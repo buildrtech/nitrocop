@@ -42,6 +42,9 @@ For each selected cop, run the full loop before moving to the next one:
 1. Read implementation and vendor behavior:
    - `src/cop/<dept>/<cop_name>.rs`
    - `vendor/rubocop*/spec/rubocop/cop/<dept>/<cop_name>_spec.rb`
+   - Check for existing investigation comments (e.g. "Known false positives",
+     "reverted") in the cop source before changing logic. These document prior
+     attempts that regressed on corpus; do not repeat the same approach.
 
 2. Add failing test first:
    - FP fix: add case to `tests/fixtures/cops/<dept>/<cop_name>/no_offense.rb`
@@ -71,9 +74,27 @@ After all selected cops are fixed:
    ```bash
    python3 scripts/check-cop.py Department/CopName --verbose --rerun
    ```
-   All fixed cops must report `PASS` with zero excess offenses.
+   Corpus validation is the acceptance gate: unit tests passing is necessary
+   but not sufficient. All fixed cops must report `PASS` with zero excess offenses.
 
-3. Regenerate coverage artifacts after cop fixes:
+3. Handle regressions: if a change increases FP count (even if unit tests pass),
+   revert the code change but add a detailed investigation comment to the cop
+   source file documenting:
+   - What was attempted (with reverted commit SHA)
+   - What improved and what regressed (X -> Y FP)
+   - Why the regression happened
+   - What a correct fix must do differently
+   Use this format:
+   ```rust
+   /// ## Known false positives (N FP in corpus as of YYYY-MM-DD)
+   ///
+   /// Attempted fix: <summary> (commit XXXXXXXX, reverted).
+   /// Effect: fixed A target FP but introduced B new FP (X -> Y total FP).
+   /// Root cause of regression: <why this approach overmatched or undermatched>.
+   /// A correct fix needs to: <constraints for future implementation>.
+   ```
+
+4. Regenerate coverage artifacts after cop fixes:
    ```bash
    cargo run --release --bin bench_nitrocop -- conform
    cargo run --bin coverage_table -- --show-missing --output docs/coverage.md
