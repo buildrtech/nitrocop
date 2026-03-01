@@ -69,6 +69,18 @@ impl<'a, 'src> ReverseEachVisitor<'a, 'src> {
             return;
         }
 
+        // Skip block-pass arguments (e.g. `reverse.each(&:destroy)`).
+        // RuboCop's NodePattern `(send (send _ :reverse) :each)` only matches
+        // when `.each` has no arguments; block_pass is an argument on the send
+        // node, so the pattern doesn't match. Block literals (`{ |x| ... }`) are
+        // a separate wrapping node and don't affect the send's children.
+        if node
+            .block()
+            .is_some_and(|b| b.as_block_argument_node().is_some())
+        {
+            return;
+        }
+
         // Report at the `reverse.each` range (from `reverse` selector to `each` selector end).
         let start_offset = inner_call.message_loc().map_or_else(
             || inner_call.location().start_offset(),

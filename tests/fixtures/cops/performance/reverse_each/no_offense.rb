@@ -14,3 +14,7 @@ return arr.reverse.each { |e| e }
 $cache ||= items.reverse.each { |x| process(x) }
 CACHE ||= items.reverse.each { |x| process(x) }
 Mod::CACHE ||= items.reverse.each { |x| process(x) }
+
+# Block-pass argument (&:sym) — RuboCop does not flag these
+items.reverse.each(&:destroy)
+records.sort_by(&:position).reverse.each(&:process)
