@@ -181,7 +181,7 @@ impl Cop for Squeeze {
             return;
         }
 
-        let loc = call.location();
+        let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         let message = if is_bang {
             "Use `squeeze!` instead of `gsub!`.".to_string()
