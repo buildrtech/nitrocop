@@ -9,3 +9,9 @@ D = Class.new(RuntimeError)
 class CustomError < Foreman::Exception; end
 class AnotherError < ::Foreman::Exception; end
 class NestedError < MyApp::Errors::Exception; end
+
+# Omitted namespace resolves to local Exception constant.
+module Foo
+  class Exception < StandardError; end
+  class C < Exception; end
+end

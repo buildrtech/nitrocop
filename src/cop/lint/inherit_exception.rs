@@ -3,6 +3,7 @@ use crate::cop::util::constant_name;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 pub struct InheritException;
 
@@ -44,6 +45,15 @@ impl Cop for InheritException {
             };
 
             if is_exception(&parent) {
+                if is_omitted_namespace_exception(&parent)
+                    && has_local_exception_sibling(
+                        _parse_result,
+                        class_node.location().start_offset(),
+                    )
+                {
+                    return;
+                }
+
                 let loc = parent.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(
@@ -112,6 +122,83 @@ fn is_exception(node: &ruby_prism::Node<'_>) -> bool {
         }
     }
     false
+}
+
+fn is_omitted_namespace_exception(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_constant_read_node()
+        .is_some_and(|cr| cr.name().as_slice() == b"Exception")
+}
+
+fn has_local_exception_sibling(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    target_class_offset: usize,
+) -> bool {
+    let mut finder = LocalExceptionSiblingFinder {
+        target_class_offset,
+        found: false,
+        done: false,
+    };
+    finder.visit(&parse_result.node());
+    finder.found
+}
+
+struct LocalExceptionSiblingFinder {
+    target_class_offset: usize,
+    found: bool,
+    done: bool,
+}
+
+impl<'a> Visit<'a> for LocalExceptionSiblingFinder {
+    fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'a>) {
+        if self.done {
+            return;
+        }
+
+        let mut seen_local_exception = false;
+        for stmt in node.body().iter() {
+            if self.done {
+                return;
+            }
+
+            if let Some(class_node) = stmt.as_class_node() {
+                if class_node.location().start_offset() == self.target_class_offset {
+                    self.found = seen_local_exception;
+                    self.done = true;
+                    return;
+                }
+            }
+
+            self.visit(&stmt);
+            if self.done {
+                return;
+            }
+
+            if defines_local_exception_constant(&stmt) {
+                seen_local_exception = true;
+            }
+        }
+    }
+}
+
+fn defines_local_exception_constant(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(class_node) = node.as_class_node() {
+        return is_exception_identifier(&class_node.constant_path());
+    }
+
+    if let Some(module_node) = node.as_module_node() {
+        return is_exception_identifier(&module_node.constant_path());
+    }
+
+    if let Some(const_write) = node.as_constant_write_node() {
+        return const_write.name().as_slice() == b"Exception";
+    }
+
+    false
+}
+
+fn is_exception_identifier(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_constant_read_node()
+        .is_some_and(|cr| cr.name().as_slice() == b"Exception")
 }
 
 #[cfg(test)]
