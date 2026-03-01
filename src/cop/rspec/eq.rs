@@ -32,40 +32,58 @@ impl Cop for Eq {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Look for `be == value` pattern
-        // This appears as a call to `==` with receiver being the `be` call
+        // Look for matcher runner calls where the matcher arg is `be == value`:
+        // `expect(foo).to be == 42`
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
         };
 
-        if call.name().as_slice() != b"==" {
+        let method_name = call.name().as_slice();
+        if method_name != b"to" && method_name != b"not_to" && method_name != b"to_not" {
             return;
         }
 
-        // The receiver should be a `be` call
-        let recv = match call.receiver() {
+        let args = match call.arguments() {
+            Some(a) => a,
+            None => return,
+        };
+        let matcher = match args.arguments().iter().next() {
+            Some(m) => m,
+            None => return,
+        };
+
+        let eq_call = match matcher.as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
+        if eq_call.name().as_slice() != b"==" {
+            return;
+        }
+
+        // The `==` receiver should be a bare `be` call.
+        let recv = match eq_call.receiver() {
             Some(r) => r,
             None => return,
         };
 
-        let recv_call = match recv.as_call_node() {
+        let be_call = match recv.as_call_node() {
             Some(c) => c,
             None => return,
         };
 
-        if recv_call.name().as_slice() != b"be" {
+        if be_call.name().as_slice() != b"be" {
             return;
         }
 
         // `be` must have no receiver (bare `be` call), matching RuboCop's `(send nil? :be)`.
         // In legacy `.should.be == value` syntax, `be` has a receiver (the should proxy).
-        if recv_call.receiver().is_some() {
+        if be_call.receiver().is_some() {
             return;
         }
 
         // `be` should have no arguments (bare `be`)
-        let has_args = recv_call
+        let has_args = be_call
             .arguments()
             .map(|a| a.arguments().iter().count() > 0)
             .unwrap_or(false);
@@ -73,8 +91,8 @@ impl Cop for Eq {
             return;
         }
 
-        let loc = recv_call.location();
-        let end_loc = call.location();
+        let loc = be_call.location();
+        let end_loc = eq_call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         let (_, end_column) = source.offset_to_line_col(end_loc.start_offset());
         // The offense covers "be ==" - the be call + == call name

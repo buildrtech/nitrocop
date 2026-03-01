@@ -12,3 +12,9 @@ it { expect(bar).to eql(42) }
 it { result.should.be == 1 }
 it { value.should.not.be == 2 }
 it { obj.should.be == "hello" }
+
+# `be ==` outside matcher runner args should not be flagged.
+it do
+  matcher = (be == 1)
+  expect(value).to matcher
+end
