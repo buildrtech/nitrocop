@@ -110,15 +110,18 @@ impl Cop for RedundantReceiverInWithOptions {
         // RuboCop requires ALL send nodes in the block to use the block parameter
         // as receiver. If any statement uses a different receiver (e.g. `self`),
         // or is not a send node, the whole block is not flagged.
-        // Also skip if there are nested blocks (which would make scope analysis unsafe).
+        // Also skip if there are any block/lambda nodes in the body.
 
-        // First pass: check that ALL statements are eligible and use the block param
-        // as receiver. Also check for nested blocks.
         let body_stmts: Vec<_> = stmts.body().iter().collect();
 
-        // Check every statement: must be a call with block param as receiver,
-        // and no nested blocks allowed anywhere in the body.
-        // Also check that no node anywhere uses a different receiver.
+        // RuboCop: `all_block_nodes_in(body).none?` — exit if ANY block/lambda in body
+        for stmt in &body_stmts {
+            if self.contains_block_or_lambda(stmt) {
+                return;
+            }
+        }
+
+        // RuboCop: `all_send_nodes_in(body).all?(&proc)` — ALL sends must use param
         if !self.all_sends_use_param(&body_stmts, &param_bytes) {
             return;
         }
@@ -142,18 +145,49 @@ impl RedundantReceiverInWithOptions {
         true
     }
 
-    /// Recursively check that all send nodes in a subtree use the block param as receiver.
+    /// Recursively check if any block or lambda node exists anywhere in a subtree.
+    /// RuboCop exits early if `all_block_nodes_in(body).none?` is false.
+    fn contains_block_or_lambda(&self, node: &ruby_prism::Node<'_>) -> bool {
+        // Lambda nodes (-> { ... }) are block nodes in Parser AST
+        if node.as_lambda_node().is_some() {
+            return true;
+        }
+        if let Some(call) = node.as_call_node() {
+            if call.block().is_some() {
+                return true;
+            }
+            if let Some(args) = call.arguments() {
+                for arg in args.arguments().iter() {
+                    if self.contains_block_or_lambda(&arg) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Recurse into assignment values
+        if let Some(or_write) = node.as_instance_variable_or_write_node() {
+            return self.contains_block_or_lambda(&or_write.value());
+        }
+        if let Some(or_write) = node.as_local_variable_or_write_node() {
+            return self.contains_block_or_lambda(&or_write.value());
+        }
+        false
+    }
+
+    /// Recursively check that all call nodes in a subtree use the block param as receiver.
+    /// RuboCop requires `all_send_nodes_in(body).all?` — every call must have the param
+    /// as receiver. Calls with no receiver (implicit self) cause this to return false.
     fn node_all_sends_use_param(&self, node: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
         if let Some(call) = node.as_call_node() {
-            // Nested blocks make analysis unsafe
-            if call.block().is_some() {
-                return false;
-            }
-            // The call must have the block param as receiver
-            if let Some(receiver) = call.receiver() {
-                if !self.is_param_receiver(&receiver, param_name) {
-                    return false;
+            // The call must have the block param as receiver.
+            // A call with no receiver (implicit self) means not all sends use param.
+            match call.receiver() {
+                Some(receiver) => {
+                    if !self.is_param_receiver(&receiver, param_name) {
+                        return false;
+                    }
                 }
+                None => return false,
             }
             // Check arguments recursively
             if let Some(args) = call.arguments() {
