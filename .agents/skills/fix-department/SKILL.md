@@ -127,6 +127,9 @@ Report:
 - Single-agent runs: use the current working tree by default (no extra worktree required).
 - Use worktrees when running in parallel with other agents, or when isolating risky experiments.
 - If the user explicitly requests a worktree/branch workflow, follow that request.
+- Parallel-agent activity is common; expect unrelated local changes in the working tree.
+- Do not revert or include unrelated files in your commit; stage only files for the cop(s) you are fixing.
+- Treat unrelated modified files as off-limits: do not edit them unless the user explicitly asks.
 - Commit each cop fix separately for safe cherry-picks.
 - Never use `git stash` or `git stash pop`.
 - Use local corpus files under `vendor/corpus/` when available.
