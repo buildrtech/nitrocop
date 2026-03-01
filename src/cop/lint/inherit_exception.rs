@@ -45,6 +45,12 @@ impl Cop for InheritException {
             };
 
             if is_exception(&parent) {
+                // Corpus investigation notes (2026-03-01):
+                // - Added omitted-namespace guard for `class C < Exception` when a local
+                //   sibling `Exception` is already defined in the same scope.
+                // - This reduced check-cop excess from 53 -> 4.
+                // - Remaining 4 excess offenses are unresolved and likely require a more
+                //   complete lexical-constant resolution than this same-scope sibling scan.
                 if is_omitted_namespace_exception(&parent)
                     && has_local_exception_sibling(
                         _parse_result,
@@ -133,6 +139,8 @@ fn has_local_exception_sibling(
     parse_result: &ruby_prism::ParseResult<'_>,
     target_class_offset: usize,
 ) -> bool {
+    // Tracks whether a local `Exception` constant/class/module appears in the
+    // same statements list before the target class definition.
     let mut finder = LocalExceptionSiblingFinder {
         target_class_offset,
         found: false,

@@ -40,6 +40,14 @@ impl Cop for Attr {
         if call_node.receiver().is_some() {
             return;
         }
+        // Corpus investigation notes (2026-03-01):
+        // - Initial fix (scope-aware context + custom `def attr` guard) reduced
+        //   check-cop excess from 64 -> 7.
+        // - Remaining examples included parenthesized calls (`attr(:name)`), which
+        //   RuboCop excludes via `command?(:attr)`.
+        // - Adding this command-call guard reduced excess further from 7 -> 5.
+        // - Remaining 5 excess offenses are still in progress and appear to involve
+        //   core-spec style direct `Module#attr` usage in class bodies.
         if call_node.opening_loc().is_some() {
             return;
         }
@@ -110,6 +118,9 @@ impl Cop for Attr {
 }
 
 fn allowed_context(parse_result: &ruby_prism::ParseResult<'_>, target_offset: usize) -> bool {
+    // Current strategy mirrors RuboCop's `allowed_context?`:
+    // - skip `attr` in non-`class_eval`/`module_eval` blocks
+    // - skip when the nearest class/block scope defines its own `def attr`
     let mut finder = AttrContextFinder {
         target_offset,
         allowed: false,
