@@ -15,3 +15,5 @@ I18n.t(feature_key, scope: :"ee.features")
 I18n.t(status_name.to_sym, scope: :user)
 t(variable, scope: [:foo, :bar])
 t [:key1, :key2], scope: :one
+# Namespaced receiver — Formtastic::I18n is not plain I18n
+Formtastic::I18n.t(:duck, scope: [:custom_scope])

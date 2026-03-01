@@ -122,7 +122,7 @@ impl Cop for RedundantReceiverInWithOptions {
         }
 
         // RuboCop: `all_send_nodes_in(body).all?(&proc)` — ALL sends must use param
-        if !self.all_sends_use_param(&body_stmts, &param_bytes) {
+        if !self.all_sends_use_param_deep(&body_stmts, &param_bytes) {
             return;
         }
 
@@ -134,17 +134,6 @@ impl Cop for RedundantReceiverInWithOptions {
 }
 
 impl RedundantReceiverInWithOptions {
-    /// Check that ALL send nodes in the block body use the block param as receiver.
-    /// Returns false if any send uses a different receiver, or if there are nested blocks.
-    fn all_sends_use_param(&self, stmts: &[ruby_prism::Node<'_>], param_name: &[u8]) -> bool {
-        for stmt in stmts {
-            if !self.node_all_sends_use_param(stmt, param_name) {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Recursively check if any block or lambda node exists anywhere in a subtree.
     /// RuboCop exits early if `all_block_nodes_in(body).none?` is false.
     fn contains_block_or_lambda(&self, node: &ruby_prism::Node<'_>) -> bool {
@@ -174,13 +163,12 @@ impl RedundantReceiverInWithOptions {
         false
     }
 
-    /// Recursively check that all call nodes in a subtree use the block param as receiver.
-    /// RuboCop requires `all_send_nodes_in(body).all?` — every call must have the param
-    /// as receiver. Calls with no receiver (implicit self) cause this to return false.
+    /// Recursively check that ALL call nodes in a subtree use the block param as receiver.
+    /// Matches RuboCop's `all_send_nodes_in(body).all?(&proc)` — deep recursive search
+    /// through all node types (hashes, arrays, assocs, etc.).
     fn node_all_sends_use_param(&self, node: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
         if let Some(call) = node.as_call_node() {
-            // The call must have the block param as receiver.
-            // A call with no receiver (implicit self) means not all sends use param.
+            // The call must have the block param as receiver
             match call.receiver() {
                 Some(receiver) => {
                     if !self.is_param_receiver(&receiver, param_name) {
@@ -189,7 +177,7 @@ impl RedundantReceiverInWithOptions {
                 }
                 None => return false,
             }
-            // Check arguments recursively
+            // Recurse into arguments
             if let Some(args) = call.arguments() {
                 for arg in args.arguments().iter() {
                     if !self.node_all_sends_use_param(&arg, param_name) {
@@ -199,8 +187,6 @@ impl RedundantReceiverInWithOptions {
             }
             return true;
         }
-        // CallOrWriteNode: e.g. `self._named_contexts ||= {}`
-        // The receiver must also be the block param, otherwise this block is mixed.
         if let Some(cor) = node.as_call_or_write_node() {
             if let Some(receiver) = cor.receiver() {
                 if !self.is_param_receiver(&receiver, param_name) {
@@ -209,12 +195,50 @@ impl RedundantReceiverInWithOptions {
             }
             return true;
         }
-        // For non-call nodes, recurse into children that might contain sends
+        // Recurse into hash/assoc nodes to find nested calls
+        if let Some(hash) = node.as_keyword_hash_node() {
+            for elem in hash.elements().iter() {
+                if !self.node_all_sends_use_param(&elem, param_name) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if let Some(hash) = node.as_hash_node() {
+            for elem in hash.elements().iter() {
+                if !self.node_all_sends_use_param(&elem, param_name) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if let Some(assoc) = node.as_assoc_node() {
+            return self.node_all_sends_use_param(&assoc.key(), param_name)
+                && self.node_all_sends_use_param(&assoc.value(), param_name);
+        }
+        if let Some(array) = node.as_array_node() {
+            for elem in array.elements().iter() {
+                if !self.node_all_sends_use_param(&elem, param_name) {
+                    return false;
+                }
+            }
+            return true;
+        }
         if let Some(or_write) = node.as_instance_variable_or_write_node() {
             return self.node_all_sends_use_param(&or_write.value(), param_name);
         }
         if let Some(or_write) = node.as_local_variable_or_write_node() {
             return self.node_all_sends_use_param(&or_write.value(), param_name);
+        }
+        true
+    }
+
+    /// Check that ALL call nodes across all body statements use the block param as receiver.
+    fn all_sends_use_param_deep(&self, stmts: &[ruby_prism::Node<'_>], param_name: &[u8]) -> bool {
+        for stmt in stmts {
+            if !self.node_all_sends_use_param(stmt, param_name) {
+                return false;
+            }
         }
         true
     }

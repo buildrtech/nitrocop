@@ -28,6 +28,7 @@ impl Cop for TableNameAssignment {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            in_class: false,
             in_base_class: false,
         };
         visitor.visit(&parse_result.node());
@@ -39,12 +40,15 @@ struct TableNameAssignmentVisitor<'a> {
     cop: &'a TableNameAssignment,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    in_class: bool,
     in_base_class: bool,
 }
 
 impl<'pr> Visit<'pr> for TableNameAssignmentVisitor<'_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        let was_in_class = self.in_class;
         let was_in_base = self.in_base_class;
+        self.in_class = true;
         // Check if the class name ends with `Base` (e.g., `Base`, `Admin::Base`)
         let class_name_node = node.constant_path();
         if util::constant_name(&class_name_node) == Some(b"Base") {
@@ -53,13 +57,14 @@ impl<'pr> Visit<'pr> for TableNameAssignmentVisitor<'_> {
         if let Some(body) = node.body() {
             self.visit(&body);
         }
+        self.in_class = was_in_class;
         self.in_base_class = was_in_base;
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if node.name().as_slice() == b"table_name=" {
             if let Some(receiver) = node.receiver() {
-                if receiver.as_self_node().is_some() && !self.in_base_class {
+                if receiver.as_self_node().is_some() && self.in_class && !self.in_base_class {
                     // Only flag if the argument is a literal string or symbol
                     // (not an interpolated string). RuboCop's `find_set_table_name`
                     // uses `{str sym}` which excludes `dstr` (interpolated strings).

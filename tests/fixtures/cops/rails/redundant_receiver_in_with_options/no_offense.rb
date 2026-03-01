@@ -43,3 +43,10 @@ with_options options: false do |merger|
     merger.invoke(another_receiver)
   end
 end
+
+# Non-param call in hash value argument (Devise.password_length)
+with_options :if => :password_required? do |v|
+  v.validates_presence_of     :password
+  v.validates_confirmation_of :password
+  v.validates_length_of       :password, :within => Devise.password_length, :allow_blank => true
+end

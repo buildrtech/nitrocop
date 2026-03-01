@@ -25,3 +25,21 @@ end
 class Setting < ActiveRecord::Base
   self.table_name = "#{db_prefix}_settings"
 end
+
+# Not inside a class definition — included do block
+module Concerns
+  extend ActiveSupport::Concern
+  included do
+    self.table_name = "callback_modifiers"
+  end
+end
+
+# Dynamic class with Class.new — not a class keyword
+klass = Class.new(ApplicationRecord) do
+  self.table_name = "good_jobs"
+end
+
+# Method call as RHS
+class MessageClone < ApplicationRecord
+  self.table_name = Message.table_name
+end

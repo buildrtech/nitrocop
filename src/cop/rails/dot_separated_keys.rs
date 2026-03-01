@@ -1,7 +1,6 @@
 use crate::cop::node_type::{
     ARRAY_NODE, ASSOC_NODE, CALL_NODE, KEYWORD_HASH_NODE, STRING_NODE, SYMBOL_NODE,
 };
-use crate::cop::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -47,11 +46,25 @@ impl Cop for DotSeparatedKeys {
             return;
         }
 
-        // Receiver can be I18n or absent (Rails helper `t`)
-        // Handle both ConstantReadNode (I18n) and ConstantPathNode (::I18n)
+        // Receiver can be I18n, ::I18n, or absent (Rails helper `t`)
+        // RuboCop pattern: (const {nil? cbase} :I18n) — only plain I18n or ::I18n,
+        // NOT namespaced like Formtastic::I18n
         if let Some(recv) = call.receiver() {
-            if util::constant_name(&recv) != Some(b"I18n") {
-                return;
+            if let Some(cr) = recv.as_constant_read_node() {
+                // Plain `I18n`
+                if cr.name().as_slice() != b"I18n" {
+                    return;
+                }
+            } else if let Some(cp) = recv.as_constant_path_node() {
+                // `::I18n` — parent must be None (cbase) and name must be I18n
+                if cp.parent().is_some() {
+                    return; // Namespaced like Formtastic::I18n — skip
+                }
+                if cp.name().map(|n| n.as_slice()) != Some(b"I18n") {
+                    return;
+                }
+            } else {
+                return; // Not a constant receiver
             }
         }
 
