@@ -73,6 +73,10 @@ You are fixing false positives in a single nitrocop cop. Follow the CLAUDE.md ru
 
 1. **Read the cop source** at `src/cop/<dept>/<cop_name>.rs`
    Read the vendor RuboCop spec at `vendor/rubocop*/spec/rubocop/cop/<dept>/<cop_name>_spec.rb`
+   **Check for existing investigation comments** (marked with "Known false positives" or
+   "reverted") — these document previously attempted fixes that regressed on corpus
+   validation. Do NOT repeat the same approach. Either find a different root cause or
+   extend the prior approach to avoid its documented failure mode.
 
 2. **Understand the FP pattern** from the examples provided in your prompt.
    If needed, read the actual source files from `vendor/corpus/<repo_id>/<path>` to see more context.
@@ -125,11 +129,28 @@ You are fixing false positives in a single nitrocop cop. Follow the CLAUDE.md ru
    ```bash
    python3 scripts/check-cop.py Department/CopName --verbose --rerun
    ```
-   Run these in parallel (background). Every cop must show `PASS` with 0 excess offenses.
+   Run these in parallel (background). **Corpus validation is the acceptance gate** —
+   unit tests passing is necessary but NOT sufficient.
 
-5. Report to the user:
+5. **Handle regressions**: if a fix increases FP count (even if unit tests pass), revert
+   the code change but **add a detailed investigation comment** to the cop source file
+   documenting:
+   - What approach was tried (with the reverted commit SHA)
+   - Why it regressed (root cause of the new FPs)
+   - What a correct fix would need to do differently
+   This prevents future attempts from repeating the same failed approach. Use the format:
+   ```rust
+   /// ## Known false positives (N FP in corpus as of YYYY-MM-DD)
+   ///
+   /// An attempt was made to ... (commit XXXXXXXX, reverted). The approach: ...
+   /// This fixed the target FPs but introduced N NEW false positives (X→Y FP).
+   /// Root cause of regression: ...
+   /// A correct fix needs to: ...
+   ```
+
+6. Report to the user:
    - Which cops were fixed (with FP counts)
-   - Which cops couldn't be fixed (and why)
+   - Which cops regressed and were reverted (with investigation comments added)
    - Summary of changes ready for commit/PR
 
 ## Arguments

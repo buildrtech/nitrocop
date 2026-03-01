@@ -94,6 +94,10 @@ to 100% corpus conformance. Follow the CLAUDE.md rules strictly.
 
 1. **Read the cop source** at `src/cop/<dept>/<cop_name>.rs`
    Read the vendor RuboCop spec at `vendor/rubocop*/spec/rubocop/cop/<dept>/<cop_name>_spec.rb`
+   **Check for existing investigation comments** (marked with "Known false positives" or
+   "reverted") — these document previously attempted fixes that regressed on corpus
+   validation. Do NOT repeat the same approach. Either find a different root cause or
+   extend the prior approach to avoid its documented failure mode.
 
 2. **Understand the FP/FN pattern** from the examples provided in your prompt.
    If needed, read the actual source files from `vendor/corpus/<repo_id>/<path>` to see more context.
@@ -148,8 +152,22 @@ to 100% corpus conformance. Follow the CLAUDE.md rules strictly.
    ```bash
    python3 scripts/check-cop.py Department/CopName --verbose --rerun
    ```
+   **Corpus validation is the acceptance gate** — unit tests passing is necessary but
+   NOT sufficient.
 
-5. Re-run the gem deep-dive to see updated progress:
+5. **Handle regressions**: if a fix increases FP count (even if unit tests pass), revert
+   the code change but **add a detailed investigation comment** to the cop source file
+   documenting what was tried, why it regressed, and what a correct fix would need. Use:
+   ```rust
+   /// ## Known false positives (N FP in corpus as of YYYY-MM-DD)
+   ///
+   /// An attempt was made to ... (commit XXXXXXXX, reverted). The approach: ...
+   /// This fixed the target FPs but introduced N NEW false positives (X→Y FP).
+   /// Root cause of regression: ...
+   /// A correct fix needs to: ...
+   ```
+
+6. Re-run the gem deep-dive to see updated progress:
    ```bash
    python3 .claude/skills/fix-department/scripts/gem_progress.py --gem <gem-name>
    ```
