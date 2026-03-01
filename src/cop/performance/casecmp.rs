@@ -3,24 +3,6 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 pub struct Casecmp;
-// HANDOFF (March 1, 2026):
-// Status:
-//   Performance/Casecmp = +7 FP, 0 FN (latest local full-corpus rerun).
-//
-// Verified repro command:
-//   python3 scripts/check-cop.py Performance/Casecmp \
-//     --input "/var/folders/bp/9k2j7t8j4k74vtdk2twvm82m0000gn/T/gem-progress-zn88twq6/corpus-results.json" \
-//     --verbose --rerun
-//
-// Validation parity requirements:
-//   - Keep check-cop environment parity (baseline bundle path + rerun).
-//   - Do not assume RuboCop rc=0/1 only; parser-error repos can emit partial JSON with rc=2.
-//
-// Known hotspot:
-//   - jruby contributes heavily here; example current nitrocop lines include:
-//     test/mri/ruby/test_env.rb (multiple lines around 223-301, 456)
-//     test/tool/lib/webrick/httpauth/digestauth.rb:192
-//     test/tool/lib/webrick/httpresponse.rb:158
 
 /// Check if a node is a valid RHS for casecmp: string literal, downcase/upcase call,
 /// or parenthesized string.
