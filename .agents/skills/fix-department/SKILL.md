@@ -124,7 +124,9 @@ Report:
 
 ## Notes
 
-- Use worktrees when running in parallel with other agents.
+- Single-agent runs: use the current working tree by default (no extra worktree required).
+- Use worktrees when running in parallel with other agents, or when isolating risky experiments.
+- If the user explicitly requests a worktree/branch workflow, follow that request.
 - Commit each cop fix separately for safe cherry-picks.
 - Never use `git stash` or `git stash pop`.
 - Use local corpus files under `vendor/corpus/` when available.
