@@ -2,6 +2,7 @@ use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 pub struct Attr;
 
@@ -22,7 +23,7 @@ impl Cop for Attr {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -39,12 +40,19 @@ impl Cop for Attr {
         if call_node.receiver().is_some() {
             return;
         }
+        if call_node.opening_loc().is_some() {
+            return;
+        }
 
         // Must have arguments
         let args = match call_node.arguments() {
             Some(a) => a,
             None => return,
         };
+
+        if allowed_context(parse_result, call_node.location().start_offset()) {
+            return;
+        }
 
         let arg_list: Vec<_> = args.arguments().iter().collect();
 
@@ -98,6 +106,135 @@ impl Cop for Attr {
             diag.corrected = true;
         }
         diagnostics.push(diag);
+    }
+}
+
+fn allowed_context(parse_result: &ruby_prism::ParseResult<'_>, target_offset: usize) -> bool {
+    let mut finder = AttrContextFinder {
+        target_offset,
+        allowed: false,
+        done: false,
+        scope_stack: Vec::new(),
+    };
+    finder.visit(&parse_result.node());
+    finder.allowed
+}
+
+#[derive(Clone, Copy)]
+enum ScopeKind {
+    Class,
+    Block { is_class_or_module_eval: bool },
+}
+
+#[derive(Clone, Copy)]
+struct ScopeContext {
+    kind: ScopeKind,
+    defines_attr_method: bool,
+}
+
+fn scope_allows_attr_call(stack: &[ScopeContext]) -> bool {
+    let Some(scope) = stack.last() else {
+        return false;
+    };
+
+    match scope.kind {
+        ScopeKind::Block {
+            is_class_or_module_eval: false,
+        } => true,
+        _ => scope.defines_attr_method,
+    }
+}
+
+struct AttrContextFinder {
+    target_offset: usize,
+    allowed: bool,
+    done: bool,
+    scope_stack: Vec<ScopeContext>,
+}
+
+impl<'a> Visit<'a> for AttrContextFinder {
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'a>) {
+        if self.done {
+            return;
+        }
+        let defines_attr_method = scope_defines_attr_method(&node.as_node());
+        self.scope_stack.push(ScopeContext {
+            kind: ScopeKind::Class,
+            defines_attr_method,
+        });
+        ruby_prism::visit_class_node(self, node);
+        self.scope_stack.pop();
+    }
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'a>) {
+        if self.done {
+            return;
+        }
+
+        if node.location().start_offset() == self.target_offset
+            && node.name().as_slice() == b"attr"
+            && node.receiver().is_none()
+        {
+            self.allowed = scope_allows_attr_call(&self.scope_stack);
+            self.done = true;
+            return;
+        }
+
+        if let Some(receiver) = node.receiver() {
+            self.visit(&receiver);
+            if self.done {
+                return;
+            }
+        }
+
+        if let Some(arguments) = node.arguments() {
+            self.visit(&arguments.as_node());
+            if self.done {
+                return;
+            }
+        }
+
+        if let Some(block) = node.block() {
+            if let Some(block_node) = block.as_block_node() {
+                let method_name = node.name().as_slice();
+                let is_class_or_module_eval =
+                    method_name == b"class_eval" || method_name == b"module_eval";
+                let defines_attr_method = scope_defines_attr_method(&block_node.as_node());
+                self.scope_stack.push(ScopeContext {
+                    kind: ScopeKind::Block {
+                        is_class_or_module_eval,
+                    },
+                    defines_attr_method,
+                });
+                ruby_prism::visit_block_node(self, &block_node);
+                self.scope_stack.pop();
+            } else {
+                self.visit(&block);
+            }
+        }
+    }
+}
+
+fn scope_defines_attr_method(scope: &ruby_prism::Node<'_>) -> bool {
+    let mut finder = AttrMethodFinder { found: false };
+    finder.visit(scope);
+    finder.found
+}
+
+struct AttrMethodFinder {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for AttrMethodFinder {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'a>) {
+        if self.found {
+            return;
+        }
+        if node.name().as_slice() == b"attr" {
+            self.found = true;
+            return;
+        }
+        ruby_prism::visit_def_node(self, node);
     }
 }
 
