@@ -34,6 +34,7 @@ DENYLIST = {
     "googleapis/google-api-ruby-client",
     "instructure/canvas-lms",
     "googleapis/google-cloud-ruby",
+    "Shopify/shopify-api-ruby",
 }
 
 

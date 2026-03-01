@@ -710,7 +710,6 @@
 {"id": "brendon__ranked-model__c2c5f33", "repo_url": "https://github.com/brendon/ranked-model", "sha": "c2c5f3385e4bfec126b554ea01be3cb8cea18f3c", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 1094 stars"}
 {"id": "palkan__isolator__1ffb396", "repo_url": "https://github.com/palkan/isolator", "sha": "1ffb396801f49954c6ae9e449e3efa506a5d5522", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 1091 stars"}
 {"id": "tomgi__git_stats__89f771e", "repo_url": "https://github.com/tomgi/git_stats", "sha": "89f771ededd37b0684b9a2a627789ff614b5d310", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 1090 stars"}
-{"id": "Shopify__shopify-api-ruby__f980d8d", "repo_url": "https://github.com/Shopify/shopify-api-ruby", "sha": "f980d8d3277723c9c3d1231d384f54e2accd55dd", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 1090 stars"}
 {"id": "chrisk__fakeweb__2b08c1f", "repo_url": "https://github.com/chrisk/fakeweb", "sha": "2b08c1ff2714ec13a12f3497d67fcefce95c2cbe", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 1088 stars"}
 {"id": "floere__phony__31824ad", "repo_url": "https://github.com/floere/phony", "sha": "31824ad3090b0beb64cb0d4264a6116c87888053", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 1088 stars"}
 {"id": "tj__commander__d10fc03", "repo_url": "https://github.com/tj/commander", "sha": "d10fc03ce9d44a0a34bb913df99dded4a0bd5287", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 1087 stars"}
@@ -998,3 +997,4 @@
 {"id": "ruby-next__ruby-next__e273012", "repo_url": "https://github.com/ruby-next/ruby-next", "sha": "e273012bdda608eb37d1e8f0f45b54679d6ce80e", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 780 stars"}
 {"id": "Envek__after_commit_everywhere__4df8efa", "repo_url": "https://github.com/Envek/after_commit_everywhere", "sha": "4df8efaea036a909779e1df2792296a4a804370c", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 779 stars"}
 {"id": "dradis__dradis-ce__87cf070", "repo_url": "https://github.com/dradis/dradis-ce", "sha": "87cf07064838f2244e11adaa0c491d5757c081a4", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 779 stars"}
+{"id": "platanus__activeadmin_addons__d56e1bb", "repo_url": "https://github.com/platanus/activeadmin_addons", "sha": "d56e1bbd83cf6be7936cb031585904be41c44ae3", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 778 stars"}
