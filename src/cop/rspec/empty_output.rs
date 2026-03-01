@@ -1,4 +1,4 @@
-use crate::cop::node_type::{CALL_NODE, STRING_NODE};
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::util::RSPEC_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -20,7 +20,7 @@ impl Cop for EmptyOutput {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, STRING_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -32,18 +32,29 @@ impl Cop for EmptyOutput {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Look for output('') calls
+        // Match:
+        //   expect { ... }.to output('').to_stdout
+        //   expect { ... }.not_to output('').to_stderr
+        // and ignore bare matcher DSL calls like `output ''` in helper contexts.
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
         };
 
-        if call.name().as_slice() != b"output" {
+        let runner = call.name().as_slice();
+        if runner != b"to" && runner != b"not_to" && runner != b"to_not" {
             return;
         }
 
-        // Must not have a receiver (it's a bare `output(...)` matcher call)
-        if call.receiver().is_some() {
+        // Receiver must be a block expectation: expect { ... }
+        let expect_call = match call.receiver().and_then(|r| r.as_call_node()) {
+            Some(c) => c,
+            None => return,
+        };
+        if expect_call.name().as_slice() != b"expect"
+            || expect_call.receiver().is_some()
+            || expect_call.block().is_none()
+        {
             return;
         }
 
@@ -57,24 +68,42 @@ impl Cop for EmptyOutput {
             return;
         }
 
-        // Check if the argument is an empty string ''
-        let is_empty_string = if let Some(s) = arg_list[0].as_string_node() {
-            s.unescaped().is_empty()
-        } else {
-            false
+        // RuboCop pattern matches only when the first argument is a matcher chain
+        // directly rooted at `output('')`, e.g. `output('').to_stdout`.
+        let matcher_chain = match arg_list[0].as_call_node() {
+            Some(c) => c,
+            None => return,
         };
-
-        if !is_empty_string {
+        let output_call = match matcher_chain.receiver().and_then(|r| r.as_call_node()) {
+            Some(c) => c,
+            None => return,
+        };
+        if output_call.name().as_slice() != b"output" || output_call.receiver().is_some() {
+            return;
+        }
+        let output_args = match output_call.arguments() {
+            Some(a) => a,
+            None => return,
+        };
+        let output_arg_list: Vec<_> = output_args.arguments().iter().collect();
+        if output_arg_list.len() != 1 {
+            return;
+        }
+        if !output_arg_list[0]
+            .as_string_node()
+            .is_some_and(|s| s.unescaped().is_empty())
+        {
             return;
         }
 
-        let loc = call.location();
+        let preferred_runner = if runner == b"to" { "not_to" } else { "to" };
+        let loc = output_call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(
             source,
             line,
             column,
-            "Use `not_to` instead of matching on an empty output.".to_string(),
+            format!("Use `{preferred_runner}` instead of matching on an empty output."),
         ));
     }
 }
