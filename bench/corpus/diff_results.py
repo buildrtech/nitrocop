@@ -333,6 +333,28 @@ def main():
         })
     by_cop.sort(key=lambda x: x["fp"] + x["fn"], reverse=True)
 
+    # Aggregate by department
+    dept_stats = defaultdict(lambda: {"matches": 0, "fp": 0, "fn": 0, "cops": 0})
+    for c in by_cop:
+        dept = c["cop"].split("/")[0]
+        dept_stats[dept]["matches"] += c["matches"]
+        dept_stats[dept]["fp"] += c["fp"]
+        dept_stats[dept]["fn"] += c["fn"]
+        dept_stats[dept]["cops"] += 1
+    by_department = []
+    for dept in sorted(dept_stats):
+        s = dept_stats[dept]
+        total = s["matches"] + s["fn"]
+        rate = s["matches"] / total if total > 0 else 1.0
+        by_department.append({
+            "department": dept,
+            "matches": s["matches"],
+            "fp": s["fp"],
+            "fn": s["fn"],
+            "match_rate": round(rate, 4),
+            "cops": s["cops"],
+        })
+
     # Overall stats
     oracle_total = total_matches + total_fn
     overall_rate = total_matches / oracle_total if oracle_total > 0 else 1.0
@@ -362,6 +384,7 @@ def main():
             "total_files_inspected": total_files,
             "rubocop_files_dropped": total_files_dropped,
         },
+        "by_department": by_department,
         "by_cop": by_cop,  # all cops (gen_tiers.py needs the full list)
         "by_repo": repo_results,
         "by_repo_cop": {repo: dict(cops) for repo, cops in by_repo_cop.items()},
@@ -397,6 +420,18 @@ def main():
         md.append(f"| Repos with RuboCop parser crashes | {len(warning_repos)} |")
         md.append(f"| RuboCop files dropped (parser crash) | {total_files_dropped:,} |")
     md.append("")
+
+    # ── Department breakdown ──
+    if by_department:
+        md.append("## Department Breakdown")
+        md.append("")
+        md.append("| Department | Cops | Matches | FP | FN | Match % |")
+        md.append("|------------|-----:|--------:|---:|---:|--------:|")
+        for d in by_department:
+            total = d["matches"] + d["fn"]
+            pct = f"{d['match_rate']:.1%}" if total > 0 else "N/A"
+            md.append(f"| {d['department']} | {d['cops']:,} | {d['matches']:,} | {d['fp']:,} | {d['fn']:,} | {pct} |")
+        md.append("")
 
     # ── Compute ok/error repo lists (used by multiple sections below) ──
     ok_repos = [r for r in repo_results if r["status"] == "ok"]
