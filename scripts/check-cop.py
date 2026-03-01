@@ -83,6 +83,43 @@ def ensure_binary():
     sys.exit(1)
 
 
+def latest_source_mtime() -> float:
+    """Return latest mtime across files that affect the release binary."""
+    latest = 0.0
+    watched = [PROJECT_ROOT / "Cargo.toml", PROJECT_ROOT / "Cargo.lock"]
+    for path in watched:
+        if path.exists():
+            latest = max(latest, path.stat().st_mtime)
+
+    src_dir = PROJECT_ROOT / "src"
+    if src_dir.exists():
+        for path in src_dir.rglob("*.rs"):
+            latest = max(latest, path.stat().st_mtime)
+
+    return latest
+
+
+def ensure_binary_fresh():
+    """Rebuild release binary when source is newer than target/release/nitrocop."""
+    ensure_binary()
+    bin_mtime = NITROCOP_BIN.stat().st_mtime
+    src_mtime = latest_source_mtime()
+    if src_mtime <= bin_mtime:
+        return
+
+    print("Release binary is stale; rebuilding with cargo build --release...", file=sys.stderr)
+    result = subprocess.run(
+        ["cargo", "build", "--release"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("Error rebuilding release binary:", file=sys.stderr)
+        print(result.stderr, file=sys.stderr)
+        sys.exit(1)
+
+
 def binary_key() -> str:
     """Return a cache key based on the nitrocop binary's mtime and size.
 
@@ -140,8 +177,7 @@ def clear_file_cache():
     """Clear nitrocop's file-level result cache to avoid stale results after rebuild."""
     import shutil
     cache_dir = Path.home() / ".cache" / "nitrocop"
-    if cache_dir.exists():
-        shutil.rmtree(cache_dir)
+    shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 def corpus_env() -> dict[str, str]:
@@ -335,6 +371,7 @@ def main():
             print(f"Using cached nitrocop results (pass --rerun to re-execute)", file=sys.stderr)
             per_repo = cached
         else:
+            ensure_binary_fresh()
             clear_file_cache()
             print("Running nitrocop per-repo...", file=sys.stderr)
             per_repo = run_nitrocop_per_repo(args.cop)

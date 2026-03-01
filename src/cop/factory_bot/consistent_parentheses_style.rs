@@ -39,6 +39,7 @@ impl Cop for ConsistentParenthesesStyle {
             explicit_only,
             diagnostics: Vec::new(),
             parent_is_ambiguous: false,
+            ambiguity_kind: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -52,6 +53,16 @@ struct ParenStyleVisitor<'s> {
     explicit_only: bool,
     diagnostics: Vec<Diagnostic>,
     parent_is_ambiguous: bool,
+    ambiguity_kind: Option<AmbiguityKind>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AmbiguityKind {
+    Call,
+    Array,
+    Assoc,
+    AndOr,
+    If,
 }
 
 impl<'s> ParenStyleVisitor<'s> {
@@ -138,69 +149,104 @@ impl<'s> ParenStyleVisitor<'s> {
 
 impl<'pr> Visit<'pr> for ParenStyleVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        // Check this node for factory call offense
         self.check_factory_call(node);
 
         // Visit receiver (not ambiguous)
         if let Some(recv) = node.receiver() {
             let saved = self.parent_is_ambiguous;
+            let saved_kind = self.ambiguity_kind;
             self.parent_is_ambiguous = false;
+            self.ambiguity_kind = None;
             self.visit(&recv);
             self.parent_is_ambiguous = saved;
+            self.ambiguity_kind = saved_kind;
         }
 
         // Visit arguments — children here have a CallNode (send) parent = ambiguous
         if let Some(args) = node.arguments() {
             let saved = self.parent_is_ambiguous;
+            let saved_kind = self.ambiguity_kind;
             self.parent_is_ambiguous = true;
+            self.ambiguity_kind = Some(AmbiguityKind::Call);
             for arg in args.arguments().iter() {
                 self.visit(&arg);
             }
             self.parent_is_ambiguous = saved;
+            self.ambiguity_kind = saved_kind;
         }
 
         // Visit block (not ambiguous — block body is independent context)
         if let Some(block) = node.block() {
             let saved = self.parent_is_ambiguous;
+            let saved_kind = self.ambiguity_kind;
             self.parent_is_ambiguous = false;
+            self.ambiguity_kind = None;
             self.visit(&block);
             self.parent_is_ambiguous = saved;
+            self.ambiguity_kind = saved_kind;
         }
     }
 
     fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
         let saved = self.parent_is_ambiguous;
+        let saved_kind = self.ambiguity_kind;
         self.parent_is_ambiguous = true;
+        self.ambiguity_kind = Some(AmbiguityKind::Array);
         ruby_prism::visit_array_node(self, node);
         self.parent_is_ambiguous = saved;
+        self.ambiguity_kind = saved_kind;
     }
 
     fn visit_assoc_node(&mut self, node: &ruby_prism::AssocNode<'pr>) {
         let saved = self.parent_is_ambiguous;
+        let saved_kind = self.ambiguity_kind;
         self.parent_is_ambiguous = true;
+        self.ambiguity_kind = Some(AmbiguityKind::Assoc);
         ruby_prism::visit_assoc_node(self, node);
         self.parent_is_ambiguous = saved;
+        self.ambiguity_kind = saved_kind;
     }
 
     fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
         let saved = self.parent_is_ambiguous;
+        let saved_kind = self.ambiguity_kind;
         self.parent_is_ambiguous = true;
+        self.ambiguity_kind = Some(AmbiguityKind::AndOr);
         ruby_prism::visit_and_node(self, node);
         self.parent_is_ambiguous = saved;
+        self.ambiguity_kind = saved_kind;
     }
 
     fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
         let saved = self.parent_is_ambiguous;
+        let saved_kind = self.ambiguity_kind;
         self.parent_is_ambiguous = true;
+        self.ambiguity_kind = Some(AmbiguityKind::AndOr);
         ruby_prism::visit_or_node(self, node);
         self.parent_is_ambiguous = saved;
+        self.ambiguity_kind = saved_kind;
     }
 
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
         let saved = self.parent_is_ambiguous;
+        let saved_kind = self.ambiguity_kind;
         self.parent_is_ambiguous = true;
+        self.ambiguity_kind = Some(AmbiguityKind::If);
         ruby_prism::visit_if_node(self, node);
         self.parent_is_ambiguous = saved;
+        self.ambiguity_kind = saved_kind;
+    }
+
+    fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'pr>) {
+        let saved = self.parent_is_ambiguous;
+        let saved_kind = self.ambiguity_kind;
+        if self.ambiguity_kind == Some(AmbiguityKind::Array) {
+            self.parent_is_ambiguous = false;
+            self.ambiguity_kind = None;
+        }
+        ruby_prism::visit_parentheses_node(self, node);
+        self.parent_is_ambiguous = saved;
+        self.ambiguity_kind = saved_kind;
     }
 }
 
