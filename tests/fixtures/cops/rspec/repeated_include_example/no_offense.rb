@@ -23,3 +23,10 @@ describe 'heredoc args with same name but different content' do
     end
   RUBY
 end
+
+describe 'keyword args with local variables' do
+  possible_values = [1, 2, 3]
+
+  it_behaves_like 'supports with_message', valid_values: possible_values
+  it_behaves_like 'supports with_message', valid_values: possible_values
+end

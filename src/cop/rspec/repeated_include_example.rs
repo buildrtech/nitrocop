@@ -7,6 +7,7 @@ use crate::cop::util::RSPEC_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 use std::collections::HashMap;
 
 /// RSpec/RepeatedIncludeExample: Flag duplicate include_examples/it_behaves_like calls.
@@ -137,15 +138,11 @@ fn include_signature(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Op
         return None;
     }
 
-    // Check all arguments are literals (no variables)
+    // Match RuboCop's recursive_literal_or_const? semantics.
+    // If any argument contains dynamic nodes (variables, sends, block-pass, interpolation),
+    // skip duplicate detection for this include_examples call.
     for arg in &arg_list {
-        if arg.as_call_node().is_some()
-            || arg.as_local_variable_read_node().is_some()
-            || arg.as_instance_variable_read_node().is_some()
-            || arg.as_class_variable_read_node().is_some()
-            || arg.as_global_variable_read_node().is_some()
-            || arg.as_block_argument_node().is_some()
-        {
+        if contains_non_literal_or_const(arg) {
             return None;
         }
     }
@@ -198,6 +195,73 @@ fn include_signature(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Op
     }
 
     Some(sig)
+}
+
+fn contains_non_literal_or_const(node: &ruby_prism::Node<'_>) -> bool {
+    let mut visitor = NonLiteralOrConstVisitor {
+        has_non_literal: false,
+    };
+    visitor.visit(node);
+    visitor.has_non_literal
+}
+
+struct NonLiteralOrConstVisitor {
+    has_non_literal: bool,
+}
+
+impl NonLiteralOrConstVisitor {
+    fn mark(&mut self) {
+        self.has_non_literal = true;
+    }
+}
+
+impl<'pr> Visit<'pr> for NonLiteralOrConstVisitor {
+    fn visit_call_node(&mut self, _node: &ruby_prism::CallNode<'pr>) {
+        self.mark();
+    }
+
+    fn visit_local_variable_read_node(&mut self, _node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        self.mark();
+    }
+
+    fn visit_instance_variable_read_node(
+        &mut self,
+        _node: &ruby_prism::InstanceVariableReadNode<'pr>,
+    ) {
+        self.mark();
+    }
+
+    fn visit_class_variable_read_node(
+        &mut self,
+        _node: &ruby_prism::ClassVariableReadNode<'pr>,
+    ) {
+        self.mark();
+    }
+
+    fn visit_global_variable_read_node(
+        &mut self,
+        _node: &ruby_prism::GlobalVariableReadNode<'pr>,
+    ) {
+        self.mark();
+    }
+
+    fn visit_block_argument_node(&mut self, _node: &ruby_prism::BlockArgumentNode<'pr>) {
+        self.mark();
+    }
+
+    fn visit_interpolated_string_node(
+        &mut self,
+        _node: &ruby_prism::InterpolatedStringNode<'pr>,
+    ) {
+        self.mark();
+    }
+
+    fn visit_interpolated_symbol_node(
+        &mut self,
+        _node: &ruby_prism::InterpolatedSymbolNode<'pr>,
+    ) {
+        self.mark();
+    }
 }
 
 /// Check if a StringNode is a heredoc (opening starts with <<)
