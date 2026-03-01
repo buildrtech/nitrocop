@@ -57,6 +57,12 @@ impl Cop for CompareWithBlock {
             return;
         }
 
+        // Skip sort/max/min with arguments — e.g. `sort(ascending: false)`, `max(2)`, `min(2)`.
+        // These are either custom methods or Enumerable methods with different semantics.
+        if call.arguments().is_some() {
+            return;
+        }
+
         // Skip safe navigation (&.sort) — RuboCop only matches `send`, not `csend`
         if call.call_operator_loc().is_some() {
             let op = call.call_operator_loc().unwrap();
