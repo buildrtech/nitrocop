@@ -26,7 +26,16 @@ const DEFAULT_INFERENCES: &[(&str, &str)] = &[
 ];
 
 /// Example group methods that can have type metadata.
-const EXAMPLE_GROUPS: &[&[u8]] = &[b"describe", b"context", b"feature", b"example_group"];
+const EXAMPLE_GROUPS: &[&[u8]] = &[
+    b"describe",
+    b"context",
+    b"feature",
+    b"example_group",
+    b"xdescribe",
+    b"xcontext",
+    b"xfeature",
+    b"xexample_group",
+];
 
 impl Cop for InferredSpecType {
     fn name(&self) -> &'static str {

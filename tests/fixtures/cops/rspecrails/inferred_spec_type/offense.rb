@@ -10,3 +10,7 @@ end
 RSpec.describe User, other: true, type: :model do
                                   ^^^^^^^^^^^^ RSpecRails/InferredSpecType: Remove redundant spec type.
 end
+
+xdescribe User, type: :model do
+                ^^^^^^^^^^^^ RSpecRails/InferredSpecType: Remove redundant spec type.
+end
