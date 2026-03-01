@@ -181,7 +181,7 @@ impl Cop for StartWith {
                 let first_arg = &args[0];
 
                 // Try arg as regex (str.match?(/regex/))
-                let found = if let Some(regex_node) = extract_regex_node(&first_arg) {
+                let found = if let Some(regex_node) = extract_regex_node(first_arg) {
                     if !has_no_flags(&regex_node) {
                         return;
                     }
@@ -225,7 +225,7 @@ impl Cop for StartWith {
                 let first_arg = &args[0];
 
                 // Check if arg is the regex
-                let found = if let Some(regex_node) = extract_regex_node(&first_arg) {
+                let found = if let Some(regex_node) = extract_regex_node(first_arg) {
                     if !has_no_flags(&regex_node) {
                         return;
                     }
