@@ -5,6 +5,25 @@ use ruby_prism::Visit;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+/// ## Known false positives (17 FP in corpus as of 2026-03-01)
+///
+/// An attempt was made to fix FPs (commit 2ffed5a7, reverted). Two changes:
+///   1. Safe navigation exclusion: `items&.each { }` should not count as a
+///      loop (RuboCop's enumerable_loop? only matches `send`, not `csend`).
+///   2. Structural equality skip: when a literal like `[1, 2]` appears inside
+///      `[1, 2].each { }`, RuboCop skips it because the literal structurally
+///      equals the loop's receiver. Implemented via source-byte comparison of
+///      literal vs ancestor loop receivers.
+///
+/// This fixed 17 target FPs but introduced 8 NEW false positives (17→25 FP),
+/// while eliminating 10 FNs (net divergence improved 27→25 but FPs increased).
+/// Root cause of regression: the source-byte comparison was too aggressive —
+/// it matched literals that happened to have the same text as a loop receiver
+/// in an unrelated ancestor scope, suppressing valid offenses. A correct fix
+/// needs true structural node comparison (not just source byte equality) and
+/// must scope the receiver matching to the IMMEDIATE enclosing loop, not all
+/// ancestor loops. The safe-nav fix (change 1) may be correct on its own but
+/// was not tested in isolation.
 pub struct CollectionLiteralInLoop;
 
 const ENUMERABLE_METHODS: &[&[u8]] = &[
@@ -263,7 +282,6 @@ impl Cop for CollectionLiteralInLoop {
             array_methods: &ARRAY_METHOD_SET,
             hash_methods: &HASH_METHOD_SET,
             enumerable_methods: &ENUMERABLE_METHOD_SET,
-            loop_receiver_ranges: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -280,10 +298,6 @@ struct CollectionLiteralVisitor<'a, 'src> {
     array_methods: &'a HashSet<Vec<u8>>,
     hash_methods: &'a HashSet<Vec<u8>>,
     enumerable_methods: &'a HashSet<Vec<u8>>,
-    /// Source byte ranges of receivers of ancestor enumerable loop calls.
-    /// Used for structural equality matching: RuboCop skips a literal if it
-    /// structurally equals the receiver of an ancestor enumerable loop.
-    loop_receiver_ranges: Vec<(usize, usize)>,
 }
 
 impl<'pr> Visit<'pr> for CollectionLiteralVisitor<'_, '_> {
@@ -308,19 +322,10 @@ impl<'pr> Visit<'pr> for CollectionLiteralVisitor<'_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method_name = node.name().as_slice();
 
-        // Check if this call has a block and is a loop-like method.
-        // Safe navigation (&.) calls are NOT treated as loops — RuboCop's
-        // enumerable_loop? matcher only matches regular sends, not csends.
-        let is_safe_nav = node
-            .call_operator_loc()
-            .is_some_and(|op| &self.source.as_bytes()[op.start_offset()..op.end_offset()] == b"&.");
-        let is_loop_call = if !is_safe_nav {
-            if let Some(block) = node.block() {
-                if block.as_block_node().is_some() {
-                    self.is_loop_method(node)
-                } else {
-                    false
-                }
+        // Check if this call has a block and is a loop-like method
+        let is_loop_call = if let Some(block) = node.block() {
+            if block.as_block_node().is_some() {
+                self.is_loop_method(node)
             } else {
                 false
             }
@@ -345,21 +350,8 @@ impl<'pr> Visit<'pr> for CollectionLiteralVisitor<'_, '_> {
         // Visit block body with loop context if needed
         if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
-                // Track the receiver's source range for structural equality checks
-                let recv_range = if is_loop_call {
-                    node.receiver().map(|r| {
-                        let loc = r.location();
-                        (loc.start_offset(), loc.end_offset())
-                    })
-                } else {
-                    None
-                };
-
                 if is_loop_call {
                     self.loop_depth += 1;
-                    if let Some(range) = recv_range {
-                        self.loop_receiver_ranges.push(range);
-                    }
                 }
                 // Visit block parameters
                 if let Some(params) = block_node.parameters() {
@@ -371,9 +363,6 @@ impl<'pr> Visit<'pr> for CollectionLiteralVisitor<'_, '_> {
                 }
                 if is_loop_call {
                     self.loop_depth -= 1;
-                    if recv_range.is_some() {
-                        self.loop_receiver_ranges.pop();
-                    }
                 }
             } else {
                 self.visit(&block);
@@ -438,11 +427,6 @@ impl CollectionLiteralVisitor<'_, '_> {
             {
                 return;
             }
-            // RuboCop skips a literal if it structurally equals the receiver of
-            // an ancestor enumerable loop (structural equality via source bytes).
-            if self.literal_matches_ancestor_loop_receiver(&recv) {
-                return;
-            }
             let loc = recv.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
             self.diagnostics.push(self.cop.diagnostic(
@@ -465,9 +449,6 @@ impl CollectionLiteralVisitor<'_, '_> {
             if !is_recursive_basic_literal(&recv) {
                 return;
             }
-            if self.literal_matches_ancestor_loop_receiver(&recv) {
-                return;
-            }
             let loc = recv.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
             self.diagnostics.push(self.cop.diagnostic(
@@ -477,25 +458,6 @@ impl CollectionLiteralVisitor<'_, '_> {
                 "Avoid immutable Hash literals in loops. It is better to extract it into a local variable or a constant.".to_string(),
             ));
         }
-    }
-
-    /// Check if a literal node's source bytes match any ancestor loop receiver.
-    /// RuboCop uses structural node equality (`!=`) which in practice compares
-    /// by structure. We approximate this by comparing source byte slices.
-    fn literal_matches_ancestor_loop_receiver(&self, node: &ruby_prism::Node<'_>) -> bool {
-        if self.loop_receiver_ranges.is_empty() {
-            return false;
-        }
-        let loc = node.location();
-        let src = self.source.as_bytes();
-        let node_bytes = &src[loc.start_offset()..loc.end_offset()];
-        for &(start, end) in &self.loop_receiver_ranges {
-            let recv_bytes = &src[start..end];
-            if recv_bytes == node_bytes {
-                return true;
-            }
-        }
-        false
     }
 }
 

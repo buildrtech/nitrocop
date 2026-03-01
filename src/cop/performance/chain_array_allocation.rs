@@ -50,56 +50,40 @@ fn chain_contains_lazy(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-/// Check if the argument is a simple type that RuboCop's NodePattern accepts.
-/// RuboCop uses `{int lvar ivar cvar gvar send}` — only simple value nodes,
-/// not constants, strings, complex expressions, or keyword hashes.
-fn is_simple_arg(node: &ruby_prism::Node<'_>) -> bool {
-    node.as_integer_node().is_some()
-        || node.as_local_variable_read_node().is_some()
-        || node.as_instance_variable_read_node().is_some()
-        || node.as_class_variable_read_node().is_some()
-        || node.as_global_variable_read_node().is_some()
-        || node.as_call_node().is_some()
-}
-
 /// Check if the inner call returns a new array based on RuboCop's rules.
 ///
-/// RuboCop's NodePattern has three branches for the receiver:
-/// 1. `(send _ $method {int lvar ivar cvar gvar send})` — RETURN_NEW_ARRAY_WHEN_ARGS with a single simple arg
-/// 2. `(any_block (send _ $method) ...)` — ALWAYS_RETURNS_NEW_ARRAY with block and NO positional args
-/// 3. `(send _ $method ...)` — RETURNS_NEW_ARRAY (ALWAYS + WHEN_NO_BLOCK) without a block
+/// ## Known false positives (20 FP in corpus as of 2026-03-01)
+///
+/// An attempt was made to tighten this function to match RuboCop's NodePattern
+/// more precisely (commit 8c87a7f9, reverted). The approach:
+///   1. RETURN_NEW_ARRAY_WHEN_ARGS: require exactly one arg of simple type
+///      `{int lvar ivar cvar gvar send}`, excluding constants/strings/complex exprs.
+///   2. ALWAYS_RETURNS_NEW_ARRAY with block: require NO positional args on the
+///      inner send (to skip `Parallel.map(items) { }.compact`).
+///
+/// This fixed the target FPs but introduced 39 NEW false positives (20→59 FP).
+/// Root cause: the is_simple_arg check was too narrow — it excluded constant
+/// references (ConstantReadNode, ConstantPathNode) which are common args to
+/// `first`/`last`/`sample` (e.g., `.last(LIMIT).map`). A correct fix needs to
+/// either widen the arg type allowlist or compare against RuboCop's actual
+/// NodePattern `{int lvar ivar cvar gvar send}` more carefully (noting that
+/// `send` in NodePattern means ANY method call, covering constant-like usage).
 fn inner_returns_new_array(inner: &ruby_prism::CallNode<'_>) -> bool {
     let name = inner.name().as_slice();
-    let has_block = inner.block().is_some();
 
-    // Branch 1: RETURN_NEW_ARRAY_WHEN_ARGS — must have exactly one simple argument, no block
-    if RETURN_NEW_ARRAY_WHEN_ARGS.contains(&name) {
-        if has_block {
-            return false;
-        }
-        let args = match inner.arguments() {
-            Some(a) => a,
-            None => return false,
-        };
-        let arg_nodes = args.arguments();
-        // Must be exactly one argument, and it must be a simple type
-        return arg_nodes.len() == 1 && is_simple_arg(&arg_nodes.iter().next().unwrap());
-    }
-
-    // Branch 2: ALWAYS_RETURNS_NEW_ARRAY with a block — inner send must have NO positional args.
-    // This matches RuboCop's `(any_block (send _ $method) ...)` where the send has no extra children.
-    // Methods like `Parallel.map(items) { ... }` have positional args, so they are excluded.
+    // ALWAYS_RETURNS_NEW_ARRAY — always qualifies
     if ALWAYS_RETURNS_NEW_ARRAY.contains(&name) {
-        if has_block {
-            return inner.arguments().is_none();
-        }
-        // Branch 3: without block, always qualifies (matches `(send _ $method ...)`)
         return true;
     }
 
-    // Branch 3 continued: RETURNS_NEW_ARRAY_WHEN_NO_BLOCK — only when called WITHOUT a block
+    // RETURN_NEW_ARRAY_WHEN_ARGS — only when called with an argument
+    if RETURN_NEW_ARRAY_WHEN_ARGS.contains(&name) {
+        return inner.arguments().is_some();
+    }
+
+    // RETURNS_NEW_ARRAY_WHEN_NO_BLOCK — only when called WITHOUT a block
     if RETURNS_NEW_ARRAY_WHEN_NO_BLOCK.contains(&name) {
-        return !has_block;
+        return inner.block().is_none();
     }
 
     false

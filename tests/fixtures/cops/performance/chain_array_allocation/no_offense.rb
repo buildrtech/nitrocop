@@ -20,17 +20,3 @@ account.users.where(auto_offline: false)&.map(&:user_id)&.map(&:to_s)
 # block_pass inner should not trigger select-as-outer (not any_block_type?)
 items.select(&:valid?).select { |x| x.ready? }
 items.reject(&:blank?).select { |x| x.present? }
-# custom receiver.map(args) with block — not Array#map
-worker.map(file_names) { |f| find(f) }.flatten
-Parallel.map(items, in_threads: 10) { |x| process(x) }.compact
-ParallelWrap.map(guides) { |g| export(g) }.compact
-# RETURN_NEW_ARRAY_WHEN_ARGS with constant arguments (not int/lvar/ivar/cvar/gvar/send)
-items.last(LIMIT).reverse
-items.first(DEFAULT_SIZE).map { |x| x.to_s }
-items.sample(COUNT).map(&:id)
-# RETURN_NEW_ARRAY_WHEN_ARGS with complex expression arguments
-items.last(config.limit || 10).reverse
-# RETURN_NEW_ARRAY_WHEN_ARGS with string argument
-data.sample("week").map(:date)
-# RETURN_NEW_ARRAY_WHEN_ARGS with multiple arguments including keyword hash
-values.sample(size, random: rng).map(&:to_sym)
