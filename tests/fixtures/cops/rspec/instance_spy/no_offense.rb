@@ -6,3 +6,12 @@ spy = instance_spy(Foo).as_null_object
 
 # instance_double.as_null_object used purely as a stub (no message expectations)
 let(:config) { instance_double(RuboCop::Config, loaded_path: '.rubocop.yml').as_null_object }
+
+RSpec.describe "logger setup" do
+  let(:logger_mock) { instance_double(Logger).as_null_object }
+
+  it "checks a different spy" do
+    other = instance_spy(Other)
+    expect(other).to have_received(:call)
+  end
+end
