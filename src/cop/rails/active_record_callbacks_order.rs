@@ -22,7 +22,6 @@ const CALLBACK_ORDER: &[&[u8]] = &[
     b"around_destroy",
     b"after_destroy",
     b"after_save",
-    b"before_commit",
     b"after_commit",
     b"after_rollback",
     b"after_find",

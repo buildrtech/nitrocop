@@ -27,3 +27,10 @@ class Token < ApplicationRecord
     self.token ||= SecureRandom.hex
   end
 end
+
+# before_commit is not tracked by RuboCop — should be ignored
+class Import < ApplicationRecord
+  before_save :prepare
+  after_commit :process, on: :create
+  before_commit :recalculate_stats, on: :destroy
+end
