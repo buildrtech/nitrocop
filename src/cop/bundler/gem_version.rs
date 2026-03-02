@@ -65,6 +65,18 @@ impl Cop for GemVersion {
     }
 }
 
+/// ## Known false positives/negatives (corpus as of 2026-03-02)
+///
+/// Attempted fix (reverted): treat `git:`/`github:` without `branch`/`ref`/`tag`
+/// as missing version specs to eliminate known false negatives.
+/// Effect: reduced FN but introduced FP regressions in corpus reruns
+/// (`Bundler/GemVersion` changed from FP=0/FN=198 to FP=25/FN=0).
+/// Root cause: this cop currently uses line-based parsing, so multi-line gem
+/// declarations can place commit references (`branch`/`ref`/`tag`) on later
+/// lines that this function cannot see, which causes false positives.
+/// A correct fix needs to inspect full call arguments (AST/source-aware) across
+/// multi-line declarations before changing `git:` handling.
+///
 /// Check if a gem declaration has a version specifier or source alternative
 /// (git:, github:, branch:, ref:, tag:).
 fn has_version_or_source_specifier(line: &str) -> bool {

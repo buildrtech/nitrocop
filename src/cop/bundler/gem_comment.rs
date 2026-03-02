@@ -27,9 +27,24 @@ impl Cop for GemComment {
         let check_version_specifiers = only_for.iter().any(|s| s == "version_specifiers");
 
         let lines: Vec<&[u8]> = source.lines().collect();
+        let mut in_block_comment = false;
 
         for (i, line) in lines.iter().enumerate() {
             let line_str = std::str::from_utf8(line).unwrap_or("");
+            let trimmed = line_str.trim_start();
+
+            if in_block_comment {
+                if trimmed.starts_with("=end") {
+                    in_block_comment = false;
+                }
+                continue;
+            }
+            if trimmed.starts_with("=begin") {
+                if !trimmed.contains("=end") {
+                    in_block_comment = true;
+                }
+                continue;
+            }
 
             if let Some(gem_name) = extract_gem_name(line_str) {
                 // Skip ignored gems
