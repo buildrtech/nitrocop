@@ -48,6 +48,50 @@ fn is_non_public_modifier(modifier: &[u8]) -> bool {
     NON_PUBLIC_MODIFIERS.contains(&modifier)
 }
 
+/// Check if the `def` has an unknown (non-visibility, non-registered modifier) prefix
+/// on the same line. For example: `memoize def foo` or `register_element def bar`.
+///
+/// RuboCop's AST-based approach associates comments with the wrapping `send` node, not
+/// the `def` node, so methods wrapped by unknown method calls are treated as undocumented
+/// even when comments exist above the line. We match that behavior.
+fn has_unknown_inline_prefix(source: &SourceFile, def_offset: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut line_start = def_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    let line_prefix = &bytes[line_start..def_offset];
+
+    // Strip leading whitespace
+    let trimmed: &[u8] = &line_prefix[line_prefix
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count()..];
+
+    // Nothing before def — no prefix
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Known visibility keywords that is_private_or_protected already handles
+    if trimmed.starts_with(b"private ")
+        || trimmed.starts_with(b"protected ")
+        || trimmed.starts_with(b"public ")
+    {
+        return false;
+    }
+
+    // Known modifiers already handled by detect_inline_modifier
+    for modifier in NON_PUBLIC_MODIFIERS.iter().chain(PUBLIC_MODIFIERS.iter()) {
+        if trimmed.starts_with(modifier) {
+            return false;
+        }
+    }
+
+    // Something else before def — unknown prefix
+    true
+}
+
 impl Cop for DocumentationMethod {
     fn name(&self) -> &'static str {
         "Style/DocumentationMethod"
@@ -112,12 +156,15 @@ impl Cop for DocumentationMethod {
             }
         }
 
-        // Check for documentation comment above the def (or modifier) line.
-        // has_documentation_comment uses the offset to find the line, then checks
-        // the line(s) above it. Since the modifier and def are on the same line,
-        // passing the def offset works correctly.
-        if has_documentation_comment(source, def_offset) {
-            return;
+        // When def is wrapped by an unknown method call (e.g., `memoize def foo`),
+        // RuboCop treats the def as undocumented because comments above the line
+        // are associated with the wrapping call, not the def node. Skip the
+        // documentation check in this case to match RuboCop's behavior.
+        if !has_unknown_inline_prefix(source, def_offset) {
+            // Check for documentation comment above the def (or modifier) line.
+            if has_documentation_comment(source, def_offset) {
+                return;
+            }
         }
 
         // Report offense - for modifiers, report at the start of the modifier

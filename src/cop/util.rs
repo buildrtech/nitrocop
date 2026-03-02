@@ -1352,3 +1352,96 @@ pub fn is_private_or_protected(source: &SourceFile, def_offset: usize) -> bool {
 
     in_private
 }
+
+#[cfg(test)]
+mod private_tests {
+    use super::is_private_or_protected;
+    use crate::parse::source::SourceFile;
+
+    fn check(source_text: &str, def_needle: &str, expected: bool) {
+        let source = SourceFile::from_bytes("test.rb", source_text.as_bytes().to_vec());
+        let off = source_text.find(def_needle).expect("needle not found");
+        let result = is_private_or_protected(&source, off);
+        assert_eq!(
+            result, expected,
+            "for '{}' in:\n{}",
+            def_needle, source_text
+        );
+    }
+
+    #[test]
+    fn public_method_not_private() {
+        check(
+            "class Foo\n  def bar\n  end\n  private\n  def secret\n  end\nend\n",
+            "def bar",
+            false,
+        );
+    }
+
+    #[test]
+    fn private_method_is_private() {
+        check(
+            "class Foo\n  def bar\n  end\n  private\n  def secret\n  end\nend\n",
+            "def secret",
+            true,
+        );
+    }
+
+    #[test]
+    fn indented_private_is_private() {
+        check(
+            "class Foo\n  private\n    def bar\n    end\nend\n",
+            "def bar",
+            true,
+        );
+    }
+
+    #[test]
+    fn public_in_next_class_not_private() {
+        // private in ClassA should NOT leak to ClassB
+        check(
+            "class A\n  private\n  def secret\n  end\nend\nclass B\n  def public_m\n  end\nend\n",
+            "def public_m",
+            false,
+        );
+    }
+
+    #[test]
+    fn nested_class_public_not_private() {
+        // private in outer should NOT leak to inner class
+        check(
+            "class Outer\n  private\n  def secret\n  end\n  class Inner\n    def public_m\n    end\n  end\nend\n",
+            "def public_m",
+            false,
+        );
+    }
+
+    #[test]
+    fn private_in_different_module_no_leak() {
+        check(
+            "module A\n  private\n  def secret\n  end\nend\nmodule B\n  def public_m\n  end\nend\n",
+            "def public_m",
+            false,
+        );
+    }
+
+    #[test]
+    fn deeply_nested_no_leak() {
+        // private at indent 4 in ClassA, public at indent 4 in ClassB
+        check(
+            "module M\n  class A\n    private\n    def secret\n    end\n  end\n  class B\n    def public_m\n    end\n  end\nend\n",
+            "def public_m",
+            false,
+        );
+    }
+
+    #[test]
+    fn private_at_lower_indent_in_same_class() {
+        // Common pattern: private at lower indent, defs at higher indent (same class)
+        check(
+            "class Foo\n  private\n    def bar\n    end\n    def baz\n    end\nend\n",
+            "def baz",
+            true,
+        );
+    }
+}

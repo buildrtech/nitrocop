@@ -6,16 +6,11 @@ use super::extract_gem_name;
 
 pub struct GemComment;
 
-/// ## Known corpus gap (1 FN as of 2026-03-02)
-///
-/// Landed fix: ignore magic comments (e.g., `# frozen_string_literal: true`) as
-/// gem description comments.
-/// Attempted fix (reverted): also ignore preceding comments on modifier-guarded
-/// gem declarations (`gem ... if/unless ...`).
-/// Effect of reverted attempt: introduced FP regressions in corpus rerun
-/// (`Bundler/GemComment` moved from FP=0/FN=1 to FP=13/FN=0).
-/// A correct remaining fix likely needs AST/comment-association parity with RuboCop
-/// (`processed_source.ast_with_comments`) instead of line-adjacent heuristics.
+// Known corpus gap (1 FN as of 2026-03-02):
+// Landed fix: ignore magic comments as gem description comments.
+// Attempted fix (reverted): ignore preceding comments on modifier-guarded gem declarations.
+// Effect: FP regressions (FP=0/FN=1 → FP=13/FN=0). Needs AST comment-association
+// parity with RuboCop instead of line-adjacent heuristics.
 
 impl Cop for GemComment {
     fn name(&self) -> &'static str {

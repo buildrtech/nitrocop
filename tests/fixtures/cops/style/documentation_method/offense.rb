@@ -33,3 +33,13 @@ module_function def undocumented_modular
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
   42
 end
+
+# Documentation above the line is for the wrapping call, not the def
+memoize def memoized_method
+        ^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+  42
+end
+
+# Outputs an element tag.
+register_element def custom_tag(**attrs, &content) = nil
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
