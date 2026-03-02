@@ -65,8 +65,18 @@ impl Cop for BinaryOperatorParameterName {
             None => return,
         };
 
+        // RuboCop's NodePattern requires (args (arg ...)) — exactly one arg child.
+        // Skip methods with multiple params, block args, rest args, etc.
         let requireds = params.requireds();
-        if requireds.is_empty() {
+        if requireds.len() != 1 {
+            return;
+        }
+        if !params.optionals().is_empty()
+            || params.rest().is_some()
+            || !params.keywords().is_empty()
+            || params.keyword_rest().is_some()
+            || params.block().is_some()
+        {
             return;
         }
 
