@@ -6,5 +6,7 @@ open("foo.txt")
 open("path/to/file")
 URI.open("http://example.com")
 Kernel.open("safe_file.txt")
+Kernel.open(user_input)
+::Kernel.open(user_input)
 page.open
 open("safe #{interpolated}")

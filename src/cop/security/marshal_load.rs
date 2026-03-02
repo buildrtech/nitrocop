@@ -42,26 +42,35 @@ impl Cop for MarshalLoad {
             None => return,
         };
 
-        let is_marshal = is_constant_named(&recv, b"Marshal");
-        if !is_marshal {
+        if !is_top_level_marshal(&recv, source) {
             return;
         }
 
+        let args = match call.arguments() {
+            Some(args) => args,
+            None => return,
+        };
+        let mut arg_iter = args.arguments().iter();
+        let Some(first_arg) = arg_iter.next() else {
+            return;
+        };
+
         // Exclude the "deep copy hack" pattern: Marshal.load(Marshal.dump(...))
-        if let Some(args) = call.arguments() {
-            let arg_list: Vec<_> = args.arguments().iter().collect();
-            if let Some(first_arg) = arg_list.first() {
-                if let Some(inner_call) = first_arg.as_call_node() {
-                    if inner_call.name().as_slice() == b"dump" {
-                        if let Some(inner_recv) = inner_call.receiver() {
-                            if is_constant_named(&inner_recv, b"Marshal") {
-                                return;
-                            }
-                        }
+        if let Some(inner_call) = first_arg.as_call_node() {
+            if inner_call.name().as_slice() == b"dump" {
+                if let Some(inner_recv) = inner_call.receiver() {
+                    if is_top_level_marshal(&inner_recv, source) {
+                        return;
                     }
                 }
             }
         }
+
+        let method_name = if method == b"restore" {
+            "Marshal.restore"
+        } else {
+            "Marshal.load"
+        };
 
         let msg_loc = call.message_loc().unwrap();
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
@@ -69,21 +78,19 @@ impl Cop for MarshalLoad {
             source,
             line,
             column,
-            "Avoid using `Marshal.load`.".to_string(),
+            format!("Avoid using `{method_name}`."),
         ));
     }
 }
 
-fn is_constant_named(node: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
+fn is_top_level_marshal(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
     if let Some(cr) = node.as_constant_read_node() {
-        return cr.name().as_slice() == name;
+        return cr.name().as_slice() == b"Marshal";
     }
     if let Some(cp) = node.as_constant_path_node() {
-        if let Some(child) = cp.name() {
-            if child.as_slice() == name && cp.parent().is_none() {
-                return true;
-            }
-        }
+        let loc = cp.location();
+        let recv_src = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+        return recv_src == b"Marshal" || recv_src == b"::Marshal";
     }
     false
 }

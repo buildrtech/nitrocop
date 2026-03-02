@@ -14,6 +14,26 @@ const DANGEROUS_METHODS: &[&[u8]] = &[
     b"readlines",
 ];
 
+fn first_arg_starts_with_pipe(node: &ruby_prism::Node<'_>) -> bool {
+    let Some(string) = node.as_string_node() else {
+        return false;
+    };
+
+    let bytes = string.unescaped();
+    let trimmed = match std::str::from_utf8(bytes) {
+        Ok(text) => text.trim().as_bytes(),
+        Err(_) => {
+            let start = bytes
+                .iter()
+                .position(|b| !b.is_ascii_whitespace())
+                .unwrap_or(bytes.len());
+            &bytes[start..]
+        }
+    };
+
+    trimmed.starts_with(b"|")
+}
+
 impl Cop for IoMethods {
     fn name(&self) -> &'static str {
         "Security/IoMethods"
@@ -62,6 +82,14 @@ impl Cop for IoMethods {
 
         if !is_io {
             return;
+        }
+
+        if let Some(args) = call.arguments() {
+            if let Some(first_arg) = args.arguments().iter().next() {
+                if first_arg_starts_with_pipe(&first_arg) {
+                    return;
+                }
+            }
         }
 
         let method_str = std::str::from_utf8(method).unwrap_or("");

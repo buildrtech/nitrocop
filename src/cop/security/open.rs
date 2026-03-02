@@ -7,21 +7,6 @@ use crate::parse::source::SourceFile;
 
 pub struct Open;
 
-/// Check if a constant node matches a given name (handles both ConstantReadNode and ConstantPathNode).
-fn is_constant_named(node: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
-    if let Some(cr) = node.as_constant_read_node() {
-        return cr.name().as_slice() == name;
-    }
-    if let Some(cp) = node.as_constant_path_node() {
-        if let Some(child) = cp.name() {
-            if child.as_slice() == name && cp.parent().is_none() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Check if the argument is a "safe" string literal.
 /// A safe argument is a non-empty string that doesn't start with '|'.
 fn is_safe_arg(node: &ruby_prism::Node<'_>) -> bool {
@@ -87,19 +72,18 @@ impl Cop for Open {
             return;
         }
 
-        // Determine if receiver matches: no receiver (bare open), Kernel, or URI
-        let is_uri;
-        match call.receiver() {
-            None => {
-                is_uri = false;
-            }
+        // Match RuboCop pattern:
+        //   (send {nil? (const {nil? cbase} :URI)} :open ...)
+        // This intentionally excludes explicit `Kernel.open(...)`.
+        let receiver_name = match call.receiver() {
+            None => None,
             Some(recv) => {
-                if is_constant_named(&recv, b"Kernel") {
-                    is_uri = false;
-                } else if is_constant_named(&recv, b"URI") {
-                    is_uri = true;
+                let loc = recv.location();
+                let recv_src = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+                if recv_src == b"URI" || recv_src == b"::URI" {
+                    Some(recv_src)
                 } else {
-                    // Not a relevant receiver (e.g., File.open, obj.open)
+                    // Not a relevant receiver (e.g., File.open, Kernel.open, obj.open)
                     return;
                 }
             }
@@ -120,15 +104,16 @@ impl Cop for Open {
             return;
         }
 
-        let msg = if is_uri {
-            "The use of `URI.open` is a serious security risk."
+        let msg = if let Some(receiver_name) = receiver_name {
+            let receiver = std::str::from_utf8(receiver_name).unwrap_or("URI");
+            format!("The use of `{receiver}.open` is a serious security risk.")
         } else {
-            "The use of `Kernel#open` is a serious security risk."
+            "The use of `Kernel#open` is a serious security risk.".to_string()
         };
 
         let msg_loc = call.message_loc().unwrap();
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, msg.to_string()));
+        diagnostics.push(self.diagnostic(source, line, column, msg));
     }
 }
 
