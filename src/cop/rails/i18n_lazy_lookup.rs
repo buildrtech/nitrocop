@@ -38,11 +38,20 @@ impl Cop for I18nLazyLookup {
             style,
             controller_prefix,
             current_method: None,
+            in_controller_class: false,
+            method_visibility: Visibility::Public,
             diagnostics: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Visibility {
+    Public,
+    Private,
+    Protected,
 }
 
 struct I18nLazyLookupVisitor<'a> {
@@ -51,10 +60,28 @@ struct I18nLazyLookupVisitor<'a> {
     style: &'a str,
     controller_prefix: Option<String>,
     current_method: Option<Vec<u8>>,
+    in_controller_class: bool,
+    method_visibility: Visibility,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        let prev_in_controller = self.in_controller_class;
+        let prev_visibility = self.method_visibility;
+
+        // Check if the class name ends with "Controller"
+        let class_name = node.constant_path();
+        let name_ends_with_controller = class_name_ends_with_controller(&class_name);
+        self.in_controller_class = name_ends_with_controller;
+        self.method_visibility = Visibility::Public;
+
+        ruby_prism::visit_class_node(self, node);
+
+        self.in_controller_class = prev_in_controller;
+        self.method_visibility = prev_visibility;
+    }
+
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         let prev_method = self.current_method.take();
         self.current_method = Some(node.name().as_slice().to_vec());
@@ -64,6 +91,16 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method = node.name().as_slice();
+
+        // Track visibility modifiers: bare `private`, `protected`, `public` calls
+        if node.receiver().is_none() && node.arguments().is_none() && node.block().is_none() {
+            match method {
+                b"private" => self.method_visibility = Visibility::Private,
+                b"protected" => self.method_visibility = Visibility::Protected,
+                b"public" => self.method_visibility = Visibility::Public,
+                _ => {}
+            }
+        }
 
         // Only match bare t/translate calls (no receiver)
         let is_bare_t = (method == b"t" || method == b"translate") && node.receiver().is_none();
@@ -93,6 +130,14 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
 
 impl I18nLazyLookupVisitor<'_> {
     fn check_key(&mut self, node: &ruby_prism::CallNode<'_>, key: &[u8]) {
+        // Only flag inside Controller classes with public methods
+        if !self.in_controller_class {
+            return;
+        }
+        if self.method_visibility != Visibility::Public {
+            return;
+        }
+
         match self.style {
             "explicit" => {
                 // Flag lazy lookups (keys starting with '.')
@@ -157,6 +202,20 @@ impl I18nLazyLookupVisitor<'_> {
     }
 }
 
+/// Check if a class constant path ends with "Controller".
+/// Handles both simple names (`BooksController`) and qualified paths (`Admin::BooksController`).
+fn class_name_ends_with_controller(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(const_read) = node.as_constant_read_node() {
+        return const_read.name().as_slice().ends_with(b"Controller");
+    }
+    if let Some(const_path) = node.as_constant_path_node() {
+        if let Some(name) = const_path.name() {
+            return name.as_slice().ends_with(b"Controller");
+        }
+    }
+    false
+}
+
 /// Check if the file path looks like a Rails controller file.
 fn is_controller_file(path: &str) -> bool {
     if path.contains("controllers/") || path.contains("controllers\\") {
@@ -196,7 +255,7 @@ mod tests {
             )]),
             ..CopConfig::default()
         };
-        let source = b"# nitrocop-filename: app/controllers/books_controller.rb\nt('.success')\n^^^^^^^^^^^^^ Rails/I18nLazyLookup: Use explicit lookup for i18n keys.\n";
+        let source = b"# nitrocop-filename: app/controllers/books_controller.rb\nclass BooksController < ApplicationController\n  def create\n    t('.success')\n    ^^^^^^^^^^^^^ Rails/I18nLazyLookup: Use explicit lookup for i18n keys.\n  end\nend\n";
         assert_cop_offenses_full_with_config(&I18nLazyLookup, source, config);
     }
 
@@ -233,7 +292,22 @@ mod tests {
     fn does_not_flag_mismatched_action() {
         use crate::testutil::assert_cop_no_offenses_full;
         // Key has action 'update' but we're in method 'validate_confirmation_token'
-        let source = b"# nitrocop-filename: app/controllers/email_confirmations_controller.rb\ndef validate_confirmation_token\n  t(\"email_confirmations.update.token_failure\")\nend\n";
+        let source = b"# nitrocop-filename: app/controllers/email_confirmations_controller.rb\nclass EmailConfirmationsController < ApplicationController\n  def validate_confirmation_token\n    t(\"email_confirmations.update.token_failure\")\n  end\nend\n";
+        assert_cop_no_offenses_full(&I18nLazyLookup, source);
+    }
+
+    #[test]
+    fn does_not_flag_concern_module() {
+        use crate::testutil::assert_cop_no_offenses_full;
+        // Concern module in controllers/ path — not a Controller class
+        let source = b"# nitrocop-filename: app/controllers/concerns/linkable_controller.rb\nmodule LinkableController\n  def sync\n    t(\"concerns.linkable.sync.success\")\n  end\nend\n";
+        assert_cop_no_offenses_full(&I18nLazyLookup, source);
+    }
+
+    #[test]
+    fn does_not_flag_private_method_in_controller() {
+        use crate::testutil::assert_cop_no_offenses_full;
+        let source = b"# nitrocop-filename: app/controllers/application_controller.rb\nclass ApplicationController < ActionController::Base\n  def index\n    render plain: \"ok\"\n  end\n\n  private\n\n  def require_cookies\n    t(\"application.require_cookies.cookies_needed\")\n  end\nend\n";
         assert_cop_no_offenses_full(&I18nLazyLookup, source);
     }
 
