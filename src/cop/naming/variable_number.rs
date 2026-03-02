@@ -1,6 +1,6 @@
 use crate::cop::node_type::{
     CLASS_VARIABLE_WRITE_NODE, DEF_NODE, GLOBAL_VARIABLE_WRITE_NODE, INSTANCE_VARIABLE_WRITE_NODE,
-    LOCAL_VARIABLE_WRITE_NODE, OPTIONAL_PARAMETER_NODE, REQUIRED_PARAMETER_NODE, SYMBOL_NODE,
+    LOCAL_VARIABLE_WRITE_NODE, REQUIRED_PARAMETER_NODE, SYMBOL_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -32,7 +32,6 @@ impl Cop for VariableNumber {
             GLOBAL_VARIABLE_WRITE_NODE,
             INSTANCE_VARIABLE_WRITE_NODE,
             LOCAL_VARIABLE_WRITE_NODE,
-            OPTIONAL_PARAMETER_NODE,
             REQUIRED_PARAMETER_NODE,
             SYMBOL_NODE,
         ]
@@ -184,22 +183,6 @@ impl Cop for VariableNumber {
                     source,
                     name_str,
                     &param.location(),
-                    enforced_style,
-                    "variable",
-                ) {
-                    diagnostics.push(diag);
-                }
-            }
-        }
-        if let Some(param) = node.as_optional_parameter_node() {
-            let name = param.name().as_slice();
-            let name_str = std::str::from_utf8(name).unwrap_or("");
-            if !is_allowed(name_str, &allowed_ids, &allowed_pats) {
-                if let Some(diag) = check_number_style(
-                    self,
-                    source,
-                    name_str,
-                    &param.name_loc(),
                     enforced_style,
                     "variable",
                 ) {
