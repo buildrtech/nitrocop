@@ -44,14 +44,53 @@ impl Cop for EmptyWhen {
         // AllowComments: when true, `when` bodies containing only comments are not offenses
         let allow_comments = config.get_bool("AllowComments", true);
         if allow_comments {
-            // Use Prism's comment nodes to check for comments between the when
-            // keyword and the end of its range. This catches both standalone comment
-            // lines and inline comments on the when line itself (e.g., `when /pat/ # comment`).
+            // The WhenNode's location only covers the `when` keyword + conditions,
+            // NOT inline comments (e.g., `when "C" ; # comment`) or standalone
+            // comment lines below an empty when body. Extend the search range from
+            // the when keyword through all subsequent blank/comment lines until the
+            // next code token (next when/else/end).
             let when_start = when_node.keyword_loc().start_offset();
-            let when_end = node.location().end_offset();
+            let src = source.as_bytes();
+
+            // Find the end of the when condition line (for inline comments)
+            let line_end = src[when_start..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(src.len(), |p| when_start + p);
+
+            // Extend past subsequent blank/comment-only lines
+            let mut search_end = line_end;
+            let mut pos = if line_end < src.len() {
+                line_end + 1
+            } else {
+                src.len()
+            };
+            while pos < src.len() {
+                let next_nl = src[pos..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(src.len(), |p| pos + p);
+                let line = &src[pos..next_nl];
+                let trimmed = line
+                    .iter()
+                    .skip_while(|b| b.is_ascii_whitespace())
+                    .copied()
+                    .collect::<Vec<u8>>();
+                if trimmed.is_empty() || trimmed.starts_with(b"#") {
+                    search_end = next_nl;
+                    pos = if next_nl < src.len() {
+                        next_nl + 1
+                    } else {
+                        src.len()
+                    };
+                } else {
+                    break;
+                }
+            }
+
             for comment in _parse_result.comments() {
                 let comment_start = comment.location().start_offset();
-                if comment_start >= when_start && comment_start < when_end {
+                if comment_start >= when_start && comment_start <= search_end {
                     return;
                 }
             }
