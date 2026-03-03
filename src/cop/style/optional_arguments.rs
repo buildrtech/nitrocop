@@ -39,13 +39,17 @@ struct OptionalArgumentsVisitor<'a> {
 impl<'pr> Visit<'pr> for OptionalArgumentsVisitor<'_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         if let Some(params) = node.parameters() {
-            let requireds: Vec<_> = params.requireds().iter().collect();
             let optionals: Vec<_> = params.optionals().iter().collect();
-            let posts: Vec<_> = params.posts().iter().collect();
+            // Filter posts to only RequiredParameterNode — destructured params
+            // (MultiTargetNode) are not treated as required args by RuboCop.
+            let has_required_posts = params
+                .posts()
+                .iter()
+                .any(|p| p.as_required_parameter_node().is_some());
 
             // If there are optional args followed by required args (posts),
             // flag each optional arg
-            if !optionals.is_empty() && !posts.is_empty() {
+            if !optionals.is_empty() && has_required_posts {
                 for opt in &optionals {
                     if let Some(opt_node) = opt.as_optional_parameter_node() {
                         let loc = opt_node.location();
@@ -62,11 +66,6 @@ impl<'pr> Visit<'pr> for OptionalArgumentsVisitor<'_> {
                     }
                 }
             }
-
-            // Also check: required, optional, required pattern in the main requireds list
-            // Actually, Prism separates these into requireds, optionals, and posts
-            // So if there are posts, the optionals are before required args
-            let _ = requireds; // used for completeness
         }
 
         // Visit body
