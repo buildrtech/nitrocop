@@ -57,7 +57,29 @@ impl GemSpecVisitor<'_> {
         false
     }
 
+    /// Check if a line is a `metadata=` setter (e.g. `spec.metadata = ...`).
+    /// Returns true for lines like `.metadata =` or `.metadata=`.
+    fn is_metadata_setter(trimmed: &str) -> bool {
+        // Match patterns like `s.metadata = {`, `spec.metadata = Foo.new`, etc.
+        // But NOT `s.metadata['key'] = ...` (that's bracket assignment).
+        if let Some(pos) = trimmed.find(".metadata") {
+            let after = &trimmed[pos + ".metadata".len()..];
+            let after_trimmed = after.trim_start();
+            // Must be followed by `=` (setter) but NOT `[` (bracket access)
+            after_trimmed.starts_with('=') && !after_trimmed.starts_with("==")
+        } else {
+            false
+        }
+    }
+
     /// Scan lines within the given byte range for MFA metadata.
+    ///
+    /// Follows RuboCop's semantics:
+    /// 1. If a `metadata=` setter exists, check its value for `rubygems_mfa_required`.
+    ///    Bracket-style `metadata['rubygems_mfa_required'] = 'true'` is ignored when
+    ///    a `metadata=` setter is present (RuboCop's NodePattern captures `metadata=` first).
+    /// 2. If no `metadata=` setter, check bracket-style assignments.
+    ///
     /// Returns:
     ///   - `Some(true)` if MFA is set to 'true'
     ///   - `Some(false)` if MFA is set to a non-'true' value (e.g. 'false')
@@ -70,30 +92,59 @@ impl GemSpecVisitor<'_> {
             Err(_) => return None,
         };
 
+        // Phase 1: Check for `metadata=` setter.
+        let mut has_metadata_setter = false;
+        let mut metadata_setter_has_mfa = None;
+
         for line_str in block_str.lines() {
             let trimmed = line_str.trim();
             if trimmed.starts_with('#') {
                 continue;
             }
 
-            // Check for metadata['rubygems_mfa_required'] or metadata["rubygems_mfa_required"]
-            // in assignment form: metadata['key'] = 'value'
+            if Self::is_metadata_setter(trimmed) {
+                has_metadata_setter = true;
+                // Check if this is a hash literal containing rubygems_mfa_required
+                // (the value could be on subsequent lines inside the hash)
+            }
+        }
+
+        if has_metadata_setter {
+            // Look for 'rubygems_mfa_required' => value WITHIN the hash of metadata=
+            // In RuboCop, `metadata(node)` captures the RHS of `metadata=`.
+            // If the RHS is a hash, it looks for `rubygems_mfa_required` pair inside.
+            // If the RHS is not a hash (dynamic value), mfa_value returns nil → offense.
+            for line_str in block_str.lines() {
+                let trimmed = line_str.trim();
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                let has_hash_key = trimmed.contains("'rubygems_mfa_required'")
+                    || trimmed.contains("\"rubygems_mfa_required\"");
+                if has_hash_key && trimmed.contains("=>") {
+                    if trimmed.contains("'true'") || trimmed.contains("\"true\"") {
+                        metadata_setter_has_mfa = Some(true);
+                    } else {
+                        metadata_setter_has_mfa = Some(false);
+                    }
+                    break;
+                }
+            }
+            // If metadata= exists but MFA key not found in hash, that's None → offense
+            return metadata_setter_has_mfa;
+        }
+
+        // Phase 2: No metadata= setter. Check bracket-style assignments.
+        for line_str in block_str.lines() {
+            let trimmed = line_str.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
             let has_mfa_key = trimmed.contains("metadata['rubygems_mfa_required']")
                 || trimmed.contains("metadata[\"rubygems_mfa_required\"]");
 
             if has_mfa_key && trimmed.contains("= ") {
-                if trimmed.contains("'true'") || trimmed.contains("\"true\"") {
-                    return Some(true);
-                }
-                return Some(false);
-            }
-
-            // Also check for hash-style metadata:
-            // 'rubygems_mfa_required' => 'true' (inside .metadata = { ... })
-            let has_hash_key = trimmed.contains("'rubygems_mfa_required'")
-                || trimmed.contains("\"rubygems_mfa_required\"");
-
-            if has_hash_key && trimmed.contains("=>") {
                 if trimmed.contains("'true'") || trimmed.contains("\"true\"") {
                     return Some(true);
                 }
@@ -158,6 +209,12 @@ impl<'pr> Visit<'pr> for GemSpecVisitor<'_> {
         if node.name().as_slice() == b"new" {
             if let Some(receiver) = node.receiver() {
                 if Self::is_gem_specification(&receiver) {
+                    // RuboCop's NodePattern requires .new() with no positional args.
+                    // Skip when positional args are present (e.g. `Gem::Specification.new "name", ver`)
+                    if node.arguments().is_some() {
+                        ruby_prism::visit_call_node(self, node);
+                        return;
+                    }
                     if let Some(block) = node.block() {
                         if let Some(block_node) = block.as_block_node() {
                             let block_start = block_node.location().start_offset();
@@ -217,5 +274,7 @@ mod tests {
         wrong_value = "wrong_value.rb",
         no_metadata_at_all = "no_metadata_at_all.rb",
         preamble = "preamble.rb",
+        metadata_hash_then_bracket = "metadata_hash_then_bracket.rb",
+        dynamic_metadata_then_bracket = "dynamic_metadata_then_bracket.rb",
     );
 }

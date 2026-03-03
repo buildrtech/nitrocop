@@ -14,3 +14,15 @@ Gem::Specification.new do |s|
     'rubygems_mfa_required' => 'true'
   }
 end
+
+# Positional args form: Gem::Specification.new "name", version do |s|
+# RuboCop's NodePattern does NOT match this form, so no offense.
+Gem::Specification.new "example3", "1.0.0" do |gem|
+  gem.authors = ["Author"]
+  gem.summary = "A gem with positional args"
+end
+
+# Positional args with constant version
+Gem::Specification.new "example4", Example::VERSION do |s|
+  s.summary = "Another gem with positional args"
+end
