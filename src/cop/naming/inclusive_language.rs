@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
+use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
 pub struct InclusiveLanguage;
@@ -51,9 +52,11 @@ impl Cop for InclusiveLanguage {
         false
     }
 
-    fn check_lines(
+    fn check_source(
         &self,
         source: &SourceFile,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+        code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -84,18 +87,18 @@ impl Cop for InclusiveLanguage {
             }
         }
 
-        // Check each line — should_check_code excludes check_strings since
-        // string regions are checked separately via find_line_regions
+        // should_check_code covers identifiers, constants, variables, symbols
         let should_check_code =
             check_identifiers || check_constants || check_variables || check_symbols;
+
+        // Track byte offset for each line start to convert line-relative positions
+        // to absolute byte offsets for CodeMap queries.
+        let mut line_byte_start: usize = 0;
 
         for (line_idx, line) in source.lines().enumerate() {
             let line_num = line_idx + 1;
             let line_str = String::from_utf8_lossy(line);
             let line_lower = line_str.to_lowercase();
-
-            // Parse line regions: comment start and string literal ranges
-            let regions = find_line_regions(line);
 
             for term in terms.iter() {
                 // Use regex matching if available, otherwise substring search
@@ -107,14 +110,25 @@ impl Cop for InclusiveLanguage {
                             Err(_) => break,
                         };
                         let abs_pos = mat.start();
-                        let in_comment = regions.comment_start.is_some_and(|cs| abs_pos >= cs);
-                        let in_string = !in_comment && regions.is_in_string(abs_pos);
+                        let byte_offset = line_byte_start + abs_pos;
+                        let match_len = mat.end() - mat.start();
+
+                        let in_code = code_map.is_code(byte_offset);
+                        let in_string = !code_map.is_not_string(byte_offset);
+                        // Not code and not string means comment
+                        let in_comment = !in_code && !in_string;
+
                         let should_flag = if in_comment {
                             check_comments
                         } else if in_string {
                             check_strings
                         } else {
-                            should_check_code
+                            // In code — skip hash labels
+                            if is_hash_label(line, abs_pos, match_len) {
+                                false
+                            } else {
+                                should_check_code
+                            }
                         };
                         if should_flag {
                             let msg = format_message(&term.name, &term.suggestions);
@@ -126,9 +140,11 @@ impl Cop for InclusiveLanguage {
                     let mut search_start = 0;
                     while let Some(pos) = line_lower[search_start..].find(&term.pattern) {
                         let abs_pos = search_start + pos;
+                        let byte_offset = line_byte_start + abs_pos;
 
-                        let in_comment = regions.comment_start.is_some_and(|cs| abs_pos >= cs);
-                        let in_string = !in_comment && regions.is_in_string(abs_pos);
+                        let in_code = code_map.is_code(byte_offset);
+                        let in_string = !code_map.is_not_string(byte_offset);
+                        let in_comment = !in_code && !in_string;
 
                         let should_flag = if in_comment {
                             check_comments
@@ -157,6 +173,9 @@ impl Cop for InclusiveLanguage {
                     }
                 }
             }
+
+            // Advance line_byte_start past this line + newline character
+            line_byte_start += line.len() + 1;
         }
     }
 }
@@ -343,63 +362,6 @@ fn is_hash_label(line: &[u8], pos: usize, _len: usize) -> bool {
     true
 }
 
-struct LineRegions {
-    comment_start: Option<usize>,
-    /// Byte ranges of string literal content (between quotes, exclusive of quotes themselves).
-    string_ranges: Vec<(usize, usize)>,
-}
-
-impl LineRegions {
-    fn is_in_string(&self, pos: usize) -> bool {
-        self.string_ranges
-            .iter()
-            .any(|&(start, end)| pos >= start && pos < end)
-    }
-}
-
-fn find_line_regions(line: &[u8]) -> LineRegions {
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut string_start: usize = 0;
-    let mut string_ranges = Vec::new();
-    let mut comment_start = None;
-
-    for (i, &b) in line.iter().enumerate() {
-        match b {
-            b'\'' if !in_double => {
-                if in_single {
-                    // Closing single quote — record the content range
-                    string_ranges.push((string_start, i));
-                    in_single = false;
-                } else {
-                    // Opening single quote — content starts after the quote
-                    in_single = true;
-                    string_start = i + 1;
-                }
-            }
-            b'"' if !in_single => {
-                if in_double {
-                    string_ranges.push((string_start, i));
-                    in_double = false;
-                } else {
-                    in_double = true;
-                    string_start = i + 1;
-                }
-            }
-            b'#' if !in_single && !in_double => {
-                comment_start = Some(i);
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    LineRegions {
-        comment_start,
-        string_ranges,
-    }
-}
-
 fn format_message(term: &str, suggestions: &[String]) -> String {
     if suggestions.is_empty() {
         format!("Use inclusive language instead of `{term}`.")
@@ -421,6 +383,7 @@ fn format_message(term: &str, suggestions: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::run_cop_full_with_config;
 
     crate::cop_fixture_tests!(InclusiveLanguage, "cops/naming/inclusive_language");
 
@@ -453,15 +416,15 @@ mod tests {
         };
 
         // "accept " at start of line — should match
-        let source = SourceFile::from_bytes("test.rb", b"accept all the things\n".to_vec());
-        let mut diags = Vec::new();
-        InclusiveLanguage.check_lines(&source, &config, &mut diags, None);
+        let diags = run_cop_full_with_config(
+            &InclusiveLanguage,
+            b"accept all the things\n",
+            config.clone(),
+        );
         assert_eq!(diags.len(), 1, "Should flag 'accept ' at start of line");
 
         // "accept" in middle of line — should NOT match (regex has \\A anchor)
-        let source2 = SourceFile::from_bytes("test.rb", b"we accept the terms\n".to_vec());
-        let mut diags2 = Vec::new();
-        InclusiveLanguage.check_lines(&source2, &config, &mut diags2, None);
+        let diags2 = run_cop_full_with_config(&InclusiveLanguage, b"we accept the terms\n", config);
         assert!(
             diags2.is_empty(),
             "Should NOT flag 'accept' in middle of line with \\A regex"
@@ -497,10 +460,11 @@ mod tests {
         };
 
         // "registers offense" without ( or s — should match
-        let source =
-            SourceFile::from_bytes("test.rb", b"it registers offense when called\n".to_vec());
-        let mut diags = Vec::new();
-        InclusiveLanguage.check_lines(&source, &config, &mut diags, None);
+        let diags = run_cop_full_with_config(
+            &InclusiveLanguage,
+            b"it registers offense when called\n",
+            config.clone(),
+        );
         assert_eq!(
             diags.len(),
             1,
@@ -508,10 +472,11 @@ mod tests {
         );
 
         // "registers offenses" — should NOT match (negative lookahead excludes 's')
-        let source2 =
-            SourceFile::from_bytes("test.rb", b"it registers offenses when called\n".to_vec());
-        let mut diags2 = Vec::new();
-        InclusiveLanguage.check_lines(&source2, &config, &mut diags2, None);
+        let diags2 = run_cop_full_with_config(
+            &InclusiveLanguage,
+            b"it registers offenses when called\n",
+            config,
+        );
         assert!(
             diags2.is_empty(),
             "Should NOT flag 'registers offenses' (excluded by lookahead)"

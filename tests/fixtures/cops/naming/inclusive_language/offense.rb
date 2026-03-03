@@ -6,3 +6,6 @@ blacklist_ips = []
 
 # Remove slave nodes from cluster
          ^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `slave`. Suggested alternatives: `replica`, `secondary`, `follower`.
+
+msg = "connected to #{slave_host}"
+                      ^^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `slave`. Suggested alternatives: `replica`, `secondary`, `follower`.

@@ -12,3 +12,27 @@ puts 'blacklist'
 msg = "add to whitelist"
 log("removed from blacklist")
 error_msg = "the slave node is down"
+# Heredoc content should not be flagged (CheckStrings: false by default)
+description = <<~TEXT
+  The whitelist feature allows blocking specific IPs.
+  Items on the blacklist are automatically rejected.
+TEXT
+# %i array content should not be flagged
+ATTRS = %i[
+  allowed_emails
+  blocked_domains
+  whitelisted_items
+  blacklisted_names
+]
+# %w array content should not be flagged
+NAMES = %w[
+  whitelisted_emails
+  blacklisted_domains
+]
+# Hash labels with regex-matching terms should not be flagged
+validate_config(
+  whitelisted_emails: [],
+  blacklisted_domains: [],
+  whitelist_enabled: true,
+  blacklist_duration: 30
+)
