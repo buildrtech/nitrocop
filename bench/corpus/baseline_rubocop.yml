@@ -6,7 +6,7 @@
 # below so we test ALL implementations against the corpus.
 # NewCops: enable covers Enabled: pending cops automatically.
 
-require:
+plugins:
   - rubocop-rails
   - rubocop-performance
   - rubocop-rspec
