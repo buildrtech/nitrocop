@@ -55,6 +55,12 @@ impl Cop for MarshalLoad {
             return;
         };
 
+        // RuboCop's pattern matches exactly one argument — Marshal.load(data, filter)
+        // with a second arg (proc filter, freeze: true, etc.) is not flagged.
+        if arg_iter.next().is_some() {
+            return;
+        }
+
         // Exclude the "deep copy hack" pattern: Marshal.load(Marshal.dump(...))
         if let Some(inner_call) = first_arg.as_call_node() {
             if inner_call.name().as_slice() == b"dump" {
