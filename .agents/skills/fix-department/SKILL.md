@@ -92,14 +92,24 @@ Read reduced repros from `/tmp/nitrocop-reduce/` and capture root-cause hypothes
    ```
 
 7. **Document ALL investigation outcomes** as `///` comments on the cop's struct in its
-   source file — not just regressions and reverts, but also cops investigated and found
-   to need no fix (e.g., FPs caused by file-drop noise, config artifacts, etc.). This
-   prevents future investigators from repeating the same analysis. Use:
+   source file. **This is mandatory for EVERY cop in the batch** — including:
+   - Cops that were **fixed** but have remaining FP/FN (document what was fixed and why
+     the remaining gaps exist)
+   - Cops that were **investigated but need no code fix** (e.g., FPs caused by encoding
+     differences, file-drop noise, config artifacts)
+   - Cops that were **deferred** (document why and what a fix would need)
+   - Cops with FN from `standard:disable` or other expected behavior differences
+
+   This prevents future investigators from repeating the same analysis. **Do not
+   consider a cop "done" until it has an investigation comment, even if the fix itself
+   is already committed.** Use:
    ```rust
    /// ## Corpus investigation (YYYY-MM-DD)
    ///
-   /// Corpus oracle run #N reported FP=X, FN=Y. Investigation found ...
-   /// <conclusion and whether a fix is needed>
+   /// Corpus oracle reported FP=X, FN=Y.
+   ///
+   /// FP=X: <what was fixed or why no fix is needed>
+   /// FN=Y: <what was fixed, what remains, and root cause of any remaining FN>
    ```
 
 ### Phase 3: Batch Verification

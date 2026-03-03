@@ -127,12 +127,25 @@ directly on main.
 
 4. **Fix the cop implementation** in `src/cop/<dept>/<cop_name>.rs`
 
-5. **Verify**:
+5. **Add investigation comment** to the cop's struct as a `///` doc comment. This is
+   **required** even if you fully fixed the cop — document what the original FP/FN were,
+   what you fixed, and any remaining gaps with root causes. Example:
+   ```rust
+   /// ## Corpus investigation (YYYY-MM-DD)
+   ///
+   /// Corpus oracle reported FP=X, FN=Y.
+   ///
+   /// FP=X: Fixed by <description>. Commit <sha>.
+   /// FN=Y: <Fixed/remaining/expected behavior — with root cause>.
+   pub struct CopName;
+   ```
+
+6. **Verify**:
    - `cargo test --release -p nitrocop --lib -- <cop_name_snake>` — all tests pass
    - `cargo fmt`
    - `cargo clippy --release -- -D warnings`
 
-6. **Commit your fix**:
+7. **Commit your fix**:
    ```bash
    git add src/cop/<dept>/<cop_name>.rs tests/fixtures/cops/<dept>/<cop_name>/
    # Add any other changed files
@@ -144,7 +157,7 @@ directly on main.
    ```
    Stage only files for this cop fix. Do not include unrelated modified files.
 
-7. **Report back** via SendMessage with:
+8. **Report back** via SendMessage with:
    - What the root cause was
    - What you changed
    - Whether tests pass
@@ -204,14 +217,24 @@ directly on main.
    - Defer with a documented reason
 
 8. **Document ALL investigation outcomes** as `///` comments on the cop's struct in its
-   source file — not just regressions and reverts, but also cops investigated and found
-   to need no fix (e.g., FPs caused by file-drop noise, config artifacts, etc.). This
-   prevents future investigators from repeating the same analysis. Use:
+   source file. **This is mandatory for EVERY cop in the batch** — including:
+   - Cops that were **fixed** but have remaining FP/FN (document what was fixed and why
+     the remaining gaps exist)
+   - Cops that were **investigated but need no code fix** (e.g., FPs caused by encoding
+     differences, file-drop noise, config artifacts)
+   - Cops that were **deferred** (document why and what a fix would need)
+   - Cops with FN from `standard:disable` or other expected behavior differences
+
+   This prevents future investigators from repeating the same analysis. **Do not
+   consider a cop "done" until it has an investigation comment, even if the fix itself
+   is already committed.** Use:
    ```rust
    /// ## Corpus investigation (YYYY-MM-DD)
    ///
-   /// Corpus oracle run #N reported FP=X, FN=Y. Investigation found ...
-   /// <conclusion and whether a fix is needed>
+   /// Corpus oracle reported FP=X, FN=Y.
+   ///
+   /// FP=X: <what was fixed or why no fix is needed>
+   /// FN=Y: <what was fixed, what remains, and root cause of any remaining FN>
    ```
 
 ### Phase 5: Declare Done (you do this)
