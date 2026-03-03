@@ -59,9 +59,9 @@ impl<'pr> Visit<'pr> for RescuedVarVisitor<'_, '_> {
 impl<'a, 'src> RescuedVarVisitor<'a, 'src> {
     fn check_rescue(&mut self, rescue_node: &ruby_prism::RescueNode<'_>) {
         if let Some(reference) = rescue_node.reference() {
-            if let Some(local_var) = reference.as_local_variable_target_node() {
-                let var_name = local_var.name().as_slice();
-                let var_str = std::str::from_utf8(var_name).unwrap_or("");
+            // Extract variable name and location from any target node type
+            let var_info = self.extract_variable_info(&reference);
+            if let Some((var_str, start_offset)) = var_info {
                 // Accept both "e" and "_e" (underscore-prefixed preferred name)
                 let underscore_preferred = format!("_{}", self.preferred);
                 if var_str != self.preferred && var_str != underscore_preferred {
@@ -74,8 +74,7 @@ impl<'a, 'src> RescuedVarVisitor<'a, 'src> {
                     if self.preferred_name_shadowed(rescue_node, preferred_for_var) {
                         // Don't flag — renaming would shadow an existing variable
                     } else {
-                        let loc = local_var.location();
-                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                        let (line, column) = self.source.offset_to_line_col(start_offset);
                         self.diagnostics.push(self.cop.diagnostic(
                             self.source,
                             line,
@@ -93,6 +92,39 @@ impl<'a, 'src> RescuedVarVisitor<'a, 'src> {
         // Check subsequent rescue clauses in the same chain (they're at the same depth)
         if let Some(subsequent) = rescue_node.subsequent() {
             self.check_rescue(&subsequent);
+        }
+    }
+
+    /// Extract the variable name string and start offset from any target node type.
+    /// Returns None for unsupported node types (e.g., call nodes like `storage.exception`).
+    fn extract_variable_info(&self, reference: &ruby_prism::Node<'_>) -> Option<(String, usize)> {
+        if let Some(node) = reference.as_local_variable_target_node() {
+            let name = std::str::from_utf8(node.name().as_slice())
+                .unwrap_or("")
+                .to_string();
+            Some((name, node.location().start_offset()))
+        } else if let Some(node) = reference.as_instance_variable_target_node() {
+            let name = std::str::from_utf8(node.name().as_slice())
+                .unwrap_or("")
+                .to_string();
+            Some((name, node.location().start_offset()))
+        } else if let Some(node) = reference.as_class_variable_target_node() {
+            let name = std::str::from_utf8(node.name().as_slice())
+                .unwrap_or("")
+                .to_string();
+            Some((name, node.location().start_offset()))
+        } else if let Some(node) = reference.as_global_variable_target_node() {
+            let name = std::str::from_utf8(node.name().as_slice())
+                .unwrap_or("")
+                .to_string();
+            Some((name, node.location().start_offset()))
+        } else if let Some(node) = reference.as_constant_target_node() {
+            let name = std::str::from_utf8(node.name().as_slice())
+                .unwrap_or("")
+                .to_string();
+            Some((name, node.location().start_offset()))
+        } else {
+            None
         }
     }
 

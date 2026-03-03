@@ -16,3 +16,18 @@ rescue => exception
           ^^^^^^^^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `exception` for rescued exceptions.
   bar
 end
+begin
+  something
+rescue => @exception
+          ^^^^^^^^^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `@exception` for rescued exceptions.
+end
+begin
+  something
+rescue => @@captured_error
+          ^^^^^^^^^^^^^^^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `@@captured_error` for rescued exceptions.
+end
+begin
+  something
+rescue => $error
+          ^^^^^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `$error` for rescued exceptions.
+end
