@@ -43,6 +43,26 @@ fn format_target_version(v: f64) -> String {
     format!("{major}.{minor}")
 }
 
+/// Check if a trimmed RHS string looks dynamic — contains method calls, hash
+/// access, constant references, or other non-literal expressions. RuboCop's
+/// `dynamic_version?` returns true when the expression has send descendants
+/// (which includes `[]` calls), variables, or constant references.
+fn is_dynamic_rhs(rhs: &str) -> bool {
+    let trimmed = rhs.trim();
+    // Hash access like gemspec['key'] or config[:key]
+    if trimmed.contains('[') {
+        return true;
+    }
+    // Method calls like Foo.bar or obj.method
+    if trimmed.contains('(') {
+        return true;
+    }
+    // Constant path like Some::Constant — but not Gem::Requirement.new which
+    // is handled separately as a known pattern
+    // Skip this check; constants/method calls are handled by the non-literal fallback
+    false
+}
+
 impl Cop for RequiredRubyVersion {
     fn name(&self) -> &'static str {
         "Gemspec/RequiredRubyVersion"
@@ -60,9 +80,9 @@ impl Cop for RequiredRubyVersion {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut found = false;
-        // None = not found or dynamic (skip), Some = extracted version or empty for non-literal
-        let mut version_info: Option<(usize, usize, String)> = None; // (line, col, version_str)
-        let mut dynamic = false;
+        // Collect all required_ruby_version assignments for processing.
+        // Each entry: (line_1based, col, extracted_version_string), or None if dynamic.
+        let mut assignments: Vec<Option<(usize, usize, String)>> = Vec::new();
 
         for (line_idx, line) in source.lines().enumerate() {
             let line_str = match std::str::from_utf8(line) {
@@ -88,18 +108,21 @@ impl Cop for RequiredRubyVersion {
                         // Check for .freeze anywhere in the RHS — RuboCop treats this as
                         // dynamic because .freeze is a send descendant.
                         if rhs.contains(".freeze") {
-                            dynamic = true;
-                            break;
+                            assignments.push(None); // dynamic
+                            continue;
                         }
 
                         // Check if RHS is a bare local variable (lowercase identifier, no
                         // quotes, no ::, no .). RuboCop treats these as dynamic.
                         if is_local_variable(rhs) {
-                            dynamic = true;
-                            break;
+                            assignments.push(None); // dynamic
+                            continue;
                         }
 
                         // Try to extract the version string from a quoted string.
+                        // This handles both plain strings ('>=2.7') and
+                        // Gem::Requirement.new(">= 3.4") — both have quotes.
+                        let mut extracted_version = false;
                         let quote_char = rhs
                             .find(['\'', '"'])
                             .map(|p| (p, rhs.as_bytes()[p] as char));
@@ -110,22 +133,28 @@ impl Cop for RequiredRubyVersion {
                                 if let Some(extracted) = extract_version_digits(ver_str) {
                                     let ver_literal = &rhs[start..=start + 1 + end];
                                     let col = line_str.find(ver_literal).unwrap_or(0);
-                                    version_info = Some((line_idx + 1, col, extracted));
+                                    assignments.push(Some((line_idx + 1, col, extracted)));
+                                    extracted_version = true;
                                 }
                             }
                         }
 
-                        // If we couldn't extract a version from a quoted string and
-                        // it's not dynamic, the value is a non-literal (constant,
-                        // method call, etc.). RuboCop fires a mismatch offense for these.
-                        if version_info.is_none() && !dynamic {
-                            let col = line_str.find(".required_ruby_version").unwrap_or(0)
-                                + ".required_ruby_version = ".len();
-                            version_info = Some((line_idx + 1, col, String::new()));
+                        if !extracted_version {
+                            // No quoted version found. Check if RHS looks dynamic
+                            // (hash access like gemspec['key']). RuboCop's
+                            // dynamic_version? returns true for send descendants
+                            // ([] is a send).
+                            if is_dynamic_rhs(rhs) {
+                                assignments.push(None); // dynamic
+                            } else {
+                                // Non-literal (constant, method call, etc.).
+                                // RuboCop fires a mismatch offense for these.
+                                let col = line_str.find(".required_ruby_version").unwrap_or(0)
+                                    + ".required_ruby_version = ".len();
+                                assignments.push(Some((line_idx + 1, col, String::new())));
+                            }
                         }
                     }
-
-                    break;
                 }
             }
         }
@@ -135,34 +164,31 @@ impl Cop for RequiredRubyVersion {
                 source,
                 1,
                 0,
-                "`required_ruby_version` should be set in gemspec.".to_string(),
+                "`required_ruby_version` should be specified.".to_string(),
             ));
             return;
         }
 
-        // Dynamic values (local variables, .freeze forms) — skip version comparison
-        if dynamic {
-            return;
-        }
-
-        // Check version mismatch against TargetRubyVersion
-        if let Some((line, col, ref gemspec_version)) = version_info {
-            let target = config
-                .options
-                .get("TargetRubyVersion")
-                .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|u| u as f64)));
-            if let Some(target_ver) = target {
-                let target_str = format_target_version(target_ver);
-                if *gemspec_version != target_str {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        col,
-                        format!(
-                            "`required_ruby_version` and `TargetRubyVersion` \
-                             ({target_str}, which may be specified in .rubocop.yml) should be equal."
-                        ),
-                    ));
+        // Check version mismatch against TargetRubyVersion for each non-dynamic assignment
+        let target = config
+            .options
+            .get("TargetRubyVersion")
+            .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|u| u as f64)));
+        if let Some(target_ver) = target {
+            let target_str = format_target_version(target_ver);
+            for assignment in &assignments {
+                if let Some((line, col, ref gemspec_version)) = *assignment {
+                    if *gemspec_version != target_str {
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            col,
+                            format!(
+                                "`required_ruby_version` and `TargetRubyVersion` \
+                                 ({target_str}, which may be specified in .rubocop.yml) should be equal."
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -280,6 +306,29 @@ mod tests {
             &RequiredRubyVersion,
             include_bytes!(
                 "../../../tests/fixtures/cops/gemspec/required_ruby_version/no_offense_requirement_new.rb"
+            ),
+            config_with_target_ruby(3.4),
+        );
+    }
+
+    #[test]
+    fn hash_access_no_offense() {
+        // Hash access like gemspec['required_ruby_version'] is dynamic — no offense
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &RequiredRubyVersion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/gemspec/required_ruby_version/no_offense_hash_access.rb"
+            ),
+            config_with_target_ruby(3.4),
+        );
+    }
+
+    #[test]
+    fn conditional_branches() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &RequiredRubyVersion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/gemspec/required_ruby_version/offense/conditional_branches.rb"
             ),
             config_with_target_ruby(3.4),
         );
