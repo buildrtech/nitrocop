@@ -4,15 +4,36 @@ use crate::parse::source::SourceFile;
 
 pub struct RequiredRubyVersion;
 
-/// Extract the first two digits from a version string and join with '.'.
-/// e.g. ">= 2.7.0" → "2.7", "~> 3.4" → "3.4"
+/// Extract version digits from a version string like RuboCop does:
+/// scan for digits and take the first two, joined with '.'.
+/// Single-digit versions (e.g. ">= 3") return just that digit (e.g. "3").
+/// e.g. ">= 2.7.0" → "2.7", "~> 3.4" → "3.4", ">= 3" → "3"
 fn extract_version_digits(s: &str) -> Option<String> {
     let digits: Vec<char> = s.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.len() >= 2 {
         Some(format!("{}.{}", digits[0], digits[1]))
+    } else if digits.len() == 1 {
+        Some(digits[0].to_string())
     } else {
         None
     }
+}
+
+/// Check if a trimmed RHS string looks like a bare local variable (e.g. `version`).
+/// Local variables in Ruby start with a lowercase letter or underscore and contain
+/// only alphanumeric characters and underscores. RuboCop treats these as dynamic.
+fn is_local_variable(rhs: &str) -> bool {
+    let ident = rhs.trim();
+    if ident.is_empty() {
+        return false;
+    }
+    let first = ident.as_bytes()[0];
+    if !(first.is_ascii_lowercase() || first == b'_') {
+        return false;
+    }
+    ident
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Format a TargetRubyVersion f64 as "X.Y".
@@ -39,7 +60,9 @@ impl Cop for RequiredRubyVersion {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut found = false;
+        // None = not found or dynamic (skip), Some = extracted version or empty for non-literal
         let mut version_info: Option<(usize, usize, String)> = None; // (line, col, version_str)
+        let mut dynamic = false;
 
         for (line_idx, line) in source.lines().enumerate() {
             let line_str = match std::str::from_utf8(line) {
@@ -59,25 +82,46 @@ impl Cop for RequiredRubyVersion {
                 if after_trimmed.starts_with('=') || after_trimmed.is_empty() {
                     found = true;
 
-                    // Try to extract the version string for mismatch checking.
-                    // Look for a quoted string after the '=' sign.
                     if let Some(eq_pos) = after_trimmed.find('=') {
-                        let rhs = &after_trimmed[eq_pos + 1..];
-                        // Find the first quoted string (single or double)
+                        let rhs = &after_trimmed[eq_pos + 1..].trim_start();
+
+                        // Check for .freeze anywhere in the RHS — RuboCop treats this as
+                        // dynamic because .freeze is a send descendant.
+                        if rhs.contains(".freeze") {
+                            dynamic = true;
+                            break;
+                        }
+
+                        // Check if RHS is a bare local variable (lowercase identifier, no
+                        // quotes, no ::, no .). RuboCop treats these as dynamic.
+                        if is_local_variable(rhs) {
+                            dynamic = true;
+                            break;
+                        }
+
+                        // Try to extract the version string from a quoted string.
                         let quote_char = rhs
                             .find(['\'', '"'])
                             .map(|p| (p, rhs.as_bytes()[p] as char));
-                        if let Some((_start, qc)) = quote_char {
-                            let after_open = &rhs[_start + 1..];
+                        if let Some((start, qc)) = quote_char {
+                            let after_open = &rhs[start + 1..];
                             if let Some(end) = after_open.find(qc) {
                                 let ver_str = &after_open[..end];
                                 if let Some(extracted) = extract_version_digits(ver_str) {
-                                    // Calculate column: find the quoted string position in the original line
-                                    let ver_literal = &rhs[_start..=_start + 1 + end];
+                                    let ver_literal = &rhs[start..=start + 1 + end];
                                     let col = line_str.find(ver_literal).unwrap_or(0);
                                     version_info = Some((line_idx + 1, col, extracted));
                                 }
                             }
+                        }
+
+                        // If we couldn't extract a version from a quoted string and
+                        // it's not dynamic, the value is a non-literal (constant,
+                        // method call, etc.). RuboCop fires a mismatch offense for these.
+                        if version_info.is_none() && !dynamic {
+                            let col = line_str.find(".required_ruby_version").unwrap_or(0)
+                                + ".required_ruby_version = ".len();
+                            version_info = Some((line_idx + 1, col, String::new()));
                         }
                     }
 
@@ -93,6 +137,11 @@ impl Cop for RequiredRubyVersion {
                 0,
                 "`required_ruby_version` should be set in gemspec.".to_string(),
             ));
+            return;
+        }
+
+        // Dynamic values (local variables, .freeze forms) — skip version comparison
+        if dynamic {
             return;
         }
 
@@ -157,6 +206,39 @@ mod tests {
     }
 
     #[test]
+    fn single_digit_version() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &RequiredRubyVersion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/gemspec/required_ruby_version/offense/single_digit_version.rb"
+            ),
+            config_with_target_ruby(3.4),
+        );
+    }
+
+    #[test]
+    fn dynamic_constant() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &RequiredRubyVersion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/gemspec/required_ruby_version/offense/dynamic_constant.rb"
+            ),
+            config_with_target_ruby(3.4),
+        );
+    }
+
+    #[test]
+    fn dynamic_method_call() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &RequiredRubyVersion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/gemspec/required_ruby_version/offense/dynamic_method_call.rb"
+            ),
+            config_with_target_ruby(3.4),
+        );
+    }
+
+    #[test]
     fn version_match_no_offense() {
         crate::testutil::assert_cop_no_offenses_full_with_config(
             &RequiredRubyVersion,
@@ -164,6 +246,42 @@ mod tests {
                 "../../../tests/fixtures/cops/gemspec/required_ruby_version/no_offense.rb"
             ),
             config_with_target_ruby(3.0),
+        );
+    }
+
+    #[test]
+    fn freeze_form_no_offense() {
+        // Gem::Requirement.new("...".freeze) is treated as dynamic by RuboCop — no offense
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &RequiredRubyVersion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/gemspec/required_ruby_version/no_offense_freeze.rb"
+            ),
+            config_with_target_ruby(3.4),
+        );
+    }
+
+    #[test]
+    fn local_var_no_offense() {
+        // Local variable assignment is treated as dynamic — no offense
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &RequiredRubyVersion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/gemspec/required_ruby_version/no_offense_local_var.rb"
+            ),
+            config_with_target_ruby(3.4),
+        );
+    }
+
+    #[test]
+    fn requirement_new_no_offense() {
+        // Gem::Requirement.new("...") with matching version — no offense
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &RequiredRubyVersion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/gemspec/required_ruby_version/no_offense_requirement_new.rb"
+            ),
+            config_with_target_ruby(3.4),
         );
     }
 }
