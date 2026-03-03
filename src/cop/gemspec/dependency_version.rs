@@ -99,7 +99,7 @@ fn parse_dependency_args(after_method: &str) -> (Option<String>, bool) {
         s
     };
 
-    // Extract gem name
+    // Extract gem name from quoted string or percent string literal
     let gem_name = if s.starts_with('\'') || s.starts_with('"') {
         let quote = s.as_bytes()[0];
         let rest = &s[1..];
@@ -107,6 +107,8 @@ fn parse_dependency_args(after_method: &str) -> (Option<String>, bool) {
             let name = rest[..end].to_string();
             (name, &rest[end + 1..])
         })
+    } else if let Some(result) = try_parse_percent_string(s) {
+        Some(result)
     } else {
         None
     };
@@ -127,6 +129,32 @@ fn parse_dependency_args(after_method: &str) -> (Option<String>, bool) {
     };
 
     (name, has_version)
+}
+
+/// Try to parse a Ruby percent string literal (%q<...>, %q(...), %q[...], %Q<...>, %Q(...), %Q[...]).
+/// Returns (extracted_string, remainder_after_closing_delimiter) if successful.
+fn try_parse_percent_string(s: &str) -> Option<(String, &str)> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 4 || bytes[0] != b'%' {
+        return None;
+    }
+    // Accept %q or %Q
+    if bytes[1] != b'q' && bytes[1] != b'Q' {
+        return None;
+    }
+    let open = bytes[2];
+    let close = match open {
+        b'<' => b'>',
+        b'(' => b')',
+        b'[' => b']',
+        b'{' => b'}',
+        _ => return None,
+    };
+    let rest = &s[3..];
+    rest.find(|c: char| c as u8 == close).map(|end| {
+        let name = rest[..end].to_string();
+        (name, &rest[end + 1..])
+    })
 }
 
 /// Check if the string starts with a quoted version specifier.

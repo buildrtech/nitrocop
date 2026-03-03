@@ -6,4 +6,10 @@ Gem::Specification.new do |spec|
        ^^^^^^^^^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
   spec.add_development_dependency 'baz'
        ^^^^^^^^^^^^^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
+  spec.add_dependency %q<os>
+       ^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
+  spec.add_runtime_dependency %q(parser)
+       ^^^^^^^^^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
+  spec.add_development_dependency %q[minitest]
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
 end
