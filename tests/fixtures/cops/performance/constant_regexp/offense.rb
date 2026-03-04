@@ -4,3 +4,9 @@ str.match?(/\A#{CONST1}something#{CONST2}\z/)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/ConstantRegexp: Extract this regexp into a constant, memoize it, or append an `/o` option to its options.
 str.match?(/\A#{CONST1}something#{Regexp.escape(CONST2)}\z/)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/ConstantRegexp: Extract this regexp into a constant, memoize it, or append an `/o` option to its options.
+rule %r/#{MISC_KEYWORDS}/i, Keyword
+     ^^^^^^^^^^^^^^^^^^^^ Performance/ConstantRegexp: Extract this regexp into a constant, memoize it, or append an `/o` option to its options.
+text.split(/#{REGEX_RANGE}/).map do |time|
+           ^^^^^^^^^^^^^^^^ Performance/ConstantRegexp: Extract this regexp into a constant, memoize it, or append an `/o` option to its options.
+rule %r/#{SPACE}/, Text
+     ^^^^^^^^^^^ Performance/ConstantRegexp: Extract this regexp into a constant, memoize it, or append an `/o` option to its options.

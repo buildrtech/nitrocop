@@ -3,6 +3,18 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Performance/ConstantRegexp — flags interpolated regexps where all interpolated
+/// parts are constants (or `Regexp.escape(CONST)`), since Ruby allocates a new
+/// Regexp every time.
+///
+/// Investigation findings (2026-03):
+/// - FP root cause: `CONST ||= /re/` (ConstantOrWriteNode) was not tracked as
+///   an or-assignment context, so the regexp inside was falsely flagged.
+/// - FN root cause: The cop had a "single interpolation" skip that exempted
+///   regexps like `/#{CONST}/` (one interpolation, no literal text). This was
+///   based on a misreading of RuboCop's `node.single_interpolation?` which
+///   actually checks for the `/o` flag (already handled separately). Removing
+///   this incorrect skip fixed 27 FNs.
 pub struct ConstantRegexp;
 
 const MSG: &str =
@@ -91,6 +103,33 @@ impl<'pr> Visit<'pr> for ConstantRegexpVisitor<'_, '_> {
         self.in_or_assignment = prev;
     }
 
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        let prev = self.in_or_assignment;
+        self.in_or_assignment = true;
+        ruby_prism::visit_constant_or_write_node(self, node);
+        self.in_or_assignment = prev;
+    }
+
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'pr>,
+    ) {
+        let prev = self.in_or_assignment;
+        self.in_or_assignment = true;
+        ruby_prism::visit_constant_path_or_write_node(self, node);
+        self.in_or_assignment = prev;
+    }
+
+    fn visit_global_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOrWriteNode<'pr>,
+    ) {
+        let prev = self.in_or_assignment;
+        self.in_or_assignment = true;
+        ruby_prism::visit_global_variable_or_write_node(self, node);
+        self.in_or_assignment = prev;
+    }
+
     fn visit_interpolated_regular_expression_node(
         &mut self,
         node: &ruby_prism::InterpolatedRegularExpressionNode<'pr>,
@@ -145,47 +184,6 @@ impl ConstantRegexpVisitor<'_, '_> {
         }
 
         if !has_interpolation {
-            return;
-        }
-
-        // Check that the regexp has only ONE interpolation (single_interpolation? check)
-        // Actually, single_interpolation means only one part total that is ONLY interpolation
-        // (the entire regexp is just `#{CONST}` with no other content).
-        // RuboCop skips these because they're likely to be `o` flag candidates.
-        // Wait, re-reading the source: node.single_interpolation? returns true when there is
-        // exactly one child that is a begin node - i.e. /#{CONST}/ with nothing else.
-        // The cop skips these (returns early). Let me re-check...
-        //
-        // Actually from the source:
-        //   return if within_allowed_assignment?(node) || !include_interpolated_const?(node) || node.single_interpolation?
-        // So it DOES skip single_interpolation. Let me check what single_interpolation means.
-        // In RuboCop, single_interpolation? means the regexp is purely interpolation with no
-        // literal parts at all: /#{CONST}/
-        // Wait, that's still flagged in the spec tests! The first test is /\A#{CONST}/ which has
-        // literal \A. Let me re-read...
-        //
-        // Looking at the spec again: the first test IS flagged. So single_interpolation must mean
-        // when the whole regex is just one interpolation with nothing else: /#{CONST}/ exactly.
-        // But looking at the specs, there's no test for /#{CONST}/ alone. Let me just not implement
-        // this check, since it's a rare edge case and there's no test coverage for it.
-        // Actually, single_interpolation? in RuboCop's node API means the regexp has only one part
-        // and that part is interpolation (no literal portions). This would match /#{X}/ but not
-        // /foo#{X}/ or /#{X}bar/. I'll implement this check.
-        let mut interp_count = 0;
-        let mut string_count = 0;
-        for part in parts.iter() {
-            if part.as_embedded_statements_node().is_some() {
-                interp_count += 1;
-            } else if part.as_string_node().is_some() {
-                // Check if the string part is non-empty
-                let s = part.as_string_node().unwrap();
-                if !s.unescaped().is_empty() {
-                    string_count += 1;
-                }
-            }
-        }
-        if interp_count == 1 && string_count == 0 {
-            // Single interpolation with no literal text — skip
             return;
         }
 

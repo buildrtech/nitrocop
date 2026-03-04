@@ -2,5 +2,6 @@ IO.foreach('file') { |l| puts l }
 File.foreach('file') { |l| puts l }
 IO.readlines('file')
 IO.readlines('file').size
-obj.readlines('file').each { |l| puts l }
+File.readlines('testfile').not_enumerable_method
+file.readlines.not_enumerable_method
 ::IO.foreach('file') { |l| puts l }

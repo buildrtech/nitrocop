@@ -3,3 +3,5 @@ CONST = str.match?(/#{ANOTHER_CONST}/)
 @regexp ||= /#{ANOTHER_CONST}/
 str.match?(/#{CONST}/o)
 str.match?(/#{CONST}#{do_something(1)}/)
+MATCHES_THIS ||= %r{/prefix-#{VERSION}(-\w+)?(-\w+)?/}
+@@cached ||= /#{PATTERN}/
