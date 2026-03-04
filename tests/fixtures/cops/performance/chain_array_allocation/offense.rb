@@ -27,3 +27,10 @@ items.+(other).uniq
                ^^^^ Performance/ChainArrayAllocation: Use unchained `+` and `uniq!` (followed by `return array` if required) instead of chaining `+...uniq`.
 items.-(excluded).compact
                   ^^^^^^^ Performance/ChainArrayAllocation: Use unchained `-` and `compact!` (followed by `return array` if required) instead of chaining `-...compact`.
+# block_pass (&method/:sym) with args — still a chained array allocation
+items.map(items, &method(:transform)).flatten
+                                      ^^^^^^^ Performance/ChainArrayAllocation: Use unchained `map` and `flatten!` (followed by `return array` if required) instead of chaining `map...flatten`.
+items.map(items, &method(:transform)).compact
+                                      ^^^^^^^ Performance/ChainArrayAllocation: Use unchained `map` and `compact!` (followed by `return array` if required) instead of chaining `map...compact`.
+arr.flatten(1).compact
+               ^^^^^^^ Performance/ChainArrayAllocation: Use unchained `flatten` and `compact!` (followed by `return array` if required) instead of chaining `flatten...compact`.

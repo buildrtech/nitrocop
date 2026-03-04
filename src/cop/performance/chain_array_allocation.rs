@@ -4,11 +4,19 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 /// Corpus investigation (2026-03-03):
-/// FP fix: Inner ALWAYS_RETURNS_NEW_ARRAY methods with both a block AND positional args
+/// FP fix: Inner ALWAYS_RETURNS_NEW_ARRAY methods with both a real block AND positional args
 /// (e.g., `Parallel.map(items) { }`) are custom methods, not Array#map. RuboCop's NodePattern
 /// `(any_block (send _ :method) ...)` requires the inner send to have NO args when blocked.
 /// FN fix: Added operator methods `*`, `+`, `-`, `|` to ALWAYS_RETURNS_NEW_ARRAY to match
 /// RuboCop's list (these return new arrays and the chained mutation can be used instead).
+///
+/// Corpus investigation (2026-03-04):
+/// FN fix: Block pass (`&method(:name)`, `&:sym`) was incorrectly treated as a real block,
+/// causing `Parallel.map(items, &method(:name)).flatten` to be skipped. In Parser gem's AST,
+/// `block_pass` is part of the send's arguments (matching pattern 3), not a block wrapper
+/// (pattern 2). Fixed by checking `as_block_node()` instead of `block().is_some()` to
+/// distinguish real blocks from block arguments. Also confirmed `.flatten(1)` with depth arg
+/// works correctly (same root cause as the block_pass issue in corpus cases).
 pub struct ChainArrayAllocation;
 
 /// Methods that ALWAYS return a new array.
@@ -75,15 +83,21 @@ fn is_acceptable_arg(node: &ruby_prism::Node<'_>) -> bool {
 fn inner_returns_new_array(inner: &ruby_prism::CallNode<'_>) -> bool {
     let name = inner.name().as_slice();
 
-    // ALWAYS_RETURNS_NEW_ARRAY — qualifies, but with a caveat for blocks.
+    // ALWAYS_RETURNS_NEW_ARRAY — qualifies, but with a caveat for real blocks.
     // In RuboCop's NodePattern, when the inner call has a block, pattern 2 requires
     // `(any_block (send _ :method) ...)` — the inner send must have NO positional args.
-    // If the call has both a block AND positional args (e.g., `Parallel.map(items) { }`),
-    // it's a custom method, not Array#map, and should not be flagged.
-    // Without a block, pattern 3 `(send _ :method ...)` matches regardless of args.
+    // If the call has both a real block (`{ }` / `do...end`) AND positional args
+    // (e.g., `Parallel.map(items) { }`), it's a custom method, not Array#map.
+    // However, a block_pass (`&method(:name)`, `&:sym`) is part of the arguments in
+    // Parser gem's AST — it matches pattern 3 `(send _ :method ...)`, not pattern 2.
+    // In Prism, `CallNode.block()` returns both BlockNode and BlockArgumentNode, so we
+    // must distinguish: only reject when the block is a real BlockNode, not a BlockArgumentNode.
     if ALWAYS_RETURNS_NEW_ARRAY.contains(&name) {
-        if inner.block().is_some() && inner.arguments().is_some() {
-            return false;
+        if let Some(block) = inner.block() {
+            let is_real_block = block.as_block_node().is_some();
+            if is_real_block && inner.arguments().is_some() {
+                return false;
+            }
         }
         return true;
     }
