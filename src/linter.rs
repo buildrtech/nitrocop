@@ -693,6 +693,18 @@ fn lint_source_once(
         return (Vec::new(), Vec::new());
     }
 
+    // Skip cops on files with invalid UTF-8 encoding. RuboCop reports
+    // Lint/Syntax: "Invalid byte sequence in utf-8" for such files and
+    // runs no other cops. Prism's C FFI parses them successfully (the
+    // invalid bytes are typically in comments), but we must match
+    // RuboCop's behavior to avoid false positives.
+    if std::str::from_utf8(source.as_bytes()).is_err() {
+        if let Some(t) = timers {
+            t.codemap_ns.fetch_add(0, Ordering::Relaxed);
+        }
+        return (Vec::new(), Vec::new());
+    }
+
     let codemap_start = std::time::Instant::now();
     let code_map = CodeMap::from_parse_result(source.as_bytes(), &parse_result);
     if let Some(t) = timers {

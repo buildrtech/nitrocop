@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03): FP=1 in samg/timetrap `lib/Getopt/Declare.rb:590`
+/// was NOT a cop logic issue. The file contains a non-UTF-8 byte (0xF1, Latin-1 `ñ`
+/// in a comment). RuboCop reports `Lint/Syntax: Invalid byte sequence in utf-8` and
+/// skips all other cops. Prism's C FFI parses it fine, so nitrocop was analyzing it
+/// and correctly flagging `sub!(/\A\.\.\./, "")`. Fixed by adding a UTF-8 validity
+/// check in `linter.rs` to skip non-UTF-8 files, matching RuboCop's behavior.
 pub struct DeletePrefix;
 
 fn is_start_anchored_literal(content: &[u8], safe_multiline: bool) -> bool {
