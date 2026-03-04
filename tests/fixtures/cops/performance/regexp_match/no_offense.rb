@@ -67,3 +67,12 @@ case val
 in { name: name } if name =~ /human/i
   puts name
 end
+# MatchData ref in block within method — still suppresses
+def with_block_ref
+  bar do
+    if x =~ /re/
+      do_something
+    end
+  end
+  puts $1
+end

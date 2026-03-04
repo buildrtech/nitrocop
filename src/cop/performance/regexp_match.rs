@@ -3,6 +3,14 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+// Corpus investigation: FP=2, FN=250. Root cause: last_match_used_in_scope checked
+// if ANY MatchData ref in the same scope had offset >= if_node_offset, without
+// limiting the search to the range before the next match node. This caused all
+// matches in a scope to be suppressed if any one of them had a MatchData ref
+// after it. Fixed by collecting all match condition positions upfront and computing
+// the range [if_node_offset, next_match_offset) for each match, matching RuboCop's
+// range_to_search_for_last_matches / next_match_pos logic.
+
 pub struct RegexpMatch;
 
 impl Cop for RegexpMatch {
@@ -30,12 +38,21 @@ impl Cop for RegexpMatch {
         };
         ref_collector.visit(&parse_result.node());
 
-        // Pass 2: Visit conditions and check for matches
+        // Pass 2: Collect all match condition positions (=~, !~, .match, ===)
+        // so we can compute the "next match" boundary for each match.
+        let mut match_collector = MatchConditionCollector {
+            positions: Vec::new(),
+            current_scope: None,
+        };
+        match_collector.visit(&parse_result.node());
+
+        // Pass 3: Visit conditions and check for matches
         let mut visitor = ConditionVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
             match_data_refs: ref_collector.refs,
+            match_positions: match_collector.positions,
             current_scope: None,
         };
         visitor.visit(&parse_result.node());
@@ -53,6 +70,14 @@ struct ScopeId {
 /// A reference to MatchData ($~, $1, $&, etc.) with its scope info.
 struct MatchDataRef {
     offset: usize,
+    scope: Option<ScopeId>,
+}
+
+/// A match condition position (=~, !~, .match, ===) in an if/unless/case condition,
+/// with the if_node_offset (start of enclosing if/unless/case for modifier form handling).
+struct MatchConditionPos {
+    /// Start of the if/unless/case node (for modifier form: includes the body before `if`)
+    if_node_offset: usize,
     scope: Option<ScopeId>,
 }
 
@@ -156,11 +181,127 @@ impl<'pr> Visit<'pr> for MatchDataRefCollector {
     }
 }
 
+/// Pass 2: Collect positions of all match conditions (=~, !~, .match, ===) in
+/// if/unless/case conditions. Used to compute the "next match" boundary.
+struct MatchConditionCollector {
+    positions: Vec<MatchConditionPos>,
+    current_scope: Option<ScopeId>,
+}
+
+impl MatchConditionCollector {
+    fn record_condition(&mut self, cond: &ruby_prism::Node<'_>, if_node_offset: usize) {
+        if let Some(call) = cond.as_call_node() {
+            let method = call.name().as_slice();
+            let is_match_cond = if method == b"=~" || method == b"!~" {
+                call.receiver().is_some()
+            } else if method == b"match" {
+                // Same filtering as check_match_method
+                if let (Some(recv), Some(args)) = (call.receiver(), call.arguments()) {
+                    let first_arg = args.arguments().iter().next();
+                    let recv_lit = is_match_literal(&recv);
+                    let arg_lit = first_arg.as_ref().is_some_and(is_match_literal);
+                    (recv_lit || arg_lit) && call.block().is_none()
+                } else {
+                    false
+                }
+            } else if method == b"===" {
+                call.receiver()
+                    .is_some_and(|r| r.as_regular_expression_node().is_some())
+                    && call.arguments().is_some()
+            } else {
+                false
+            };
+            if is_match_cond {
+                self.positions.push(MatchConditionPos {
+                    if_node_offset,
+                    scope: self.current_scope,
+                });
+            }
+        }
+        // Also check for MatchWriteNode (named captures) — these count as "matches"
+        // that reset MatchData, so they serve as boundaries.
+        if cond.as_match_write_node().is_some() {
+            self.positions.push(MatchConditionPos {
+                if_node_offset,
+                scope: self.current_scope,
+            });
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for MatchConditionCollector {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        let old = self.current_scope;
+        let loc = node.location();
+        self.current_scope = Some(ScopeId {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+        });
+        ruby_prism::visit_def_node(self, node);
+        self.current_scope = old;
+    }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        let old = self.current_scope;
+        let loc = node.location();
+        self.current_scope = Some(ScopeId {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+        });
+        ruby_prism::visit_class_node(self, node);
+        self.current_scope = old;
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        let old = self.current_scope;
+        let loc = node.location();
+        self.current_scope = Some(ScopeId {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+        });
+        ruby_prism::visit_module_node(self, node);
+        self.current_scope = old;
+    }
+
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        let if_start = node.location().start_offset();
+        self.record_condition(&node.predicate(), if_start);
+        ruby_prism::visit_if_node(self, node);
+    }
+
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        let unless_start = node.location().start_offset();
+        self.record_condition(&node.predicate(), unless_start);
+        ruby_prism::visit_unless_node(self, node);
+    }
+
+    fn visit_in_node(&mut self, node: &ruby_prism::InNode<'pr>) {
+        if let Some(stmts) = node.statements() {
+            self.visit(&stmts.as_node());
+        }
+    }
+
+    fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
+        if node.predicate().is_none() {
+            let case_start = node.location().start_offset();
+            for condition in node.conditions().iter() {
+                if let Some(when_node) = condition.as_when_node() {
+                    for when_cond in when_node.conditions().iter() {
+                        self.record_condition(&when_cond, case_start);
+                    }
+                }
+            }
+        }
+        ruby_prism::visit_case_node(self, node);
+    }
+}
+
 struct ConditionVisitor<'a, 'src> {
     cop: &'a RegexpMatch,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     match_data_refs: Vec<MatchDataRef>,
+    match_positions: Vec<MatchConditionPos>,
     current_scope: Option<ScopeId>,
 }
 
@@ -206,6 +347,7 @@ impl<'pr> Visit<'pr> for ConditionVisitor<'_, '_> {
             &node.predicate(),
             if_start,
             &self.match_data_refs,
+            &self.match_positions,
             self.current_scope,
             &mut self.diagnostics,
         );
@@ -220,6 +362,7 @@ impl<'pr> Visit<'pr> for ConditionVisitor<'_, '_> {
             &node.predicate(),
             unless_start,
             &self.match_data_refs,
+            &self.match_positions,
             self.current_scope,
             &mut self.diagnostics,
         );
@@ -253,6 +396,7 @@ impl<'pr> Visit<'pr> for ConditionVisitor<'_, '_> {
                             &when_cond,
                             case_start,
                             &self.match_data_refs,
+                            &self.match_positions,
                             self.current_scope,
                             &mut self.diagnostics,
                         );
@@ -267,12 +411,14 @@ impl<'pr> Visit<'pr> for ConditionVisitor<'_, '_> {
 /// Check a condition expression for =~, !~, .match(), or === usage.
 /// `if_node_offset` is the start of the enclosing if/unless/case node,
 /// used for modifier-form MatchData detection.
+#[allow(clippy::too_many_arguments)]
 fn check_condition(
     cop: &RegexpMatch,
     source: &SourceFile,
     cond: &ruby_prism::Node<'_>,
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
+    match_positions: &[MatchConditionPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -287,6 +433,7 @@ fn check_condition(
                 method,
                 if_node_offset,
                 match_data_refs,
+                match_positions,
                 current_scope,
                 diagnostics,
             );
@@ -297,6 +444,7 @@ fn check_condition(
                 &call,
                 if_node_offset,
                 match_data_refs,
+                match_positions,
                 current_scope,
                 diagnostics,
             );
@@ -307,6 +455,7 @@ fn check_condition(
                 &call,
                 if_node_offset,
                 match_data_refs,
+                match_positions,
                 current_scope,
                 diagnostics,
             );
@@ -319,25 +468,34 @@ fn check_condition(
 }
 
 /// Check if MatchData is used in the same scope as a match at the given offset.
-/// `cond_offset` is the start of the condition expression (e.g. `x =~ /re/`).
-/// `if_node_offset` is the start of the enclosing if/unless node (to handle modifier forms
-/// where `return $1 if x =~ /re/` has `$1` before the condition but still on the same line).
+///
+/// RuboCop's logic: search for MatchData refs in the range from the match position
+/// (or if_branch start for modifier forms) to the NEXT match position in the same
+/// scope. This ensures that a MatchData ref after a later match doesn't suppress
+/// an earlier match that has nothing to do with it.
+///
+/// `if_node_offset` is the start of the enclosing if/unless node (for modifier forms,
+/// this includes the body before `if`, e.g., `return $1 if x =~ /re/`).
 fn last_match_used_in_scope(
-    _cond_offset: usize,
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
+    match_positions: &[MatchConditionPos],
     current_scope: Option<ScopeId>,
 ) -> bool {
+    // Find the next match position in the same scope after this one.
+    // "After" means a match whose if_node_offset > this match's if_node_offset.
+    let next_match_offset = match_positions
+        .iter()
+        .filter(|m| m.scope == current_scope && m.if_node_offset > if_node_offset)
+        .map(|m| m.if_node_offset)
+        .min()
+        .unwrap_or(usize::MAX);
+
+    // Check if any MatchData ref in the same scope falls within
+    // [if_node_offset, next_match_offset).
     for r in match_data_refs {
-        if r.scope == current_scope {
-            // MatchData ref in the same scope.
-            // RuboCop checks from the match position (or if_branch start for modifier forms)
-            // to the next match in the same scope.
-            // We check: ref is at or after the if_node start (covers modifier `return $1 if x =~ /re/`)
-            // or at or after the condition offset.
-            if r.offset >= if_node_offset {
-                return true;
-            }
+        if r.scope == current_scope && r.offset >= if_node_offset && r.offset < next_match_offset {
+            return true;
         }
     }
     false
@@ -352,6 +510,7 @@ fn check_match_operator(
     method: &[u8],
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
+    match_positions: &[MatchConditionPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -362,9 +521,9 @@ fn check_match_operator(
 
     // Check if MatchData is used in the same scope
     if last_match_used_in_scope(
-        call.location().start_offset(),
         if_node_offset,
         match_data_refs,
+        match_positions,
         current_scope,
     ) {
         return;
@@ -385,12 +544,14 @@ fn check_match_operator(
 }
 
 /// Check .match() method call usage.
+#[allow(clippy::too_many_arguments)]
 fn check_match_method(
     cop: &RegexpMatch,
     source: &SourceFile,
     call: &ruby_prism::CallNode<'_>,
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
+    match_positions: &[MatchConditionPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -434,9 +595,9 @@ fn check_match_method(
 
     // Check if MatchData is used in the same scope
     if last_match_used_in_scope(
-        call.location().start_offset(),
         if_node_offset,
         match_data_refs,
+        match_positions,
         current_scope,
     ) {
         return;
@@ -453,12 +614,14 @@ fn check_match_method(
 }
 
 /// Check === with regexp literal on LHS.
+#[allow(clippy::too_many_arguments)]
 fn check_threequals(
     cop: &RegexpMatch,
     source: &SourceFile,
     call: &ruby_prism::CallNode<'_>,
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
+    match_positions: &[MatchConditionPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -480,9 +643,9 @@ fn check_threequals(
 
     // Check if MatchData is used in the same scope
     if last_match_used_in_scope(
-        call.location().start_offset(),
         if_node_offset,
         match_data_refs,
+        match_positions,
         current_scope,
     ) {
         return;

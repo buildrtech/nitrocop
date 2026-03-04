@@ -86,3 +86,50 @@ def baz
     do_something2
   end
 end
+# Multiple matches in same method — first match has no MatchData use,
+# second match does. First should be flagged, second should not.
+def multi_match
+  if x =~ /first/
+     ^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+    do_something
+  end
+  if y =~ /second/
+    do_something($1)
+  end
+end
+# MatchData ref overridden by a later match — first match should still flag
+def overridden_match
+  if x =~ /re/
+     ^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+    do_something
+  end
+  if y =~ /other/
+    do_something2
+  end
+  puts $1
+end
+# Top-level code: multiple matches, only some use MatchData
+message = message.sub(/re/, '') if message =~ /pattern/
+                                   ^^^^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+# =~ in class body, MatchData is in a method (different scope) — flag
+class Checker
+  if name =~ /pattern/
+     ^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+    do_something
+  end
+
+  def check
+    $1
+  end
+end
+# =~ in module body, MatchData is in a method (different scope) — flag
+module Validator
+  if name =~ /pattern/
+     ^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+    do_something
+  end
+
+  def validate
+    $1
+  end
+end
