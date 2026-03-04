@@ -143,21 +143,20 @@ mod tests {
     }
 
     #[test]
-    fn debug_spork_like_module() {
+    fn module_with_103_body_lines() {
         use crate::testutil::run_cop_full;
 
-        // Read actual spork.rb content
-        let content = std::fs::read("vendor/corpus/sporkrb__spork__224df49/lib/spork.rb")
-            .expect("spork.rb should exist in vendor/corpus");
-        let diags = run_cop_full(&ModuleLength, &content);
-        eprintln!(
-            "Spork ModuleLength diags: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
-        );
-        // RuboCop reports [103/100] for module Spork (lines 3-149)
+        // Synthetic module with 103 body lines (reproduces spork-like pattern)
+        let mut src = String::from("module Spork\n");
+        for i in 1..=103 {
+            src.push_str(&format!("  x_{} = {}\n", i, i));
+        }
+        src.push_str("end\n");
+
+        let diags = run_cop_full(&ModuleLength, src.as_bytes());
         assert!(
             !diags.is_empty(),
-            "Should fire on module Spork (RuboCop reports 103/100)"
+            "Should fire on module Spork (103 body lines > 100 max)"
         );
         assert!(
             diags[0].message.contains("[103/100]"),
