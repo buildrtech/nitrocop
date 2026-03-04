@@ -3,6 +3,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Performance/RedundantStringChars
+///
+/// Flags redundant uses of `.chars` followed by methods that can be called
+/// directly on the string. RuboCop flags these patterns:
+/// - `.chars.first` / `.chars[n]` / `.chars.last` -> use `[]`
+/// - `.chars.length` / `.chars.size` / `.chars.empty?` -> use directly on string
+/// - `.chars.take(n)` / `.chars.first(n)` / `.chars.slice(range)` -> use `[range].chars`
+///
+/// Investigation: 7 FNs were all `.chars.length` patterns. Added support for
+/// `length`, `size`, `empty?`, `take`, and `slice` outer methods to match
+/// RuboCop's full detection set.
 pub struct RedundantStringChars;
 
 impl Cop for RedundantStringChars {
@@ -37,31 +48,45 @@ impl Cop for RedundantStringChars {
             return;
         }
 
-        // outer method must be `first`, `last`, or `[]`
-        if chain.outer_method != b"first"
-            && chain.outer_method != b"last"
-            && chain.outer_method != b"[]"
-        {
-            return;
-        }
+        let outer_call = node.as_call_node().unwrap();
+        let has_args = outer_call.arguments().is_some();
 
-        // `.chars.last(n)` is not equivalent to a simple string slice for edge cases
-        // (e.g. empty string, negative values). RuboCop explicitly excludes this.
-        if chain.outer_method == b"last" {
-            let outer_call = node.as_call_node().unwrap();
-            if outer_call.arguments().is_some() {
-                return;
+        let message = match chain.outer_method {
+            b"first" => {
+                if has_args {
+                    "Use `[0...2].chars` instead of `chars.first(2)`.".to_string()
+                } else {
+                    "Use `[]` instead of `chars.first`.".to_string()
+                }
             }
-        }
+            b"last" => {
+                // `.chars.last(n)` is not equivalent to a simple string slice for edge cases
+                // (e.g. empty string, negative values). RuboCop explicitly excludes this.
+                if has_args {
+                    return;
+                }
+                "Use `[]` instead of `chars.first`.".to_string()
+            }
+            b"[]" => {
+                // `.chars[n, m]` (two-arg form) is not flagged by RuboCop
+                if let Some(args) = outer_call.arguments() {
+                    if args.arguments().iter().count() > 1 {
+                        return;
+                    }
+                }
+                "Use `[]` instead of `chars.first`.".to_string()
+            }
+            b"length" => "Use `.length` instead of `chars.length`.".to_string(),
+            b"size" => "Use `.size` instead of `chars.size`.".to_string(),
+            b"empty?" => "Use `.empty?` instead of `chars.empty?`.".to_string(),
+            b"take" => "Use `[0...2].chars` instead of `chars.take(2)`.".to_string(),
+            b"slice" => "Use `[0..2].chars` instead of `chars.slice(0..2)`.".to_string(),
+            _ => return,
+        };
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Use `[]` instead of `chars.first`.".to_string(),
-        ));
+        diagnostics.push(self.diagnostic(source, line, column, message));
     }
 }
 
