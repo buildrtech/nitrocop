@@ -12,3 +12,7 @@ expect(enabled?('Layout/EndOfLine')).to be(false)
 expect(cop_enabled?(cop_class)).to be true
 expect(valid?).to be_truthy
 expect(something?).to be_falsey
+
+# Safe navigation (&.) should not be flagged — can't rewrite to predicate matcher
+expect(element&.visible?).to be_falsey
+expect(record&.active?).to be_truthy

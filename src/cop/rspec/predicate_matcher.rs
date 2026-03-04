@@ -8,6 +8,10 @@ pub struct PredicateMatcher;
 
 /// Default style `inflected`: flags `expect(foo.bar?).to be_truthy` →
 /// prefer `expect(foo).to be_bar`.
+///
+/// Corpus FP fix: safe navigation calls (`&.visible?`) cannot be rewritten
+/// to predicate matchers because the nil-safe semantics would be lost.
+/// Fixed by checking `call_operator_loc()` for `&.` on the predicate call.
 impl Cop for PredicateMatcher {
     fn name(&self) -> &'static str {
         "RSpec/PredicateMatcher"
@@ -141,6 +145,14 @@ impl Cop for PredicateMatcher {
         // and should not be flagged. This matches RuboCop's `(send !nil? ...)` pattern.
         if predicate_call.receiver().is_none() {
             return;
+        }
+
+        // Skip safe navigation calls (&.) — can't rewrite to predicate matcher
+        // because the nil-safe semantics would be lost.
+        if let Some(op) = predicate_call.call_operator_loc() {
+            if op.as_slice() == b"&." {
+                return;
+            }
         }
 
         let pred_name = predicate_call.name().as_slice();
