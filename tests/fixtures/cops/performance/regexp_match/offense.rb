@@ -133,3 +133,47 @@ module Validator
     $1
   end
 end
+# bare match() with regexp arg — no receiver (implicit self)
+if match(/pattern/)
+   ^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `match` when `MatchData` is not used.
+  do_something
+end
+# bare match() with string arg — no receiver
+unless match("pattern")
+       ^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `match` when `MatchData` is not used.
+  do_something
+end
+# =~ where next non-condition match resets MatchData boundary
+def boundary_test
+  if prefix =~ /^\s*$/
+     ^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+    new_offset = offset
+  else
+    new_offset = offset
+    prefix =~ /^(\s*)[^\s].*$/
+    len = $1 ? $1.length : 0
+    new_offset += len
+  end
+end
+# Sequential modifier-if: both first matches have no MatchData refs in their
+# ranges (between current match and next match). Third match has $1 in its body.
+def sequential_modifier
+  raise "no db" if out =~ /^ERROR.+: No database selected/
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+  raise "no match" if out =~ /^ERROR.+: Connection refused/
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+  if out =~ /^ERROR.+Unknown database '(.+)'/
+    raise "missing #{$1}"
+  end
+end
+# case/when: second when has no MatchData use — flag it
+case
+when line =~ /^ORIGINAL ?([\w\s]+)$/
+  name = $~[1].strip
+when line =~ /^EXPECTED$/
+     ^^^^^^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+  current[:expected] = ""
+when line =~ /^PENDING$/
+     ^^^^^^^^^^^^^^^^^^^^^ Performance/RegexpMatch: Use `match?` instead of `=~` when `MatchData` is not used.
+  current[:pending] = true
+end

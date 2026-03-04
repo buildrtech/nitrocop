@@ -3,14 +3,25 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
-// Corpus investigation: FP=2, FN=250. Root cause: last_match_used_in_scope checked
-// if ANY MatchData ref in the same scope had offset >= if_node_offset, without
-// limiting the search to the range before the next match node. This caused all
-// matches in a scope to be suppressed if any one of them had a MatchData ref
-// after it. Fixed by collecting all match condition positions upfront and computing
-// the range [if_node_offset, next_match_offset) for each match, matching RuboCop's
-// range_to_search_for_last_matches / next_match_pos logic.
-
+/// Corpus investigation (round 1): FP=2, FN=250. Root cause: last_match_used_in_scope checked
+/// if ANY MatchData ref in the same scope had offset >= if_node_offset, without
+/// limiting the search to the range before the next match node. Fixed by collecting
+/// all match condition positions upfront and computing per-match ranges.
+///
+/// Corpus investigation (round 2): FP=11, FN=31. Three root causes:
+/// 1. FP: next_match boundary used if_node_offset instead of match_expr_offset.
+///    For modifier-if `raise "#{$1}" if x =~ /re/`, the if_node_offset includes the
+///    body, so a `$1` in the NEXT statement's body was included in THIS match's range.
+///    RuboCop uses the match expression offset as the upper boundary, not the if_node
+///    offset. Fixed by storing both offsets and using match_expr_offset for boundaries.
+/// 2. FP/FN: match positions only collected from if/unless/case conditions, not bare
+///    match expressions (`x =~ /re/` as a statement). Bare matches reset MatchData
+///    and serve as boundaries. Fixed by collecting ALL match expressions in Pass 2.
+/// 3. FN: bare `match(/re/)` without receiver was not flagged. RuboCop's pattern
+///    `(send _recv :match ...)` matches nil receiver (implicit self). Fixed by allowing
+///    receiverless match() when the argument is a literal.
+/// 4. FN: case/when used case_start as if_node_offset for all when conditions, making
+///    them indistinguishable. Fixed by using each when condition's own offset.
 pub struct RegexpMatch;
 
 impl Cop for RegexpMatch {
@@ -38,9 +49,10 @@ impl Cop for RegexpMatch {
         };
         ref_collector.visit(&parse_result.node());
 
-        // Pass 2: Collect all match condition positions (=~, !~, .match, ===)
-        // so we can compute the "next match" boundary for each match.
-        let mut match_collector = MatchConditionCollector {
+        // Pass 2: Collect ALL match expression positions (=~, !~, .match, ===)
+        // anywhere in the body — not just in conditions. Non-condition matches also
+        // reset MatchData and serve as boundaries for next_match_pos computation.
+        let mut match_collector = AllMatchExprCollector {
             positions: Vec::new(),
             current_scope: None,
         };
@@ -73,11 +85,12 @@ struct MatchDataRef {
     scope: Option<ScopeId>,
 }
 
-/// A match condition position (=~, !~, .match, ===) in an if/unless/case condition,
-/// with the if_node_offset (start of enclosing if/unless/case for modifier form handling).
-struct MatchConditionPos {
-    /// Start of the if/unless/case node (for modifier form: includes the body before `if`)
-    if_node_offset: usize,
+/// A match expression position (=~, !~, .match, ===) anywhere in the body.
+/// Used to compute the "next match" boundary — the upper limit of the range
+/// where MatchData references are searched for each match.
+struct MatchExprPos {
+    /// Start of the actual match expression (=~, match, ===).
+    offset: usize,
     scope: Option<ScopeId>,
 }
 
@@ -181,55 +194,43 @@ impl<'pr> Visit<'pr> for MatchDataRefCollector {
     }
 }
 
-/// Pass 2: Collect positions of all match conditions (=~, !~, .match, ===) in
-/// if/unless/case conditions. Used to compute the "next match" boundary.
-struct MatchConditionCollector {
-    positions: Vec<MatchConditionPos>,
+/// Pass 2: Collect ALL match expressions (=~, !~, .match, ===, match_with_lvasgn)
+/// anywhere in the body. Used to compute the "next match" boundary. This includes
+/// matches outside of conditions (bare statements), which also reset MatchData.
+struct AllMatchExprCollector {
+    positions: Vec<MatchExprPos>,
     current_scope: Option<ScopeId>,
 }
 
-impl MatchConditionCollector {
-    fn record_condition(&mut self, cond: &ruby_prism::Node<'_>, if_node_offset: usize) {
-        if let Some(call) = cond.as_call_node() {
-            let method = call.name().as_slice();
-            let is_match_cond = if method == b"=~" || method == b"!~" {
-                call.receiver().is_some()
-            } else if method == b"match" {
-                // Same filtering as check_match_method
-                if let (Some(recv), Some(args)) = (call.receiver(), call.arguments()) {
-                    let first_arg = args.arguments().iter().next();
-                    let recv_lit = is_match_literal(&recv);
-                    let arg_lit = first_arg.as_ref().is_some_and(is_match_literal);
-                    (recv_lit || arg_lit) && call.block().is_none()
-                } else {
-                    false
-                }
-            } else if method == b"===" {
-                call.receiver()
-                    .is_some_and(|r| r.as_regular_expression_node().is_some())
-                    && call.arguments().is_some()
+/// Check if a call node is a match expression that we track (=~, !~, .match, ===).
+fn is_match_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    let method = call.name().as_slice();
+    if method == b"=~" || method == b"!~" {
+        call.receiver().is_some()
+    } else if method == b"match" {
+        if let Some(args) = call.arguments() {
+            let first_arg = args.arguments().iter().next();
+            if let Some(recv) = call.receiver() {
+                let recv_lit = is_match_literal(&recv);
+                let arg_lit = first_arg.as_ref().is_some_and(is_match_literal);
+                (recv_lit || arg_lit) && call.block().is_none()
             } else {
-                false
-            };
-            if is_match_cond {
-                self.positions.push(MatchConditionPos {
-                    if_node_offset,
-                    scope: self.current_scope,
-                });
+                // Bare match() without receiver — check if arg is a literal
+                first_arg.as_ref().is_some_and(is_match_literal) && call.block().is_none()
             }
+        } else {
+            false
         }
-        // Also check for MatchWriteNode (named captures) — these count as "matches"
-        // that reset MatchData, so they serve as boundaries.
-        if cond.as_match_write_node().is_some() {
-            self.positions.push(MatchConditionPos {
-                if_node_offset,
-                scope: self.current_scope,
-            });
-        }
+    } else if method == b"===" {
+        call.receiver()
+            .is_some_and(|r| r.as_regular_expression_node().is_some())
+            && call.arguments().is_some()
+    } else {
+        false
     }
 }
 
-impl<'pr> Visit<'pr> for MatchConditionCollector {
+impl<'pr> Visit<'pr> for AllMatchExprCollector {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         let old = self.current_scope;
         let loc = node.location();
@@ -263,36 +264,23 @@ impl<'pr> Visit<'pr> for MatchConditionCollector {
         self.current_scope = old;
     }
 
-    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        let if_start = node.location().start_offset();
-        self.record_condition(&node.predicate(), if_start);
-        ruby_prism::visit_if_node(self, node);
-    }
-
-    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
-        let unless_start = node.location().start_offset();
-        self.record_condition(&node.predicate(), unless_start);
-        ruby_prism::visit_unless_node(self, node);
-    }
-
-    fn visit_in_node(&mut self, node: &ruby_prism::InNode<'pr>) {
-        if let Some(stmts) = node.statements() {
-            self.visit(&stmts.as_node());
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if is_match_call(node) {
+            self.positions.push(MatchExprPos {
+                offset: node.location().start_offset(),
+                scope: self.current_scope,
+            });
         }
+        ruby_prism::visit_call_node(self, node);
     }
 
-    fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
-        if node.predicate().is_none() {
-            let case_start = node.location().start_offset();
-            for condition in node.conditions().iter() {
-                if let Some(when_node) = condition.as_when_node() {
-                    for when_cond in when_node.conditions().iter() {
-                        self.record_condition(&when_cond, case_start);
-                    }
-                }
-            }
-        }
-        ruby_prism::visit_case_node(self, node);
+    fn visit_match_write_node(&mut self, node: &ruby_prism::MatchWriteNode<'pr>) {
+        // Named captures (/(?<name>...)/ =~ expr) — these reset MatchData too.
+        self.positions.push(MatchExprPos {
+            offset: node.location().start_offset(),
+            scope: self.current_scope,
+        });
+        ruby_prism::visit_match_write_node(self, node);
     }
 }
 
@@ -301,7 +289,7 @@ struct ConditionVisitor<'a, 'src> {
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     match_data_refs: Vec<MatchDataRef>,
-    match_positions: Vec<MatchConditionPos>,
+    match_positions: Vec<MatchExprPos>,
     current_scope: Option<ScopeId>,
 }
 
@@ -386,15 +374,18 @@ impl<'pr> Visit<'pr> for ConditionVisitor<'_, '_> {
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
         // RuboCop only checks case-less when (i.e., `case\n when cond\n ...`)
         if node.predicate().is_none() {
-            let case_start = node.location().start_offset();
             for condition in node.conditions().iter() {
                 if let Some(when_node) = condition.as_when_node() {
                     for when_cond in when_node.conditions().iter() {
+                        // RuboCop uses the condition expression's begin_pos as the
+                        // range start (not case_start), so MatchData refs from
+                        // earlier when bodies don't affect later when conditions.
+                        let cond_start = when_cond.location().start_offset();
                         check_condition(
                             self.cop,
                             self.source,
                             &when_cond,
-                            case_start,
+                            cond_start,
                             &self.match_data_refs,
                             &self.match_positions,
                             self.current_scope,
@@ -418,7 +409,7 @@ fn check_condition(
     cond: &ruby_prism::Node<'_>,
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
-    match_positions: &[MatchConditionPos],
+    match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -469,32 +460,32 @@ fn check_condition(
 
 /// Check if MatchData is used in the same scope as a match at the given offset.
 ///
-/// RuboCop's logic: search for MatchData refs in the range from the match position
-/// (or if_branch start for modifier forms) to the NEXT match position in the same
-/// scope. This ensures that a MatchData ref after a later match doesn't suppress
-/// an earlier match that has nothing to do with it.
-///
-/// `if_node_offset` is the start of the enclosing if/unless node (for modifier forms,
-/// this includes the body before `if`, e.g., `return $1 if x =~ /re/`).
+/// RuboCop's logic: search for MatchData refs in [if_node_offset, next_match_offset).
+/// `if_node_offset` is the START of the search range (enclosing if/unless/case node
+/// start — for modifier-if this includes the body before `if`).
+/// `match_expr_offset` is the actual match expression start, used to find the NEXT
+/// match boundary. The range END is the next match expression's offset in the same
+/// scope. This matches RuboCop's `next_match_pos` which returns
+/// `node.source_range.begin_pos`.
 fn last_match_used_in_scope(
     if_node_offset: usize,
+    match_expr_offset: usize,
     match_data_refs: &[MatchDataRef],
-    match_positions: &[MatchConditionPos],
+    match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
 ) -> bool {
-    // Find the next match position in the same scope after this one.
-    // "After" means a match whose if_node_offset > this match's if_node_offset.
-    let next_match_offset = match_positions
+    // Find the next match expression in the same scope after this one.
+    let upper_bound = match_positions
         .iter()
-        .filter(|m| m.scope == current_scope && m.if_node_offset > if_node_offset)
-        .map(|m| m.if_node_offset)
+        .filter(|m| m.scope == current_scope && m.offset > match_expr_offset)
+        .map(|m| m.offset)
         .min()
         .unwrap_or(usize::MAX);
 
     // Check if any MatchData ref in the same scope falls within
-    // [if_node_offset, next_match_offset).
+    // [if_node_offset, upper_bound).
     for r in match_data_refs {
-        if r.scope == current_scope && r.offset >= if_node_offset && r.offset < next_match_offset {
+        if r.scope == current_scope && r.offset >= if_node_offset && r.offset < upper_bound {
             return true;
         }
     }
@@ -510,7 +501,7 @@ fn check_match_operator(
     method: &[u8],
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
-    match_positions: &[MatchConditionPos],
+    match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -519,9 +510,12 @@ fn check_match_operator(
         return;
     }
 
+    let match_expr_offset = call.location().start_offset();
+
     // Check if MatchData is used in the same scope
     if last_match_used_in_scope(
         if_node_offset,
+        match_expr_offset,
         match_data_refs,
         match_positions,
         current_scope,
@@ -530,8 +524,7 @@ fn check_match_operator(
     }
 
     let op_str = if method == b"!~" { "!~" } else { "=~" };
-    let loc = call.location();
-    let (line, column) = source.offset_to_line_col(loc.start_offset());
+    let (line, column) = source.offset_to_line_col(match_expr_offset);
     diagnostics.push(cop.diagnostic(
         source,
         line,
@@ -551,17 +544,11 @@ fn check_match_method(
     call: &ruby_prism::CallNode<'_>,
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
-    match_positions: &[MatchConditionPos],
+    match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Must have a receiver (x.match)
-    let receiver = match call.receiver() {
-        Some(r) => r,
-        None => return,
-    };
-
-    // Must have arguments (x.match(y) or x.match(y, pos))
+    // Must have arguments (x.match(y) or match(y))
     let arguments = match call.arguments() {
         Some(a) => a,
         None => return,
@@ -572,12 +559,21 @@ fn check_match_method(
         None => return,
     };
 
-    // RuboCop requires at least one side to be a regexp, string, or symbol literal
-    let recv_is_literal = is_match_literal(&receiver);
-    let arg_is_literal = is_match_literal(&first_arg);
-
-    if !recv_is_literal && !arg_is_literal {
-        return;
+    // RuboCop's pattern: (send _recv :match {regexp str sym}) matches any receiver
+    // including nil (bare match() calls). When there IS a receiver, at least one side
+    // must be a literal. When there is NO receiver (bare match()), the arg must be a literal.
+    if let Some(receiver) = call.receiver() {
+        let recv_is_literal = is_match_literal(&receiver);
+        let arg_is_literal = is_match_literal(&first_arg);
+        if !recv_is_literal && !arg_is_literal {
+            return;
+        }
+    } else {
+        // Bare match() — RuboCop matches (send nil :match {regexp str sym})
+        // The first arg must be a regexp, string, or symbol literal.
+        if !is_match_literal(&first_arg) {
+            return;
+        }
     }
 
     // Don't flag if the call has a block
@@ -593,9 +589,12 @@ fn check_match_method(
         }
     }
 
+    let match_expr_offset = call.location().start_offset();
+
     // Check if MatchData is used in the same scope
     if last_match_used_in_scope(
         if_node_offset,
+        match_expr_offset,
         match_data_refs,
         match_positions,
         current_scope,
@@ -603,8 +602,7 @@ fn check_match_method(
         return;
     }
 
-    let loc = call.location();
-    let (line, column) = source.offset_to_line_col(loc.start_offset());
+    let (line, column) = source.offset_to_line_col(match_expr_offset);
     diagnostics.push(cop.diagnostic(
         source,
         line,
@@ -621,7 +619,7 @@ fn check_threequals(
     call: &ruby_prism::CallNode<'_>,
     if_node_offset: usize,
     match_data_refs: &[MatchDataRef],
-    match_positions: &[MatchConditionPos],
+    match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -641,9 +639,12 @@ fn check_threequals(
         return;
     }
 
+    let match_expr_offset = call.location().start_offset();
+
     // Check if MatchData is used in the same scope
     if last_match_used_in_scope(
         if_node_offset,
+        match_expr_offset,
         match_data_refs,
         match_positions,
         current_scope,
@@ -651,8 +652,7 @@ fn check_threequals(
         return;
     }
 
-    let loc = call.location();
-    let (line, column) = source.offset_to_line_col(loc.start_offset());
+    let (line, column) = source.offset_to_line_col(match_expr_offset);
     diagnostics.push(cop.diagnostic(
         source,
         line,
@@ -674,4 +674,68 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(RegexpMatch, "cops/performance/regexp_match");
+
+    #[test]
+    fn matchdata_used_in_if_body() {
+        use crate::testutil::run_cop_full;
+        let source = b"if str =~ /(\\d+)/\n  puts $1\nend\n";
+        let diags = run_cop_full(&RegexpMatch, source);
+        assert!(
+            diags.is_empty(),
+            "Should NOT flag when $1 is used. Got: {:?}",
+            diags
+                .iter()
+                .map(|d| format!("{}:{} {}", d.location.line, d.location.column, d.message))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn bare_match_in_if() {
+        use crate::testutil::run_cop_full;
+        let source = b"if match(/pattern/)\n  do_something\nend\n";
+        let diags = run_cop_full(&RegexpMatch, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag bare match(). Diags: {:?}",
+            diags
+                .iter()
+                .map(|d| format!("{}:{} {}", d.location.line, d.location.column, d.message))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn regexp_last_match_used_in_if_body() {
+        use crate::testutil::run_cop_full;
+        let source = b"if x =~ /pattern/\n  Regexp.last_match(1).downcase\nend\n";
+        let diags = run_cop_full(&RegexpMatch, source);
+        assert!(
+            diags.is_empty(),
+            "Should NOT flag when Regexp.last_match is used. Got: {:?}",
+            diags
+                .iter()
+                .map(|d| format!("{}:{} {}", d.location.line, d.location.column, d.message))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sequential_modifier_if_matchdata_suppresses_prior_match() {
+        use crate::testutil::run_cop_full;
+        // When $1 is between the first and second =~ (in the second match's modifier
+        // body), RuboCop conservatively suppresses the first match.
+        let source = b"def test\n  raise \"no db\" if out =~ /no_db/\n  raise \"missing #{$1}\" if out =~ /Unknown '(.+)'/\nend\n";
+        let diags = run_cop_full(&RegexpMatch, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Should not flag when $1 falls in range. Got: {:?}",
+            diags
+                .iter()
+                .map(|d| format!("{}:{} {}", d.location.line, d.location.column, d.message))
+                .collect::<Vec<_>>()
+        );
+    }
 }

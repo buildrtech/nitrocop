@@ -76,3 +76,25 @@ def with_block_ref
   end
   puts $1
 end
+# Sequential modifier-if: each =~ has MatchData used in its own if-branch body
+def sequential_with_matchdata
+  raise "missing #{$1}" if out =~ /^ERROR.+Unknown '(.+)'/
+  raise "no table #{$1}" if out =~ /^ERROR.+Table '.+\.(.+)'/
+end
+# =~ in modifier-if where later line's $1 belongs to later match
+def later_match_uses_matchdata
+  raise "not running" if out =~ /^ERROR.+Can't connect/
+  raise "missing #{$1}" if out =~ /^ERROR.+Unknown '(.+)'/
+end
+# match() in modifier-if where later line's $1 belongs to later match
+def match_method_with_later_matchdata
+  ie_comment += "gte " if cond.match(/or_higher/)
+  ie_comment += " #{$1}" if cond.match(/IE(\d)/)
+end
+# case/when where first when uses MatchData
+case
+when line =~ /^ORIGINAL ?([\w\s]+)$/
+  name = $~[1].strip
+when line =~ /^(.+)$/
+  opts = eval("{ #{$~[1]} }")
+end
