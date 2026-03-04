@@ -15,3 +15,26 @@ RSpec.describe Post do
   before { setup }
   it { is_expected.to be_present }
 end
+
+module Spree
+  describe LegacyUser do
+    let(:user) { create(:user) }
+    before { setup }
+    subject { described_class.new }
+  end
+end
+
+require 'spec_helper'
+module Berkshelf
+  describe ChefRepoUniverse do
+    let(:fixture) { nil }
+    subject { described_class.new(fixture) }
+  end
+end
+
+class Configuration
+  describe Server do
+    let(:server) { build(:server) }
+    subject { described_class.new }
+  end
+end

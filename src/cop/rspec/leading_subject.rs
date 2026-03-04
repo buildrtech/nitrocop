@@ -1,4 +1,4 @@
-use crate::cop::node_type::{BLOCK_NODE, CALL_NODE, STATEMENTS_NODE};
+use crate::cop::node_type::PROGRAM_NODE;
 use crate::cop::util::{
     self, RSPEC_DEFAULT_INCLUDE, is_rspec_example, is_rspec_example_group, is_rspec_hook,
     is_rspec_let, is_rspec_subject,
@@ -7,6 +7,19 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RSpec/LeadingSubject checks that `subject` is declared before `let`, hooks,
+/// examples, and other declarations within an example group.
+///
+/// RuboCop uses `InsideExampleGroup` to determine whether a `subject` node
+/// should be checked. This check walks up to the file's root-level node and
+/// verifies it is a spec group (describe/context/shared_examples block). When
+/// the describe block is wrapped in a `module` or `class` declaration, the
+/// root-level node is the module/class — NOT a spec group — so RuboCop skips
+/// the cop entirely. This is a documented side-effect of `InsideExampleGroup`.
+///
+/// We replicate this by only checking subjects inside spec groups that are
+/// at the file's top level (direct children of the program node, or within a
+/// top-level `begin`). Spec groups inside module/class wrappers are skipped.
 pub struct LeadingSubject;
 
 impl Cop for LeadingSubject {
@@ -23,7 +36,7 @@ impl Cop for LeadingSubject {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, CALL_NODE, STATEMENTS_NODE]
+        &[PROGRAM_NODE]
     }
 
     fn check_node(
@@ -35,23 +48,36 @@ impl Cop for LeadingSubject {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let program = match node.as_program_node() {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Walk top-level statements looking for spec groups.
+        // Only spec groups at the file root (not inside module/class) are checked,
+        // matching RuboCop's InsideExampleGroup behavior.
+        for stmt in program.statements().body().iter() {
+            if is_spec_group_call(&stmt) {
+                self.check_example_group_recursive(source, &stmt, diagnostics);
+            }
+            // Skip modules, classes, requires, and anything else at the top level.
+        }
+    }
+}
+
+impl LeadingSubject {
+    /// Recursively check an example group and all nested example groups
+    /// for subject ordering violations.
+    fn check_example_group_recursive(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
         };
-
-        let method_name = call.name().as_slice();
-
-        // Check for example group calls (including ::RSpec.describe)
-        let is_example_group = if let Some(recv) = call.receiver() {
-            util::constant_name(&recv).is_some_and(|n| n == b"RSpec") && method_name == b"describe"
-        } else {
-            is_rspec_example_group(method_name)
-        };
-
-        if !is_example_group {
-            return;
-        }
 
         let block = match call.block() {
             Some(b) => match b.as_block_node() {
@@ -71,14 +97,19 @@ impl Cop for LeadingSubject {
             None => return,
         };
 
-        // Find `subject` declarations and check if any precede let/hook/example/etc.
-        let nodes: Vec<_> = stmts.body().iter().collect();
+        // Check subject ordering within this example group
         let mut first_relevant_name: Option<&[u8]> = None;
 
-        for stmt in &nodes {
+        for stmt in stmts.body().iter() {
             if let Some(c) = stmt.as_call_node() {
                 let name = c.name().as_slice();
                 if c.receiver().is_some() {
+                    // Recurse into RSpec.describe nested calls
+                    if util::constant_name(&c.receiver().unwrap()).is_some_and(|n| n == b"RSpec")
+                        && name == b"describe"
+                    {
+                        self.check_example_group_recursive(source, &stmt, diagnostics);
+                    }
                     continue;
                 }
 
@@ -95,10 +126,15 @@ impl Cop for LeadingSubject {
                             format!("Declare `subject` above any other `{prev_str}` declarations."),
                         ));
                     }
+                } else if is_rspec_example_group(name) {
+                    // Recurse into nested context/describe blocks
+                    self.check_example_group_recursive(source, &stmt, diagnostics);
+                    if first_relevant_name.is_none() {
+                        first_relevant_name = Some(name);
+                    }
                 } else if (is_rspec_let(name)
                     || is_rspec_hook(name)
                     || is_rspec_example(name)
-                    || is_rspec_example_group(name)
                     || is_example_include(name))
                     && first_relevant_name.is_none()
                 {
@@ -106,6 +142,19 @@ impl Cop for LeadingSubject {
                 }
             }
         }
+    }
+}
+
+fn is_spec_group_call(node: &ruby_prism::Node<'_>) -> bool {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+    let name = call.name().as_slice();
+    if let Some(recv) = call.receiver() {
+        util::constant_name(&recv).is_some_and(|n| n == b"RSpec") && name == b"describe"
+    } else {
+        is_rspec_example_group(name)
     }
 }
 
