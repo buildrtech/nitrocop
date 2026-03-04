@@ -44,3 +44,10 @@ data
   .reject { |d| d.nil? }
    ^^^^^^^^^^^^^^^^^^^^^^ Performance/Count: Use `count` instead of `reject...count`.
   .count
+# find_all/select + size/length used in comparisons (still flagged)
+dups = current.uniq.find_all { |u| current.find_all { |c| c == u }.length > 1 }
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/Count: Use `count` instead of `find_all...length`.
+assert(revisions.all? {|rev| rev.find_all {|obj| obj.type == :XRef }.size == 1 })
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/Count: Use `count` instead of `find_all...size`.
+doc.methods(false).select { |e| e =~ /^find_by_/ }.size == doc.keys.size
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/Count: Use `count` instead of `select...size`.

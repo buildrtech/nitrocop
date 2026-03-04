@@ -3,6 +3,13 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Performance/Count: flags `select/reject/filter/find_all { }.count/size/length`.
+///
+/// Investigation (2026-03): Fixed false negatives when `select/find_all { }.size/length`
+/// appeared as a sub-expression (e.g., `find_all { |c| ... }.length > 1`). Root cause:
+/// the block-body skip logic compared only start offsets, but chained CallNodes share the
+/// same start offset as their enclosing expression. Fixed by comparing both start AND end
+/// offsets to ensure the call IS the entire sole statement, not just a prefix of it.
 pub struct Count;
 
 impl Cop for Count {
@@ -27,7 +34,7 @@ impl Cop for Count {
             cop: self,
             source,
             diagnostics: Vec::new(),
-            single_stmt_block_body_offset: None,
+            single_stmt_block_body_range: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -38,29 +45,29 @@ struct CountVisitor<'a, 'src> {
     cop: &'a Count,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
-    /// Byte offset of the sole statement in the current block body, if any.
+    /// Byte offset range (start, end) of the sole statement in the current block body, if any.
     /// RuboCop skips `select{}.count` when its direct parent is a block node
-    /// (`node.parent&.block_type?`). We track the offset of the single
+    /// (`node.parent&.block_type?`). We track the range of the single
     /// statement so we only skip when the count call IS that statement, not
-    /// when it's nested inside an assignment or other expression.
-    single_stmt_block_body_offset: Option<usize>,
+    /// when it's nested inside a comparison or other expression.
+    single_stmt_block_body_range: Option<(usize, usize)>,
 }
 
 impl<'pr> Visit<'pr> for CountVisitor<'_, '_> {
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
-        // Record the byte offset of the sole statement in the block body.
-        let prev = self.single_stmt_block_body_offset;
-        self.single_stmt_block_body_offset = single_statement_offset(node.body());
+        // Record the byte range of the sole statement in the block body.
+        let prev = self.single_stmt_block_body_range;
+        self.single_stmt_block_body_range = single_statement_range(node.body());
         ruby_prism::visit_block_node(self, node);
-        self.single_stmt_block_body_offset = prev;
+        self.single_stmt_block_body_range = prev;
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         // Lambdas are block-like in parser gem
-        let prev = self.single_stmt_block_body_offset;
-        self.single_stmt_block_body_offset = single_statement_offset(node.body());
+        let prev = self.single_stmt_block_body_range;
+        self.single_stmt_block_body_range = single_statement_range(node.body());
         ruby_prism::visit_lambda_node(self, node);
-        self.single_stmt_block_body_offset = prev;
+        self.single_stmt_block_body_range = prev;
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
@@ -143,11 +150,13 @@ impl CountVisitor<'_, '_> {
 
         // Skip if this call is the direct sole statement of a block body.
         // RuboCop: `return false if node.parent&.block_type?`
-        // We compare the call's start offset against the recorded single
-        // statement offset — only skip when they match exactly (the call IS
-        // the statement, not nested inside an assignment or other wrapper).
-        if let Some(offset) = self.single_stmt_block_body_offset {
-            if call.location().start_offset() == offset {
+        // We compare both start AND end offsets to ensure the call IS the
+        // entire statement, not just a sub-expression (e.g., in
+        // `find_all { |c| c == u }.length > 1`, the `.length` call shares
+        // the same start offset as the `>` call but has a smaller end offset).
+        if let Some((start, end)) = self.single_stmt_block_body_range {
+            let loc = call.location();
+            if loc.start_offset() == start && loc.end_offset() == end {
                 return;
             }
         }
@@ -168,22 +177,21 @@ impl CountVisitor<'_, '_> {
     }
 }
 
-/// If the block/lambda body has exactly one statement, return its start offset.
-fn single_statement_offset(body: Option<ruby_prism::Node<'_>>) -> Option<usize> {
+/// If the block/lambda body has exactly one statement, return its (start, end) byte offsets.
+fn single_statement_range(body: Option<ruby_prism::Node<'_>>) -> Option<(usize, usize)> {
     let body = body?;
     match body.as_statements_node() {
-        Some(stmts) if stmts.body().len() == 1 => Some(
-            stmts
-                .body()
-                .iter()
-                .next()
-                .unwrap()
-                .location()
-                .start_offset(),
-        ),
+        Some(stmts) if stmts.body().len() == 1 => {
+            let node = stmts.body().iter().next().unwrap();
+            let loc = node.location();
+            Some((loc.start_offset(), loc.end_offset()))
+        }
         Some(_) => None,
         // Body is a single non-statements node
-        None => Some(body.location().start_offset()),
+        None => {
+            let loc = body.location();
+            Some((loc.start_offset(), loc.end_offset()))
+        }
     }
 }
 
