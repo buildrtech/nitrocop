@@ -34,6 +34,24 @@ unsupported config keys, external cops breakdown by source (plugin vs custom req
 A `bin/lint` recipe that runs nitrocop for covered cops, then `bundle exec rubocop --only <remaining>`
 for the rest. Documents the incremental adoption path for teams that can't drop RuboCop yet.
 
+## Rails Schema Cops (2 remaining for 100% coverage)
+
+2 cops need a `db/schema.rb` parser: `Rails/UniqueValidationWithoutIndex` (enabled by default,
+medium-hard) and `Rails/UnusedIgnoredColumns` (disabled by default, easy once schema exists).
+Neither fires on any bench repo today — no-op stubs match RuboCop perfectly. Zero conformance impact.
+
+Prerequisite: schema loader (`src/schema.rs`) that parses `create_table` blocks and `add_index`
+calls via Prism AST, resolves model class → table name (underscore + pluralize), and passes
+schema data to cops as a shared reference. Loaded once at startup, optional (no `db/schema.rb` = no-op).
+
+## Streaming Progress Output
+
+Replace `par_iter().collect()` with `mpsc::channel` inside `rayon::scope`. Workers send per-file
+results; main thread prints progress chars (`.`, `C`, `W`) as they arrive. Add `file_finished()`
+method to `Formatter` trait (default no-op). Progress/pacman formatters implement it; JSON/text
+leave it as no-op. ~150-200 lines across `linter.rs`, `formatter/mod.rs`, `formatter/progress.rs`,
+`formatter/pacman.rs`, `lib.rs`.
+
 ## Corpus Scaling & Advanced Harness
 
 Phase 1 of the corpus oracle is live (CI workflow, ~22 repos, diff engine). Future phases:
