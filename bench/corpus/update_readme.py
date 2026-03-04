@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -61,8 +62,8 @@ def format_count_summary(n: int) -> str:
 
 
 def format_match_rate(rate: float) -> str:
-    """Format match rate: 0.938 -> '93.8%'."""
-    return f"{rate:.1%}"
+    """Format match rate floored to 0.1%: 0.9999 -> '99.9%', never rounds up to 100%."""
+    return f"{math.floor(rate * 1000) / 10:.1f}%"
 
 
 def build_top15_table(by_repo: list, manifest: dict[str, tuple[str, int]]) -> str:

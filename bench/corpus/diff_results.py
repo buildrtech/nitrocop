@@ -12,11 +12,17 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+def fmt_pct(rate: float) -> str:
+    """Format rate as percentage, floored to 0.1% (never rounds up to 100%)."""
+    return f"{math.floor(rate * 1000) / 10:.1f}%"
 
 
 def strip_repo_prefix(filepath: str) -> str:
@@ -261,7 +267,7 @@ def main():
         n_matches = len(matches)
         n_fp = len(fp)
         n_fn = len(fn)
-        total = n_matches + n_fn  # rubocop is the oracle
+        total = n_matches + n_fp + n_fn
         match_rate = n_matches / total if total > 0 else 1.0
 
         total_matches += n_matches
@@ -322,7 +328,7 @@ def main():
         m = by_cop_matches.get(cop, 0)
         fp = by_cop_fp.get(cop, 0)
         fn = by_cop_fn.get(cop, 0)
-        total = m + fn
+        total = m + fp + fn
         rate = m / total if total > 0 else 1.0
         by_cop.append({
             "cop": cop,
@@ -346,7 +352,7 @@ def main():
     by_department = []
     for dept in sorted(dept_stats):
         s = dept_stats[dept]
-        total = s["matches"] + s["fn"]
+        total = s["matches"] + s["fp"] + s["fn"]
         rate = s["matches"] / total if total > 0 else 1.0
         by_department.append({
             "department": dept,
@@ -358,7 +364,7 @@ def main():
         })
 
     # Overall stats
-    oracle_total = total_matches + total_fn
+    oracle_total = total_matches + total_fp + total_fn
     overall_rate = total_matches / oracle_total if oracle_total > 0 else 1.0
 
     # ── Write JSON ──
@@ -415,7 +421,7 @@ def main():
     md.append(f"| Matches (both agree) | {total_matches:,} |")
     md.append(f"| FP (nitrocop extra) | {total_fp:,} |")
     md.append(f"| FN (nitrocop missing) | {total_fn:,} |")
-    md.append(f"| **Match rate** | **{overall_rate:.1%}** |")
+    md.append(f"| **Match rate** | **{fmt_pct(overall_rate)}** |")
     if repos_error > 0 or warning_repos:
         md.append(f"| Repos with errors | {repos_error} |")
     if warning_repos:
@@ -430,8 +436,8 @@ def main():
         md.append("| Department | Cops | Matches | FP | FN | Match % |")
         md.append("|------------|-----:|--------:|---:|---:|--------:|")
         for d in by_department:
-            total = d["matches"] + d["fn"]
-            pct = f"{d['match_rate']:.1%}" if total > 0 else "N/A"
+            total = d["matches"] + d["fp"] + d["fn"]
+            pct = fmt_pct(d['match_rate']) if total > 0 else "N/A"
             md.append(f"| {d['department']} | {d['cops']:,} | {d['matches']:,} | {d['fp']:,} | {d['fn']:,} | {pct} |")
         md.append("")
 
@@ -470,8 +476,8 @@ def main():
         md.append("| Cop | Matches | FP | FN | Match % |")
         md.append("|-----|--------:|---:|---:|--------:|")
         for c in diverging:
-            total = c["matches"] + c["fn"]
-            pct = f"{c['match_rate']:.1%}" if total > 0 else "N/A"
+            total = c["matches"] + c["fp"] + c["fn"]
+            pct = fmt_pct(c['match_rate']) if total > 0 else "N/A"
             md.append(f"| {c['cop']} | {c['matches']:,} | {c['fp']:,} | {c['fn']:,} | {pct} |")
         md.append("")
 
@@ -482,8 +488,8 @@ def main():
             fn_list = c.get("fn_examples", [])
             if not fp_list and not fn_list:
                 continue
-            total = c["matches"] + c["fn"]
-            pct = f"{c['match_rate']:.1%}" if total > 0 else "N/A"
+            total = c["matches"] + c["fp"] + c["fn"]
+            pct = fmt_pct(c['match_rate']) if total > 0 else "N/A"
             md.append(f"<details>")
             md.append(f"<summary><strong>{c['cop']}</strong> — {c['matches']:,} matches, {c['fp']:,} FP, {c['fn']:,} FN ({pct})</summary>")
             md.append("")
@@ -515,7 +521,7 @@ def main():
     md.append("|------|------:|----------:|--------:|---:|---:|")
     for r in sorted(ok_repos, key=lambda x: x.get("match_rate", 0)):
         files = r.get("files_inspected", 0)
-        rate = f"{r['match_rate']:.1%}"
+        rate = fmt_pct(r['match_rate'])
         md.append(f"| {r['repo']} | {files:,} | {rate} | {r['matches']:,} | {r['fp']:,} | {r['fn']:,} |")
     md.append("")
 
@@ -551,7 +557,7 @@ def main():
     # Print summary to stderr
     print(f"\nCorpus: {len(all_ids)} repos, {repos_perfect} perfect, {repos_error} errors", file=sys.stderr)
     print(f"Offenses: {oracle_total:,} compared, {total_matches:,} match, {total_fp:,} FP, {total_fn:,} FN", file=sys.stderr)
-    print(f"Overall match rate: {overall_rate:.1%}", file=sys.stderr)
+    print(f"Overall match rate: {fmt_pct(overall_rate)}", file=sys.stderr)
     if warning_repos:
         print(f"RuboCop parser crashes: {len(warning_repos)} repos, {total_files_dropped:,} files dropped", file=sys.stderr)
         for r in warning_repos:

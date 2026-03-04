@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
@@ -155,7 +156,7 @@ def print_repo_list(by_repo: list[dict], by_repo_cop: dict):
         matches = r.get("matches", 0)
         fp = r.get("fp", 0)
         fn = r.get("fn", 0)
-        total = matches + fn
+        total = matches + fp + fn
         match_rate = matches / total if total > 0 else 1.0
         repos.append((repo_id, files, matches, fp, fn, match_rate))
 
@@ -171,7 +172,7 @@ def print_repo_list(by_repo: list[dict], by_repo_cop: dict):
         if fp == 0 and fn == 0:
             continue  # skip perfect repos in list mode
         print(f"{repo_id:<{repo_w}}  {files:>6}  {fmt_count(matches):>9}  "
-              f"{fmt_count(fp):>9}  {fmt_count(fn):>9}  {match_rate:>6.1%}")
+              f"{fmt_count(fp):>9}  {fmt_count(fn):>9}  {math.floor(match_rate * 1000) / 10:>5.1f}%")
 
     # Summary
     total_repos = len([r for r in repos if r[3] > 0 or r[4] > 0])
@@ -193,11 +194,11 @@ def print_repo_detail(repo_id: str, by_repo: list[dict], by_repo_cop: dict,
         matches = repo_info.get("matches", 0)
         fp = repo_info.get("fp", 0)
         fn = repo_info.get("fn", 0)
-        total = matches + fn
+        total = matches + fp + fn
         match_rate = matches / total if total > 0 else 1.0
         print(f"{repo_id} — {fmt_count(files)} Ruby files")
         print(f"  {fmt_count(matches)} matches, {fmt_count(fp)} FP, "
-              f"{fmt_count(fn)} FN — {match_rate:.1%} match rate")
+              f"{fmt_count(fn)} FN — {math.floor(match_rate * 1000) / 10:.1f}% match rate")
     else:
         print(f"{repo_id}")
     print()

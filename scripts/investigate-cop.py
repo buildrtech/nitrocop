@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -161,7 +162,7 @@ def main():
 
     print(f"{args.cop}")
     print(f"  Matches: {match_count:,}  FP: {fp_count:,}  FN: {fn_count:,}  "
-          f"Match: {cop_entry['match_rate']:.1%}")
+          f"Match: {math.floor(cop_entry['match_rate'] * 1000) / 10:.1f}%")
     print()
 
     # Use by_repo_cop for repo breakdown if available
