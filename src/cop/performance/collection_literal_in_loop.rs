@@ -17,6 +17,17 @@ use std::sync::LazyLock;
 ///      loop (RuboCop's enumerable_loop? only matches `send`, not `csend`).
 ///   2. Added regex, rational, and imaginary node types to
 ///      `is_recursive_basic_literal` to match RuboCop's `recursive_basic_literal?`.
+///   3. RuboCop value-equality FP fix: track source bytes of each enclosing
+///      loop receiver in a stack. When a literal's source bytes match an
+///      enclosing loop receiver, skip the offense. This mirrors RuboCop's
+///      `receiver != node` check which uses AST value equality (same content
+///      = not inside loop). Only applies to enumerable loops, not keyword
+///      loops (while/until/for) or Kernel.loop.
+///   4. Added RangeNode and ParenthesesNode to `is_recursive_basic_literal`
+///      to match RuboCop's LITERAL_RECURSIVE_TYPES (irange, erange, begin).
+///   5. Safe navigation in include? arguments: `a&.parent&.name` is NOT
+///      optimized by Ruby 3.4 (only `send` chains, not `csend`), so still
+///      flag the offense.
 pub struct CollectionLiteralInLoop;
 
 const ENUMERABLE_METHODS: &[&[u8]] = &[
@@ -270,6 +281,7 @@ impl Cop for CollectionLiteralInLoop {
             source,
             diagnostics: Vec::new(),
             loop_depth: 0,
+            loop_receiver_sources: Vec::new(),
             min_size,
             target_ruby_version,
             array_methods: &ARRAY_METHOD_SET,
@@ -286,6 +298,11 @@ struct CollectionLiteralVisitor<'a, 'src> {
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     loop_depth: usize,
+    /// Source byte ranges of receivers of enclosing enumerable loop calls.
+    /// Used to implement RuboCop's value-equality exclusion: if a literal's
+    /// source bytes match an enclosing loop receiver, it is NOT considered
+    /// "inside" that loop (it's the same value used to drive the loop).
+    loop_receiver_sources: Vec<(usize, usize)>,
     min_size: usize,
     target_ruby_version: f64,
     array_methods: &'a HashSet<Vec<u8>>,
@@ -345,6 +362,15 @@ impl<'pr> Visit<'pr> for CollectionLiteralVisitor<'_, '_> {
             if let Some(block_node) = block.as_block_node() {
                 if is_loop_call {
                     self.loop_depth += 1;
+                    // Track the receiver's source bytes for value-equality exclusion.
+                    // RuboCop's `node_within_enumerable_loop?` checks
+                    // `receiver != node` using AST value equality — if the literal
+                    // has the same source text as the loop receiver, skip it.
+                    if let Some(recv) = node.receiver() {
+                        let loc = recv.location();
+                        self.loop_receiver_sources
+                            .push((loc.start_offset(), loc.end_offset()));
+                    }
                 }
                 // Visit block parameters
                 if let Some(params) = block_node.parameters() {
@@ -356,6 +382,9 @@ impl<'pr> Visit<'pr> for CollectionLiteralVisitor<'_, '_> {
                 }
                 if is_loop_call {
                     self.loop_depth -= 1;
+                    if node.receiver().is_some() {
+                        self.loop_receiver_sources.pop();
+                    }
                 }
             } else {
                 self.visit(&block);
@@ -405,6 +434,21 @@ impl CollectionLiteralVisitor<'_, '_> {
         self.enumerable_methods.contains(method_name)
     }
 
+    /// Check if a literal node's source bytes match any enclosing loop receiver.
+    /// This implements RuboCop's `receiver != node` value-equality check:
+    /// if a literal inside a loop has the same source text as the receiver
+    /// driving one of the enclosing loops, it is excluded from offense.
+    fn matches_enclosing_loop_receiver(&self, node_start: usize, node_end: usize) -> bool {
+        let node_bytes = &self.source.as_bytes()[node_start..node_end];
+        for &(recv_start, recv_end) in &self.loop_receiver_sources {
+            let recv_bytes = &self.source.as_bytes()[recv_start..recv_end];
+            if node_bytes == recv_bytes {
+                return true;
+            }
+        }
+        false
+    }
+
     fn check_call(&mut self, call: &ruby_prism::CallNode<'_>, method_name: &[u8]) {
         let recv = match call.receiver() {
             Some(r) => r,
@@ -431,6 +475,11 @@ impl CollectionLiteralVisitor<'_, '_> {
                 return;
             }
             let loc = recv.location();
+            // RuboCop value-equality exclusion: if this literal's source matches
+            // an enclosing loop receiver, skip it.
+            if self.matches_enclosing_loop_receiver(loc.start_offset(), loc.end_offset()) {
+                return;
+            }
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
             self.diagnostics.push(self.cop.diagnostic(
                 self.source,
@@ -453,6 +502,9 @@ impl CollectionLiteralVisitor<'_, '_> {
                 return;
             }
             let loc = recv.location();
+            if self.matches_enclosing_loop_receiver(loc.start_offset(), loc.end_offset()) {
+                return;
+            }
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
             self.diagnostics.push(self.cop.diagnostic(
                 self.source,
@@ -466,8 +518,12 @@ impl CollectionLiteralVisitor<'_, '_> {
 
 /// Check if a node is a recursive basic literal (all children are basic literals too).
 /// Matches RuboCop's `recursive_basic_literal?` which includes: int, float, str, sym,
-/// nil, true, false, complex (ImaginaryNode), rational (RationalNode), and
-/// regexp (non-interpolated RegularExpressionNode).
+/// nil, true, false, complex (ImaginaryNode), rational (RationalNode),
+/// regexp (non-interpolated RegularExpressionNode), ranges (irange/erange),
+/// and parenthesized expressions (begin).
+///
+/// RuboCop also recurses through `LITERAL_RECURSIVE_METHODS` (==, *, <, etc.)
+/// so that expressions like `"str" * 100` are considered recursive basic literals.
 fn is_recursive_basic_literal(node: &ruby_prism::Node<'_>) -> bool {
     if node.as_integer_node().is_some()
         || node.as_float_node().is_some()
@@ -515,7 +571,67 @@ fn is_recursive_basic_literal(node: &ruby_prism::Node<'_>) -> bool {
         });
     }
 
+    // Range literals (1..10, 1...10) — RuboCop's LITERAL_RECURSIVE_TYPES
+    // includes :irange and :erange.
+    if let Some(range) = node.as_range_node() {
+        let left_ok = range
+            .left()
+            .map(|l| is_recursive_basic_literal(&l))
+            .unwrap_or(true);
+        let right_ok = range
+            .right()
+            .map(|r| is_recursive_basic_literal(&r))
+            .unwrap_or(true);
+        return left_ok && right_ok;
+    }
+
+    // Parenthesized expressions like `(1..32)` — RuboCop's :begin type.
+    // In Prism this is a ParenthesesNode wrapping the inner expression.
+    if let Some(parens) = node.as_parentheses_node() {
+        return parens
+            .body()
+            .map(|body| {
+                // The body is typically a StatementsNode with one child
+                if let Some(stmts) = body.as_statements_node() {
+                    stmts.body().iter().all(|s| is_recursive_basic_literal(&s))
+                } else {
+                    is_recursive_basic_literal(&body)
+                }
+            })
+            .unwrap_or(true);
+    }
+
+    // Method calls with literal recursive methods (==, *, <, etc.)
+    // e.g. `"str" * 100` is considered a recursive basic literal in RuboCop.
+    if let Some(call) = node.as_call_node() {
+        let method = call.name().as_slice();
+        if is_literal_recursive_method(method) {
+            let recv_ok = call
+                .receiver()
+                .map(|r| is_recursive_basic_literal(&r))
+                .unwrap_or(true);
+            let args_ok = call
+                .arguments()
+                .map(|args| {
+                    args.arguments()
+                        .iter()
+                        .all(|a| is_recursive_basic_literal(&a))
+                })
+                .unwrap_or(true);
+            return recv_ok && args_ok;
+        }
+    }
+
     false
+}
+
+/// Methods that RuboCop treats as recursive literal boundaries.
+/// Matches RuboCop's `LITERAL_RECURSIVE_METHODS`.
+fn is_literal_recursive_method(method: &[u8]) -> bool {
+    matches!(
+        method,
+        b"==" | b"===" | b"!=" | b"<=" | b">=" | b">" | b"<" | b"*" | b"!" | b"<=>"
+    )
 }
 
 /// Check if a call to `include?` on an array literal has a single "simple" argument
@@ -535,7 +651,9 @@ fn is_optimized_include_arg(call: &ruby_prism::CallNode<'_>) -> bool {
 
 /// Check if a node is a "simple" argument for the Ruby 3.4+ include? optimization.
 /// Matches: string literals, `self`, local variables, instance variables, and
-/// method call chains where no call in the chain has arguments.
+/// method call chains where no call in the chain has arguments AND uses regular
+/// dispatch (not safe navigation `&.`). RuboCop's implementation checks
+/// `arg.send_type?` which only matches `send`, not `csend`.
 fn is_simple_argument(node: &ruby_prism::Node<'_>) -> bool {
     // String literal
     if node.as_string_node().is_some() {
@@ -557,8 +675,16 @@ fn is_simple_argument(node: &ruby_prism::Node<'_>) -> bool {
     if node.as_it_local_variable_read_node().is_some() {
         return true;
     }
-    // Method call (possibly chained) with no arguments at any level
+    // Method call (possibly chained) with no arguments at any level.
+    // Safe navigation (&.) calls are NOT optimized — RuboCop checks
+    // `arg.send_type?` which only matches `send`, not `csend`.
     if let Some(call) = node.as_call_node() {
+        // Safe navigation breaks the optimization
+        if let Some(op) = call.call_operator_loc() {
+            if op.as_slice() == b"&." {
+                return false;
+            }
+        }
         // Disallow if this call has arguments
         if call.arguments().is_some() {
             return false;
@@ -798,6 +924,45 @@ mod tests {
         crate::testutil::assert_cop_no_offenses_full(
             &CollectionLiteralInLoop,
             b"items&.each { |item| [1, 2, 3].include?(item) }\n",
+        );
+    }
+
+    #[test]
+    fn ruby34_still_flags_include_with_safe_nav_chain() {
+        // Safe navigation (&.) in the argument is NOT optimized by Ruby 3.4.
+        // RuboCop checks `arg.send_type?` which only matches `send`, not `csend`.
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &CollectionLiteralInLoop,
+            b"items.each do |a|\n  %w[video audio].include?(a&.parent&.name)\n  ^^^^^^^^^^^^^^^^ Performance/CollectionLiteralInLoop: Avoid immutable Array literals in loops. It is better to extract it into a local variable or a constant.\nend\n",
+            ruby34_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_same_literal_as_loop_receiver() {
+        // When a literal inside a loop has the same source text as the loop receiver,
+        // RuboCop uses value equality to exclude it (receiver != node returns false).
+        crate::testutil::assert_cop_no_offenses_full(
+            &CollectionLiteralInLoop,
+            b"[1].each { |x| [1].each { puts x } }\n",
+        );
+    }
+
+    #[test]
+    fn offense_different_literal_from_loop_receiver() {
+        // Different literal from the loop receiver should still be flagged
+        crate::testutil::assert_cop_offenses_full(
+            &CollectionLiteralInLoop,
+            b"[1].each { |x| [2].each { puts x } }\n               ^^^ Performance/CollectionLiteralInLoop: Avoid immutable Array literals in loops. It is better to extract it into a local variable or a constant.\n",
+        );
+    }
+
+    #[test]
+    fn detects_array_with_range_in_loop() {
+        // Arrays containing ranges should be detected (ranges are basic literals)
+        crate::testutil::assert_cop_offenses_full(
+            &CollectionLiteralInLoop,
+            b"items.each do |item|\n  [1..10, 20..30].include?(item)\n  ^^^^^^^^^^^^^^^ Performance/CollectionLiteralInLoop: Avoid immutable Array literals in loops. It is better to extract it into a local variable or a constant.\nend\n",
         );
     }
 }

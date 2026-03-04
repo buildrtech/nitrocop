@@ -60,3 +60,14 @@ items.each do |str|
   [/foo/, /bar/].any? { |r| str.match?(r) }
   ^^^^^^^^^^^^^^ Performance/CollectionLiteralInLoop: Avoid immutable Array literals in loops. It is better to extract it into a local variable or a constant.
 end
+[:dup, :clone].each do |method|
+  [
+  ^ Performance/CollectionLiteralInLoop: Avoid immutable Array literals in loops. It is better to extract it into a local variable or a constant.
+    [],
+    ["A"],
+    %w[A B C],
+    (1..32),
+  ].each do |values|
+    puts values
+  end
+end
