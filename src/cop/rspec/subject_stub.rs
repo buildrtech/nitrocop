@@ -1,15 +1,29 @@
-use crate::cop::node_type::{
-    BLOCK_NODE, CALL_NODE, DEF_NODE, LOCAL_VARIABLE_READ_NODE, STATEMENTS_NODE, SYMBOL_NODE,
-};
-use crate::cop::util::{self, RSPEC_DEFAULT_INCLUDE, is_rspec_example_group};
+use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example_group};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-pub struct SubjectStub;
-
 /// Flags stubbing methods on `subject`. The object under test should not be stubbed.
 /// Detects: allow(subject_name).to receive(...), expect(subject_name).to receive(...)
+///
+/// Investigation notes (corpus FP=571, FN=27):
+/// Root cause of FPs:
+/// 1. Missing TopLevelGroup scoping: RuboCop's `TopLevelGroup#top_level_nodes` only
+///    processes describe/context blocks at the file's top level. When `require "spec_helper"`
+///    appears alongside a `module Foo` wrapper, the AST root is a `begin` node whose children
+///    are `[require_call, module_node]`. The module is not a spec group, so it's skipped.
+///    Our cop was processing ALL describe/context blocks regardless of nesting.
+/// 2. Local variable reads: RuboCop's `(send nil? %)` pattern only matches method calls,
+///    not local variable reads. When `subject = Foo.new` shadows the RSpec subject,
+///    `allow(subject).to receive(...)` uses a local variable, not the subject method.
+///    Our `extract_simple_name` was matching both CallNode and LocalVariableReadNode.
+///
+/// Root cause of FNs (27):
+/// Multi-line `do...end` block arguments on receive chains like
+/// `expect(subject).to receive(:method).and_wrap_original do |orig| ... end`
+/// are not detected because the block wraps the whole chain differently in the AST.
+pub struct SubjectStub;
+
 impl Cop for SubjectStub {
     fn name(&self) -> &'static str {
         "RSpec/SubjectStub"
@@ -23,61 +37,132 @@ impl Cop for SubjectStub {
         RSPEC_DEFAULT_INCLUDE
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            BLOCK_NODE,
-            CALL_NODE,
-            DEF_NODE,
-            LOCAL_VARIABLE_READ_NODE,
-            STATEMENTS_NODE,
-            SYMBOL_NODE,
-        ]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Look for top-level describe/context blocks and track subject names
-        let call = match node.as_call_node() {
-            Some(c) => c,
+        let program = match parse_result.node().as_program_node() {
+            Some(p) => p,
             None => return,
         };
+        let body = program.statements();
+        let stmts: Vec<_> = body.body().iter().collect();
 
-        let method_name = call.name().as_slice();
-
-        // Only process example group methods (describe, context, etc., including ::RSpec)
-        let is_rspec_describe = if let Some(recv) = call.receiver() {
-            util::constant_name(&recv).is_some_and(|n| n == b"RSpec")
-                && is_rspec_example_group(method_name)
+        if stmts.len() == 1 {
+            // Single top-level statement: unwrap module/class wrappers to find spec groups.
+            self.find_top_level_groups(&stmts[0], source, diagnostics);
         } else {
-            false
-        };
+            // Multiple top-level statements (e.g., `require "spec_helper"` + `describe Foo`):
+            // Only check direct children for spec groups, do NOT unwrap modules/classes.
+            // This matches RuboCop's TopLevelGroup `:begin` branch.
+            for stmt in &stmts {
+                self.check_direct_spec_group(stmt, source, diagnostics);
+            }
+        }
+    }
+}
 
-        if !(is_rspec_describe || call.receiver().is_none() && is_rspec_example_group(method_name))
-        {
+impl SubjectStub {
+    /// Check if a single node is a top-level spec group and process it.
+    /// Does NOT recurse into module/class — used for the `:begin` case.
+    fn check_direct_spec_group(
+        &self,
+        node: &ruby_prism::Node<'_>,
+        source: &SourceFile,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if let Some(call) = node.as_call_node() {
+            if let Some(block) = call.block() {
+                if let Some(bn) = block.as_block_node() {
+                    let name = call.name().as_slice();
+                    let is_eg = call.receiver().is_none() && is_rspec_example_group(name);
+                    let is_rspec_describe =
+                        is_rspec_receiver(&call) && is_rspec_example_group(name);
+                    if is_eg || is_rspec_describe {
+                        let mut subject_names: Vec<Vec<u8>> = Vec::new();
+                        subject_names.push(b"subject".to_vec());
+                        collect_subject_stub_offenses(
+                            source,
+                            bn,
+                            &mut subject_names,
+                            diagnostics,
+                            self,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recursively find top-level spec groups, unwrapping module/class/begin nodes.
+    /// Used when there's a single top-level construct.
+    fn find_top_level_groups(
+        &self,
+        node: &ruby_prism::Node<'_>,
+        source: &SourceFile,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Check if this node is a spec group call
+        if let Some(call) = node.as_call_node() {
+            if let Some(block) = call.block() {
+                if let Some(bn) = block.as_block_node() {
+                    let name = call.name().as_slice();
+                    let is_eg = call.receiver().is_none() && is_rspec_example_group(name);
+                    let is_rspec_describe =
+                        is_rspec_receiver(&call) && is_rspec_example_group(name);
+                    if is_eg || is_rspec_describe {
+                        let mut subject_names: Vec<Vec<u8>> = Vec::new();
+                        subject_names.push(b"subject".to_vec());
+                        collect_subject_stub_offenses(
+                            source,
+                            bn,
+                            &mut subject_names,
+                            diagnostics,
+                            self,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Unwrap module nodes
+        if let Some(module_node) = node.as_module_node() {
+            if let Some(body) = module_node.body() {
+                if let Some(stmts) = body.as_statements_node() {
+                    for child in stmts.body().iter() {
+                        self.find_top_level_groups(&child, source, diagnostics);
+                    }
+                }
+            }
             return;
         }
 
-        let block = match call.block() {
-            Some(b) => b,
-            None => return,
-        };
-        let block_node = match block.as_block_node() {
-            Some(b) => b,
-            None => return,
-        };
+        // Unwrap class nodes
+        if let Some(class_node) = node.as_class_node() {
+            if let Some(body) = class_node.body() {
+                if let Some(stmts) = body.as_statements_node() {
+                    for child in stmts.body().iter() {
+                        self.find_top_level_groups(&child, source, diagnostics);
+                    }
+                }
+            }
+            return;
+        }
 
-        let mut subject_names: Vec<Vec<u8>> = Vec::new();
-        // Always include "subject" as a subject name
-        subject_names.push(b"subject".to_vec());
-
-        collect_subject_stub_offenses(source, block_node, &mut subject_names, diagnostics, self);
+        // Unwrap begin nodes
+        if let Some(begin_node) = node.as_begin_node() {
+            if let Some(stmts) = begin_node.statements() {
+                for child in stmts.body().iter() {
+                    self.find_top_level_groups(&child, source, diagnostics);
+                }
+            }
+        }
     }
 }
 
@@ -141,7 +226,7 @@ fn check_for_subject_stubs(
         let method = call.name().as_slice();
         if method == b"to" || method == b"not_to" || method == b"to_not" {
             // Check if the argument involves `receive`
-            if has_receive_matcher(&call) {
+            if has_receive_matcher(&call) || has_have_received_matcher(&call) {
                 // Check receiver is allow/expect(subject_name) or is_expected
                 if let Some(recv) = call.receiver() {
                     if let Some(recv_call) = recv.as_call_node() {
@@ -163,7 +248,9 @@ fn check_for_subject_stubs(
                             if let Some(args) = recv_call.arguments() {
                                 let arg_list: Vec<_> = args.arguments().iter().collect();
                                 if !arg_list.is_empty() {
-                                    let arg_name = extract_simple_name(&arg_list[0]);
+                                    // Only match method calls (send nil?), NOT local variable reads.
+                                    // RuboCop's `(send nil? %)` pattern only matches method sends.
+                                    let arg_name = extract_method_name(&arg_list[0]);
                                     if let Some(name) = arg_name {
                                         if subject_names.iter().any(|s| s == &name) {
                                             let loc = node.location();
@@ -180,41 +267,6 @@ fn check_for_subject_stubs(
                                             );
                                             return;
                                         }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check for `expect(subject_name).to have_received(...)`
-        if (method == b"to" || method == b"not_to" || method == b"to_not")
-            && has_have_received_matcher(&call)
-        {
-            if let Some(recv) = call.receiver() {
-                if let Some(recv_call) = recv.as_call_node() {
-                    if recv_call.name().as_slice() == b"expect" && recv_call.receiver().is_none() {
-                        if let Some(args) = recv_call.arguments() {
-                            let arg_list: Vec<_> = args.arguments().iter().collect();
-                            if !arg_list.is_empty() {
-                                let arg_name = extract_simple_name(&arg_list[0]);
-                                if let Some(name) = arg_name {
-                                    if subject_names.iter().any(|s| s == &name) {
-                                        let loc = node.location();
-                                        let (line, column) =
-                                            source.offset_to_line_col(loc.start_offset());
-                                        diagnostics.push(
-                                            cop.diagnostic(
-                                                source,
-                                                line,
-                                                column,
-                                                "Do not stub methods of the object under test."
-                                                    .to_string(),
-                                            ),
-                                        );
-                                        return;
                                     }
                                 }
                             }
@@ -321,17 +373,34 @@ fn contains_have_received_call(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-fn extract_simple_name(node: &ruby_prism::Node<'_>) -> Option<Vec<u8>> {
-    // Extract simple method call name (receiverless call) or local variable
+/// Extract the name of a receiverless method call. Only matches `CallNode` with
+/// no receiver and no arguments (i.e., `(send nil? :name)` in RuboCop terms).
+/// Does NOT match local variable reads — RuboCop's message_expectation? matcher
+/// uses `(send nil? %)` which only matches method sends, not lvar reads.
+fn extract_method_name(node: &ruby_prism::Node<'_>) -> Option<Vec<u8>> {
     if let Some(call) = node.as_call_node() {
         if call.receiver().is_none() && call.arguments().is_none() {
             return Some(call.name().as_slice().to_vec());
         }
     }
-    if let Some(lv) = node.as_local_variable_read_node() {
-        return Some(lv.name().as_slice().to_vec());
-    }
     None
+}
+
+/// Check if the receiver of a CallNode is `RSpec` (simple constant) or `::RSpec`.
+fn is_rspec_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
+    if let Some(recv) = call.receiver() {
+        if let Some(cr) = recv.as_constant_read_node() {
+            return cr.name().as_slice() == b"RSpec";
+        }
+        if let Some(cp) = recv.as_constant_path_node() {
+            if cp.parent().is_none() {
+                if let Some(name) = cp.name() {
+                    return name.as_slice() == b"RSpec";
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
