@@ -11,6 +11,10 @@ use crate::parse::source::SourceFile;
 pub struct ReturnFromStub;
 
 /// Default style is `and_return` — flags block-style stubs returning static values.
+///
+/// **Investigation (2026-03):** 46 FPs caused by flagging `receive_message_chain` blocks.
+/// RuboCop only flags `receive` calls, not `receive_message_chain`. Fixed by checking the
+/// root method name in `find_block_on_receive_chain` and skipping non-`receive` chains.
 /// Detects: `allow(X).to receive(:y) { static_value }`
 impl Cop for ReturnFromStub {
     fn name(&self) -> &'static str {
@@ -195,15 +199,28 @@ fn find_block_on_receive_chain<'a>(
 ) -> Option<ruby_prism::BlockNode<'a>> {
     let call = node.as_call_node()?;
     let mut current = call;
+    let mut block_node = None;
+    // Walk the chain to find: (1) any block, and (2) the root method name
     loop {
-        if current.block().is_some() {
+        if block_node.is_none() {
             if let Some(block) = current.block() {
-                return block.as_block_node();
+                block_node = block.as_block_node();
             }
         }
-        let recv = current.receiver()?;
-        current = recv.as_call_node()?;
+        match current.receiver() {
+            Some(recv) => match recv.as_call_node() {
+                Some(c) => current = c,
+                None => return None,
+            },
+            None => break,
+        }
     }
+    // Only flag `receive` calls, not `receive_message_chain`
+    let root_name = current.name();
+    if root_name.as_slice() != b"receive" {
+        return None;
+    }
+    block_node
 }
 
 fn is_static_value(node: &ruby_prism::Node<'_>) -> bool {

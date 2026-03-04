@@ -21,3 +21,10 @@ end
 it do
   allow(Foo).to receive(:bar) { Module::CONSTANT }
 end
+# receive_message_chain with block is not flagged by RuboCop
+it do
+  allow(order).to receive_message_chain(:payments, :valid, :empty?) { false }
+end
+it do
+  allow(obj).to receive_message_chain(:foo, :bar) { 42 }
+end
