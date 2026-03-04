@@ -3,6 +3,11 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Performance/RangeInclude - flags `Range#include?` and `Range#member?`, suggesting `Range#cover?`.
+///
+/// Investigation: 15 FNs were all `.member?()` calls on ranges. The cop originally only checked
+/// for `include?`. Ruby's `Range#member?` is an alias for `Range#include?` and both should be
+/// flagged. Fix: check for both method names and use the correct method name in the message.
 pub struct RangeInclude;
 
 impl Cop for RangeInclude {
@@ -32,7 +37,8 @@ impl Cop for RangeInclude {
             None => return,
         };
 
-        if call.name().as_slice() != b"include?" {
+        let method_name = call.name().as_slice();
+        if method_name != b"include?" && method_name != b"member?" {
             return;
         }
 
@@ -64,11 +70,16 @@ impl Cop for RangeInclude {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let method = if method_name == b"member?" {
+            "member?"
+        } else {
+            "include?"
+        };
         diagnostics.push(self.diagnostic(
             source,
             line,
             column,
-            "Use `Range#cover?` instead of `Range#include?`.".to_string(),
+            format!("Use `Range#cover?` instead of `Range#{method}`."),
         ));
     }
 }
