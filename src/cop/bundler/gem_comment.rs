@@ -20,7 +20,7 @@ pub struct GemComment;
 /// names. Fix: `extract_gem_name` now requires the first non-whitespace character after
 /// `gem ` to be a quote, and rejects names containing `#{` (interpolation).
 ///
-/// ### FN=16 — FIXED (AST-based modifier detection in check_source)
+/// ### FN=16 — FIXED (AST-based modifier detection + percent-string fix)
 ///
 /// All 16 FNs were gem declarations inside modifier `if`/`unless` with a preceding
 /// comment. RuboCop's `ast_with_comments` associates the preceding comment with the
@@ -32,6 +32,11 @@ pub struct GemComment;
 /// of 1-based line numbers where gem CallNodes are inside modifier if/unless (detected
 /// via `end_keyword_loc().is_none()`). For those lines, preceding-line comments are not
 /// counted as gem documentation — only inline comments on the same line count.
+///
+/// One additional FN (asciidoctor-pdf) was caused by `has_inline_comment()` not handling
+/// `%(...)` percent-string literals. The `#` inside `%(~> #{...})` was falsely detected
+/// as an inline comment, making the gem appear "commented". Fix: `has_inline_comment()`
+/// now tracks `%(...)`/`%w(...)`/etc. paren-depth and skips `#` inside percent-strings.
 impl Cop for GemComment {
     fn name(&self) -> &'static str {
         "Bundler/GemComment"
@@ -231,16 +236,45 @@ fn is_version_string(s: &str) -> bool {
 
 /// Check if the line has an inline comment (# after the gem declaration).
 fn has_inline_comment(line: &str) -> bool {
-    // Simple heuristic: look for # that's not inside quotes
+    // Heuristic: look for # that's not inside quotes or percent-string literals.
     let mut in_single = false;
     let mut in_double = false;
-    for ch in line.chars() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '#' if !in_single && !in_double => return true,
+    let mut paren_depth: usize = 0;
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if paren_depth > 0 {
+            match b {
+                b'(' => paren_depth += 1,
+                b')' => paren_depth -= 1,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'%' if !in_single && !in_double => {
+                // Check for percent-string: %(...) or %X(...) where X is a letter
+                if bytes.get(i + 1) == Some(&b'(') {
+                    paren_depth = 1;
+                    i += 2; // skip %(
+                    continue;
+                }
+                if bytes.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic())
+                    && bytes.get(i + 2) == Some(&b'(')
+                {
+                    paren_depth = 1;
+                    i += 3; // skip %X(
+                    continue;
+                }
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single && !in_double => return true,
             _ => {}
         }
+        i += 1;
     }
     false
 }

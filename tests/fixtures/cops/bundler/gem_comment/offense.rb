@@ -24,3 +24,7 @@ gem "fog-google", "~> 1.13.0" if RUBY_VERSION.to_f < 2.7
 # Some browsers have problems with WEBrick
 gem 'puma_alt' unless RUBY_ENGINE == 'truffleruby'
 ^ Bundler/GemComment: Missing gem description comment.
+
+# This comment is about the condition, not the gem; %(#) is NOT a real comment
+gem 'rouge', (ENV.fetch 'ROUGE_VERSION', %(~> #{RUBY_ENGINE == 'jruby' ? '3' : '4'}.0)), require: false unless ENV['ROUGE_VERSION'] == 'false'
+^ Bundler/GemComment: Missing gem description comment.

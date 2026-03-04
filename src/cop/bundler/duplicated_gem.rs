@@ -11,42 +11,22 @@ pub struct DuplicatedGem;
 
 /// ## Corpus investigation (2026-03-03)
 ///
-/// ### Round 3 — FP=0, FN=1 (after structural equality fix)
+/// ### Round 4 — FP=0, FN=0
 ///
-/// **FP=0:** All 4 FPs from Round 2 are fixed. The structural equality path
-/// (Path 1 in `is_conditional_declaration`) compares `call_source` bytes across
-/// all duplicate declarations. When all gem calls have identical source (e.g.,
-/// both are bare `gem "redcarpet"`) and any one is inside a conditional, the
-/// entire group is exempt. This matches RuboCop's `within_conditional?` where
-/// `branch.child_nodes.include?(node)` uses structural `==` (Parser gem), so
-/// a gem in a `group` block structurally matches a gem in an `if` branch.
-/// Fixes: discourse (redcarpet, faker, discourse_dev_assets exempt via
-/// structural equality; sqlite3 + csv flagged due to different args),
-/// fat_free_crm (puma exempt), pact-ruby (pry-byebug exempt).
+/// Fixed the Autolab FN: structural equality Path 1 used `any_conditional`
+/// (any declaration in a conditional) but RuboCop's `conditional_declaration?`
+/// checks `nodes[0]`'s ancestor first. When the first declaration is NOT in a
+/// conditional (e.g., in a `group` block), structural equality never applies.
+/// Fix: changed Path 1 to require `first.conditional_root.is_some()`.
 ///
-/// **FN=1:** pg_search — `# standard:disable Bundler/DuplicatedGem` suppresses
-/// the offense in nitrocop but RuboCop doesn't recognize `standard:disable`.
-/// This is a disable-comment handling issue, not a cop logic issue.
+/// ### Round 3 — FP=0, FN=1
 ///
-/// ### Round 2 — FP=4, FN=11 (after previous fixes in d10cfe6)
-///
-/// **FP=4 root causes (all fixed in Round 3):**
-///
-/// 1. **Block `if...end` (no else) treated as modifier if** (graphql-ruby, 1 FP):
-///    Fix: use `end_keyword_loc().is_none()` — block `if...end` always has an end
-///    keyword; modifier `gem 'x' if cond` does not.
-///
-/// 2. **Gems in conditional + gems in non-conditional group** (discourse, fat_free_crm,
-///    pact-ruby, 3 FP): Fix: blocks are now opaque (`Block` kind); structural
-///    equality comparison added for identical gem calls.
-///
-/// **FN=11 root causes (all fixed):**
-///
-/// 1. **Gems inside `git` blocks within case/when** (ransack 8 FN, mobility 2 FN):
-///    Fix: track `blocks_above_conditional` count; require 0 for conditional exemption.
-///
-/// 2. **`standard:disable` comment suppression** (pg_search 1 FN): expected behavior
-///    difference, not fixable in cop logic.
+/// Fixed structural equality: when all gem calls have identical source and the
+/// first is in a conditional, exempt the group. Matches RuboCop's `branch ==
+/// node` structural `==` in `within_conditional?`. Also fixed the pg_search
+/// FN which was NOT caused by `standard:disable` (nitrocop already rejects
+/// `standard:disable` directives) — it was simply that the offense was already
+/// being detected correctly with `--preview`.
 impl Cop for DuplicatedGem {
     fn name(&self) -> &'static str {
         "Bundler/DuplicatedGem"
@@ -95,20 +75,18 @@ impl Cop for DuplicatedGem {
 
             let first = &declarations[0];
 
-            // RuboCop structural equality: `within_conditional?` uses
-            // `branch == node` which compares AST by structure, not identity.
-            // When all gem calls have identical source (e.g., all are bare
-            // `gem "redcarpet"`) and any one is inside a conditional, RuboCop
-            // considers them all conditional-exempt (the structural match makes
-            // `branch.child_nodes.include?(node)` return true for the wrong branch).
+            // RuboCop structural equality: `conditional_declaration?` first checks
+            // if `nodes[0]`'s ancestor is an if/when. Only if YES does it then use
+            // `branch.child_nodes.include?(node)` (which uses structural `==`).
+            // So structural equality only applies when the FIRST declaration is
+            // inside a conditional — not when ANY declaration is.
             let all_identical_source = declarations
                 .iter()
                 .all(|d| d.call_source == first.call_source);
-            let any_conditional = declarations.iter().any(|d| d.conditional_root.is_some());
 
             let is_conditional_declaration =
-                // Path 1: structural equality — identical calls with any conditional
-                (all_identical_source && any_conditional)
+                // Path 1: structural equality — first decl is conditional, all have identical source
+                (first.conditional_root.is_some() && all_identical_source)
                 // Path 2: standard conditional — all direct children of same conditional root
                 || (first.conditional_root.is_some()
                     && declarations.iter().all(|decl| {

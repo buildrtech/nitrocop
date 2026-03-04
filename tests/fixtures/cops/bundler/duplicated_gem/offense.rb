@@ -61,3 +61,13 @@ group :development do
   gem 'webpacker', path: '/path/to/gem'
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `webpacker` requirements already given on line 47 of the Gemfile.
 end
+
+# Identical gem in group block + conditional — first decl is NOT conditional,
+# so structural equality does not apply (RuboCop's conditional_declaration?
+# checks nodes[0]'s ancestor first).
+group :development do
+  gem 'pg', '1.5.1'
+end
+if ENV['DEPLOY_METHOD'] == "docker"
+  gem 'pg', '1.5.1'
+  ^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `pg` requirements already given on line 56 of the Gemfile.

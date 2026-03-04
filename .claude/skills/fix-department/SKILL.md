@@ -226,7 +226,7 @@ directly on main.
    - Cops that were **investigated but need no code fix** (e.g., FPs caused by encoding
      differences, file-drop noise, config artifacts)
    - Cops that were **deferred** (document why and what a fix would need)
-   - Cops with FN from `standard:disable` or other expected behavior differences
+   - Cops with FN from `standard:disable` handling or other config edge cases (these are still bugs to fix, not acceptable differences)
 
    This prevents future investigators from repeating the same analysis. **Do not
    consider a cop "done" until it has an investigation comment, even if the fix itself
