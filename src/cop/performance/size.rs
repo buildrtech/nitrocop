@@ -1,8 +1,16 @@
-use crate::cop::node_type::{ARRAY_NODE, CALL_NODE, HASH_NODE};
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Performance/Size flags `.count` (no args, no block) on receivers that are
+/// known to be Array or Hash values: literals, `.to_a`/`.to_h` conversions,
+/// and `Array()`/`Array[]`/`Hash()`/`Hash[]` constructors.
+///
+/// Root cause of 36 FNs: the cop previously only matched literal array/hash
+/// receivers, missing `.to_a`/`.to_h` chains and `Array()`/`Hash()` calls.
+/// Fixed by checking the receiver for conversion methods and constructor
+/// patterns in addition to literals.
 pub struct Size;
 
 impl Cop for Size {
@@ -15,7 +23,7 @@ impl Cop for Size {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[ARRAY_NODE, CALL_NODE, HASH_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -36,24 +44,21 @@ impl Cop for Size {
             return;
         }
 
-        // Must have a receiver that is an Array or Hash literal (not AR relations etc.)
-        let recv = match call.receiver() {
-            Some(r) => r,
-            None => return,
-        };
-
-        // Note: keyword_hash_node (keyword args like `foo(a: 1)`) intentionally not
-        // handled — keyword hashes cannot be receivers of `.count`.
-        if recv.as_array_node().is_none() && recv.as_hash_node().is_none() {
-            return;
-        }
-
         // Must have no arguments and no block
         if call.arguments().is_some() || call.block().is_some() {
             return;
         }
 
-        let loc = call.location();
+        let recv = match call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
+
+        if !is_array_or_hash_receiver(&recv) {
+            return;
+        }
+
+        let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(
             source,
@@ -62,6 +67,54 @@ impl Cop for Size {
             "Use `size` instead of `count`.".to_string(),
         ));
     }
+}
+
+/// Returns true if the node is known to produce an Array or Hash:
+/// - Array/Hash literals
+/// - `.to_a` / `.to_h` calls (any receiver)
+/// - `Array[...]` / `Array(...)` / `Hash[...]` / `Hash(...)`
+fn is_array_or_hash_receiver(node: &ruby_prism::Node<'_>) -> bool {
+    // Array or Hash literal
+    if node.as_array_node().is_some() || node.as_hash_node().is_some() {
+        return true;
+    }
+
+    // Check for call-based patterns: .to_a, .to_h, Array[], Array(), Hash[], Hash()
+    if let Some(call) = node.as_call_node() {
+        let name = call.name();
+        let name_bytes = name.as_slice();
+
+        // .to_a or .to_h on any receiver
+        if name_bytes == b"to_a" || name_bytes == b"to_h" {
+            return true;
+        }
+
+        // Array[...] or Hash[...] — `[]` method on constant `Array` or `Hash`
+        if name_bytes == b"[]" {
+            if let Some(recv) = call.receiver() {
+                if is_array_or_hash_constant(&recv) {
+                    return true;
+                }
+            }
+        }
+
+        // Array(...) or Hash(...) — Kernel method call with no explicit receiver
+        if (name_bytes == b"Array" || name_bytes == b"Hash") && call.receiver().is_none() {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Checks if a node is a simple constant read of `Array` or `Hash`.
+fn is_array_or_hash_constant(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(c) = node.as_constant_read_node() {
+        let name = c.name();
+        let name_bytes = name.as_slice();
+        return name_bytes == b"Array" || name_bytes == b"Hash";
+    }
+    false
 }
 
 #[cfg(test)]

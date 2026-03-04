@@ -1,6 +1,28 @@
 [1, 2, 3].count
-^^^^^^^^^^^^^^^^ Performance/Size: Use `size` instead of `count`.
+          ^^^^^ Performance/Size: Use `size` instead of `count`.
 {a: 1}.count
-^^^^^^^^^^^^ Performance/Size: Use `size` instead of `count`.
+       ^^^^^ Performance/Size: Use `size` instead of `count`.
 [].count
-^^^^^^^^ Performance/Size: Use `size` instead of `count`.
+   ^^^^^ Performance/Size: Use `size` instead of `count`.
+(1..3).to_a.count
+            ^^^^^ Performance/Size: Use `size` instead of `count`.
+[[:foo, :bar], [1, 2]].to_h.count
+                            ^^^^^ Performance/Size: Use `size` instead of `count`.
+Array[*1..5].count
+             ^^^^^ Performance/Size: Use `size` instead of `count`.
+Array(1..5).count
+            ^^^^^ Performance/Size: Use `size` instead of `count`.
+Hash[*('a'..'z')].count
+                  ^^^^^ Performance/Size: Use `size` instead of `count`.
+Hash(key: :value).count
+                  ^^^^^ Performance/Size: Use `size` instead of `count`.
+categories.to_a.count
+                ^^^^^ Performance/Size: Use `size` instead of `count`.
+post.comments.to_a.count
+                   ^^^^^ Performance/Size: Use `size` instead of `count`.
+[1, 2, 3]&.count
+           ^^^^^ Performance/Size: Use `size` instead of `count`.
+(1..3)&.to_a&.count
+              ^^^^^ Performance/Size: Use `size` instead of `count`.
+[[:foo, :bar], [1, 2]]&.to_h&.count
+                              ^^^^^ Performance/Size: Use `size` instead of `count`.
