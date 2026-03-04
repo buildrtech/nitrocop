@@ -6,6 +6,19 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-04)
+///
+/// Corpus oracle reported FP=105, FN=5.
+///
+/// A high-volume FP pattern was blocks whose body is only a heredoc expression:
+/// `render do; <<~RUBY ... RUBY; end`.
+///
+/// In RuboCop (Parser AST), that body is a `str`/`dstr` node whose source range
+/// is just the heredoc opening line (`<<~RUBY`), so it counts as one body line.
+/// Our Prism implementation counted the full physical heredoc content range,
+/// producing false positives on large documentation/example blocks.
+///
+/// Fix: detect "single heredoc expression body" and count it as one line.
 pub struct BlockLength;
 
 impl Cop for BlockLength {
@@ -160,6 +173,13 @@ fn count_block_lines(
         None => return 0,
     };
 
+    // Parser/RuboCop behavior: when a block body is a single heredoc expression,
+    // code length is based on the heredoc opener node source, not heredoc content.
+    // This makes the body count as one line.
+    if is_single_heredoc_expression(source, &body) {
+        return 1;
+    }
+
     // Use body start offset to skip heredoc content that appears before body.
     // Same approach as method_length.rs.
     let (body_start_line, _) = source.offset_to_line_col(body.location().start_offset());
@@ -173,9 +193,8 @@ fn count_block_lines(
 
     // Collect foldable ranges from CountAsOne config. Heredocs are only
     // folded when "heredoc" is explicitly in CountAsOne (default: []).
-    // RuboCop's CodeLengthCalculator counts heredoc content lines toward
-    // block length by default. Prism includes heredoc content in the body's
-    // byte range, so lines are naturally counted.
+    // For non-bare-heredoc bodies, RuboCop's CodeLengthCalculator includes
+    // heredoc content lines by default. We replicate that here.
     let mut all_foldable: Vec<(usize, usize)> = Vec::new();
     if let Some(cao) = count_as_one {
         if !cao.is_empty() {
@@ -195,6 +214,39 @@ fn count_block_lines(
         count_comments,
         &all_foldable,
     )
+}
+
+fn is_single_heredoc_expression(source: &SourceFile, body: &ruby_prism::Node<'_>) -> bool {
+    if is_heredoc_node(source, body) {
+        return true;
+    }
+
+    if let Some(stmts) = body.as_statements_node() {
+        let mut iter = stmts.body().iter();
+        if let Some(first) = iter.next() {
+            return iter.next().is_none() && is_heredoc_node(source, &first);
+        }
+    }
+
+    false
+}
+
+fn is_heredoc_node(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(s) = node.as_string_node() {
+        return s
+            .opening_loc()
+            .map(|o| source.as_bytes()[o.start_offset()..o.end_offset()].starts_with(b"<<"))
+            .unwrap_or(false);
+    }
+
+    if let Some(s) = node.as_interpolated_string_node() {
+        return s
+            .opening_loc()
+            .map(|o| source.as_bytes()[o.start_offset()..o.end_offset()].starts_with(b"<<"))
+            .unwrap_or(false);
+    }
+
+    false
 }
 
 /// Check if a call is a class constructor like `Struct.new`, `Class.new`, `Module.new`, etc.

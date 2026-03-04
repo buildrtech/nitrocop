@@ -39,8 +39,8 @@ render do
   x3 = 3
 end
 
-# Block whose body IS a heredoc — content lines count toward length.
-# 20 content lines + heredoc opening + closing = 22 body lines (under 25).
+# RuboCop counts a block body that is only a heredoc expression as one line.
+# This remains no-offense regardless of heredoc content size.
 process do
   <<~RUBY
     line1
@@ -63,5 +63,41 @@ process do
     line18
     line19
     line20
+  RUBY
+end
+
+# Same behavior with a larger heredoc payload.
+render do
+  <<~RUBY
+    line1
+    line2
+    line3
+    line4
+    line5
+    line6
+    line7
+    line8
+    line9
+    line10
+    line11
+    line12
+    line13
+    line14
+    line15
+    line16
+    line17
+    line18
+    line19
+    line20
+    line21
+    line22
+    line23
+    line24
+    line25
+    line26
+    line27
+    line28
+    line29
+    line30
   RUBY
 end
