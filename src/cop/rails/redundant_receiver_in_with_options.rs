@@ -116,7 +116,7 @@ impl Cop for RedundantReceiverInWithOptions {
 
         // RuboCop: `all_block_nodes_in(body).none?` — exit if ANY block/lambda in body
         for stmt in &body_stmts {
-            if self.contains_block_or_lambda(stmt) {
+            if Self::contains_block_or_lambda(stmt) {
                 return;
             }
         }
@@ -136,7 +136,7 @@ impl Cop for RedundantReceiverInWithOptions {
 impl RedundantReceiverInWithOptions {
     /// Recursively check if any block or lambda node exists anywhere in a subtree.
     /// RuboCop exits early if `all_block_nodes_in(body).none?` is false.
-    fn contains_block_or_lambda(&self, node: &ruby_prism::Node<'_>) -> bool {
+    fn contains_block_or_lambda(node: &ruby_prism::Node<'_>) -> bool {
         // Lambda nodes (-> { ... }) are block nodes in Parser AST
         if node.as_lambda_node().is_some() {
             return true;
@@ -147,7 +147,7 @@ impl RedundantReceiverInWithOptions {
             }
             if let Some(args) = call.arguments() {
                 for arg in args.arguments().iter() {
-                    if self.contains_block_or_lambda(&arg) {
+                    if Self::contains_block_or_lambda(&arg) {
                         return true;
                     }
                 }
@@ -155,10 +155,10 @@ impl RedundantReceiverInWithOptions {
         }
         // Recurse into assignment values
         if let Some(or_write) = node.as_instance_variable_or_write_node() {
-            return self.contains_block_or_lambda(&or_write.value());
+            return Self::contains_block_or_lambda(&or_write.value());
         }
         if let Some(or_write) = node.as_local_variable_or_write_node() {
-            return self.contains_block_or_lambda(&or_write.value());
+            return Self::contains_block_or_lambda(&or_write.value());
         }
         false
     }

@@ -70,11 +70,11 @@ impl Cop for PluckInWhere {
 
 impl PluckInWhere {
     /// Find the root receiver of a chained call (e.g., `User.active` -> `User`).
-    fn root_receiver<'a>(&self, node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
+    fn root_receiver<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
         if let Some(call) = node.as_call_node() {
             if let Some(recv) = call.receiver() {
                 if recv.as_call_node().is_some() {
-                    return self.root_receiver(&recv);
+                    return Self::root_receiver(&recv);
                 }
                 return Some(recv);
             }
@@ -83,7 +83,7 @@ impl PluckInWhere {
     }
 
     fn is_const_rooted(&self, node: &ruby_prism::Node<'_>) -> bool {
-        if let Some(root) = self.root_receiver(node) {
+        if let Some(root) = Self::root_receiver(node) {
             return root.as_constant_read_node().is_some()
                 || root.as_constant_path_node().is_some();
         }

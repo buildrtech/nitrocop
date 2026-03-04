@@ -596,12 +596,12 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
-        if !self.cop.find_receiver_by_bytes(&body, checked_src, bytes) {
+        if !SafeNavigation::find_receiver_by_bytes(&body, checked_src, bytes) {
             ruby_prism::visit_unless_node(self, node);
             return;
         }
 
-        let chain_len = self.cop.chain_length_by_bytes(&body, checked_src, bytes);
+        let chain_len = SafeNavigation::chain_length_by_bytes(&body, checked_src, bytes);
         if chain_len > self.max_chain_length {
             ruby_prism::visit_unless_node(self, node);
             return;
@@ -781,17 +781,17 @@ impl SafeNavigation {
 
         // Find matching receiver using source byte comparison
         let checked_src = &bytes[checked_var_range.0..checked_var_range.1];
-        if !self.find_receiver_by_bytes(&body, checked_src, bytes) {
+        if !Self::find_receiver_by_bytes(&body, checked_src, bytes) {
             return Vec::new();
         }
 
-        let chain_len = self.chain_length_by_bytes(&body, checked_src, bytes);
+        let chain_len = Self::chain_length_by_bytes(&body, checked_src, bytes);
         if chain_len > max_chain_length {
             return Vec::new();
         }
 
         // Check if the call directly on the matched receiver is a dotless operator
-        if self.call_on_receiver_is_dotless_by_bytes(&body, checked_src, bytes) {
+        if Self::call_on_receiver_is_dotless_by_bytes(&body, checked_src, bytes) {
             return Vec::new();
         }
 
@@ -832,7 +832,6 @@ impl SafeNavigation {
     }
 
     fn find_receiver_by_bytes(
-        &self,
         node: &ruby_prism::Node<'_>,
         checked_src: &[u8],
         bytes: &[u8],
@@ -843,14 +842,13 @@ impl SafeNavigation {
                 if recv_src == checked_src {
                     return true;
                 }
-                return self.find_receiver_by_bytes(&recv, checked_src, bytes);
+                return Self::find_receiver_by_bytes(&recv, checked_src, bytes);
             }
         }
         false
     }
 
     fn chain_length_by_bytes(
-        &self,
         node: &ruby_prism::Node<'_>,
         checked_src: &[u8],
         bytes: &[u8],
@@ -861,14 +859,13 @@ impl SafeNavigation {
                 if recv_src == checked_src {
                     return 1;
                 }
-                return 1 + self.chain_length_by_bytes(&recv, checked_src, bytes);
+                return 1 + Self::chain_length_by_bytes(&recv, checked_src, bytes);
             }
         }
         0
     }
 
     fn call_on_receiver_is_dotless_by_bytes(
-        &self,
         node: &ruby_prism::Node<'_>,
         checked_src: &[u8],
         bytes: &[u8],
@@ -879,7 +876,7 @@ impl SafeNavigation {
                 if recv_src == checked_src {
                     return Self::is_dotless_operator(&call);
                 }
-                return self.call_on_receiver_is_dotless_by_bytes(&recv, checked_src, bytes);
+                return Self::call_on_receiver_is_dotless_by_bytes(&recv, checked_src, bytes);
             }
         }
         false
@@ -969,11 +966,11 @@ impl SafeNavigation {
             return Vec::new();
         }
 
-        if !self.find_receiver_by_bytes(&body, checked_src, bytes) {
+        if !Self::find_receiver_by_bytes(&body, checked_src, bytes) {
             return Vec::new();
         }
 
-        let chain_len = self.chain_length_by_bytes(&body, checked_src, bytes);
+        let chain_len = Self::chain_length_by_bytes(&body, checked_src, bytes);
         if chain_len > max_chain_length {
             return Vec::new();
         }

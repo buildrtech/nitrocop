@@ -35,47 +35,65 @@ use crate::parse::source::SourceFile;
 /// upstream spec matrix (e.g., constant-path writes and mixed multi-targets).
 pub struct ClassLength;
 
-fn check_classlike_length(
-    cop: &ClassLength,
-    source: &SourceFile,
-    diagnostics: &mut Vec<Diagnostic>,
+struct LengthSettings<'a> {
     max: usize,
     count_comments: bool,
-    count_as_one: Option<&Vec<String>>,
+    count_as_one: Option<&'a Vec<String>>,
+}
+
+struct NodeSpan<'pr> {
     start_offset: usize,
     end_offset: usize,
-    body: Option<ruby_prism::Node<'_>>,
-) {
+    body: Option<ruby_prism::Node<'pr>>,
+}
+
+fn foldable_ranges_for(
+    source: &SourceFile,
+    body: Option<&ruby_prism::Node<'_>>,
+    count_as_one: Option<&Vec<String>>,
+) -> Vec<(usize, usize)> {
     let mut foldable_ranges = Vec::new();
     if let Some(cao) = count_as_one {
         if !cao.is_empty() {
-            if let Some(body_node) = &body {
+            if let Some(body_node) = body {
                 foldable_ranges.extend(collect_foldable_ranges(source, body_node, cao));
             }
         }
     }
+    foldable_ranges
+}
 
-    let inner_ranges = body
+fn check_classlike_length(
+    cop: &ClassLength,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    settings: &LengthSettings<'_>,
+    span: NodeSpan<'_>,
+) {
+    let foldable_ranges = foldable_ranges_for(source, span.body.as_ref(), settings.count_as_one);
+
+    let inner_ranges = span
+        .body
         .as_ref()
         .map(|b| inner_classlike_ranges(source, b))
         .unwrap_or_default();
 
     let count = count_body_lines_full(
         source,
-        start_offset,
-        end_offset,
-        count_comments,
+        span.start_offset,
+        span.end_offset,
+        settings.count_comments,
         &foldable_ranges,
         &inner_ranges,
     );
 
-    if count > max {
-        let (line, column) = source.offset_to_line_col(start_offset);
+    if count > settings.max {
+        let (line, column) = source.offset_to_line_col(span.start_offset);
         diagnostics.push(cop.diagnostic(
             source,
             line,
             column,
-            format!("Class has too many lines. [{count}/{max}]"),
+            format!("Class has too many lines. [{count}/{}]", settings.max),
         ));
     }
 }
@@ -84,39 +102,28 @@ fn check_non_classlike_length(
     cop: &ClassLength,
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
-    max: usize,
-    count_comments: bool,
-    count_as_one: Option<&Vec<String>>,
-    start_offset: usize,
-    end_offset: usize,
-    body: Option<ruby_prism::Node<'_>>,
+    settings: &LengthSettings<'_>,
+    span: NodeSpan<'_>,
 ) {
-    let mut foldable_ranges = Vec::new();
-    if let Some(cao) = count_as_one {
-        if !cao.is_empty() {
-            if let Some(body_node) = &body {
-                foldable_ranges.extend(collect_foldable_ranges(source, body_node, cao));
-            }
-        }
-    }
+    let foldable_ranges = foldable_ranges_for(source, span.body.as_ref(), settings.count_as_one);
 
     // RuboCop handles `sclass` via generic code-length calculation (not the
     // class/module classlike path), so use non-classlike counting here.
     let count = count_body_lines_ex(
         source,
-        start_offset,
-        end_offset,
-        count_comments,
+        span.start_offset,
+        span.end_offset,
+        settings.count_comments,
         &foldable_ranges,
     );
 
-    if count > max {
-        let (line, column) = source.offset_to_line_col(start_offset);
+    if count > settings.max {
+        let (line, column) = source.offset_to_line_col(span.start_offset);
         diagnostics.push(cop.diagnostic(
             source,
             line,
             column,
-            format!("Class has too many lines. [{count}/{max}]"),
+            format!("Class has too many lines. [{count}/{}]", settings.max),
         ));
     }
 }
@@ -204,16 +211,21 @@ impl<'pr> Visit<'pr> for SingletonClassLengthVisitor<'_> {
     fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
         // Match RuboCop's on_sclass: skip singleton classes nested under class.
         if self.class_depth == 0 {
+            let settings = LengthSettings {
+                max: self.max,
+                count_comments: self.count_comments,
+                count_as_one: self.count_as_one.as_ref(),
+            };
             check_non_classlike_length(
                 self.cop,
                 self.source,
                 self.diagnostics,
-                self.max,
-                self.count_comments,
-                self.count_as_one.as_ref(),
-                node.class_keyword_loc().start_offset(),
-                node.end_keyword_loc().start_offset(),
-                node.body(),
+                &settings,
+                NodeSpan {
+                    start_offset: node.class_keyword_loc().start_offset(),
+                    end_offset: node.end_keyword_loc().start_offset(),
+                    body: node.body(),
+                },
             );
         }
         ruby_prism::visit_singleton_class_node(self, node);
@@ -250,18 +262,23 @@ impl Cop for ClassLength {
         let max = config.get_usize("Max", 100);
         let count_comments = config.get_bool("CountComments", false);
         let count_as_one = config.get_string_array("CountAsOne");
+        let settings = LengthSettings {
+            max,
+            count_comments,
+            count_as_one: count_as_one.as_ref(),
+        };
 
         if let Some(class_node) = node.as_class_node() {
             check_classlike_length(
                 self,
                 source,
                 diagnostics,
-                max,
-                count_comments,
-                count_as_one.as_ref(),
-                class_node.class_keyword_loc().start_offset(),
-                class_node.end_keyword_loc().start_offset(),
-                class_node.body(),
+                &settings,
+                NodeSpan {
+                    start_offset: class_node.class_keyword_loc().start_offset(),
+                    end_offset: class_node.end_keyword_loc().start_offset(),
+                    body: class_node.body(),
+                },
             );
             return;
         }
@@ -277,12 +294,12 @@ impl Cop for ClassLength {
             self,
             source,
             diagnostics,
-            max,
-            count_comments,
-            count_as_one.as_ref(),
-            call_node.location().start_offset(),
-            block_node.closing_loc().start_offset(),
-            block_node.body(),
+            &settings,
+            NodeSpan {
+                start_offset: call_node.location().start_offset(),
+                end_offset: block_node.closing_loc().start_offset(),
+                body: block_node.body(),
+            },
         );
     }
 
