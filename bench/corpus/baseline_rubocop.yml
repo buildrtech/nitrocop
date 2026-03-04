@@ -27,6 +27,8 @@ AllCops:
     - "dist/**/*"
     - "build/**/*"
     - ".git/**/*"
+    - ".bundle/**/*"
+    - ".bundles_cache/**/*"
     - "db/schema.rb"
     - "bin/**/*"
 
