@@ -3,6 +3,17 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// ## Corpus investigation (2026-03-04)
+///
+/// Corpus oracle reported FP=0, FN=3.
+///
+/// FN=3: All involve `block.call()` inside an inner block where `|block|` shadows
+/// the method's `&block` parameter. RuboCop had a bug in `shadowed_block_argument?`
+/// (only checked method body, not inner blocks) that was fixed in rubocop-performance
+/// v1.21.0 (commit 0d982851b, "[Fix #448] Fix a false positive for
+/// Performance/RedundantBlockCall"). Our vendor pins v1.26.1 which includes the fix.
+/// The corpus repos use older versions that still have this bug. No code change needed —
+/// nitrocop correctly implements v1.26.1 behavior.
 pub struct RedundantBlockCall;
 
 impl Cop for RedundantBlockCall {
