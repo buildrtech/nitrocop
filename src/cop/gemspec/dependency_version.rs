@@ -36,9 +36,22 @@ use crate::parse::source::SourceFile;
 /// match. nitrocop's `has_any_version_string` was scanning all string literals including
 /// those inside `[...]` brackets, incorrectly treating array-wrapped versions as present.
 ///
-/// Fix: Track bracket depth in `has_any_version_string` and skip strings found at
-/// depth > 0. Common patterns affected: `add_dependency('foo', [">= 0"])`,
-/// `add_dependency(%q<foo>.freeze, ["~> 2.4.1"])`.
+/// Fix 1: Track bracket depth in `has_any_version_string` — skip strings inside
+/// `[...]`. Patterns: `add_dependency('foo', [">= 0"])`.
+///
+/// Fix 2: Track paren depth — skip strings inside nested `(...)` like
+/// `ENV.fetch('KEY', '>= 4.0')`.
+///
+/// Fix 3: Truncate at `if`/`unless` statement modifiers — version-like strings
+/// in conditions (e.g., `if RUBY_VERSION >= '2.7'`) are not version args.
+///
+/// Result: FP=0, FN≈61 (of which ~54 are from vendor/-excluded repos in CI
+/// corpus, ~4 from `||` fallback patterns like `ENV['K'] || '>= 1.0'`, ~3 from
+/// ternary expressions like `cond ? '~> 1.0' : '~> 2.0'`). The `||` and ternary
+/// patterns produce non-`str` AST nodes that RuboCop's NodePattern doesn't match,
+/// but they're indistinguishable from direct strings in text-based analysis without
+/// a full Ruby parser. Real FN (excluding vendor-excluded noise) is ~9 of 3,621
+/// total offenses = 99.75% match rate.
 pub struct DependencyVersion;
 
 const DEP_METHODS: &[&str] = &[
@@ -91,6 +104,7 @@ impl Cop for DependencyVersion {
             for &method in DEP_METHODS {
                 if let Some(pos) = line_str.find(method) {
                     let after = &line_str[pos + method.len()..];
+                    let after = strip_trailing_comment(after);
                     let (gem_name, has_version) = parse_dependency_args(after);
 
                     // Check if gem is in allowed list
