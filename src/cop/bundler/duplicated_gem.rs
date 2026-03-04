@@ -11,79 +11,38 @@ pub struct DuplicatedGem;
 
 /// ## Corpus investigation (2026-03-03)
 ///
-/// Corpus oracle reported FP=6, FN=6.
+/// ### Round 2 — FP=4, FN=11 (after previous fixes in d10cfe6)
 ///
-/// ### FP=6 — FIXED (commit d10cfe6)
+/// **FP=4 root causes:**
 ///
-/// Three root causes, all in the conditional tracking visitor:
+/// 1. **Block `if...end` (no else) treated as modifier if** (graphql-ruby, 1 FP):
+///    `if RUBY_VERSION >= "3.2.0"; gem "minitest-mock"; gem "minitest-mock"; end`
+///    was treated as modifier (transparent) because `subsequent().is_none()` is true
+///    for BOTH modifier `gem 'x' if cond` AND block `if cond; ...; end` without else.
+///    Fix: use `end_keyword_loc().is_none()` — block `if...end` always has an end
+///    keyword; modifier `gem 'x' if cond` does not.
 ///
-/// 1. **Modifier if/unless created spurious conditional roots** (rswag, 1 FP):
-///    `gem 'concurrent-ruby' if rails_version.segments[1] < 2` inside a `when 7`
-///    branch. The modifier `if` was wrapped in an IfNode which got its own
-///    conditional root Y, shadowing the outer case/when root X. Since roots
-///    differed across branches, all gems were flagged as duplicates.
-///    Fix: modifier if/unless (no else/elsif) is now BeginLike (transparent).
+/// 2. **Gems in conditional + gems in non-conditional group** (discourse, fat_free_crm,
+///    pact-ruby, 3 FP): one gem inside `if...end` / `case-when`, another in a top-level
+///    `group` block. Since blocks were BeginLike (transparent), the group gem inherited
+///    the conditional root from a parent scope, causing both gems to share a root and
+///    get conditional exemption. Fix: blocks are now opaque (`Block` kind); only
+///    StatementsNode/BeginNode/ElseNode are transparent. Gems inside blocks don't see
+///    through to outer conditional roots.
 ///
-/// 2. **Block calls broke the ancestor chain** (discourse 3 FP, pact-ruby 1 FP):
-///    `gem "faker"` inside `else { group :dev, :test do ... end }` got
-///    conditional_root=None because the `group` CallNode/BlockNode pushed an
-///    AncestorKind::Other frame, which made `nearest_conditional_root` return None.
-///    Fix: all frames now default to BeginLike; only if/case/when override their kind.
+/// **FN=11 root causes:**
 ///
-/// 3. **Same pattern as #2** (fat_free_crm 1 FP): `gem 'sqlite3'` inside a `group`
-///    block had its conditional root broken by the group block frame.
+/// 1. **Gems inside `git` blocks within case/when** (ransack 8 FN, mobility 2 FN):
+///    `git 'url' do; gem 'x'; end` inside a when branch. The gem is NOT a direct
+///    child of the when branch (it's nested inside a git block). RuboCop's
+///    `within_conditional?` uses `branch.child_nodes.include?(node)` which only
+///    checks direct children. Fix: track `blocks_above_conditional` count; require
+///    it to be 0 for conditional exemption.
 ///
-/// ### FN=6 — PARTIALLY FIXED (5 of 6 fixed, 1 remaining)
-///
-/// **5 FN from sentry-ruby (FIXED in commit d10cfe6):**
-/// `sentry-rails/Gemfile` has 6 `gem "sqlite3"` declarations in an if/elsif/else
-/// chain where the else branch contains a nested if/else:
-/// ```text
-/// if rails >= 8.1      → sqlite3 ~> 2.1.1   (root A)
-/// elsif rails >= 8.0   → sqlite3 ~> 2.1.1   (root A)
-/// elsif rails >= 7.1   → sqlite3 ~> 1.7.3   (root A)
-/// elsif rails >= 6.1   → sqlite3 ~> 1.7.3   (root A)
-/// else
-///   if rails >= 6.0    → sqlite3 ~> 1.4.0   (was root A due to leak, now root B)
-///   else               → sqlite3 ~> 1.3.0   (was root A due to leak, now root B)
-/// ```
-/// Bug: `pending_elsif_root` was set to Some(A) for the elsif chain but never
-/// cleared when entering the else clause. The nested if inside else inherited
-/// root A from the leaked pending value, making ALL 6 gems share root A →
-/// `is_conditional_declaration` was true → no duplicates reported.
-/// Fix: clear `pending_elsif_root` when subsequent is not an IfNode (i.e., else).
-/// Now the nested if gets root B, roots differ across the group, and all 5
-/// duplicates (of the first declaration) are correctly flagged.
-///
-/// **1 FN from Casecommons/pg_search — REMAINING:**
-/// ```ruby
-/// if ENV["ACTIVE_RECORD_BRANCH"]
-///   gem "activerecord", git: "https://github.com/rails/rails.git", branch: ...
-/// end
-/// gem "activerecord", ENV.fetch("ACTIVE_RECORD_VERSION", nil) if ENV[...]
-/// ```
-/// Line 11 has `gem "activerecord"` inside `if ENV["ACTIVE_RECORD_BRANCH"]` (root X).
-/// Line 15 has `gem "activerecord"` with a modifier `if` at top level (root None,
-/// since modifier ifs are now transparent). These have different conditional roots
-/// (Some(X) vs None) → `is_conditional_declaration` is false → nitrocop SHOULD flag
-/// line 15 as duplicate. But the FN says RuboCop flags it and nitrocop doesn't.
-///
-/// Possible explanation: `gem_name_from_call` requires the first argument to be a
-/// string literal (via `util::string_value`). Line 15's first arg IS a string literal
-/// `"activerecord"`, so it should match. However, line 15 also has an inline comment
-/// `# standard:disable Bundler/DuplicatedGem` — nitrocop's disable-comment handling
-/// may be suppressing the offense. RuboCop does NOT recognize `standard:disable` as
-/// a valid disable directive, so RuboCop still reports the offense. If this is the
-/// cause, the fix is to only recognize `rubocop:disable` (and `nitrocop:disable`),
-/// not `standard:disable`.
-///
-/// Alternatively, the modifier-if transparency fix may have changed the conditional
-/// root assignment such that both declarations now share the same root (making
-/// `is_conditional_declaration` true and suppressing the report). The top-level
-/// `if ENV["ACTIVE_RECORD_BRANCH"]` around line 11 gives it root X. Line 15's
-/// modifier `if ENV["ACTIVE_RECORD_VERSION"]` is transparent, so it inherits from
-/// the top-level scope (None). Different roots → should be flagged. Needs a debugger
-/// trace to confirm which path is taken at runtime.
+/// 2. **`standard:disable` comment suppression** (pg_search 1 FN):
+///    `# standard:disable Bundler/DuplicatedGem` was recognized as a disable
+///    directive, suppressing the offense. RuboCop doesn't recognize `standard:disable`.
+///    This is a disable-comment handling issue, not a cop logic issue.
 impl Cop for DuplicatedGem {
     fn name(&self) -> &'static str {
         "Bundler/DuplicatedGem"
@@ -131,10 +90,17 @@ impl Cop for DuplicatedGem {
             }
 
             let first = &declarations[0];
+            // Conditional exemption requires:
+            // 1. All gems share the same conditional root
+            // 2. All gems are direct children of the conditional branches (no
+            //    intervening blocks like git/group/source/platforms)
+            // This matches RuboCop's `within_conditional?` which uses
+            // `branch.child_nodes.include?(node)` — direct children only.
             let is_conditional_declaration = first.conditional_root.is_some()
-                && declarations
-                    .iter()
-                    .all(|decl| decl.conditional_root == first.conditional_root);
+                && declarations.iter().all(|decl| {
+                    decl.conditional_root == first.conditional_root
+                        && decl.blocks_above_conditional == 0
+                });
             if is_conditional_declaration {
                 continue;
             }
@@ -157,11 +123,21 @@ impl Cop for DuplicatedGem {
 
 #[derive(Clone, Copy)]
 enum AncestorKind {
-    Other,
+    /// Opaque block — breaks direct-child relationship for conditional exemption.
+    /// Used for CallNode, BlockNode with multi-statement body, and similar.
+    Block,
+    /// Transparent wrapper — does not break the conditional ancestor chain.
+    /// Used for StatementsNode, BeginNode, ElseNode, ProgramNode, single-stmt BlockNode.
     BeginLike,
-    If { root_id: usize },
-    Case { root_id: usize },
-    When { root_id: usize },
+    If {
+        root_id: usize,
+    },
+    Case {
+        root_id: usize,
+    },
+    When {
+        root_id: usize,
+    },
 }
 
 struct AncestorFrame {
@@ -173,6 +149,9 @@ struct GemDeclaration {
     line: usize,
     column: usize,
     conditional_root: Option<usize>,
+    /// Number of opaque Block frames between this gem and its nearest conditional root.
+    /// Must be 0 for conditional exemption (matches RuboCop's direct-child check).
+    blocks_above_conditional: usize,
 }
 
 struct GemDeclarationVisitor<'a> {
@@ -184,22 +163,27 @@ struct GemDeclarationVisitor<'a> {
 }
 
 impl GemDeclarationVisitor<'_> {
-    fn nearest_conditional_root(&self) -> Option<usize> {
+    /// Find the nearest conditional root and count opaque Block frames between
+    /// the current position and that root.
+    fn nearest_conditional_root(&self) -> (Option<usize>, usize) {
         let ancestors = self
             .ancestors
             .get(..self.ancestors.len().saturating_sub(1))
             .unwrap_or(&[]);
+        let mut blocks_above = 0;
         for frame in ancestors.iter().rev() {
             match frame.kind {
-                // Prism wraps branch bodies in `StatementsNode`; Ruby AST uses `begin`.
                 AncestorKind::BeginLike => continue,
-                AncestorKind::If { root_id } => return Some(root_id),
-                AncestorKind::When { root_id } => return Some(root_id),
-                AncestorKind::Case { root_id } => return Some(root_id),
-                AncestorKind::Other => return None,
+                AncestorKind::Block => {
+                    blocks_above += 1;
+                    continue;
+                }
+                AncestorKind::If { root_id } => return (Some(root_id), blocks_above),
+                AncestorKind::When { root_id } => return (Some(root_id), blocks_above),
+                AncestorKind::Case { root_id } => return (Some(root_id), blocks_above),
             }
         }
-        None
+        (None, blocks_above)
     }
 
     fn allocate_conditional_root_id(&mut self) -> usize {
@@ -217,15 +201,55 @@ fn gem_name_from_call(call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
     util::string_value(&first_arg)
 }
 
+/// Check if a node is a "transparent" wrapper that should not create an
+/// opaque block frame.
+///
+/// **Why CallNode is transparent:** In Parser gem's AST, a method call with a
+/// block (e.g., `group :dev do gem "x" end`) is represented as a single
+/// `(block (send ...) (args) body)` node. The `send` node is a child of the
+/// `block` node, not a parent. In Prism, the structure is inverted: CallNode
+/// contains a BlockNode child. Making CallNode transparent ensures that the
+/// opaque/transparent decision is made at the BlockNode level (matching
+/// Parser gem's structure).
+///
+/// **Why single-statement BlockNode is transparent:** In Parser gem, a block
+/// with a single-statement body has the statement as a direct child_node of
+/// the block (not wrapped in `begin`). RuboCop's `branch.child_nodes.include?`
+/// check therefore includes gems in single-statement blocks as direct children.
+fn is_transparent_node(node: &ruby_prism::Node<'_>) -> bool {
+    if node.as_statements_node().is_some()
+        || node.as_begin_node().is_some()
+        || node.as_else_node().is_some()
+        || node.as_program_node().is_some()
+        || node.as_call_node().is_some()
+        || node.as_arguments_node().is_some()
+    {
+        return true;
+    }
+
+    // Single-statement block bodies are transparent in Parser gem's AST.
+    if let Some(block_node) = node.as_block_node() {
+        let is_single_statement = block_node
+            .body()
+            .and_then(|b| b.as_statements_node())
+            .is_some_and(|s| s.body().len() == 1);
+        return is_single_statement;
+    }
+
+    false
+}
+
 impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
-    fn visit_branch_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {
-        // Default to BeginLike (transparent). Conditional nodes (if, case, when)
-        // override their frame kind in their specific visit methods. Non-conditional
-        // constructs like blocks, calls, and DSL methods (group, source, platforms)
-        // should not break the conditional ancestor chain.
-        self.ancestors.push(AncestorFrame {
-            kind: AncestorKind::BeginLike,
-        });
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        // Transparent wrappers (StatementsNode, BeginNode, ElseNode, ProgramNode,
+        // single-statement BlockNode) get BeginLike. Everything else gets Block
+        // (opaque). Conditional nodes override their frame in specific visit methods.
+        let kind = if is_transparent_node(&node) {
+            AncestorKind::BeginLike
+        } else {
+            AncestorKind::Block
+        };
+        self.ancestors.push(AncestorFrame { kind });
     }
 
     fn visit_branch_node_leave(&mut self) {
@@ -233,10 +257,10 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
     }
 
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        // Modifier if (no else/elsif) is transparent — don't create a conditional root.
-        // This prevents `gem 'x' if cond` inside a case/when from shadowing the
-        // outer conditional root.
-        let is_modifier = node.subsequent().is_none();
+        // Modifier if has no end keyword: `gem 'x' if cond`
+        // Block if always has an end keyword: `if cond; ...; end`
+        // Only modifier if should be transparent — block if creates a conditional root.
+        let is_modifier = node.end_keyword_loc().is_none();
         if is_modifier {
             if let Some(frame) = self.ancestors.last_mut() {
                 frame.kind = AncestorKind::BeginLike;
@@ -278,8 +302,8 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
     }
 
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
-        // Modifier unless (no else) is transparent — same as modifier if.
-        let is_modifier = node.else_clause().is_none();
+        // Modifier unless has no end keyword — same logic as modifier if.
+        let is_modifier = node.end_keyword_loc().is_none();
         if is_modifier {
             if let Some(frame) = self.ancestors.last_mut() {
                 frame.kind = AncestorKind::BeginLike;
@@ -333,7 +357,7 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
         if let Some(frame) = self.ancestors.last_mut() {
             frame.kind = case_root_id
                 .map(|root_id| AncestorKind::When { root_id })
-                .unwrap_or(AncestorKind::Other);
+                .unwrap_or(AncestorKind::Block);
         }
         ruby_prism::visit_when_node(self, node);
     }
@@ -342,12 +366,13 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
         if let Some(gem_name) = gem_name_from_call(node) {
             let loc = node.message_loc().unwrap_or(node.location());
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            let conditional_root = self.nearest_conditional_root();
+            let (conditional_root, blocks_above_conditional) = self.nearest_conditional_root();
             self.declarations.push(GemDeclaration {
                 gem_name,
                 line,
                 column,
                 conditional_root,
+                blocks_above_conditional,
             });
         }
         ruby_prism::visit_call_node(self, node);
