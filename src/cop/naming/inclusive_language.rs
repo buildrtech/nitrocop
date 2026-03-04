@@ -93,6 +93,7 @@ impl Cop for InclusiveLanguage {
         }
 
         let symbol_ranges = collect_symbol_ranges(parse_result);
+        let interpolation_code_ranges = collect_interpolation_code_ranges(parse_result);
 
         // Check filepath
         if check_filepaths {
@@ -143,6 +144,7 @@ impl Cop for InclusiveLanguage {
                             check_symbols,
                             should_check_code,
                             &symbol_ranges,
+                            &interpolation_code_ranges,
                         );
                         if should_flag {
                             let msg = format_message(&term.name, &term.suggestions);
@@ -167,6 +169,7 @@ impl Cop for InclusiveLanguage {
                             check_symbols,
                             should_check_code,
                             &symbol_ranges,
+                            &interpolation_code_ranges,
                         );
 
                         if should_flag
@@ -361,6 +364,7 @@ fn classify_match(
     check_symbols: bool,
     should_check_code: bool,
     symbol_ranges: &[(usize, usize)],
+    interpolation_code_ranges: &[(usize, usize)],
 ) -> bool {
     let in_code = code_map.is_code(byte_offset);
     let in_string = !code_map.is_not_string(byte_offset);
@@ -370,6 +374,14 @@ fn classify_match(
     if in_comment {
         check_comments
     } else if in_string {
+        if in_ranges(interpolation_code_ranges, byte_offset) {
+            // RuboCop checks tokens inside string/heredoc interpolation (`#{...}`).
+            if in_ranges(symbol_ranges, byte_offset) {
+                check_symbols
+            } else {
+                should_flag_code_token(line, line_pos, match_len, should_check_code)
+            }
+        } else
         // In string_ranges: could be string, heredoc, regex, %i/%w, or symbol.
         // Symbol literal ranges are checked via parse_result ranges.
         if in_ranges(symbol_ranges, byte_offset) {
@@ -380,13 +392,22 @@ fn classify_match(
     } else {
         // In code — skip hash labels (tLABEL in RuboCop, not checked)
         // and tFID tokens (identifiers ending in ! or ?) except method definitions.
-        if is_hash_label(line, line_pos, match_len)
-            || (is_fid_token(line, line_pos) && !is_method_definition_name(line, line_pos))
-        {
-            false
-        } else {
-            should_check_code
-        }
+        should_flag_code_token(line, line_pos, match_len, should_check_code)
+    }
+}
+
+fn should_flag_code_token(
+    line: &[u8],
+    line_pos: usize,
+    match_len: usize,
+    should_check_code: bool,
+) -> bool {
+    if is_hash_label(line, line_pos, match_len)
+        || (is_fid_token(line, line_pos) && !is_method_definition_name(line, line_pos))
+    {
+        false
+    } else {
+        should_check_code
     }
 }
 
@@ -495,6 +516,36 @@ fn collect_symbol_ranges(parse_result: &ruby_prism::ParseResult<'_>) -> Vec<(usi
     }
 
     let mut collector = SymbolRangeCollector { ranges: Vec::new() };
+    collector.visit(&parse_result.node());
+    collector.ranges.sort_unstable();
+    merge_ranges(collector.ranges)
+}
+
+fn collect_interpolation_code_ranges(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> Vec<(usize, usize)> {
+    struct InterpolationCollector {
+        ranges: Vec<(usize, usize)>,
+    }
+
+    impl<'pr> Visit<'pr> for InterpolationCollector {
+        fn visit_embedded_statements_node(
+            &mut self,
+            node: &ruby_prism::EmbeddedStatementsNode<'pr>,
+        ) {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+            ruby_prism::visit_embedded_statements_node(self, node);
+        }
+
+        fn visit_embedded_variable_node(&mut self, node: &ruby_prism::EmbeddedVariableNode<'pr>) {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+            ruby_prism::visit_embedded_variable_node(self, node);
+        }
+    }
+
+    let mut collector = InterpolationCollector { ranges: Vec::new() };
     collector.visit(&parse_result.node());
     collector.ranges.sort_unstable();
     merge_ranges(collector.ranges)
