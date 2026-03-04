@@ -3,6 +3,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Detects `bind(obj).call(args)` that can be replaced with `bind_call(obj, args)`.
+///
+/// Fixed: bare `bind(object)` without an explicit receiver was rejected (receiver().is_none()
+/// guard), causing FN on patterns like `bind(object).call(*args, &block)`. RuboCop's NodePattern
+/// uses `_` which matches nil receivers. Also fixed: block pass arguments (`&block`) on the
+/// `.call()` side were not included in the suggested replacement message because Prism puts them
+/// in `call.block()` rather than `call.arguments()`.
 pub struct BindCall;
 
 impl Cop for BindCall {
@@ -52,11 +59,6 @@ impl Cop for BindCall {
             return;
         }
 
-        // bind must have a receiver (not bare `bind(...)`)
-        if bind_call.receiver().is_none() {
-            return;
-        }
-
         // Extract bind argument source
         let bind_args = match bind_call.arguments() {
             Some(a) => a,
@@ -73,22 +75,28 @@ impl Cop for BindCall {
         )
         .unwrap_or("obj");
 
-        // Extract call arguments source
-        let call_args_src = if let Some(call_args) = outer_call.arguments() {
-            let args: Vec<_> = call_args
-                .arguments()
-                .iter()
-                .map(|a| {
-                    std::str::from_utf8(
-                        &bytes[a.location().start_offset()..a.location().end_offset()],
-                    )
-                    .unwrap_or("?")
-                })
-                .collect();
-            args.join(", ")
-        } else {
-            String::new()
-        };
+        // Extract call arguments source (positional args + block pass)
+        let mut call_arg_parts: Vec<String> = Vec::new();
+        if let Some(call_args) = outer_call.arguments() {
+            for a in call_args.arguments().iter() {
+                let s = std::str::from_utf8(
+                    &bytes[a.location().start_offset()..a.location().end_offset()],
+                )
+                .unwrap_or("?");
+                call_arg_parts.push(s.to_string());
+            }
+        }
+        // Include block pass argument (&block) if present
+        if let Some(block) = outer_call.block() {
+            if block.as_block_argument_node().is_some() {
+                let s = std::str::from_utf8(
+                    &bytes[block.location().start_offset()..block.location().end_offset()],
+                )
+                .unwrap_or("&block");
+                call_arg_parts.push(s.to_string());
+            }
+        }
+        let call_args_src = call_arg_parts.join(", ");
 
         let comma = if call_args_src.is_empty() { "" } else { ", " };
         let msg = format!(

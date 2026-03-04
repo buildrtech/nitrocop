@@ -12,3 +12,5 @@ umethod.bind(a).call(*p)
         ^^^^ Performance/BindCall: Use `bind_call(a, *p)` instead of `bind(a).call(*p)`.
 CONSTANT.bind(obj).call
          ^^^^ Performance/BindCall: Use `bind_call(obj)` instead of `bind(obj).call()`.
+bind(object).call(*args, &block)
+^^^^ Performance/BindCall: Use `bind_call(object, *args, &block)` instead of `bind(object).call(*args, &block)`.
