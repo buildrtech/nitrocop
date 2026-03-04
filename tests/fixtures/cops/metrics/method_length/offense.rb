@@ -94,21 +94,6 @@ def heredoc_assignment_method
   SQL
 end
 
-def interpolated_heredoc_method
-^^^ Metrics/MethodLength: Method has too many lines. [11/10]
-  <<~TEXT
-    line1
-    line2
-    line3
-    line4
-    line5
-    line6
-    line7
-    line8
-    #{dynamic_value}
-  TEXT
-end
-
 # Receiver-qualified define_method should also be checked.
 builder.define_method(:generated_method) do
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Metrics/MethodLength: Method has too many lines. [11/10]

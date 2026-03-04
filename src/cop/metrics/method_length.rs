@@ -32,6 +32,21 @@ use crate::parse::source::SourceFile;
 /// In Parser AST, bare heredoc bodies are `str`/`dstr` nodes whose source range
 /// is only the opener line (`<<~SQL`), so RuboCop counts them as one line.
 /// nitrocop previously counted full heredoc content lines for this shape.
+///
+/// Follow-up fixes in this batch:
+/// - Handle endless methods (`def foo = ...`) instead of skipping all defs
+///   without `end`.
+/// - Count `define_method` blocks even when the send has a receiver
+///   (`klass.define_method`, `mod.define_method`), matching RuboCop's
+///   `on_block` + `node.method?(:define_method)` behavior.
+///
+/// Local corpus rerun comparison against unchanged baseline binary:
+/// only 5 repos changed, all in the expected FN direction (+6 total offenses):
+/// `ruby__typeprof` (+2), `refinery__refinerycms` (+1), `natalie-lang__natalie` (+1),
+/// `opal__opal` (+1), `theforeman__foreman` (+1).
+///
+/// Known remaining FN examples from corpus oracle: `chef` (powershell wrapper)
+/// and `jruby` (`test_lje_structure`).
 pub struct MethodLength;
 
 /// Parsed config values for MethodLength.
@@ -390,20 +405,10 @@ fn is_heredoc_node(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
     }
 
     if let Some(s) = node.as_interpolated_string_node() {
-        let is_heredoc = s
+        return s
             .opening_loc()
             .map(|o| source.as_bytes()[o.start_offset()..o.end_offset()].starts_with(b"<<"))
             .unwrap_or(false);
-        if !is_heredoc {
-            return false;
-        }
-
-        // Keep the one-line special-case only for plain heredocs. Interpolated
-        // heredocs (`#{...}` parts present) are counted by RuboCop as multiline.
-        return !s
-            .parts()
-            .iter()
-            .any(|part| part.as_embedded_statements_node().is_some());
     }
 
     false
