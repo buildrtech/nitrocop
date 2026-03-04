@@ -181,7 +181,22 @@ fn count_method_lines(
     // count_body_lines_ex counts from start_line+1 to end_line-1, so we need
     // start_line = body_first_line - 1. We achieve this by using the offset of
     // the line just before the body's first line.
-    let (body_start_line, _) = source.offset_to_line_col(body.location().start_offset());
+    //
+    // For methods with rescue/ensure, Prism wraps the body in a BeginNode whose
+    // location() starts at the def keyword (not the first statement). We must
+    // dig into the BeginNode's children to find the actual first body line.
+    let first_content_offset = if let Some(begin) = body.as_begin_node() {
+        begin
+            .statements()
+            .and_then(|s| s.body().iter().next())
+            .map(|n| n.location().start_offset())
+            .or_else(|| begin.rescue_clause().map(|r| r.location().start_offset()))
+            .or_else(|| begin.ensure_clause().map(|e| e.location().start_offset()))
+            .unwrap_or(body.location().start_offset())
+    } else {
+        body.location().start_offset()
+    };
+    let (body_start_line, _) = source.offset_to_line_col(first_content_offset);
     let effective_start_offset = if body_start_line > 1 {
         // Use offset of the line before the body's first line
         source
@@ -462,19 +477,37 @@ mod tests {
     }
 
     #[test]
-    fn reduced_fp_method_with_rescue() {
+    fn method_with_ensure_exact_boundary() {
         use crate::testutil::run_cop_full;
-        // From corpus FP: method with inline rescue, 10 body lines should NOT fire (Max=10)
-        let source = b"module ActionCable\n  module Connection\n    class Subscriptions\n      def initialize(connection)\n        case data[\"command\"]\n        when \"subscribe\"   then add data\n        when \"unsubscribe\" then remove data\n        when \"message\"     then perform_action data\n        else\n          logger.error \"msg\"\n        end\n      rescue Exception => e\n        handle(e)\n        logger.error \"msg2\"\n      end\n      def unsubscribe_from_all\n          if subscription = subscriptions[data[\"identifier\"]]\n          end\n        end\n    end\n  end\nend\n";
+        // From corpus FP: method with ensure, exactly 10 body lines
+        // Body: old_values={}, each do, send, send, end, yield, ensure, each do, send, end = 10
+        let source = b"def swap(klass, new_values)\n  old_values = {}\n  new_values.each do |key, value|\n    old_values[key] = klass.public_send key\n    klass.public_send key\n  end\n  yield\nensure\n  old_values.each do |key, value|\n    klass.public_send key\n  end\nend\n";
         let diags = run_cop_full(&MethodLength, source);
-        // Body lines: case, when, when, when, else, logger, end, rescue, handle, logger = 10
-        // Should NOT fire (10 <= Max:10)
         for d in &diags {
             eprintln!("  DIAG: {} at line {}", d.message, d.location.line);
         }
         assert!(
-            diags.iter().all(|d| !d.message.contains("initialize")),
-            "initialize with 10 body lines should not fire (Max:10)"
+            diags.is_empty(),
+            "10 body lines with ensure should NOT fire (Max:10)"
+        );
+    }
+
+    #[test]
+    fn method_with_ensure_inside_class() {
+        use crate::testutil::run_cop_full;
+        // When a method with ensure is inside a class, the BeginNode's location
+        // starts at the def keyword, not the first statement. This caused an
+        // off-by-one: body_start_line == def_line, effective_start becomes the
+        // line BEFORE def, making us count the def line as a body line.
+        let source = b"class Foo\n  def with_adapter_method_tracking(method_name, tracker)\n    original = MultiJson.method(method_name)\n    silence_warnings do\n      MultiJson.define_singleton_method(method_name) do\n        tracker.call\n        original.call\n      end\n    end\n    yield\n  ensure\n    silence_warnings { MultiJson.define_singleton_method(method_name, original) }\n  end\nend\n";
+        // Body: lines 3-12 = original, silence do, define do, call, call, end, end, yield, ensure, silence = 10 lines
+        let diags = run_cop_full(&MethodLength, source);
+        for d in &diags {
+            eprintln!("  DIAG: {} at line {}", d.message, d.location.line);
+        }
+        assert!(
+            diags.is_empty(),
+            "10 body lines with ensure inside class should NOT fire (Max:10)"
         );
     }
 }
