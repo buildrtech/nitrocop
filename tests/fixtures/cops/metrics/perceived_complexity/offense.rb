@@ -91,3 +91,41 @@ def iterating_and_index_or(values)
   values.map! { |v| v.to_s }
   values
 end
+
+# define_method blocks should be treated like def
+define_method(:complex_block) do |a|
+^^^ Metrics/PerceivedComplexity: Perceived complexity for complex_block is too high. [9/8]
+  if a == 1
+    1
+  else
+    0
+  end
+  if a == 2
+    2
+  else
+    0
+  end
+  if a == 3
+    3
+  else
+    0
+  end
+  if a == 4
+    4
+  else
+    0
+  end
+end
+
+# block_pass (&:method) should count toward complexity in iterating methods
+def method_with_block_pass(items)
+^^^ Metrics/PerceivedComplexity: Perceived complexity for method_with_block_pass is too high. [9/8]
+  items.map(&:to_s)
+  items.select(&:valid?)
+  items.reject(&:blank?)
+  items.flat_map(&:children)
+  items.each(&:process)
+  items.any?(&:active?)
+  items.all?(&:ready?)
+  items.detect(&:present?)
+end

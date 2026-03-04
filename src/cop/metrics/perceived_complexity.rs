@@ -219,7 +219,7 @@ impl PerceivedCounter {
                 self.complexity += 1;
             }
 
-            // CallNode: count &. (safe navigation) and iterating blocks
+            // CallNode: count &. (safe navigation) and iterating blocks/block_pass
             ruby_prism::Node::CallNode { .. } => {
                 if let Some(call) = node.as_call_node() {
                     // Safe navigation (&.) counts, but discount repeated &. on the same lvar
@@ -230,8 +230,10 @@ impl PerceivedCounter {
                     {
                         self.complexity += 1;
                     }
-                    // Iterating block counts
-                    if call.block().is_some_and(|b| b.as_block_node().is_some()) {
+                    // Iterating block or block_pass counts
+                    if call.block().is_some_and(|b| {
+                        b.as_block_node().is_some() || b.as_block_argument_node().is_some()
+                    }) {
                         let method_name = call.name().as_slice();
                         if KNOWN_ITERATING_METHODS.contains(&method_name) {
                             self.complexity += 1;
@@ -326,17 +328,66 @@ impl Cop for PerceivedComplexity {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let def_node = match node.as_def_node() {
-            Some(d) => d,
-            None => return,
-        };
+        if let Some(def_node) = node.as_def_node() {
+            let body = match def_node.body() {
+                Some(b) => b,
+                None => return,
+            };
+            let method_name = def_node.name().as_slice();
+            let start_offset = def_node.def_keyword_loc().start_offset();
+            self.check_complexity(
+                source,
+                config,
+                diagnostics,
+                method_name,
+                &body,
+                start_offset,
+            );
+        } else if let Some(call_node) = node.as_call_node() {
+            // Handle define_method(:name) do...end
+            if call_node.name().as_slice() == b"define_method" && call_node.receiver().is_none() {
+                if let Some(block) = call_node.block() {
+                    if let Some(block_node) = block.as_block_node() {
+                        let method_name = match extract_define_method_name(&call_node) {
+                            Some(name) => name,
+                            None => return,
+                        };
+                        let body = match block_node.body() {
+                            Some(b) => b,
+                            None => return,
+                        };
+                        let start_offset = call_node.location().start_offset();
+                        self.check_complexity(
+                            source,
+                            config,
+                            diagnostics,
+                            method_name.as_bytes(),
+                            &body,
+                            start_offset,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
 
+impl PerceivedComplexity {
+    fn check_complexity(
+        &self,
+        source: &SourceFile,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        method_name_bytes: &[u8],
+        body: &ruby_prism::Node<'_>,
+        start_offset: usize,
+    ) {
         let max = config.get_usize("Max", 8);
 
         // AllowedMethods / AllowedPatterns: skip methods matching these
         let allowed_methods = config.get_string_array("AllowedMethods");
         let allowed_patterns = config.get_string_array("AllowedPatterns");
-        let method_name_str = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
+        let method_name_str = std::str::from_utf8(method_name_bytes).unwrap_or("");
         if let Some(allowed) = &allowed_methods {
             if allowed.iter().any(|m| m == method_name_str) {
                 return;
@@ -345,24 +396,18 @@ impl Cop for PerceivedComplexity {
         if let Some(patterns) = &allowed_patterns {
             if patterns
                 .iter()
-                .any(|p| method_name_str.contains(p.as_str()))
+                .any(|p| regex::Regex::new(p).is_ok_and(|re| re.is_match(method_name_str)))
             {
                 return;
             }
         }
 
-        let body = match def_node.body() {
-            Some(b) => b,
-            None => return,
-        };
-
         let mut counter = PerceivedCounter::default();
-        counter.visit(&body);
+        counter.visit(body);
 
         let score = 1 + counter.complexity;
         if score > max {
-            let method_name = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("unknown");
-            let start_offset = def_node.def_keyword_loc().start_offset();
+            let method_name = std::str::from_utf8(method_name_bytes).unwrap_or("unknown");
             let (line, column) = source.offset_to_line_col(start_offset);
             diagnostics.push(self.diagnostic(
                 source,
@@ -372,6 +417,20 @@ impl Cop for PerceivedComplexity {
             ));
         }
     }
+}
+
+/// Extract the method name from a `define_method` call's first argument.
+fn extract_define_method_name(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    let args = call.arguments()?;
+    let first = args.arguments().iter().next()?;
+
+    if let Some(sym) = first.as_symbol_node() {
+        return Some(String::from_utf8_lossy(sym.unescaped()).into_owned());
+    }
+    if let Some(s) = first.as_string_node() {
+        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
+    }
+    None
 }
 
 #[cfg(test)]
@@ -396,5 +455,65 @@ mod tests {
             "Should fire with Max:1 on method with if/else"
         );
         assert!(diags[0].message.contains("/1]"));
+    }
+
+    #[test]
+    fn allowed_patterns_uses_regex() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                ("Max".into(), serde_yml::Value::Number(1.into())),
+                (
+                    "AllowedPatterns".into(),
+                    serde_yml::Value::Sequence(vec![serde_yml::Value::String("^complex".into())]),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        // Method matching the regex pattern should be skipped
+        let source = b"def complex_method\n  if x\n    y\n  else\n    z\n  end\nend\n";
+        let diags = run_cop_full_with_config(&PerceivedComplexity, source, config);
+        assert!(
+            diags.is_empty(),
+            "Should not fire on method matching AllowedPatterns regex"
+        );
+    }
+
+    #[test]
+    fn define_method_block_counted() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(1.into()))]),
+            ..CopConfig::default()
+        };
+        let source = b"define_method(:foo) do\n  if x\n    y\n  else\n    z\n  end\nend\n";
+        let diags = run_cop_full_with_config(&PerceivedComplexity, source, config);
+        assert!(
+            !diags.is_empty(),
+            "Should fire on define_method block with complexity"
+        );
+        assert!(diags[0].message.contains("foo"));
+    }
+
+    #[test]
+    fn block_pass_counted() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(1.into()))]),
+            ..CopConfig::default()
+        };
+        // base 1 + map(&:to_s) 1 = 2 > Max:1
+        let source = b"def foo(items)\n  items.map(&:to_s)\nend\n";
+        let diags = run_cop_full_with_config(&PerceivedComplexity, source, config);
+        assert!(
+            !diags.is_empty(),
+            "Should count block_pass (&:method) in iterating methods"
+        );
     }
 }

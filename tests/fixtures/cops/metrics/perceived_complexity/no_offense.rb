@@ -99,3 +99,18 @@ def method_with_loop
     end
   end
 end
+
+# define_method with simple body should not fire
+define_method(:simple_block) do |x|
+  if x
+    1
+  end
+end
+
+# block_pass on non-iterating method should not count
+def method_with_non_iterating_block_pass(items)
+  items.send(&:to_s)
+  if items.empty?
+    1
+  end
+end
