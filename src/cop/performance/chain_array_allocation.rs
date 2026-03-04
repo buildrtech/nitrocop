@@ -3,10 +3,20 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03-03):
+/// FP fix: Inner ALWAYS_RETURNS_NEW_ARRAY methods with both a block AND positional args
+/// (e.g., `Parallel.map(items) { }`) are custom methods, not Array#map. RuboCop's NodePattern
+/// `(any_block (send _ :method) ...)` requires the inner send to have NO args when blocked.
+/// FN fix: Added operator methods `*`, `+`, `-`, `|` to ALWAYS_RETURNS_NEW_ARRAY to match
+/// RuboCop's list (these return new arrays and the chained mutation can be used instead).
 pub struct ChainArrayAllocation;
 
 /// Methods that ALWAYS return a new array.
 const ALWAYS_RETURNS_NEW_ARRAY: &[&[u8]] = &[
+    b"*",
+    b"+",
+    b"-",
+    b"|",
     b"collect",
     b"compact",
     b"drop",
@@ -65,8 +75,16 @@ fn is_acceptable_arg(node: &ruby_prism::Node<'_>) -> bool {
 fn inner_returns_new_array(inner: &ruby_prism::CallNode<'_>) -> bool {
     let name = inner.name().as_slice();
 
-    // ALWAYS_RETURNS_NEW_ARRAY — always qualifies
+    // ALWAYS_RETURNS_NEW_ARRAY — qualifies, but with a caveat for blocks.
+    // In RuboCop's NodePattern, when the inner call has a block, pattern 2 requires
+    // `(any_block (send _ :method) ...)` — the inner send must have NO positional args.
+    // If the call has both a block AND positional args (e.g., `Parallel.map(items) { }`),
+    // it's a custom method, not Array#map, and should not be flagged.
+    // Without a block, pattern 3 `(send _ :method ...)` matches regardless of args.
     if ALWAYS_RETURNS_NEW_ARRAY.contains(&name) {
+        if inner.block().is_some() && inner.arguments().is_some() {
+            return false;
+        }
         return true;
     }
 

@@ -26,3 +26,8 @@ records.first(Config::MAX).select(&:active?)
 data.sample(TOP_COUNT).sort
 events.shift(BATCH_SIZE).compact
 items.pop(Settings::LIMIT).uniq
+# FP: map/collect/select with BOTH args AND block — custom method, not Array#map
+worker.map(file_names) { |f| process(f) }.flatten
+Parallel.map(items, in_threads: 10) { |x| transform(x) }.compact
+collector.collect(source) { |s| s.parse }.sort
+Custom.select(records, :active) { |r| r.valid? }.uniq
