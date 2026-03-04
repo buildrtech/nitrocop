@@ -119,10 +119,10 @@ fn has_positional_args_spec_new(source: &SourceFile) -> bool {
             if after.is_empty() || after.starts_with("do") || after.starts_with('{') {
                 continue;
             }
-            if after.starts_with('(') {
+            if let Some(stripped) = after.strip_prefix('(') {
                 // `Gem::Specification.new(&block)` - no positional args
                 // `Gem::Specification.new('name', ...)` - positional args
-                let inner = after[1..].trim_start();
+                let inner = stripped.trim_start();
                 if inner.starts_with('&') {
                     continue;
                 }
