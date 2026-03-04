@@ -4,6 +4,10 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus FP fix: regular method calls like `Statuses.describe(:foo)` have an
+/// explicit receiver and are not RSpec describe blocks. Fixed by requiring the
+/// call to be receiverless or have `RSpec` as the receiver, matching the
+/// pattern in ExcessiveDocstringSpacing.
 pub struct DescribeSymbol;
 
 impl Cop for DescribeSymbol {
@@ -40,6 +44,14 @@ impl Cop for DescribeSymbol {
         let method = call.name().as_slice();
         if method != b"describe" {
             return;
+        }
+
+        // Must be receiverless or RSpec.describe / ::RSpec.describe
+        // Regular method calls like `obj.describe(:sym)` are not RSpec describe blocks.
+        if let Some(recv) = call.receiver() {
+            if crate::cop::util::constant_name(&recv).is_none_or(|n| n != b"RSpec") {
+                return;
+            }
         }
 
         let args = match call.arguments() {
