@@ -10,6 +10,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-04)
+///
+/// Corpus oracle reported FP=269, FN=988.
+///
+/// FP root cause: nitrocop analyzed `define_method` with dynamic names
+/// (`define_method("name_#{suffix}")`), while RuboCop's `MethodComplexity`
+/// matcher only handles static `sym`/`str` method names.
+///
+/// FN root cause: `[]=` setter calls were not counted as assignments.
+/// RuboCop's ABC calculator counts setter sends as assignments (and branches).
+/// In hash-heavy methods this undercount led to missed offenses.
 pub struct AbcSize;
 
 /// Known iterating method names that make blocks count toward conditions.
@@ -401,13 +412,13 @@ fn is_comparison_method(name: &[u8]) -> bool {
     matches!(name, b"==" | b"===" | b"!=" | b"<=" | b">=" | b">" | b"<")
 }
 
-/// Setter methods end in '=' but are not operators (!=, ==, <=, >=, []=).
+/// Setter methods end in '=' but are not operators (!=, ==, <=, >=).
 /// Examples: foo=, bar=
 /// In RuboCop, setter method calls count as both a branch and an assignment.
 fn is_setter_method(name: &[u8]) -> bool {
     name.len() >= 2
         && name.ends_with(b"=")
-        && !matches!(name, b"==" | b"!=" | b"<=" | b">=" | b"===" | b"[]=")
+        && !matches!(name, b"==" | b"!=" | b"<=" | b">=" | b"===")
 }
 
 impl AbcSize {
@@ -480,8 +491,12 @@ impl AbcSize {
         let count_repeated_attributes = config.get_bool("CountRepeatedAttributes", true);
 
         // Extract method name from first argument
-        let method_name = extract_define_method_name(call_node);
-        let method_name_str = method_name.as_deref().unwrap_or("(unknown)");
+        let method_name = match extract_define_method_name(call_node) {
+            Some(name) => name,
+            // RuboCop ignores define_method with dynamic/non-literal names.
+            None => return,
+        };
+        let method_name_str = method_name.as_str();
         if self.is_allowed_method(method_name_str, config) {
             return;
         }

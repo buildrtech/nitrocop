@@ -80,3 +80,21 @@ define_method(:complex_dm) do
   q = 17
   r = 18
 end
+
+# []= setter calls count as assignments and branches in RuboCop's ABC metric.
+def indexed_assignment_heavy
+^^^ Metrics/AbcSize: Assignment Branch Condition size for indexed_assignment_heavy is too high. [17.69/17]
+  hash = {}
+  hash[:a] = 1
+  hash[:b] = 2
+  hash[:c] = 3
+  hash[:d] = 4
+  hash[:e] = 5
+  hash[:f] = 6
+  hash[:g] = 7
+  hash[:h] = 8
+  hash[:i] = 9
+  hash[:j] = 10
+  hash[:k] = 11
+  hash[:l] = 12
+end
