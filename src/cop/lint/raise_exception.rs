@@ -5,6 +5,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03):
+/// 12 FPs all from TracksApp/tracks, all the pattern `raise Exception.new, "message"`.
+/// Root cause: RuboCop's NodePattern `exception_new_with_message?` only matches when
+/// `Exception.new(...)` is the sole argument to raise. When `.new` has no args and the
+/// message is a separate second arg to raise (`raise Exception.new, "msg"`), neither
+/// RuboCop pattern matches. Fixed by rejecting Exception.new as first arg when there
+/// are additional args to raise/fail.
 pub struct RaiseException;
 
 /// Collect all module names that enclose a given byte offset.
@@ -110,6 +117,26 @@ impl Cop for RaiseException {
             Some(a) => a,
             None => return,
         };
+
+        // RuboCop has two NodePattern matchers:
+        //   exception?:                (send nil? {:raise :fail} $(const ...) ...)
+        //   exception_new_with_message?: (send nil? {:raise :fail} (send $(const ...) :new ...))
+        //
+        // The first matches `raise Exception` or `raise Exception, "msg"` (const as first arg, any extra args).
+        // The second matches `raise Exception.new(...)` (Exception.new as the ONLY arg to raise).
+        //
+        // `raise Exception.new, "msg"` does NOT match either pattern:
+        // - Not exception? because first arg is a send node, not a const
+        // - Not exception_new_with_message? because Exception.new is not the only arg to raise
+        //
+        // So we must reject the case where first_arg is Exception.new AND there are extra args to raise.
+        let is_new_call = first_arg.as_call_node().is_some();
+        if is_new_call {
+            // Exception.new is only flagged when it's the sole argument to raise/fail
+            if args.len() > 1 {
+                return;
+            }
+        }
 
         if !is_exception_reference(&first_arg) {
             return;
