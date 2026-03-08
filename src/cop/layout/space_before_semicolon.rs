@@ -16,8 +16,12 @@ use crate::parse::source::SourceFile;
 /// when `;` is the first non-whitespace token on the line. Keep offenses for
 /// true in-line spacing before semicolons.
 ///
-/// Remaining gap: this cop still does not consult `Layout/SpaceInsideBlockBraces`
-/// style interaction; unchanged in this patch.
+/// Second fix (2026-03-08): FP=5 all from `{ ; }` pattern — a block open brace
+/// with space before semicolon. RuboCop's `SpaceBeforePunctuation` mixin checks
+/// `space_required_after?` which returns true when the preceding token is `{` and
+/// `Layout/SpaceInsideBlockBraces` has `EnforcedStyle: space` (the default). This
+/// defers the space to `SpaceInsideBlockBraces`. Fix: skip offense when the
+/// character immediately before the whitespace run is `{`.
 pub struct SpaceBeforeSemicolon;
 
 impl Cop for SpaceBeforeSemicolon {
@@ -63,6 +67,12 @@ impl Cop for SpaceBeforeSemicolon {
 
             // Semicolon is the first non-whitespace token on this line.
             if whitespace_start == line_start {
+                continue;
+            }
+
+            // Space after block open brace is handled by SpaceInsideBlockBraces,
+            // not SpaceBeforeSemicolon (e.g., `{ ; }`, `{ ; expr }`).
+            if bytes[whitespace_start - 1] == b'{' {
                 continue;
             }
 
