@@ -20,3 +20,13 @@ end
 
 task('update_cache') { Cache.refresh }
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/RakeEnvironment: Add `:environment` dependency to the rake task.
+
+task migrate: [] do
+^^^^^^^^^^^^^^^ Rails/RakeEnvironment: Add `:environment` dependency to the rake task.
+  ActiveRecord::Base.connection.migrate
+end
+
+task refresh: [] do
+^^^^^^^^^^^^^^^ Rails/RakeEnvironment: Add `:environment` dependency to the rake task.
+  Cache.clear
+end

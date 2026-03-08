@@ -10,3 +10,12 @@ end
 task :baz, [:arg] => [:environment, :other] do
   puts "multi deps"
 end
+task :default do
+  puts "default task"
+end
+task default: [:test] do
+  puts "default with deps"
+end
+task setup: :database do
+  puts "setup depends on database"
+end
