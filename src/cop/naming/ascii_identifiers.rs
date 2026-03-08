@@ -1,9 +1,24 @@
-use crate::cop::node_type::{CONSTANT_WRITE_NODE, DEF_NODE, LOCAL_VARIABLE_WRITE_NODE};
-use crate::cop::util::is_ascii_name;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
+use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// Checks for non-ASCII characters in identifier and constant names.
+///
+/// ## Investigation (2026-03-08)
+/// FP=0, FN=156 in corpus. Root cause: original implementation only checked 3
+/// AST node types (ConstantWriteNode, DefNode, LocalVariableWriteNode), missing
+/// many identifier occurrences: local variable reads, method calls, parameters,
+/// constant reads/paths, etc.
+///
+/// RuboCop's implementation iterates over lexer tokens (tIDENTIFIER and tCONSTANT),
+/// not AST nodes. Switched to a `check_source` approach that scans raw bytes for
+/// identifier tokens, skipping non-code regions (strings, comments, regexes) via
+/// CodeMap. This matches RuboCop's token-level scanning without requiring Prism's
+/// lexer API.
+///
+/// RuboCop reports the offense at the first contiguous run of non-ASCII characters
+/// within the identifier, not at the identifier start.
 pub struct AsciiIdentifiers;
 
 impl Cop for AsciiIdentifiers {
@@ -11,66 +26,137 @@ impl Cop for AsciiIdentifiers {
         "Naming/AsciiIdentifiers"
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[CONSTANT_WRITE_NODE, DEF_NODE, LOCAL_VARIABLE_WRITE_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
         _parse_result: &ruby_prism::ParseResult<'_>,
+        code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // AsciiConstants: when true (default), also flag non-ASCII constants
         let ascii_constants = config.get_bool("AsciiConstants", true);
+        let bytes = &source.content;
+        let len = bytes.len();
+        let mut i = 0;
 
-        if let Some(def_node) = node.as_def_node() {
-            let method_name = def_node.name().as_slice();
-            if !is_ascii_name(method_name) {
-                let loc = def_node.name_loc();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use only ascii symbols in identifiers.".to_string(),
-                ));
+        while i < len {
+            // Skip non-code regions (comments, strings, regexes, symbols)
+            if !code_map.is_code(i) {
+                i += 1;
+                continue;
             }
-        }
 
-        if let Some(write_node) = node.as_local_variable_write_node() {
-            let var_name = write_node.name().as_slice();
-            if !is_ascii_name(var_name) {
-                let loc = write_node.name_loc();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use only ascii symbols in identifiers.".to_string(),
-                ));
-            }
-        }
+            // Check if we're at the start of an identifier
+            let b = bytes[i];
+            if is_ident_start(b) {
+                // Skip identifiers preceded by @ (ivar), @@ (cvar), $ (gvar),
+                // or : (symbol). RuboCop only checks tIDENTIFIER and tCONSTANT
+                // tokens, not tIVAR/tCVAR/tGVAR/tSYMBOL.
+                // Check if preceded by @ (ivar/cvar) or $ (gvar).
+                // Note: we intentionally don't skip :identifier here because
+                // distinguishing symbol : from ternary : is complex. The CodeMap
+                // already marks symbol literals as non-code, so :café in symbol
+                // context will be skipped by the is_code() check above.
+                let is_prefixed = if i > 0 {
+                    let prev = bytes[i - 1];
+                    prev == b'@' || prev == b'$'
+                } else {
+                    false
+                };
 
-        // Check constants only when AsciiConstants is true
-        if ascii_constants {
-            if let Some(const_write) = node.as_constant_write_node() {
-                let const_name = const_write.name().as_slice();
-                if !is_ascii_name(const_name) {
-                    let loc = const_write.name_loc();
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Use only ascii symbols in constants.".to_string(),
-                    ));
+                // Find the end of the identifier
+                let start = i;
+                i += utf8_char_len(b);
+                while i < len && is_ident_continue(bytes[i]) {
+                    i += utf8_char_len(bytes[i]);
                 }
+                // Allow trailing ? or ! on method names
+                if i < len && (bytes[i] == b'?' || bytes[i] == b'!') {
+                    // But not != (which is an operator)
+                    if bytes[i] == b'!' && i + 1 < len && bytes[i + 1] == b'=' {
+                        // Don't consume the !
+                    } else {
+                        i += 1;
+                    }
+                }
+
+                let ident = &bytes[start..i];
+
+                // Skip prefixed identifiers (ivars, cvars, gvars, symbols)
+                if is_prefixed {
+                    continue;
+                }
+
+                // Check if identifier has non-ASCII characters
+                if ident.iter().all(|&b| b.is_ascii()) {
+                    continue;
+                }
+
+                // Skip BOM (byte order mark, U+FEFF = EF BB BF). The parser
+                // strips it and doesn't produce a token for it.
+                if ident == [0xEF, 0xBB, 0xBF] {
+                    continue;
+                }
+
+                // Determine if this is a constant (starts with uppercase A-Z)
+                let is_constant = bytes[start].is_ascii_uppercase();
+
+                if is_constant && !ascii_constants {
+                    continue;
+                }
+
+                // Find the first non-ASCII character position (byte offset of
+                // the first non-ASCII UTF-8 lead byte in the identifier)
+                let first_non_ascii_offset = bytes[start..i]
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, &b)| !b.is_ascii() && (b & 0xC0) != 0x80)
+                    .map(|(idx, _)| start + idx)
+                    .unwrap_or(start);
+
+                let (line, column) = source.offset_to_line_col(first_non_ascii_offset);
+                let message = if is_constant {
+                    "Use only ascii symbols in constants."
+                } else {
+                    "Use only ascii symbols in identifiers."
+                };
+                diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+            } else if !b.is_ascii() {
+                // Skip non-ASCII bytes that aren't part of an identifier
+                // (e.g., standalone Unicode operators)
+                i += utf8_char_len(b);
+            } else {
+                i += 1;
             }
         }
+    }
+}
+
+/// Check if a byte can start a Ruby identifier.
+/// Ruby identifiers start with [a-zA-Z_] or non-ASCII (multi-byte UTF-8 lead byte).
+/// UTF-8 continuation bytes (0x80..0xBF) are excluded.
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_' || (b >= 0xC0)
+}
+
+/// Check if a byte can continue a Ruby identifier.
+/// Ruby identifiers continue with [a-zA-Z0-9_] or non-ASCII (including
+/// UTF-8 continuation bytes which are part of multi-byte characters).
+fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii()
+}
+
+/// Return the length of a UTF-8 character based on its first byte.
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
     }
 }
 
@@ -111,5 +197,21 @@ mod tests {
             diags.is_empty(),
             "Should not flag non-ASCII constant when AsciiConstants:false"
         );
+    }
+
+    #[test]
+    fn does_not_flag_non_ascii_in_strings() {
+        use crate::testutil::run_cop_full;
+        let source = b"x = \"caf\\xC3\\xA9\"\n";
+        let diags = run_cop_full(&AsciiIdentifiers, source);
+        assert!(diags.is_empty(), "Should not flag non-ASCII in strings");
+    }
+
+    #[test]
+    fn does_not_flag_non_ascii_in_comments() {
+        use crate::testutil::run_cop_full;
+        let source = "# café comment\nx = 1\n".as_bytes();
+        let diags = run_cop_full(&AsciiIdentifiers, source);
+        assert!(diags.is_empty(), "Should not flag non-ASCII in comments");
     }
 }
