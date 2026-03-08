@@ -4,6 +4,10 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Corpus investigation: 30 FPs across 15 repos caused by multi-line conditions
+/// (e.g., `while a && \n b`). RuboCop checks both body AND predicate line span
+/// before suggesting modifier form. Fixed by adding predicate line-span check
+/// after the existing body line-span check.
 pub struct WhileUntilModifier;
 
 /// Returns true if the node or any descendant contains a local variable assignment.
@@ -106,6 +110,26 @@ impl Cop for WhileUntilModifier {
             return;
         }
 
+        // Predicate (condition) must be on a single line
+        let predicate = if let Some(while_node) = node.as_while_node() {
+            while_node.predicate()
+        } else if let Some(until_node) = node.as_until_node() {
+            until_node.predicate()
+        } else {
+            return;
+        };
+
+        let (pred_start_line, _) = source.offset_to_line_col(predicate.location().start_offset());
+        let pred_end_off = predicate
+            .location()
+            .end_offset()
+            .saturating_sub(1)
+            .max(predicate.location().start_offset());
+        let (pred_end_line, _) = source.offset_to_line_col(pred_end_off);
+        if pred_start_line != pred_end_line {
+            return;
+        }
+
         // Check if the modifier form would fit within the max line length.
         // RuboCop considers Layout/LineLength Max (default 120).
         let max_line_length = _config
@@ -119,14 +143,6 @@ impl Cop for WhileUntilModifier {
             [body_node.location().start_offset()..body_node.location().end_offset()];
         let body_str = String::from_utf8_lossy(body_src);
         let body_trimmed = body_str.trim();
-
-        let predicate = if let Some(while_node) = node.as_while_node() {
-            while_node.predicate()
-        } else if let Some(until_node) = node.as_until_node() {
-            until_node.predicate()
-        } else {
-            return;
-        };
 
         // Skip if the condition contains a local variable assignment
         // (e.g., `while (chunk = file.read(1024))`)

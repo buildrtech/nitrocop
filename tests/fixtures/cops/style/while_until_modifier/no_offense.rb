@@ -18,3 +18,17 @@ end
 while (node = node.receiver)
   return true if node.heredoc?
 end
+# Multi-line conditions should not suggest modifier form
+while ancestors.any? &&
+      !issue.is_descendant_of?(ancestors.last)
+  ancestors.pop
+end
+until starting >= max ||
+      line_left[starting] != line_right[starting]
+  starting += 1
+end
+while valid?(item) &&
+      item.active? &&
+      item.visible?
+  process(item)
+end
