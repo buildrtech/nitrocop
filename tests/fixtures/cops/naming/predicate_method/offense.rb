@@ -64,3 +64,25 @@ def valid_event_payload?
     ^^^^^^^^^^^^^^^^^^^^^ Naming/PredicateMethod: Non-predicate method names should not end with `?`.
   @channel = Channel::Line.find_by(line_channel_id: @params[:line_channel_id]) if @params[:line_channel_id]
 end
+
+# Explicit return with compound and-expression (return a? && b?)
+def has_flag
+    ^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  return active? && enabled?
+end
+
+# Explicit return with compound or-expression (return x > 0 || y > 0)
+def is_valid
+    ^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  return x > 0 || y > 0
+end
+
+# Explicit return with case expression
+def has_role
+    ^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  case kind
+  when :admin then admin?
+  when :member then member?
+  else false
+  end
+end

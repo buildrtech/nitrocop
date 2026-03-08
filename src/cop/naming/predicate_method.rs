@@ -4,6 +4,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// FN=232 investigation (2026-03):
+/// Root cause: ReturnFinder called `classify_node()` on explicit `return` arguments,
+/// but `classify_node` only handles leaf nodes and CallNode. Compound expressions
+/// (AndNode, OrNode, IfNode, CaseNode, etc.) fell through to ReturnType::Unknown,
+/// causing conservative mode to skip the method entirely.
+/// Fix: Changed ReturnFinder to call `collect_implicit_return()` for single return
+/// arguments, which properly recurses into compound expressions.
+/// Also added CaseMatchNode (pattern matching `case...in...end`) handling in
+/// `collect_implicit_return`, alongside the existing CaseNode support.
 pub struct PredicateMethod;
 
 const MSG_PREDICATE: &str = "Predicate method names should end with `?`.";
@@ -274,22 +283,10 @@ fn collect_all_return_types(body: &ruby_prism::Node<'_>, wayward: &[String]) -> 
     // 1. Collect explicit return statements
     let mut return_finder = ReturnFinder {
         returns: Vec::new(),
+        wayward: wayward.to_vec(),
     };
     return_finder.visit(body);
-
-    for ret_node_info in &return_finder.returns {
-        match ret_node_info {
-            ReturnValue::NoArg => {
-                return_types.push(ReturnType::NonBooleanLiteral);
-            }
-            ReturnValue::MultipleArgs => {
-                return_types.push(ReturnType::NonBooleanLiteral);
-            }
-            ReturnValue::SingleArg(rt) => {
-                return_types.push(*rt);
-            }
-        }
-    }
+    return_types.extend(return_finder.returns);
 
     // 2. Collect the implicit return (last expression in body)
     collect_implicit_return(body, &mut return_types, wayward);
@@ -297,31 +294,29 @@ fn collect_all_return_types(body: &ruby_prism::Node<'_>, wayward: &[String]) -> 
     return_types
 }
 
-/// Information about a return statement's value.
-enum ReturnValue {
-    NoArg,
-    MultipleArgs,
-    SingleArg(ReturnType),
-}
-
 /// Visitor to find all explicit `return` statements in a method body.
+/// Collects ReturnType values directly by using `collect_implicit_return`
+/// on single return arguments, so compound expressions (and/or/if/case)
+/// are properly decomposed instead of falling through to Unknown.
 struct ReturnFinder {
-    returns: Vec<ReturnValue>,
+    returns: Vec<ReturnType>,
+    wayward: Vec<String>,
 }
 
 impl<'pr> Visit<'pr> for ReturnFinder {
     fn visit_return_node(&mut self, node: &ruby_prism::ReturnNode<'pr>) {
         match node.arguments() {
             None => {
-                self.returns.push(ReturnValue::NoArg);
+                self.returns.push(ReturnType::NonBooleanLiteral);
             }
             Some(args) => {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
                 if arg_list.len() != 1 {
-                    self.returns.push(ReturnValue::MultipleArgs);
+                    self.returns.push(ReturnType::NonBooleanLiteral);
                 } else {
-                    let rt = classify_node(&arg_list[0], &[]);
-                    self.returns.push(ReturnValue::SingleArg(rt));
+                    // Use collect_implicit_return to properly recurse into
+                    // compound expressions (AndNode, OrNode, IfNode, etc.)
+                    collect_implicit_return(&arg_list[0], &mut self.returns, &self.wayward);
                 }
             }
         }
@@ -452,6 +447,39 @@ fn collect_implicit_return(
             }
         }
         if let Some(else_clause) = case_node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                let body: Vec<_> = stmts.body().iter().collect();
+                if let Some(last) = body.last() {
+                    collect_implicit_return(last, returns, wayward);
+                } else {
+                    returns.push(ReturnType::NonBooleanLiteral);
+                }
+            } else {
+                returns.push(ReturnType::NonBooleanLiteral);
+            }
+        } else {
+            returns.push(ReturnType::NonBooleanLiteral);
+        }
+        return;
+    }
+
+    // CaseMatchNode (case...in...end pattern matching)
+    if let Some(case_match) = node.as_case_match_node() {
+        for condition in case_match.conditions().iter() {
+            if let Some(in_node) = condition.as_in_node() {
+                if let Some(stmts) = in_node.statements() {
+                    let body: Vec<_> = stmts.body().iter().collect();
+                    if let Some(last) = body.last() {
+                        collect_implicit_return(last, returns, wayward);
+                    } else {
+                        returns.push(ReturnType::NonBooleanLiteral);
+                    }
+                } else {
+                    returns.push(ReturnType::NonBooleanLiteral);
+                }
+            }
+        }
+        if let Some(else_clause) = case_match.else_clause() {
             if let Some(stmts) = else_clause.statements() {
                 let body: Vec<_> = stmts.body().iter().collect();
                 if let Some(last) = body.last() {
