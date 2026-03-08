@@ -88,3 +88,32 @@ object.destroy(param)
 def find_or_create(**opts)
   find(**opts) || create(**opts)
 end
+
+# CREATE with persisted? check on next line (local variable)
+user = User.create
+if user.persisted?
+  foo
+end
+
+# CREATE with persisted? check on next line (instance variable)
+@user = User.create
+if @user.persisted?
+  foo
+end
+
+# CREATE with persisted? check directly on result
+return unless object.create.persisted?
+
+# CREATE with persisted? in same if condition (parenthesized assignment)
+if (user = User.create).persisted?
+  foo(user)
+end
+
+# CREATE with persisted? after conditional assignment
+user ||= User.create
+if user.persisted?
+  foo
+end
+
+# Persist call inside brace block — last expression (implicit return)
+items.each { |i| i.save }

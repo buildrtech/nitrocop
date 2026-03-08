@@ -3,6 +3,33 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Rails/SaveBang - flags ActiveRecord persist methods (save, update, destroy, create, etc.)
+/// whose return value is not checked, suggesting bang variants instead.
+///
+/// ## Investigation findings (2026-03-08)
+///
+/// **Root cause of massive FN (24,736):** `visit_call_node` did not visit `BlockNode`
+/// children of CallNodes. It only handled `block_argument_node` (e.g., `&block`) but
+/// not actual block bodies (e.g., `items.each { |i| i.save }`). Since `visit_block_node`
+/// was never invoked for blocks attached to calls, persist calls inside any block body
+/// were invisible to the cop.
+///
+/// **Fix:** Added `block.as_block_node()` handling in `visit_call_node` to invoke
+/// `visit_block_node` for block bodies attached to call nodes.
+///
+/// **FP cause (558):** `persisted?` follow-up checks were not recognized. When a create
+/// method result was assigned to a variable and `persisted?` was called on that variable
+/// in the next statement (e.g., `user = User.create; if user.persisted?`), the cop
+/// incorrectly flagged the create call. Also, inline patterns like
+/// `(user = User.create).persisted?` were not suppressed.
+///
+/// **Fix:** Added lookahead in statement visitors to detect `persisted?` checks on
+/// assigned variables. Added suppression when `persisted?` is called directly on a
+/// receiver containing a create assignment.
+///
+/// **Remaining gaps:** Large FN count likely has additional causes beyond block traversal,
+/// such as unhandled control flow patterns or context-tracking gaps. The block fix
+/// addresses the primary structural issue.
 pub struct SaveBang;
 
 /// Modify-type persistence methods whose return value indicates success/failure.
@@ -73,6 +100,7 @@ impl Cop for SaveBang {
             allowed_receivers,
             diagnostics: Vec::new(),
             context_stack: Vec::new(),
+            suppress_create_assignment: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -86,6 +114,8 @@ struct SaveBangVisitor<'a, 'src> {
     allowed_receivers: Vec<String>,
     diagnostics: Vec<Diagnostic>,
     context_stack: Vec<Context>,
+    /// When true, suppress create-in-assignment offenses because a persisted? check follows.
+    suppress_create_assignment: bool,
 }
 
 impl SaveBangVisitor<'_, '_> {
@@ -260,6 +290,178 @@ impl SaveBangVisitor<'_, '_> {
         }
     }
 
+    /// Extract the variable name from an assignment node (local, instance, global, class, multi,
+    /// or conditional assignment). Returns the variable name bytes and whether the RHS contains
+    /// a create-type persist call.
+    fn assignment_var_name<'n>(node: &'n ruby_prism::Node<'n>) -> Option<Vec<u8>> {
+        if let Some(lv) = node.as_local_variable_write_node() {
+            return Some(lv.name().as_slice().to_vec());
+        }
+        if let Some(iv) = node.as_instance_variable_write_node() {
+            return Some(iv.name().as_slice().to_vec());
+        }
+        if let Some(gv) = node.as_global_variable_write_node() {
+            return Some(gv.name().as_slice().to_vec());
+        }
+        if let Some(cv) = node.as_class_variable_write_node() {
+            return Some(cv.name().as_slice().to_vec());
+        }
+        // local_variable_or_write (||=)
+        if let Some(lov) = node.as_local_variable_or_write_node() {
+            return Some(lov.name().as_slice().to_vec());
+        }
+        // multi-write: use first target if it's a local variable
+        if let Some(mw) = node.as_multi_write_node() {
+            let lefts: Vec<_> = mw.lefts().iter().collect();
+            if let Some(first) = lefts.first() {
+                if let Some(lt) = first.as_local_variable_target_node() {
+                    return Some(lt.name().as_slice().to_vec());
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if a statement is a persisted? call on a given variable name.
+    /// Handles patterns like: `if var.persisted?`, `unless var.persisted?`,
+    /// `var.persisted? && ...`, and direct `var.persisted?` calls.
+    fn stmt_checks_persisted(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
+        // Direct call: var.persisted?
+        if let Some(call) = node.as_call_node() {
+            if call.name().as_slice() == b"persisted?" {
+                if let Some(recv) = call.receiver() {
+                    return Self::node_is_var(&recv, var_name);
+                }
+            }
+        }
+        // if/unless with persisted? in predicate
+        if let Some(if_node) = node.as_if_node() {
+            return Self::expr_checks_persisted(&if_node.predicate(), var_name);
+        }
+        if let Some(unless_node) = node.as_unless_node() {
+            return Self::expr_checks_persisted(&unless_node.predicate(), var_name);
+        }
+        false
+    }
+
+    /// Check if an expression (possibly nested in boolean operators) contains
+    /// a persisted? call on the given variable.
+    fn expr_checks_persisted(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
+        if let Some(call) = node.as_call_node() {
+            if call.name().as_slice() == b"persisted?" {
+                if let Some(recv) = call.receiver() {
+                    if Self::node_is_var(&recv, var_name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if let Some(and_node) = node.as_and_node() {
+            return Self::expr_checks_persisted(&and_node.left(), var_name)
+                || Self::expr_checks_persisted(&and_node.right(), var_name);
+        }
+        if let Some(or_node) = node.as_or_node() {
+            return Self::expr_checks_persisted(&or_node.left(), var_name)
+                || Self::expr_checks_persisted(&or_node.right(), var_name);
+        }
+        // Negation: !var.persisted?
+        if let Some(call) = node.as_call_node() {
+            if call.name().as_slice() == b"!" {
+                if let Some(recv) = call.receiver() {
+                    return Self::expr_checks_persisted(&recv, var_name);
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a node is a variable read matching the given name.
+    fn node_is_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
+        if let Some(lv) = node.as_local_variable_read_node() {
+            return lv.name().as_slice() == var_name;
+        }
+        if let Some(iv) = node.as_instance_variable_read_node() {
+            return iv.name().as_slice() == var_name;
+        }
+        if let Some(gv) = node.as_global_variable_read_node() {
+            return gv.name().as_slice() == var_name;
+        }
+        if let Some(cv) = node.as_class_variable_read_node() {
+            return cv.name().as_slice() == var_name;
+        }
+        false
+    }
+
+    /// Check if the RHS of an assignment contains a create-type persist call.
+    fn rhs_has_create_call(&self, node: &ruby_prism::Node<'_>) -> bool {
+        if let Some(call) = node.as_call_node() {
+            if self.classify_persist_call(&call) == Some(true) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a statement is a create-type assignment where the next statement
+    /// checks persisted? on the assigned variable.
+    fn should_suppress_create(
+        &self,
+        stmt: &ruby_prism::Node<'_>,
+        body: &[ruby_prism::Node<'_>],
+        idx: usize,
+    ) -> bool {
+        // Extract variable name from assignment
+        let var_name = match Self::assignment_var_name(stmt) {
+            Some(name) => name,
+            None => return false,
+        };
+
+        // Check if the RHS contains a create-type call
+        let rhs = self.get_assignment_rhs(stmt);
+        let has_create = match rhs {
+            Some(rhs_node) => self.rhs_has_create_call(&rhs_node),
+            None => false,
+        };
+        if !has_create {
+            return false;
+        }
+
+        // Check the immediately following statement for persisted? check
+        if let Some(next_stmt) = body.get(idx + 1) {
+            if Self::stmt_checks_persisted(next_stmt, &var_name) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Get the RHS value node from an assignment statement.
+    fn get_assignment_rhs<'n>(
+        &self,
+        node: &'n ruby_prism::Node<'n>,
+    ) -> Option<ruby_prism::Node<'n>> {
+        if let Some(lv) = node.as_local_variable_write_node() {
+            return Some(lv.value());
+        }
+        if let Some(iv) = node.as_instance_variable_write_node() {
+            return Some(iv.value());
+        }
+        if let Some(gv) = node.as_global_variable_write_node() {
+            return Some(gv.value());
+        }
+        if let Some(cv) = node.as_class_variable_write_node() {
+            return Some(cv.value());
+        }
+        if let Some(lov) = node.as_local_variable_or_write_node() {
+            return Some(lov.value());
+        }
+        if let Some(mw) = node.as_multi_write_node() {
+            return Some(mw.value());
+        }
+        None
+    }
+
     fn flag_void_context(&mut self, call: &ruby_prism::CallNode<'_>) {
         let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("save");
         let msg_loc = call.message_loc().unwrap_or(call.location());
@@ -306,7 +508,8 @@ impl SaveBangVisitor<'_, '_> {
             }
             Some(Context::Assignment) => {
                 // Assignment: exempt for modify methods, flag create methods
-                if is_create {
+                // unless persisted? is checked on the assigned variable
+                if is_create && !self.suppress_create_assignment {
                     self.flag_create_assignment(call);
                 }
             }
@@ -352,9 +555,19 @@ impl SaveBangVisitor<'_, '_> {
                 Context::VoidStatement
             };
 
+            // Check if this assignment's create call has persisted? checked in the next statement
+            let suppress = self.should_suppress_create(stmt, &body, i);
+            if suppress {
+                self.suppress_create_assignment = true;
+            }
+
             self.context_stack.push(ctx);
             self.visit(stmt);
             self.context_stack.pop();
+
+            if suppress {
+                self.suppress_create_assignment = false;
+            }
         }
     }
 }
@@ -370,11 +583,18 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         // Continue visiting children (e.g., receiver, arguments, block)
         // But we need to set appropriate context for arguments
         if let Some(recv) = node.receiver() {
-            // Receiver is evaluated but not "checked" in our sense;
-            // it's not a context where persist calls matter
+            // If this call is persisted?, suppress create-assignment offenses in the receiver
+            // (handles patterns like `(user = User.create).persisted?`)
+            let is_persisted_check = node.name().as_slice() == b"persisted?";
+            if is_persisted_check {
+                self.suppress_create_assignment = true;
+            }
             self.context_stack.push(Context::Argument);
             self.visit(&recv);
             self.context_stack.pop();
+            if is_persisted_check {
+                self.suppress_create_assignment = false;
+            }
         }
 
         if let Some(args) = node.arguments() {
@@ -384,9 +604,10 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         }
 
         if let Some(block) = node.block() {
-            // A block argument like `&block` is just a reference, visit it
             if let Some(block_arg) = block.as_block_argument_node() {
                 self.visit_block_argument_node(&block_arg);
+            } else if let Some(block_node) = block.as_block_node() {
+                self.visit_block_node(&block_node);
             }
         }
     }
@@ -443,10 +664,19 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         // But def/block/lambda override this to use visit_statements_with_context.
         let body: Vec<_> = node.body().iter().collect();
 
-        for stmt in &body {
+        for (i, stmt) in body.iter().enumerate() {
+            let suppress = self.should_suppress_create(stmt, &body, i);
+            if suppress {
+                self.suppress_create_assignment = true;
+            }
+
             self.context_stack.push(Context::VoidStatement);
             self.visit(stmt);
             self.context_stack.pop();
+
+            if suppress {
+                self.suppress_create_assignment = false;
+            }
         }
     }
 

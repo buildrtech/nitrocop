@@ -70,3 +70,34 @@ case object.create
 when true
   puts "true"
 end
+
+# Persist calls inside blocks (void context within block body)
+records.map do |r|
+  r.update(name: 'Tom')
+    ^^^^^^ Rails/SaveBang: Use `update!` instead of `update` if the return value is not checked.
+  nil
+end
+
+# Persist calls inside nested blocks
+items.each do |i|
+  i.records.each do |r|
+    r.save
+      ^^^^ Rails/SaveBang: Use `save!` instead of `save` if the return value is not checked.
+    nil
+  end
+end
+
+# CREATE in condition inside a block
+items.each do |i|
+  if User.create
+          ^^^^^^ Rails/SaveBang: `create` returns a model which is always truthy.
+    puts "yes"
+  end
+end
+
+# CREATE in assignment inside a block (not followed by persisted?)
+items.each do |i|
+  x = User.create
+           ^^^^^^ Rails/SaveBang: Use `create!` instead of `create` if the return value is not checked. Or check `persisted?` on model returned from `create`.
+  nil
+end
