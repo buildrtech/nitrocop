@@ -2,6 +2,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// FP=10 regressed in the latest corpus run at locations using
+/// `# rubocop:disable Metrics/LineLength`. RuboCop still suppresses
+/// `Layout/LineLength` for that moved legacy name because the short name stayed
+/// `LineLength`. Fixed centrally in `parse/directives.rs`.
 pub struct LineLength;
 
 impl Cop for LineLength {

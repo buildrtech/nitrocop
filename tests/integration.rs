@@ -3259,6 +3259,55 @@ fn redundant_disable_renamed_cop_extended_format() {
 }
 
 #[test]
+fn redundant_disable_moved_cop_same_short_name() {
+    // Lint/Eval moved to Security/Eval but kept the short name. RuboCop still
+    // qualifies the legacy name in inline directives, so the offense should be
+    // suppressed and the directive should not be redundant.
+    let dir = temp_dir("redundant_disable_moved_cop_same_short_name");
+    let file = write_file(
+        &dir,
+        "test.rb",
+        b"# frozen_string_literal: true\n\neval(user_input) # rubocop:disable Lint/Eval\n",
+    );
+    let config = load_config(None, None, None).unwrap();
+    let registry = CopRegistry::default_registry();
+    let args = default_args();
+
+    let result = run_linter(
+        &discovered(&[file]),
+        &config,
+        &registry,
+        &args,
+        &TierMap::load(),
+        &AutocorrectAllowlist::load(),
+    );
+
+    let eval_offenses: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.cop_name == "Security/Eval")
+        .collect();
+    assert!(
+        eval_offenses.is_empty(),
+        "Moved legacy name should suppress Security/Eval, got: {:?}",
+        eval_offenses
+    );
+
+    let redundant: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.cop_name == "Lint/RedundantCopDisableDirective")
+        .collect();
+    assert!(
+        redundant.is_empty(),
+        "Moved legacy directive should not be redundant, got: {:?}",
+        redundant
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn redundant_disable_renamed_cop_simple_value() {
     // Layout/Tab was renamed to Layout/IndentationStyle (simple key: value format
     // in obsoletion.yml). A disable directive for the old name should be flagged.

@@ -13,6 +13,11 @@ use crate::parse::source::SourceFile;
 ///    define_method/define_singleton_method (CALL_NODE), Struct.new/Data.define member names
 ///    (CALL_NODE), alias keyword (ALIAS_METHOD_NODE), and alias_method (CALL_NODE).
 /// 3. All of these are now handled, matching RuboCop's on_def/on_defs/on_send/on_alias handlers.
+///
+/// Follow-up (2026-03-08): FP=8 regressed at sites using
+/// `# rubocop:disable Style/MethodName`. RuboCop still suppresses
+/// `Naming/MethodName` for that moved legacy name because the short name stayed
+/// `MethodName`. Fixed centrally in `parse/directives.rs`.
 pub struct MethodName;
 
 /// Bundles config values needed for method name checking.

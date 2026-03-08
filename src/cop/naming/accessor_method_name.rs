@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// FP=1 regressed at a site using `# rubocop:disable Style/AccessorMethodName`.
+/// RuboCop still suppresses `Naming/AccessorMethodName` for that moved legacy
+/// name because the short name stayed `AccessorMethodName`. Fixed centrally in
+/// `parse/directives.rs`.
 pub struct AccessorMethodName;
 
 impl Cop for AccessorMethodName {

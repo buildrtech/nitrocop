@@ -14,6 +14,13 @@ use crate::parse::source::SourceFile;
 /// FN=5: Previously caused by `# standard:disable Security/Eval` directives being
 /// treated as suppressions. Fixed by parsing only `rubocop:`/`nitrocop:` directives
 /// in `parse/directives.rs` so Security/Eval now matches RuboCop directive behavior.
+///
+/// ## Corpus investigation (2026-03-08)
+///
+/// FP=2 regressed after directive matching stopped honoring the moved legacy name
+/// `Lint/Eval`. RuboCop still suppresses `Security/Eval` for `# rubocop:disable Lint/Eval`
+/// because the cop moved departments but kept the short name. Fixed centrally in
+/// `parse/directives.rs` by honoring moved legacy names whose short name is unchanged.
 pub struct Eval;
 
 impl Cop for Eval {

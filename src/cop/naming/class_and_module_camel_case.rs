@@ -21,6 +21,12 @@ use crate::parse::source::SourceFile;
 /// full name source. If underscores remain after stripping, it's an offense.
 /// This allows `module_parent::MyClass` to pass (the underscore is in an
 /// allowed name).
+///
+/// Follow-up (2026-03-08): FP=1 regressed at a site using
+/// `# rubocop:disable Style/ClassAndModuleCamelCase`. RuboCop still suppresses
+/// `Naming/ClassAndModuleCamelCase` for that moved legacy name because the
+/// short name stayed `ClassAndModuleCamelCase`. Fixed centrally in
+/// `parse/directives.rs`.
 pub struct ClassAndModuleCamelCase;
 
 impl Cop for ClassAndModuleCamelCase {

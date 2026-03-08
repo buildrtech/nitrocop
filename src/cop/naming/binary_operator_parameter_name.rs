@@ -10,10 +10,15 @@ use crate::parse::source::SourceFile;
 /// detection logic was correct. Root cause: nitrocop's disable directive
 /// system was resolving renamed cop names via REVERSE_RENAMED_COPS, treating
 /// `Style/OpMethod` as equivalent to `Naming/BinaryOperatorParameterName`.
-/// RuboCop does NOT do this — obsoletion.yml renames only apply to config
-/// keys, not inline disable comments. Fixed by removing the
-/// REVERSE_RENAMED_COPS lookup from DisabledRanges::is_disabled() and
-/// check_and_mark_used().
+/// RuboCop does NOT do that for cross-department renames whose short name also
+/// changed. Fixed by removing the blanket renamed-cop lookup from
+/// `DisabledRanges::is_disabled()` and `check_and_mark_used()`.
+///
+/// Follow-up (2026-03-08): RuboCop still honors moved legacy names when the
+/// short name is unchanged (for example `Lint/Eval` -> `Security/Eval`). That
+/// qualification is now handled centrally in `parse/directives.rs`; it still
+/// excludes `Style/OpMethod` because `OpMethod` does not qualify to
+/// `BinaryOperatorParameterName`.
 pub struct BinaryOperatorParameterName;
 
 const BINARY_OPERATORS: &[&[u8]] = &[

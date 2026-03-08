@@ -7,6 +7,14 @@ use crate::diagnostic::Severity;
 /// actually fired offenses, so the detection logic lives in `lint_source_inner`
 /// in `src/linter.rs`. This struct exists so the cop name is registered and
 /// can be referenced in configuration (enabled/disabled/excluded).
+///
+/// ## Corpus investigation (2026-03-08)
+///
+/// FP=19 regressed because moved legacy directives like
+/// `# rubocop:disable Style/MethodName` and `# rubocop:disable Metrics/LineLength`
+/// stopped suppressing their current cops, so nitrocop started reporting the
+/// directives themselves as redundant. Fixed centrally in `parse/directives.rs`
+/// by honoring moved legacy names whose short name is unchanged.
 pub struct RedundantCopDisableDirective;
 
 impl Cop for RedundantCopDisableDirective {

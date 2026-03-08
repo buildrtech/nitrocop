@@ -22,6 +22,11 @@ use crate::parse::source::SourceFile;
 /// - Added `MULTI_WRITE_NODE` to handle `ConstantTargetNode`/`ConstantPathTargetNode`
 ///   in multi-assignment (always flag, no valid_rhs check since value is shared)
 /// - Added range, interpolated string/symbol nodes to `is_literal()`
+///
+/// Follow-up (2026-03-08): FP=1 regressed at a site using
+/// `# rubocop:disable Style/ConstantName`. RuboCop still suppresses
+/// `Naming/ConstantName` for that moved legacy name because the short name
+/// stayed `ConstantName`. Fixed centrally in `parse/directives.rs`.
 pub struct ConstantName;
 
 impl Cop for ConstantName {
