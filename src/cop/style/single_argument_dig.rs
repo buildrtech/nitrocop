@@ -1,10 +1,23 @@
 use crate::cop::node_type::{
-    BLOCK_ARGUMENT_NODE, CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE, SPLAT_NODE,
+    BLOCK_ARGUMENT_NODE, CALL_NODE, FORWARDING_ARGUMENTS_NODE, HASH_NODE, KEYWORD_HASH_NODE,
+    SPLAT_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// FP investigation (2026-03-08): 11 FP (8 activemerchant, 2 world_cup_json, 1 anyway_config).
+///
+/// Root cause: Missing `ForwardingArgumentsNode` check. RuboCop's `IGNORED_ARGUMENT_TYPES`
+/// includes `forwarded_args` which maps to Prism's `ForwardingArgumentsNode`. Patterns like
+/// `data.dig(...)` (argument forwarding) were being falsely flagged.
+///
+/// Other forwarding patterns (`dig(*)`, `dig(**)`, `dig(&)`) were already handled by the
+/// existing `SplatNode`, `KeywordHashNode`, and `BlockArgumentNode` checks respectively.
+///
+/// Also relevant: RuboCop's `ignore_dig_chain?` skips chained `.dig().dig()` calls when
+/// `Style/DigChain` is enabled. This is not yet implemented but may not affect corpus FPs
+/// since those repos may not have DigChain enabled.
 pub struct SingleArgumentDig;
 
 impl Cop for SingleArgumentDig {
@@ -16,6 +29,7 @@ impl Cop for SingleArgumentDig {
         &[
             BLOCK_ARGUMENT_NODE,
             CALL_NODE,
+            FORWARDING_ARGUMENTS_NODE,
             HASH_NODE,
             KEYWORD_HASH_NODE,
             SPLAT_NODE,
@@ -65,12 +79,13 @@ impl Cop for SingleArgumentDig {
             return;
         }
 
-        // Skip block_pass, splat, and hash arguments
+        // Skip block_pass, splat, hash, and forwarding arguments
         let arg = &arg_list[0];
         if arg.as_block_argument_node().is_some()
             || arg.as_splat_node().is_some()
             || arg.as_keyword_hash_node().is_some()
             || arg.as_hash_node().is_some()
+            || arg.as_forwarding_arguments_node().is_some()
         {
             return;
         }
