@@ -1,12 +1,99 @@
-use crate::cop::node_type::{BLOCK_NODE, CALL_NODE, STATEMENTS_NODE};
-use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example};
+use crate::cop::node_type::CALL_NODE;
+use crate::cop::util::{
+    self, RSPEC_DEFAULT_INCLUDE, is_rspec_example, is_rspec_example_group, is_rspec_shared_group,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 use std::collections::HashMap;
 
-/// RSpec/RepeatedDescription: Don't repeat descriptions within an example group.
+/// ## Corpus investigation (2026-03-07)
+///
+/// Corpus oracle reported FP=408, FN=914.
+///
+/// Root causes in the previous implementation:
+/// - FP: `its(:x)` signatures were keyed only by args, so different block expectations
+///   (e.g. different `include(...)` checks) were incorrectly grouped together.
+/// - FN: only direct statements were checked, missing examples nested under iterator/if
+///   wrappers within the same example-group scope.
+///
+/// Fix:
+/// - Replaced direct-statement scan with a scope-aware recursive collector that mirrors
+///   RuboCop's `ExampleGroup#find_all_in_scope`: recurse through the current group, but
+///   stop at nested example groups/shared groups/include blocks and at example bodies.
+/// - Non-`its` signatures use example args (docstring + metadata).
+/// - `its` signatures use docstring + implementation body so block differences are respected.
+///
+/// Validation (`scripts/check-cop.py RSpec/RepeatedDescription --verbose --rerun`):
+/// - Expected (RuboCop): 2,875
+/// - Actual (nitrocop): 2,866
+/// - Potential FP: 0
+/// - Potential FN: 9
+///
+/// Note: check-cop reports FAIL against the CI nitrocop baseline because this fix restores
+/// many previously-missed detections (large FN reduction), increasing total offense count.
 pub struct RepeatedDescription;
+
+#[derive(Clone)]
+struct ExampleEntry {
+    is_its: bool,
+    signature: Vec<u8>,
+    line: usize,
+    column: usize,
+}
+
+struct ExampleCollector<'a> {
+    source: &'a SourceFile,
+    examples: Vec<ExampleEntry>,
+}
+
+impl<'a> ExampleCollector<'a> {
+    fn new(source: &'a SourceFile) -> Self {
+        Self {
+            source,
+            examples: Vec::new(),
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for ExampleCollector<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        let name = node.name().as_slice();
+        let block = node.block().and_then(|b| b.as_block_node());
+        let has_block = block.is_some();
+
+        // Scope boundaries: nested example groups/shared groups/include blocks
+        // should not be searched from the current example-group scope.
+        if has_block && is_scope_change_call(node) {
+            return;
+        }
+
+        // Examples are collected but their bodies are not traversed.
+        if has_block && is_example_call(node) {
+            let is_its = name == b"its";
+            let signature = if is_its {
+                its_signature(self.source, node)
+            } else {
+                example_signature(self.source, node)
+            };
+
+            if let Some(signature) = signature {
+                let loc = node.location();
+                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                self.examples.push(ExampleEntry {
+                    is_its,
+                    signature,
+                    line,
+                    column,
+                });
+            }
+            return;
+        }
+
+        ruby_prism::visit_call_node(self, node);
+    }
+}
 
 impl Cop for RepeatedDescription {
     fn name(&self) -> &'static str {
@@ -22,7 +109,7 @@ impl Cop for RepeatedDescription {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, CALL_NODE, STATEMENTS_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -39,8 +126,7 @@ impl Cop for RepeatedDescription {
             None => return,
         };
 
-        let name = call.name().as_slice();
-        if !is_example_group(name) {
+        if !is_example_group_call(&call) {
             return;
         }
 
@@ -56,47 +142,43 @@ impl Cop for RepeatedDescription {
             Some(b) => b,
             None => return,
         };
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
-            None => return,
-        };
 
-        // Collect example descriptions: signature -> list of (line, col, end_line, end_col)
+        let mut collector = ExampleCollector::new(source);
+        collector.visit(&body);
+
         #[allow(clippy::type_complexity)] // internal collection used only in this function
-        let mut desc_map: HashMap<Vec<u8>, Vec<(usize, usize, usize, usize)>> = HashMap::new();
+        let mut repeated_desc: HashMap<Vec<u8>, Vec<(usize, usize)>> = HashMap::new();
+        #[allow(clippy::type_complexity)] // internal collection used only in this function
+        let mut repeated_its: HashMap<Vec<u8>, Vec<(usize, usize)>> = HashMap::new();
 
-        for stmt in stmts.body().iter() {
-            if let Some(c) = stmt.as_call_node() {
-                let m = c.name().as_slice();
-                if is_rspec_example(m) || m == b"its" {
-                    // Build a signature from the full source of the call (without block)
-                    let sig = example_signature(source, &c);
-                    if let Some(s) = sig {
-                        let loc = c.location();
-                        let (line, col) = source.offset_to_line_col(loc.start_offset());
-                        let end_off = loc.end_offset();
-                        desc_map.entry(s).or_default().push((
-                            line,
-                            col,
-                            loc.start_offset(),
-                            end_off,
-                        ));
-                    }
-                }
+        for example in &collector.examples {
+            if example.signature.is_empty() {
+                continue;
+            }
+            if example.is_its {
+                repeated_its
+                    .entry(example.signature.clone())
+                    .or_default()
+                    .push((example.line, example.column));
+            } else {
+                repeated_desc
+                    .entry(example.signature.clone())
+                    .or_default()
+                    .push((example.line, example.column));
             }
         }
 
-        for locs in desc_map.values() {
-            if locs.len() > 1 {
-                for &(line, col, start, end) in locs {
-                    let _ = (start, end);
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        col,
-                        "Don't repeat descriptions within an example group.".to_string(),
-                    ));
-                }
+        for locs in repeated_desc.values().chain(repeated_its.values()) {
+            if locs.len() <= 1 {
+                continue;
+            }
+            for &(line, column) in locs {
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Don't repeat descriptions within an example group.".to_string(),
+                ));
             }
         }
     }
@@ -117,22 +199,57 @@ fn example_signature(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Op
     Some(sig)
 }
 
-fn is_example_group(name: &[u8]) -> bool {
-    // NOTE: shared_examples, shared_examples_for, and shared_context are
-    // intentionally excluded — RuboCop's RepeatedDescription only fires on
-    // ExampleGroups (describe/context/feature), not SharedGroups.
+/// Build a signature for `its` examples from docstring + implementation.
+fn its_signature(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
+    let args = call.arguments()?;
+    let doc = args.arguments().iter().next()?;
+
+    let block = call.block().and_then(|b| b.as_block_node())?;
+    let body = block.body()?;
+
+    let doc_loc = doc.location();
+    let body_loc = body.location();
+    let mut sig = Vec::new();
+    sig.extend_from_slice(&source.as_bytes()[doc_loc.start_offset()..doc_loc.end_offset()]);
+    sig.push(0);
+    sig.extend_from_slice(&source.as_bytes()[body_loc.start_offset()..body_loc.end_offset()]);
+    Some(sig)
+}
+
+fn is_example_group_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    let name = call.name().as_slice();
+    if !is_rspec_example_group(name) || is_rspec_shared_group(name) {
+        return false;
+    }
+
+    match call.receiver() {
+        None => true,
+        Some(recv) => util::constant_name(&recv).is_some_and(|n| n == b"RSpec"),
+    }
+}
+
+fn is_example_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.receiver().is_none() && is_rspec_example(call.name().as_slice())
+}
+
+fn is_scope_change_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    let name = call.name().as_slice();
+
+    if call.receiver().is_none() {
+        return is_rspec_example_group(name)
+            || is_rspec_shared_group(name)
+            || is_include_scope_method(name);
+    }
+
+    let is_rspec_receiver =
+        util::constant_name(&call.receiver().unwrap()).is_some_and(|n| n == b"RSpec");
+    is_rspec_receiver && (is_rspec_example_group(name) || is_rspec_shared_group(name))
+}
+
+fn is_include_scope_method(name: &[u8]) -> bool {
     matches!(
         name,
-        b"describe"
-            | b"context"
-            | b"feature"
-            | b"example_group"
-            | b"xdescribe"
-            | b"xcontext"
-            | b"xfeature"
-            | b"fdescribe"
-            | b"fcontext"
-            | b"ffeature"
+        b"include_examples" | b"it_behaves_like" | b"it_should_behave_like" | b"include_context"
     )
 }
 

@@ -22,3 +22,15 @@ describe 'doing y' do
   ^^^^^^^^^^ RSpec/RepeatedDescription: Don't repeat descriptions within an example group.
   end
 end
+
+describe 'iterator examples' do
+  %i[foo bar].each do |type|
+    it "does a thing #{type}" do
+    ^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedDescription: Don't repeat descriptions within an example group.
+    end
+
+    it "does a thing #{type}" do
+    ^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedDescription: Don't repeat descriptions within an example group.
+    end
+  end
+end

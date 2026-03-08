@@ -23,3 +23,9 @@ shared_examples 'default locale' do
     2
   end
 end
+
+# Same `its` docstring but different block implementations should not be grouped.
+describe 'gemfile updates' do
+  its(:content) { is_expected.to include('"business", "~> 1.5.0"') }
+  its(:content) { is_expected.to include('"statesman", "~> 1.2.0"') }
+end
