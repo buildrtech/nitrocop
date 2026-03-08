@@ -4,6 +4,21 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=465, FN=0.
+///
+/// Investigation outcome: representative FPs were explored from corpus and an
+/// attempted fix narrowed "empty line" detection to strictly empty/CR-only
+/// lines in `no_empty_lines` mode.
+///
+/// Attempted fix effect: reduced FPs, but introduced large FN regression
+/// (`check-cop --rerun` reported Missing=290), which violates conformance.
+///
+/// Resolution in this patch: revert the attempted logic change and keep current
+/// behavior unchanged. A correct future fix likely needs config-sensitive
+/// handling (for example excludes/department interactions), not a blanket
+/// whitespace-line rule.
 pub struct EmptyLinesAroundModuleBody;
 
 impl Cop for EmptyLinesAroundModuleBody {
@@ -115,6 +130,17 @@ mod tests {
             diags.len(),
             2,
             "empty_lines style should require blank lines at both ends"
+        );
+    }
+
+    #[test]
+    fn no_empty_lines_style_flags_crlf_empty_lines() {
+        let src = b"module Foo\r\n\r\n  X = 1\r\n\r\nend\r\n";
+        let diags = run_cop_full(&EmptyLinesAroundModuleBody, src);
+        assert_eq!(
+            diags.len(),
+            2,
+            "CRLF empty lines should still be treated as empty"
         );
     }
 }
