@@ -18,3 +18,5 @@ def underscore_valid(_name, _count)
 end
 def just_underscore(_)
 end
+def post_splat(*args, name, count)
+end

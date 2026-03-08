@@ -30,6 +30,12 @@ pub struct MethodParameterName;
 ///
 /// Fix: strip leading underscores to get basename, add uppercase check, wire up
 /// ForbiddenNames and AllowNamesEndingInNumbers.
+///
+/// ## FN=12 fix (2026-03-08)
+///
+/// All 12 FNs were post-splat required parameters (e.g., `def m(*args, a, b)`).
+/// These live in `params.posts()` in Prism's AST, which was not iterated.
+/// Fix: add `params.posts()` iteration alongside `params.requireds()`.
 const DEFAULT_ALLOWED: &[&str] = &[
     "as", "at", "by", "cc", "db", "id", "if", "in", "io", "ip", "of", "on", "os", "pp", "to",
 ];
@@ -79,6 +85,24 @@ impl Cop for MethodParameterName {
 
         // Check required parameters
         for param in params.requireds().iter() {
+            if let Some(req) = param.as_required_parameter_node() {
+                let name = req.name().as_slice();
+                check_param(
+                    self,
+                    source,
+                    name,
+                    &req.location(),
+                    min_length,
+                    &allowed,
+                    &forbidden,
+                    allow_numbers,
+                    diagnostics,
+                );
+            }
+        }
+
+        // Check post-splat required parameters
+        for param in params.posts().iter() {
             if let Some(req) = param.as_required_parameter_node() {
                 let name = req.name().as_slice();
                 check_param(

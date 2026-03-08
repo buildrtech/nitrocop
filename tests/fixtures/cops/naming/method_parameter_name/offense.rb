@@ -33,3 +33,7 @@ end
 def underscore_upper(_fooBar)
                      ^^^^^^^ Naming/MethodParameterName: Only use lowercase characters for method parameter.
 end
+def post_splat(*args, a, b)
+                      ^ Naming/MethodParameterName: Method parameter must be at least 3 characters long.
+                         ^ Naming/MethodParameterName: Method parameter must be at least 3 characters long.
+end
