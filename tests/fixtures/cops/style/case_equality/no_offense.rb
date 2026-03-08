@@ -12,3 +12,9 @@ x.equal?(y)
 NUMERIC_PATTERN === timezone
 NAME_PATTERN === value
 CONST_NAME === input
+
+# Qualified constants with ALL_CAPS last segment are also not module names
+Constants::ATOM_UNSAFE === str
+Constants::PHRASE_UNSAFE === str
+URI::HTTPS === @uri
+Foo::Bar::ALL_CAPS === value

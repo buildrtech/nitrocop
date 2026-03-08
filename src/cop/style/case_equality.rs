@@ -13,6 +13,12 @@ use crate::parse::source::SourceFile;
 /// `AllowOnConstant`. Only PascalCase constants (e.g., `String`, `Integer`)
 /// are subject to `AllowOnConstant`. This was causing 42 FPs across 27 repos
 /// on patterns like `NUMERIC_PATTERN === timezone`.
+///
+/// Second fix: `receiver_constant_name()` was returning hardcoded "QualifiedPath"
+/// for all `ConstantPathNode` receivers, which always passed `is_module_name()`.
+/// Fixed to extract the actual last-segment name via `cp.name()`. This resolves
+/// 21 FPs on patterns like `Constants::ATOM_UNSAFE === str` and `URI::HTTPS === @uri`
+/// where the last segment is ALL_CAPS (not a module name).
 pub struct CaseEquality;
 
 impl CaseEquality {
@@ -21,10 +27,14 @@ impl CaseEquality {
         if let Some(c) = node.as_constant_read_node() {
             return Some(String::from_utf8_lossy(c.name().as_slice()).into_owned());
         }
-        if node.as_constant_path_node().is_some() {
-            // For qualified constants like Foo::Bar, treat as module name
-            // (RuboCop checks the full path, but qualified constants are always module-like)
-            return Some("QualifiedPath".to_string());
+        if let Some(cp) = node.as_constant_path_node() {
+            // For qualified constants like Foo::Bar, extract the last segment name.
+            // RuboCop checks the last segment: URI::HTTPS is ALL_CAPS (not a module name),
+            // while URI::Generic is PascalCase (a module name).
+            if let Some(name) = cp.name() {
+                return Some(String::from_utf8_lossy(name.as_slice()).into_owned());
+            }
+            return None;
         }
         None
     }
