@@ -10,5 +10,7 @@ describe Foo do
            ^^^ RSpec/ExpectActual: Provide the actual value you are testing to `expect(...)`.
     expect(:sym).to eq(bar)
            ^^^^ RSpec/ExpectActual: Provide the actual value you are testing to `expect(...)`.
+    expect(__FILE__).to eq(expected_path)
+           ^^^^^^^^ RSpec/ExpectActual: Provide the actual value you are testing to `expect(...)`.
   end
 end

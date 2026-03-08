@@ -8,6 +8,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=20, FN=1.
+///
+/// FP=20 root cause: matcher-shape checks were too permissive. We flagged runner
+/// calls where `.to`/`.not_to` had multiple args (matcher + failure message) and
+/// chained matcher receivers (for example `have_matcher.with(...)`), while
+/// RuboCop only matches a single matcher arg in the form `send nil? ...` or
+/// `be == expected`.
+///
+/// FN=1 root cause: `__FILE__` was not treated as a literal expect actual value.
+///
+/// Fixes applied:
+/// - Require exactly one runner argument.
+/// - Match only RuboCop-compatible matcher forms.
+/// - Treat `__FILE__` (`SourceFileNode`) as a literal.
 pub struct ExpectActual;
 
 impl Cop for ExpectActual {
@@ -89,7 +105,7 @@ impl Cop for ExpectActual {
         }
 
         let literal_arg = &expect_arg_list[0];
-        if !is_literal_value(literal_arg) {
+        if !is_literal_value(source, literal_arg) {
             return;
         }
 
@@ -101,23 +117,20 @@ impl Cop for ExpectActual {
             None => return,
         };
         let matcher_list: Vec<ruby_prism::Node<'_>> = matcher_args.arguments().iter().collect();
-        if matcher_list.is_empty() {
+        if matcher_list.len() != 1 {
             return;
         }
 
-        // The matcher call itself must have arguments
+        // RuboCop only matches:
+        // - (send nil? matcher expected ...)
+        // - (send (send nil? :be) :== expected)
         let matcher = &matcher_list[0];
-        if let Some(matcher_call) = matcher.as_call_node() {
-            let matcher_name = matcher_call.name().as_slice();
-            // Skip route_to and be_routable matchers
-            if matcher_name == b"route_to" || matcher_name == b"be_routable" {
-                return;
-            }
-            // Matcher must have arguments (eq(something), be(something), etc.)
-            if matcher_call.arguments().is_none() {
-                // Also check for `be == something` pattern
-                return;
-            }
+        let Some(matcher_name) = expect_actual_matcher_name(matcher) else {
+            return;
+        };
+        // Skip route_to and be_routable matchers
+        if matcher_name == b"route_to" || matcher_name == b"be_routable" {
+            return;
         }
 
         let loc = literal_arg.location();
@@ -131,7 +144,7 @@ impl Cop for ExpectActual {
     }
 }
 
-fn is_literal_value(node: &ruby_prism::Node<'_>) -> bool {
+fn is_literal_value(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
     if node.as_integer_node().is_some()
         || node.as_float_node().is_some()
         || node.as_imaginary_node().is_some()
@@ -139,6 +152,7 @@ fn is_literal_value(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_true_node().is_some()
         || node.as_false_node().is_some()
         || node.as_nil_node().is_some()
+        || node.as_source_file_node().is_some()
         || node.as_regular_expression_node().is_some()
     {
         return true;
@@ -146,8 +160,13 @@ fn is_literal_value(node: &ruby_prism::Node<'_>) -> bool {
 
     // String without interpolation
     if let Some(s) = node.as_string_node() {
-        // Check it's not an interpolated string
-        let _ = s;
+        // RuboCop's Parser AST treats multiline string literals as dynamic string
+        // (`dstr`), so they are not considered simple literals for this cop.
+        let loc = s.location();
+        let bytes = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+        if bytes.contains(&b'\n') {
+            return false;
+        }
         return true;
     }
 
@@ -159,7 +178,7 @@ fn is_literal_value(node: &ruby_prism::Node<'_>) -> bool {
     // Array with all literal elements
     if let Some(arr) = node.as_array_node() {
         let elements: Vec<ruby_prism::Node<'_>> = arr.elements().iter().collect();
-        if elements.iter().all(|e| is_literal_value(e)) {
+        if elements.iter().all(|e| is_literal_value(source, e)) {
             return true;
         }
     }
@@ -169,7 +188,7 @@ fn is_literal_value(node: &ruby_prism::Node<'_>) -> bool {
         let pairs: Vec<ruby_prism::Node<'_>> = hash.elements().iter().collect();
         if pairs.iter().all(|p| {
             if let Some(assoc) = p.as_assoc_node() {
-                is_literal_value(&assoc.key()) && is_literal_value(&assoc.value())
+                is_literal_value(source, &assoc.key()) && is_literal_value(source, &assoc.value())
             } else {
                 false
             }
@@ -180,9 +199,10 @@ fn is_literal_value(node: &ruby_prism::Node<'_>) -> bool {
 
     // Range with literal endpoints
     if let Some(range) = node.as_range_node() {
-        let left_ok = range.left().is_none() || range.left().is_some_and(|l| is_literal_value(&l));
+        let left_ok =
+            range.left().is_none() || range.left().is_some_and(|l| is_literal_value(source, &l));
         let right_ok =
-            range.right().is_none() || range.right().is_some_and(|r| is_literal_value(&r));
+            range.right().is_none() || range.right().is_some_and(|r| is_literal_value(source, &r));
         if left_ok && right_ok {
             return true;
         }
@@ -193,7 +213,7 @@ fn is_literal_value(node: &ruby_prism::Node<'_>) -> bool {
         let elems: Vec<ruby_prism::Node<'_>> = kh.elements().iter().collect();
         if elems.iter().all(|e| {
             if let Some(assoc) = e.as_assoc_node() {
-                is_literal_value(&assoc.key()) && is_literal_value(&assoc.value())
+                is_literal_value(source, &assoc.key()) && is_literal_value(source, &assoc.value())
             } else {
                 false
             }
@@ -203,6 +223,25 @@ fn is_literal_value(node: &ruby_prism::Node<'_>) -> bool {
     }
 
     false
+}
+
+fn expect_actual_matcher_name<'a>(node: &'a ruby_prism::Node<'_>) -> Option<&'a [u8]> {
+    let matcher = node.as_call_node()?;
+
+    // Regular matcher call: eq(expected), include(expected), etc.
+    if matcher.receiver().is_none() && matcher.arguments().is_some() {
+        return Some(matcher.name().as_slice());
+    }
+
+    // Special RuboCop pattern: be == expected
+    if matcher.name().as_slice() == b"==" && matcher.arguments().is_some() {
+        let be_call = matcher.receiver().and_then(|r| r.as_call_node())?;
+        if be_call.receiver().is_none() && be_call.name().as_slice() == b"be" {
+            return Some(b"be");
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
