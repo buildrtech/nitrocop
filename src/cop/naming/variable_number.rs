@@ -1,11 +1,24 @@
 use crate::cop::node_type::{
-    CLASS_VARIABLE_WRITE_NODE, DEF_NODE, GLOBAL_VARIABLE_WRITE_NODE, INSTANCE_VARIABLE_WRITE_NODE,
-    LOCAL_VARIABLE_WRITE_NODE, REQUIRED_PARAMETER_NODE, SYMBOL_NODE,
+    CLASS_VARIABLE_AND_WRITE_NODE, CLASS_VARIABLE_OPERATOR_WRITE_NODE,
+    CLASS_VARIABLE_OR_WRITE_NODE, CLASS_VARIABLE_TARGET_NODE, CLASS_VARIABLE_WRITE_NODE, DEF_NODE,
+    GLOBAL_VARIABLE_AND_WRITE_NODE, GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+    GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_TARGET_NODE, GLOBAL_VARIABLE_WRITE_NODE,
+    INSTANCE_VARIABLE_AND_WRITE_NODE, INSTANCE_VARIABLE_OPERATOR_WRITE_NODE,
+    INSTANCE_VARIABLE_OR_WRITE_NODE, INSTANCE_VARIABLE_TARGET_NODE, INSTANCE_VARIABLE_WRITE_NODE,
+    LOCAL_VARIABLE_AND_WRITE_NODE, LOCAL_VARIABLE_OPERATOR_WRITE_NODE,
+    LOCAL_VARIABLE_OR_WRITE_NODE, LOCAL_VARIABLE_TARGET_NODE, LOCAL_VARIABLE_WRITE_NODE,
+    REQUIRED_PARAMETER_NODE, SYMBOL_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// FN=160 investigation: nitrocop only handled simple write nodes (e.g.
+/// `LocalVariableWriteNode`) but missed compound assignment variants:
+/// or-write (`||=`), and-write (`&&=`), operator-write (`+=`, `-=`, etc.),
+/// and multi-assignment target nodes. All 16 missing node types have a
+/// `.name()` method returning the variable name, same as the write nodes.
+/// Fix: register all 16 additional node types and handle them identically.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -27,10 +40,26 @@ impl Cop for VariableNumber {
 
     fn interested_node_types(&self) -> &'static [u8] {
         &[
+            CLASS_VARIABLE_AND_WRITE_NODE,
+            CLASS_VARIABLE_OPERATOR_WRITE_NODE,
+            CLASS_VARIABLE_OR_WRITE_NODE,
+            CLASS_VARIABLE_TARGET_NODE,
             CLASS_VARIABLE_WRITE_NODE,
             DEF_NODE,
+            GLOBAL_VARIABLE_AND_WRITE_NODE,
+            GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+            GLOBAL_VARIABLE_OR_WRITE_NODE,
+            GLOBAL_VARIABLE_TARGET_NODE,
             GLOBAL_VARIABLE_WRITE_NODE,
+            INSTANCE_VARIABLE_AND_WRITE_NODE,
+            INSTANCE_VARIABLE_OPERATOR_WRITE_NODE,
+            INSTANCE_VARIABLE_OR_WRITE_NODE,
+            INSTANCE_VARIABLE_TARGET_NODE,
             INSTANCE_VARIABLE_WRITE_NODE,
+            LOCAL_VARIABLE_AND_WRITE_NODE,
+            LOCAL_VARIABLE_OPERATOR_WRITE_NODE,
+            LOCAL_VARIABLE_OR_WRITE_NODE,
+            LOCAL_VARIABLE_TARGET_NODE,
             LOCAL_VARIABLE_WRITE_NODE,
             REQUIRED_PARAMETER_NODE,
             SYMBOL_NODE,
@@ -57,80 +86,71 @@ impl Cop for VariableNumber {
 
         let allowed_pats: Vec<String> = allowed_patterns.unwrap_or_default();
 
-        // Check local variable writes
-        if let Some(lvar) = node.as_local_variable_write_node() {
-            let name = lvar.name().as_slice();
-            let name_str = std::str::from_utf8(name).unwrap_or("");
-            if !is_allowed(name_str, &allowed_ids, &allowed_pats) {
-                if let Some(diag) = check_number_style(
-                    self,
-                    source,
-                    name_str,
-                    &lvar.name_loc(),
-                    enforced_style,
-                    "variable",
-                ) {
-                    diagnostics.push(diag);
-                }
+        // Extract (name_bytes, location) from any variable write/compound-write/target node
+        let var_info: Option<(&[u8], ruby_prism::Location<'_>)> =
+            // Local variables (no sigil to strip)
+            if let Some(n) = node.as_local_variable_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_local_variable_or_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_local_variable_and_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_local_variable_operator_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_local_variable_target_node() {
+                Some((n.name().as_slice(), n.location()))
             }
-        }
+            // Instance variables (strip @)
+            else if let Some(n) = node.as_instance_variable_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_instance_variable_or_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_instance_variable_and_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_instance_variable_operator_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_instance_variable_target_node() {
+                Some((n.name().as_slice(), n.location()))
+            }
+            // Class variables (strip @@)
+            else if let Some(n) = node.as_class_variable_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_class_variable_or_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_class_variable_and_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_class_variable_operator_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_class_variable_target_node() {
+                Some((n.name().as_slice(), n.location()))
+            }
+            // Global variables (strip $)
+            else if let Some(n) = node.as_global_variable_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_global_variable_or_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_global_variable_and_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_global_variable_operator_write_node() {
+                Some((n.name().as_slice(), n.name_loc()))
+            } else if let Some(n) = node.as_global_variable_target_node() {
+                Some((n.name().as_slice(), n.location()))
+            } else {
+                None
+            };
 
-        // Check instance variable writes
-        if let Some(ivar) = node.as_instance_variable_write_node() {
-            let name = ivar.name().as_slice();
-            let name_str = std::str::from_utf8(name).unwrap_or("");
-            // Strip leading @
-            let bare = name_str.trim_start_matches('@');
+        if let Some((name_bytes, loc)) = var_info {
+            let name_str = std::str::from_utf8(name_bytes).unwrap_or("");
+            // Strip sigils: @@ for class vars, @ for instance vars, $ for globals
+            let bare = name_str.trim_start_matches('@').trim_start_matches('$');
             if !is_allowed(bare, &allowed_ids, &allowed_pats) {
-                if let Some(diag) = check_number_style(
-                    self,
-                    source,
-                    bare,
-                    &ivar.name_loc(),
-                    enforced_style,
-                    "variable",
-                ) {
+                if let Some(diag) =
+                    check_number_style(self, source, bare, &loc, enforced_style, "variable")
+                {
                     diagnostics.push(diag);
                 }
             }
-        }
-
-        // Check class variable writes
-        if let Some(cvar) = node.as_class_variable_write_node() {
-            let name = cvar.name().as_slice();
-            let name_str = std::str::from_utf8(name).unwrap_or("");
-            let bare = name_str.trim_start_matches('@');
-            if !is_allowed(bare, &allowed_ids, &allowed_pats) {
-                if let Some(diag) = check_number_style(
-                    self,
-                    source,
-                    bare,
-                    &cvar.name_loc(),
-                    enforced_style,
-                    "variable",
-                ) {
-                    diagnostics.push(diag);
-                }
-            }
-        }
-
-        // Check global variable writes
-        if let Some(gvar) = node.as_global_variable_write_node() {
-            let name = gvar.name().as_slice();
-            let name_str = std::str::from_utf8(name).unwrap_or("");
-            let bare = name_str.trim_start_matches('$');
-            if !is_allowed(bare, &allowed_ids, &allowed_pats) {
-                if let Some(diag) = check_number_style(
-                    self,
-                    source,
-                    bare,
-                    &gvar.name_loc(),
-                    enforced_style,
-                    "variable",
-                ) {
-                    diagnostics.push(diag);
-                }
-            }
+            return;
         }
 
         // Check method names (def)
