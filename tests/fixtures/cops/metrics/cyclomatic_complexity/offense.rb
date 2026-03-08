@@ -183,3 +183,20 @@ def method_with_many_rescue_modifiers
   f = sixth_call rescue nil
   g = seventh_call rescue nil
 end
+
+# with_index and with_object are iterating methods (enumerator category)
+def method_with_enumerator_blocks(items)
+^^^ Metrics/CyclomaticComplexity: Cyclomatic complexity for method_with_enumerator_blocks is too high. [9/7]
+  if items.nil?
+    return
+  end
+  if items.empty?
+    return
+  end
+  items.map.with_index { |item, i| item }
+  items.each.with_object([]) { |item, acc| acc << item }
+  items.select { |item| item }
+  items.reject { |item| item }
+  items.flat_map { |item| [item] }
+  result = items.any? || items.none?
+end

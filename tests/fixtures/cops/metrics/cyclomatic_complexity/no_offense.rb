@@ -88,3 +88,9 @@ def method_with_few_compound(h, obj)
   h["key"] ||= "default"
   obj.attr &&= process(obj.attr)
 end
+
+# with_index / with_object below threshold are fine
+def method_with_enumerator(items)
+  items.map.with_index { |item, i| [i, item] }
+  items.each.with_object({}) { |item, acc| acc[item] = true }
+end
