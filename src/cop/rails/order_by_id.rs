@@ -4,6 +4,20 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/OrderById: flags `order(:id)`, `order(id: dir)`, `order(primary_key)`,
+/// and `order(primary_key => dir)`.
+///
+/// ## FP root cause (77 FP)
+/// RuboCop's `order_by_id?` pattern only matches hash args with EXACTLY ONE pair:
+/// `(hash (pair (sym :id) _))`. Nitrocop was calling `keyword_arg_value(&call, b"id")`
+/// without checking pair count, so `order(id: :asc, name: :desc)` was incorrectly flagged.
+/// Fix: verify hash/keyword_hash has exactly 1 element before checking the key.
+///
+/// ## FN root cause (210 FN)
+/// RuboCop also matches `order(primary_key => value)` — a hash pair where the key is a
+/// `primary_key` method call. Nitrocop only handled bare `primary_key` as a symbol-like
+/// argument, not as a hash key. Fix: when processing single-pair hashes, also check if
+/// the key is a CallNode with method `primary_key`.
 pub struct OrderById;
 
 impl Cop for OrderById {
@@ -41,11 +55,6 @@ impl Cop for OrderById {
             return;
         }
 
-        // Must have a receiver
-        if call.receiver().is_none() {
-            return;
-        }
-
         let args = match call.arguments() {
             Some(a) => a,
             None => return,
@@ -55,26 +64,46 @@ impl Cop for OrderById {
             return;
         }
 
-        let is_order_by_id = if let Some(sym) = arg_list[0].as_symbol_node() {
+        // Check for the various patterns RuboCop matches:
+        // 1. order(:id) — bare symbol
+        // 2. order(id: dir) — single-pair keyword hash
+        // 3. order(primary_key) — bare method call
+        // 4. order(primary_key => dir) — single-pair hash with primary_key call as key
+        let arg = &arg_list[0];
+
+        let is_order_by_id = if let Some(sym) = arg.as_symbol_node() {
+            // Pattern 1: order(:id)
             sym.unescaped() == b"id"
-        } else if arg_list[0].as_hash_node().is_some()
-            || arg_list[0].as_keyword_hash_node().is_some()
-        {
-            // order(id: :asc) or order(id: :desc)
-            keyword_arg_value(&call, b"id").is_some()
+        } else if let Some(kw) = arg.as_keyword_hash_node() {
+            // Pattern 2 & 4: keyword hash — must have exactly 1 pair
+            if kw.elements().iter().count() != 1 {
+                return;
+            }
+            if keyword_arg_value(&call, b"id").is_some() {
+                true
+            } else {
+                // Check for primary_key => value
+                hash_key_is_primary_key(kw.elements().iter().next())
+            }
+        } else if let Some(hash) = arg.as_hash_node() {
+            // Pattern 2 & 4: explicit hash — must have exactly 1 pair
+            if hash.elements().iter().count() != 1 {
+                return;
+            }
+            if keyword_arg_value(&call, b"id").is_some() {
+                true
+            } else {
+                hash_key_is_primary_key(hash.elements().iter().next())
+            }
+        } else if let Some(pk_call) = arg.as_call_node() {
+            // Pattern 3: order(primary_key)
+            pk_call.name().as_slice() == b"primary_key"
         } else {
             false
         };
 
         if !is_order_by_id {
-            // Also check: order(primary_key) - call to primary_key method
-            if let Some(pk_call) = arg_list[0].as_call_node() {
-                if pk_call.name().as_slice() != b"primary_key" {
-                    return;
-                }
-            } else {
-                return;
-            }
+            return;
         }
 
         let msg_loc = call.message_loc().unwrap_or(call.location());
@@ -85,6 +114,22 @@ impl Cop for OrderById {
             column,
             "Do not use the `id` column for ordering. Use a timestamp column to order chronologically.".to_string(),
         ));
+    }
+}
+
+/// Check if a hash element's key is a `primary_key` method call.
+fn hash_key_is_primary_key(elem: Option<ruby_prism::Node<'_>>) -> bool {
+    let elem = match elem {
+        Some(e) => e,
+        None => return false,
+    };
+    let assoc = match elem.as_assoc_node() {
+        Some(a) => a,
+        None => return false,
+    };
+    match assoc.key().as_call_node() {
+        Some(c) => c.name().as_slice() == b"primary_key",
+        None => false,
     }
 }
 
