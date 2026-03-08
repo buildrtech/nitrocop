@@ -23,6 +23,10 @@ use ruby_prism::Visit;
 /// leaked into nested scopes, causing 6 new FPs. The key insight is that RuboCop's
 /// inspector navigates UP from the merge! node and only matches if the parent (or
 /// begin-wrapped parent) is the block node itself.
+///
+/// FP=1 fix (2026-03-07): The accumulator was still leaking into nested blocks (e.g.,
+/// `.each do` inside `each_with_object`). Fixed by saving/clearing the accumulator in
+/// `visit_call_node`'s else branch for non-each_with_object blocks.
 pub struct RedundantMerge;
 
 impl Cop for RedundantMerge {
@@ -226,7 +230,9 @@ impl<'pr> Visit<'pr> for RedundantMergeVisitor<'_, '_> {
                 self.visit(&block);
                 self.each_with_object_accumulator = prev_acc;
             } else {
+                let prev_acc = self.each_with_object_accumulator.take();
                 self.visit(&block);
+                self.each_with_object_accumulator = prev_acc;
             }
         }
     }

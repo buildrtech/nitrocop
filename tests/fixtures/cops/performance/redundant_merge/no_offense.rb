@@ -51,3 +51,9 @@ end
 module Config
   DEFAULTS.merge!(timeout: 30, retries: 3)
 end
+# merge! on accumulator inside a nested block within each_with_object
+record_classes.each_with_object({}) do |klass, hash|
+  klass.where(active: true).each do |record|
+    hash.merge!(name => {})
+  end
+end
