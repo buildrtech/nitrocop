@@ -12,3 +12,9 @@ end
 
 module Ëxample
 end
+
+class module_parent::MyClass
+end
+
+module Top::MyModule
+end
