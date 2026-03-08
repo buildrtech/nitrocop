@@ -4,6 +4,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-07)
+///
+/// Corpus oracle reported FP=25, FN=9.
+///
+/// FP root cause: calls that pass a block argument (`&handler`) were treated as
+/// hook blocks. RuboCop's matcher runs on `any_block` nodes only, so
+/// `state.before(:each, &handler)`/`state.after(:each, &handler)` should be ignored.
+///
+/// Fix: require a literal Prism `BlockNode` (`do/end` or `{}`) before enforcing
+/// hook-argument style.
+///
+/// Acceptance gate after fix (`check-cop --verbose --rerun`):
+/// - Expected: 12,040
+/// - Actual: 12,029
+/// - Excess: 0
+/// - Missing: 11 (remaining FN work deferred)
 pub struct HookArgument;
 
 /// Hook methods to check.
@@ -55,8 +71,8 @@ impl Cop for HookArgument {
             return;
         }
 
-        // Must have a block
-        if call.block().is_none() {
+        // RuboCop matches `any_block` only; ignore block-pass args (`&handler`).
+        if call.block().and_then(|b| b.as_block_node()).is_none() {
             return;
         }
 
