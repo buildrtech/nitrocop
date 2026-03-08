@@ -30,6 +30,12 @@ use crate::parse::source::SourceFile;
 ///
 /// Also fixed: plain string patterns in ForbiddenDelimiters (e.g., `END` without
 /// `/` delimiters) are now treated as regex via `Regexp.new()` matching RuboCop.
+///
+/// Remaining FP=14, FN=14: symmetric location mismatch on **empty** heredocs.
+/// RuboCop's `on_heredoc` uses `node.children.empty? ? node : node.loc.heredoc_end`,
+/// reporting empty heredocs at the opening (`<<~END`) and non-empty at the closing
+/// delimiter. nitrocop was always using closing. Fixed by checking `parts().is_empty()`
+/// / `unescaped().is_empty()` and using `opening_loc` for empty heredocs.
 pub struct HeredocDelimiterNaming;
 
 // Default forbidden patterns: EO followed by one uppercase letter, or END.
@@ -129,24 +135,36 @@ impl Cop for HeredocDelimiterNaming {
         let forbidden_delimiters = config.get_string_array("ForbiddenDelimiters");
 
         // Check string and xstring nodes for heredoc openings.
-        let (opening_loc, closing_start) = if let Some(interp) = node.as_interpolated_string_node()
-        {
-            (
-                interp.opening_loc(),
-                interp.closing_loc().map(|loc| loc.start_offset()),
-            )
-        } else if let Some(s) = node.as_string_node() {
-            (
-                s.opening_loc(),
-                s.closing_loc().map(|loc| loc.start_offset()),
-            )
-        } else if let Some(x) = node.as_interpolated_x_string_node() {
-            (Some(x.opening_loc()), Some(x.closing_loc().start_offset()))
-        } else if let Some(x) = node.as_x_string_node() {
-            (Some(x.opening_loc()), Some(x.closing_loc().start_offset()))
-        } else {
-            return;
-        };
+        // Track whether body is empty — RuboCop reports empty heredocs at the
+        // opening (`node`) and non-empty heredocs at `node.loc.heredoc_end`.
+        let (opening_loc, closing_start, body_empty) =
+            if let Some(interp) = node.as_interpolated_string_node() {
+                (
+                    interp.opening_loc(),
+                    interp.closing_loc().map(|loc| loc.start_offset()),
+                    interp.parts().is_empty(),
+                )
+            } else if let Some(s) = node.as_string_node() {
+                (
+                    s.opening_loc(),
+                    s.closing_loc().map(|loc| loc.start_offset()),
+                    s.unescaped().is_empty(),
+                )
+            } else if let Some(x) = node.as_interpolated_x_string_node() {
+                (
+                    Some(x.opening_loc()),
+                    Some(x.closing_loc().start_offset()),
+                    x.parts().is_empty(),
+                )
+            } else if let Some(x) = node.as_x_string_node() {
+                (
+                    Some(x.opening_loc()),
+                    Some(x.closing_loc().start_offset()),
+                    x.unescaped().is_empty(),
+                )
+            } else {
+                return;
+            };
 
         let opening_loc = match opening_loc {
             Some(loc) => loc,
@@ -195,11 +213,16 @@ impl Cop for HeredocDelimiterNaming {
             return;
         }
 
-        // RuboCop flags the closing delimiter token.
+        // RuboCop reports empty heredocs at the opening (node), non-empty at
+        // the closing delimiter (node.loc.heredoc_end).
         if !contains_word_char(delimiter_str)
             || is_forbidden_delimiter(delimiter_str, forbidden_delimiters.as_ref())
         {
-            let offense_offset = closing_start.unwrap_or(opening_loc.start_offset() + 2);
+            let offense_offset = if body_empty {
+                opening_loc.start_offset()
+            } else {
+                closing_start.unwrap_or(opening_loc.start_offset() + 2)
+            };
             let (line, column) = source.offset_to_line_col(offense_offset);
             diagnostics.push(self.diagnostic(
                 source,

@@ -18,3 +18,9 @@ r = <<~`END`
   echo hello
 END
 ^^^ Naming/HeredocDelimiterNaming: Use meaningful heredoc delimiters.
+s = <<~END
+END
+# nitrocop-expect: 16:4 Naming/HeredocDelimiterNaming: Use meaningful heredoc delimiters.
+t = <<~EOS
+EOS
+# nitrocop-expect: 18:4 Naming/HeredocDelimiterNaming: Use meaningful heredoc delimiters.

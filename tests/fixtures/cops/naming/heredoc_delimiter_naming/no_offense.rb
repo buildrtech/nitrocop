@@ -21,3 +21,8 @@ my_template.html
 d = <<~`SHELL`
   echo hello
 SHELL
+# Empty heredocs with meaningful delimiters
+e = <<~SQL
+SQL
+f = <<~HTML
+HTML
