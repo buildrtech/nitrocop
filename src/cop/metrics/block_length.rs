@@ -28,6 +28,23 @@ use crate::parse::source::SourceFile;
 /// - Analyze `SuperNode` and `ForwardingSuperNode` blocks as method name `super`.
 /// - Extend constructor exemption to include `Data.define`.
 /// - When block body and closing token share a line, count that trailing body line.
+///
+/// ## Corpus investigation (2026-03-07)
+///
+/// Corpus oracle reported FP=39, FN=0.
+///
+/// Root cause: RuboCop's `source_from_node_with_heredoc` uses `each_descendant`
+/// (which excludes the body node itself) to find max last_line. When a block body
+/// contains heredocs, lines belonging to the root body node (e.g. a trailing `)`
+/// on its own line in `Hash.new(...)`) are excluded from the count. nitrocop was
+/// using `body.location().end_offset()` which includes the full body span,
+/// overcounting by 1 line in these cases.
+///
+/// Fix: when the body contains heredoc descendants, compute the end line as the
+/// max last_line across all descendants only (via `heredoc_descendant_max_line`),
+/// matching RuboCop's `source_from_node_with_heredoc` algorithm.
+///
+/// Result: FP=0, FN=0 (within file-drop noise).
 pub struct BlockLength;
 
 impl Cop for BlockLength {
@@ -233,18 +250,33 @@ fn count_block_lines(
         opening_offset
     };
 
-    // For brace blocks like `lambda { Hash.new(...) }`, the final body token can
-    // share the same line as the closing `}`. RuboCop counts that final line.
-    // `count_body_lines_ex` excludes the end line, so move end to next line start.
+    // RuboCop's `source_from_node_with_heredoc`: when the body contains any
+    // heredoc descendants, RuboCop computes the end line as the max last_line
+    // across all *descendants* (not the body node itself). In Parser AST,
+    // `each_descendant` excludes the root node, so structural delimiters like
+    // a trailing `)` on its own line (part of the root send/call node) are not
+    // counted. Without this adjustment, nitrocop overcounts by including lines
+    // that RuboCop's descendant-based algorithm skips.
     let mut effective_end_offset = end_offset;
-    let (body_end_line, _) =
-        source.offset_to_line_col(body.location().end_offset().saturating_sub(1));
-    let (closing_line, _) = source.offset_to_line_col(end_offset);
-    if body_end_line == closing_line {
-        if let Some(next_line_start) = source.line_col_to_offset(closing_line + 1, 0) {
+    if let Some(desc_end_line) = heredoc_descendant_max_line(source, &body) {
+        // Use descendant max line as the end boundary (matches RuboCop behavior)
+        if let Some(next_line_start) = source.line_col_to_offset(desc_end_line + 1, 0) {
             effective_end_offset = next_line_start;
-        } else {
-            effective_end_offset = closing_end_offset;
+        }
+    } else {
+        // No heredocs: for brace blocks like `lambda { Hash.new(...) }`, the final
+        // body token can share the same line as the closing `}`. RuboCop counts that
+        // final line. `count_body_lines_ex` excludes the end line, so move end to
+        // next line start.
+        let (body_end_line, _) =
+            source.offset_to_line_col(body.location().end_offset().saturating_sub(1));
+        let (closing_line, _) = source.offset_to_line_col(end_offset);
+        if body_end_line == closing_line {
+            if let Some(next_line_start) = source.line_col_to_offset(closing_line + 1, 0) {
+                effective_end_offset = next_line_start;
+            } else {
+                effective_end_offset = closing_end_offset;
+            }
         }
     }
 
@@ -271,6 +303,82 @@ fn count_block_lines(
         count_comments,
         &all_foldable,
     )
+}
+
+/// When the body contains heredoc descendants, compute the max last_line across
+/// all descendants (matching RuboCop's `source_from_node_with_heredoc`).
+/// Returns `Some(max_line)` if heredocs are found, `None` otherwise.
+fn heredoc_descendant_max_line(source: &SourceFile, body: &ruby_prism::Node<'_>) -> Option<usize> {
+    use ruby_prism::Visit;
+
+    struct DescendantMaxLineFinder<'s> {
+        source: &'s SourceFile,
+        max_line: usize,
+        has_heredoc: bool,
+    }
+
+    impl<'pr> Visit<'pr> for DescendantMaxLineFinder<'_> {
+        fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+            if let Some(opening) = node.opening_loc() {
+                let bytes = &self.source.as_bytes()[opening.start_offset()..opening.end_offset()];
+                if bytes.starts_with(b"<<") {
+                    self.has_heredoc = true;
+                    // Use closing_loc (the EOS terminator) as the end line
+                    if let Some(closing) = node.closing_loc() {
+                        let (line, _) = self
+                            .source
+                            .offset_to_line_col(closing.end_offset().saturating_sub(1));
+                        self.max_line = self.max_line.max(line);
+                    }
+                    return;
+                }
+            }
+            let (line, _) = self
+                .source
+                .offset_to_line_col(node.location().end_offset().saturating_sub(1));
+            self.max_line = self.max_line.max(line);
+        }
+
+        fn visit_interpolated_string_node(
+            &mut self,
+            node: &ruby_prism::InterpolatedStringNode<'pr>,
+        ) {
+            if let Some(opening) = node.opening_loc() {
+                let bytes = &self.source.as_bytes()[opening.start_offset()..opening.end_offset()];
+                if bytes.starts_with(b"<<") {
+                    self.has_heredoc = true;
+                    if let Some(closing) = node.closing_loc() {
+                        let (line, _) = self
+                            .source
+                            .offset_to_line_col(closing.end_offset().saturating_sub(1));
+                        self.max_line = self.max_line.max(line);
+                    }
+                    return;
+                }
+            }
+            let (line, _) = self
+                .source
+                .offset_to_line_col(node.location().end_offset().saturating_sub(1));
+            self.max_line = self.max_line.max(line);
+            ruby_prism::visit_interpolated_string_node(self, node);
+        }
+    }
+
+    let mut finder = DescendantMaxLineFinder {
+        source,
+        max_line: 0,
+        has_heredoc: false,
+    };
+    // visit() traverses body and all descendants. Since body is typically
+    // StatementsNode/BeginNode (not a string node), the visitor methods
+    // only fire on actual descendants, matching RuboCop's each_descendant.
+    finder.visit(body);
+
+    if finder.has_heredoc {
+        Some(finder.max_line)
+    } else {
+        None
+    }
 }
 
 fn is_single_heredoc_expression(source: &SourceFile, body: &ruby_prism::Node<'_>) -> bool {

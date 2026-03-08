@@ -102,6 +102,39 @@ render do
   RUBY
 end
 
+# RuboCop's source_from_node_with_heredoc uses descendant max last_line,
+# which excludes the body node's own closing delimiter (e.g. trailing `)`)
+# on a separate line. This block has 25 body lines by RuboCop's count
+# because the `)` line is part of the root send node, not a descendant.
+payload = {
+  check_records: lambda {Hash.new(
+    "code" => 200,
+    "body" => {
+      "records" => [
+        {
+          "values" => [
+            <<~TXT,
+              line1
+              line2
+              line3
+              line4
+              line5
+              line6
+              line7
+              line8
+              line9
+              line10
+            TXT
+            "other"
+          ],
+          "address" => "example.com",
+          "match" => false
+        }
+      ]
+    }
+  )}
+}
+
 # Data.define constructor blocks are exempt, like Struct.new / Class.new.
 Payload = Data.define(:id, :name) do
   a1 = 1
