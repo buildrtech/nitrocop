@@ -6,3 +6,10 @@ x = OpenStruct.new
 
 y = ::OpenStruct.new
     ^^^^^^^^^^^^ Style/OpenStructUse: Avoid using `OpenStruct`; use `Struct`, `Hash`, a class, or ActiveModel attributes instead.
+
+class SubClass < OpenStruct
+                 ^^^^^^^^^^ Style/OpenStructUse: Avoid using `OpenStruct`; use `Struct`, `Hash`, a class, or ActiveModel attributes instead.
+end
+
+SubClass = Class.new(OpenStruct)
+                     ^^^^^^^^^^ Style/OpenStructUse: Avoid using `OpenStruct`; use `Struct`, `Hash`, a class, or ActiveModel attributes instead.
