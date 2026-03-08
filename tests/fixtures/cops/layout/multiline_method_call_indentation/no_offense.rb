@@ -58,4 +58,8 @@ expect(subject)
   .to receive(:method)
   .and_return(value)
 
+result =
+  Foo
+    .where(active: true)
+    .order(:name)
 

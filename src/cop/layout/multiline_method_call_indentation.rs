@@ -1,10 +1,29 @@
 use ruby_prism::Visit;
 
-use crate::cop::util::indentation_of;
+use crate::cop::util::{assignment_context_base_col, indentation_of};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=46, FN=17,871.
+///
+/// FP=46: not investigated in this pass.
+///
+/// FN root cause investigated:
+/// - For aligned style chains whose RHS starts on the same assignment line
+///   (`bar = Foo` followed by multiline continuations), nitrocop used the
+///   previous continuation dot as the alignment base. That skips the first
+///   misaligned continuation and then reports the second line instead.
+///
+/// Fix applied:
+/// - Detect same-line assignment RHS chains and align every continuation line
+///   to the chain root column, matching RuboCop's assignment handling.
+///
+/// Remaining likely gaps:
+/// - The artifact corpus still shows a large FN count, so additional config-
+///   sensitive and non-assignment chain patterns remain.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -120,6 +139,8 @@ impl ChainVisitor<'_> {
                     } else {
                         find_chain_root_col(self.source, &receiver)
                     }
+                } else if let Some(col) = find_assignment_alignment_col(self.source, &receiver) {
+                    col
                 } else {
                     // Try to find a previous continuation dot to align with.
                     // Also check for block chain continuation.
@@ -160,6 +181,14 @@ impl ChainVisitor<'_> {
                 .push(self.cop.diagnostic(self.source, msg_line, msg_col, msg));
         }
     }
+}
+
+fn find_assignment_alignment_col(
+    source: &SourceFile,
+    receiver: &ruby_prism::Node<'_>,
+) -> Option<usize> {
+    let root_offset = find_chain_root_offset(receiver);
+    assignment_context_base_col(source, root_offset).map(|_| find_chain_root_col(source, receiver))
 }
 
 impl Visit<'_> for ChainVisitor<'_> {
@@ -498,6 +527,18 @@ fn find_chain_root_col(source: &SourceFile, node: &ruby_prism::Node<'_>) -> usiz
     }
     let (_, col) = source.offset_to_line_col(node.location().start_offset());
     col
+}
+
+fn find_chain_root_offset(node: &ruby_prism::Node<'_>) -> usize {
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            return find_chain_root_offset(&recv);
+        }
+    }
+    if let Some(block) = node.as_block_node() {
+        return block.location().start_offset();
+    }
+    node.location().start_offset()
 }
 
 /// Walk backwards from a given line to find the first line that does NOT

@@ -31,3 +31,7 @@ foo(key: receiver.chained
                           .misaligned)
                           ^^^ Layout/MultilineMethodCallIndentation: Align `.misaligned` with `receiver` on line 25.
 
+bar = Foo
+  .a
+  ^^ Layout/MultilineMethodCallIndentation: Align `.a` with `Foo` on line 28.
+      .b(c)
