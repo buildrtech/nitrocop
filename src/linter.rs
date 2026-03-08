@@ -66,10 +66,10 @@ impl PhaseTimers {
     }
 }
 
-/// Renamed cops from vendor/rubocop/config/obsoletion.yml.
+/// Renamed cops snapshot from src/resources/renamed_cops.yml.
 /// Maps old cop name -> new cop name (e.g., "Naming/PredicateName" -> "Naming/PredicatePrefix").
 pub(crate) static RENAMED_COPS: LazyLock<HashMap<String, String>> =
-    LazyLock::new(|| parse_renamed_cops(include_str!("../vendor/rubocop/config/obsoletion.yml")));
+    LazyLock::new(|| parse_renamed_cops(include_str!("resources/renamed_cops.yml")));
 
 /// Parse the `renamed:` section from obsoletion.yml content.
 ///
@@ -1039,9 +1039,9 @@ renamed:
     }
 
     #[test]
-    fn parse_renamed_cops_real_obsoletion_yml() {
-        // Verify the actual vendor file parses correctly
-        let map = parse_renamed_cops(include_str!("../vendor/rubocop/config/obsoletion.yml"));
+    fn parse_renamed_cops_bundled_snapshot() {
+        // Verify the bundled renamed-cops snapshot parses correctly.
+        let map = parse_renamed_cops(include_str!("resources/renamed_cops.yml"));
         // Spot-check a few known renames
         assert_eq!(map.get("Layout/Tab").unwrap(), "Layout/IndentationStyle");
         assert_eq!(map.get("Lint/Eval").unwrap(), "Security/Eval");
@@ -1092,7 +1092,7 @@ renamed:
 
     #[test]
     fn renamed_cops_static_is_populated() {
-        // The LazyLock should parse the real obsoletion.yml on first access
+        // The LazyLock should parse the bundled snapshot on first access.
         assert!(!RENAMED_COPS.is_empty(), "RENAMED_COPS should not be empty");
         assert!(RENAMED_COPS.contains_key("Layout/Tab"));
     }

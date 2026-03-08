@@ -1,0 +1,61 @@
+# Snapshot of RuboCop obsoletion renamed map.
+# Source: vendor/rubocop/config/obsoletion.yml (renamed: section).
+# Update this file when vendor RuboCop submodule changes.
+
+renamed:
+  Layout/AlignArguments: Layout/ArgumentAlignment
+  Layout/AlignArray: Layout/ArrayAlignment
+  Layout/AlignHash: Layout/HashAlignment
+  Layout/AlignParameters: Layout/ParameterAlignment
+  Layout/IndentArray: Layout/FirstArrayElementIndentation
+  Layout/IndentAssignment: Layout/AssignmentIndentation
+  Layout/IndentFirstArgument: Layout/FirstArgumentIndentation
+  Layout/IndentFirstArrayElement: Layout/FirstArrayElementIndentation
+  Layout/IndentFirstHashElement: Layout/FirstHashElementIndentation
+  Layout/IndentFirstParameter: Layout/FirstParameterIndentation
+  Layout/IndentHash: Layout/FirstHashElementIndentation
+  Layout/IndentHeredoc: Layout/HeredocIndentation
+  Layout/LeadingBlankLines: Layout/LeadingEmptyLines
+  Layout/Tab: Layout/IndentationStyle
+  Layout/TrailingBlankLines: Layout/TrailingEmptyLines
+  Lint/BlockAlignment: Layout/BlockAlignment
+  Lint/DefEndAlignment: Layout/DefEndAlignment
+  Lint/DuplicatedKey: Lint/DuplicateHashKey
+  Lint/EndAlignment: Layout/EndAlignment
+  Lint/EndInMethod: Style/EndBlock
+  Lint/Eval: Security/Eval
+  Lint/HandleExceptions: Lint/SuppressedException
+  Lint/MultipleCompare: Lint/MultipleComparison
+  Lint/StringConversionInInterpolation: Lint/RedundantStringCoercion
+  Lint/UnneededCopDisableDirective: Lint/RedundantCopDisableDirective
+  Lint/UnneededCopEnableDirective: Lint/RedundantCopEnableDirective
+  Lint/UnneededRequireStatement: Lint/RedundantRequireStatement
+  Lint/UnneededSplatExpansion: Lint/RedundantSplatExpansion
+  Metrics/LineLength: Layout/LineLength
+  Naming/PredicateName:
+    new_name: Naming/PredicatePrefix
+    severity: warning
+  Naming/UncommunicativeBlockParamName: Naming/BlockParameterName
+  Naming/UncommunicativeMethodParamName: Naming/MethodParameterName
+  Style/AccessorMethodName: Naming/AccessorMethodName
+  Style/AsciiIdentifiers: Naming/AsciiIdentifiers
+  Style/ClassAndModuleCamelCase: Naming/ClassAndModuleCamelCase
+  Style/ConstantName: Naming/ConstantName
+  Style/DeprecatedHashMethods: Style/PreferredHashMethods
+  Style/FileName: Naming/FileName
+  Style/FlipFlop: Lint/FlipFlop
+  Style/MethodCallParentheses: Style/MethodCallWithoutArgsParentheses
+  Style/MethodName: Naming/MethodName
+  Style/OpMethod: Naming/BinaryOperatorParameterName
+  Style/PredicateName:
+    new_name: Naming/PredicatePrefix
+    severity: warning
+  Style/SingleSpaceBeforeFirstArg: Layout/SpaceBeforeFirstArg
+  Style/UnneededCapitalW: Style/RedundantCapitalW
+  Style/UnneededCondition: Style/RedundantCondition
+  Style/UnneededInterpolation: Style/RedundantInterpolation
+  Style/UnneededPercentQ: Style/RedundantPercentQ
+  Style/UnneededSort: Style/RedundantSort
+  Style/VariableName: Naming/VariableName
+  Style/VariableNumber: Naming/VariableNumber
+

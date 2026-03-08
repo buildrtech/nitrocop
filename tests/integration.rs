@@ -3374,6 +3374,50 @@ fn no_cop_returns_vec_diagnostic() {
     );
 }
 
+/// Ensure non-test source code does not include compile-time vendor file paths.
+///
+/// Vendor submodules are not guaranteed to exist for crate consumers, so
+/// `include_str!/include_bytes!` must not point at `vendor/` in `src/**/*.rs`.
+#[test]
+fn no_vendor_include_macros_in_src() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut failures = Vec::new();
+
+    fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, files);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    let mut rs_files = Vec::new();
+    collect_rs_files(&src_dir, &mut rs_files);
+
+    let include_macro_re = regex::Regex::new(r#"include_(?:str|bytes)!\s*\((?s:.*?)\)"#).unwrap();
+    for path in rs_files {
+        let content = fs::read_to_string(&path).unwrap();
+        for m in include_macro_re.find_iter(&content) {
+            let snippet = &content[m.start()..m.end()];
+            if snippet.contains("vendor/") {
+                let line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+                failures.push(format!("{}:{line}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Found include_str!/include_bytes! macros referencing vendor/ in src code:\n{}",
+        failures.join("\n")
+    );
+}
+
 // ---------- Result cache integration tests ----------
 
 #[test]

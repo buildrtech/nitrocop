@@ -14,11 +14,7 @@ static DIRECTIVE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Maps new cop name -> old cop names, but only for same-department renames.
 /// Cross-department renames are intentionally excluded.
 static SAME_DEPARTMENT_LEGACY_ALIASES: LazyLock<HashMap<String, Vec<String>>> =
-    LazyLock::new(|| {
-        parse_same_department_legacy_aliases(include_str!(
-            "../../vendor/rubocop/config/obsoletion.yml"
-        ))
-    });
+    LazyLock::new(|| build_same_department_legacy_aliases(&crate::linter::RENAMED_COPS));
 
 /// A single disable directive entry (one cop name from a `# rubocop:disable` comment).
 #[derive(Debug, Clone)]
@@ -323,44 +319,16 @@ fn short_cop_name(cop_name: &str) -> Option<&str> {
     cop_name.split_once('/').map(|(_, short)| short)
 }
 
-fn parse_same_department_legacy_aliases(yaml_content: &str) -> HashMap<String, Vec<String>> {
+fn build_same_department_legacy_aliases(
+    renamed_cops: &HashMap<String, String>,
+) -> HashMap<String, Vec<String>> {
     let mut aliases = HashMap::new();
 
-    let raw: serde_yml::Value = match serde_yml::from_str(yaml_content) {
-        Ok(v) => v,
-        Err(_) => return aliases,
-    };
-    let Some(renamed) = raw.get("renamed") else {
-        return aliases;
-    };
-    let Some(mapping) = renamed.as_mapping() else {
-        return aliases;
-    };
-
-    for (key, value) in mapping {
-        let Some(old_name) = key.as_str() else {
-            continue;
-        };
-
-        let new_name = if let Some(s) = value.as_str() {
-            s.to_string()
-        } else if let Some(inner_map) = value.as_mapping() {
-            inner_map
-                .get(serde_yml::Value::String("new_name".to_string()))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-        } else {
-            continue;
-        };
-        if new_name.is_empty() {
-            continue;
-        }
-
+    for (old_name, new_name) in renamed_cops {
         let Some((old_dept, _)) = old_name.split_once('/') else {
             continue;
         };
-        let Some((new_dept, _)) = new_name.split_once('/') else {
+        let Some((new_dept, _)) = new_name.as_str().split_once('/') else {
             continue;
         };
         if !old_dept.eq_ignore_ascii_case(new_dept) {
@@ -368,9 +336,9 @@ fn parse_same_department_legacy_aliases(yaml_content: &str) -> HashMap<String, V
         }
 
         aliases
-            .entry(new_name)
+            .entry(new_name.clone())
             .or_insert_with(Vec::new)
-            .push(old_name.to_string());
+            .push(old_name.clone());
     }
 
     aliases
