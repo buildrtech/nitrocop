@@ -3,3 +3,7 @@ a = 1; b = 2
 foo; bar
 s = "hello ; world"
 r = /semi ; colon/
+
+while ready
+  ;
+end

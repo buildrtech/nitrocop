@@ -3,6 +3,21 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=49, FN=0.
+///
+/// FP=49 root cause: generated parser code often contains standalone semicolon
+/// lines (for example, an indented line containing only `;`). RuboCop ignores
+/// indentation before such semicolons, but the previous implementation flagged any
+/// ` ;` sequence in code.
+///
+/// Fix: detect the full whitespace run immediately before `;` and skip offenses
+/// when `;` is the first non-whitespace token on the line. Keep offenses for
+/// true in-line spacing before semicolons.
+///
+/// Remaining gap: this cop still does not consult `Layout/SpaceInsideBlockBraces`
+/// style interaction; unchanged in this patch.
 pub struct SpaceBeforeSemicolon;
 
 impl Cop for SpaceBeforeSemicolon {
@@ -25,26 +40,50 @@ impl Cop for SpaceBeforeSemicolon {
     ) {
         let bytes = source.as_bytes();
         for (i, &byte) in bytes.iter().enumerate() {
-            if byte == b';' && i > 0 && bytes[i - 1] == b' ' && code_map.is_code(i) {
-                let (line, column) = source.offset_to_line_col(i - 1);
-                let mut diag = self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Space found before semicolon.".to_string(),
-                );
-                if let Some(ref mut corr) = corrections {
-                    corr.push(crate::correction::Correction {
-                        start: i - 1,
-                        end: i,
-                        replacement: String::new(),
-                        cop_name: self.name(),
-                        cop_index: 0,
-                    });
-                    diag.corrected = true;
-                }
-                diagnostics.push(diag);
+            if byte != b';' || i == 0 || !code_map.is_code(i) {
+                continue;
             }
+
+            let line_start = bytes[..i]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |idx| idx + 1);
+
+            let mut whitespace_start = i;
+            while whitespace_start > line_start
+                && (bytes[whitespace_start - 1] == b' ' || bytes[whitespace_start - 1] == b'\t')
+            {
+                whitespace_start -= 1;
+            }
+
+            // No space before semicolon.
+            if whitespace_start == i {
+                continue;
+            }
+
+            // Semicolon is the first non-whitespace token on this line.
+            if whitespace_start == line_start {
+                continue;
+            }
+
+            let (line, column) = source.offset_to_line_col(whitespace_start);
+            let mut diag = self.diagnostic(
+                source,
+                line,
+                column,
+                "Space found before semicolon.".to_string(),
+            );
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: whitespace_start,
+                    end: i,
+                    replacement: String::new(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+            diagnostics.push(diag);
         }
     }
 }
