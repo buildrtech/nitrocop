@@ -4,11 +4,131 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Detects redundant `all` used as a receiver for Active Record query methods.
+///
+/// ## Investigation findings (2026-03-08)
+///
+/// Root causes of corpus divergence (FP=419, FN=194):
+///
+/// 1. **FN=194**: The method list (`REDUNDANT_AFTER_ALL`) had only 18 methods vs vendor's
+///    100+ from `ActiveRecord::Querying::QUERYING_METHODS`. Expanded to match vendor.
+///
+/// 2. **FP=419**: Multiple causes:
+///    - Offense location was reported at the outer call node (full chain start) instead
+///      of at the `all` method name position. Fixed to use `inner_call.message_loc()`.
+///    - Message included extra "Remove `all` from the chain." text not in vendor.
+///    - Missing check to skip `all` called with arguments (e.g., `page.all(:param)`).
+///    - Missing `sensitive_association_method?` logic: `delete_all`/`destroy_all` should
+///      only be flagged when receiver of `all` is a constant (model), not an association.
 pub struct RedundantActiveRecordAllMethod;
 
-const REDUNDANT_AFTER_ALL: &[&[u8]] = &[
-    b"where", b"order", b"select", b"find", b"find_by", b"first", b"last", b"count", b"pluck",
-    b"sum", b"maximum", b"minimum", b"average", b"exists?", b"any?", b"none?", b"empty?",
+/// ActiveRecord::Querying::QUERYING_METHODS (from activerecord 7.1.0)
+/// plus `empty?` which is inherited from Enumerable but still valid.
+const QUERYING_METHODS: &[&[u8]] = &[
+    b"and",
+    b"annotate",
+    b"any?",
+    b"async_average",
+    b"async_count",
+    b"async_ids",
+    b"async_maximum",
+    b"async_minimum",
+    b"async_pick",
+    b"async_pluck",
+    b"async_sum",
+    b"average",
+    b"calculate",
+    b"count",
+    b"create_or_find_by",
+    b"create_or_find_by!",
+    b"create_with",
+    b"delete_all",
+    b"delete_by",
+    b"destroy_all",
+    b"destroy_by",
+    b"distinct",
+    b"eager_load",
+    b"except",
+    b"excluding",
+    b"exists?",
+    b"extending",
+    b"extract_associated",
+    b"fifth",
+    b"fifth!",
+    b"find",
+    b"find_by",
+    b"find_by!",
+    b"find_each",
+    b"find_in_batches",
+    b"find_or_create_by",
+    b"find_or_create_by!",
+    b"find_or_initialize_by",
+    b"find_sole_by",
+    b"first",
+    b"first!",
+    b"first_or_create",
+    b"first_or_create!",
+    b"first_or_initialize",
+    b"forty_two",
+    b"forty_two!",
+    b"fourth",
+    b"fourth!",
+    b"from",
+    b"group",
+    b"having",
+    b"ids",
+    b"in_batches",
+    b"in_order_of",
+    b"includes",
+    b"invert_where",
+    b"joins",
+    b"last",
+    b"last!",
+    b"left_joins",
+    b"left_outer_joins",
+    b"limit",
+    b"lock",
+    b"many?",
+    b"maximum",
+    b"merge",
+    b"minimum",
+    b"none",
+    b"none?",
+    b"offset",
+    b"one?",
+    b"only",
+    b"optimizer_hints",
+    b"or",
+    b"order",
+    b"pick",
+    b"pluck",
+    b"preload",
+    b"readonly",
+    b"references",
+    b"regroup",
+    b"reorder",
+    b"reselect",
+    b"rewhere",
+    b"second",
+    b"second!",
+    b"second_to_last",
+    b"second_to_last!",
+    b"select",
+    b"sole",
+    b"strict_loading",
+    b"sum",
+    b"take",
+    b"take!",
+    b"third",
+    b"third!",
+    b"third_to_last",
+    b"third_to_last!",
+    b"touch_all",
+    b"unscope",
+    b"update_all",
+    b"where",
+    b"with",
+    b"without",
 ];
 
 /// Methods that could be Enumerable block methods instead of AR query methods.
@@ -16,6 +136,11 @@ const REDUNDANT_AFTER_ALL: &[&[u8]] = &[
 const POSSIBLE_ENUMERABLE_BLOCK_METHODS: &[&[u8]] = &[
     b"any?", b"count", b"find", b"none?", b"one?", b"select", b"sum",
 ];
+
+/// Methods that are sensitive on associations — `delete_all` and `destroy_all`
+/// behave differently on `ActiveRecord::Relation` vs `CollectionProxy`.
+/// Only flag these when the receiver of `all` is a constant (i.e., a model class).
+const SENSITIVE_METHODS_ON_ASSOCIATION: &[&[u8]] = &[b"delete_all", b"destroy_all"];
 
 impl Cop for RedundantActiveRecordAllMethod {
     fn name(&self) -> &'static str {
@@ -50,7 +175,13 @@ impl Cop for RedundantActiveRecordAllMethod {
             return;
         }
 
-        if !REDUNDANT_AFTER_ALL.contains(&chain.outer_method) {
+        // Skip if `all` is called with arguments (e.g., `page.all(:parameter)`)
+        // — that's not ActiveRecord's `all`.
+        if chain.inner_call.arguments().is_some() {
+            return;
+        }
+
+        if !QUERYING_METHODS.contains(&chain.outer_method) {
             return;
         }
 
@@ -76,6 +207,24 @@ impl Cop for RedundantActiveRecordAllMethod {
             }
         }
 
+        // For sensitive methods (delete_all, destroy_all), only flag when the
+        // receiver of `all` is a constant (model class). Skip for associations
+        // (non-const receivers) and no-receiver calls.
+        if SENSITIVE_METHODS_ON_ASSOCIATION.contains(&chain.outer_method) {
+            match chain.inner_call.receiver() {
+                Some(recv) => {
+                    // Only flag if receiver is a constant (e.g., User.all.delete_all)
+                    if recv.as_constant_read_node().is_none()
+                        && recv.as_constant_path_node().is_none()
+                    {
+                        return;
+                    }
+                }
+                // No receiver (e.g., `all.delete_all`) — skip
+                None => return,
+            }
+        }
+
         // Skip if receiver of the `all` call is in AllowedReceivers
         if let Some(ref receivers) = allowed_receivers {
             if let Some(recv) = chain.inner_call.receiver() {
@@ -86,13 +235,17 @@ impl Cop for RedundantActiveRecordAllMethod {
             }
         }
 
-        let loc = node.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        // Report at the `all` method name location
+        let msg_loc = chain
+            .inner_call
+            .message_loc()
+            .unwrap_or(chain.inner_call.location());
+        let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
         diagnostics.push(self.diagnostic(
             source,
             line,
             column,
-            "Redundant `all` detected. Remove `all` from the chain.".to_string(),
+            "Redundant `all` detected.".to_string(),
         ));
     }
 }
