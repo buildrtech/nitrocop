@@ -1,6 +1,7 @@
 use crate::cop::node_type::CALL_NODE;
 use crate::cop::util::{
-    RSPEC_DEFAULT_INCLUDE, is_blank_or_whitespace_line, is_rspec_example_group, line_at,
+    RSPEC_DEFAULT_INCLUDE, is_blank_or_whitespace_line, is_rspec_example_group,
+    is_rspec_shared_group, line_at,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -8,16 +9,29 @@ use crate::parse::source::SourceFile;
 
 /// ## Corpus investigation (2026-03-08)
 ///
+/// ### Round 1
 /// Corpus oracle reported FP=484, FN=7.
-///
 /// FP root cause: separator lines containing only spaces/tabs were treated as
 /// non-blank by `is_blank_line`, so example groups followed by whitespace-only
 /// lines were flagged. RuboCop's separator logic treats whitespace-only lines
 /// as blank.
-///
-/// FN=7: this pass focuses on the high-volume FP regression only.
-///
 /// Fix: use whitespace-aware blank-line checks while scanning lines after group end.
+///
+/// ### Round 2 (FP=5, FN=7)
+/// FN root cause: calls with receivers were skipped entirely, but `RSpec.describe`,
+/// `RSpec.shared_examples`, and `RSpec.shared_context` are valid example groups
+/// that should be checked. RuboCop's `spec_group?` matcher accepts both bare
+/// `describe` and `RSpec.describe`.
+/// Fix: allow calls where the receiver is the `RSpec` constant.
+///
+/// FP root cause: RuboCop's `last_child?` returns true (skip) when the block's
+/// parent is not a `begin` node (e.g., when wrapped in a postfix `if`/`unless`).
+/// nitrocop's line-scanning approach didn't account for postfix modifiers on the
+/// `end` line (e.g., `end if condition`). After the `end` keyword, remaining
+/// content like `if ...`/`unless ...` indicates a postfix conditional, and
+/// RuboCop skips such cases.
+/// Fix: after finding end_line, check if the end line has a postfix `if`/`unless`
+/// after the `end` keyword; if so, skip.
 pub struct EmptyLineAfterExampleGroup;
 
 impl Cop for EmptyLineAfterExampleGroup {
@@ -52,7 +66,17 @@ impl Cop for EmptyLineAfterExampleGroup {
         };
 
         let method_name = call.name().as_slice();
-        if call.receiver().is_some() || !is_rspec_example_group(method_name) {
+        // Allow bare calls (no receiver) and RSpec-prefixed calls (RSpec.describe, etc.)
+        if let Some(recv) = call.receiver() {
+            // Only allow `RSpec` constant as receiver
+            let is_rspec = recv
+                .as_constant_read_node()
+                .is_some_and(|c| c.name().as_slice() == b"RSpec");
+            if !is_rspec {
+                return;
+            }
+        }
+        if !is_rspec_example_group(method_name) && !is_rspec_shared_group(method_name) {
             return;
         }
 
@@ -62,8 +86,30 @@ impl Cop for EmptyLineAfterExampleGroup {
         }
 
         let loc = node.location();
+
+        // Skip if the node is part of a larger expression (e.g., `group = RSpec.describe { }`)
+        // by checking if there's non-whitespace content before the node on its start line.
+        // RuboCop's `last_child?` returns true when the block's parent isn't a `begin` node,
+        // which covers these cases.
+        let (start_line, start_col) = source.offset_to_line_col(loc.start_offset());
+        if let Some(start_line_bytes) = line_at(source, start_line) {
+            let prefix = &start_line_bytes[..start_col.min(start_line_bytes.len())];
+            if prefix.iter().any(|&b| b != b' ' && b != b'\t') {
+                return;
+            }
+        }
+
         let end_offset = loc.end_offset().saturating_sub(1).max(loc.start_offset());
-        let (end_line, _) = source.offset_to_line_col(end_offset);
+        let (end_line, end_col) = source.offset_to_line_col(end_offset);
+
+        // If the end line has a postfix `if`/`unless` after the node's end,
+        // the block is wrapped in a conditional. RuboCop skips these because
+        // the block's parent is not a `begin` node (it's an IfNode/UnlessNode).
+        if let Some(end_line_bytes) = line_at(source, end_line) {
+            if has_postfix_conditional_after(end_line_bytes, end_col) {
+                return;
+            }
+        }
 
         // Check the lines after the example group end.
         // Skip if:
@@ -93,6 +139,10 @@ impl Cop for EmptyLineAfterExampleGroup {
                             && (rest.len() == 3 || !rest[3].is_ascii_alphanumeric())
                         {
                             return; // Next meaningful line is `end` — OK
+                        }
+                        // `}` is also a closing delimiter (e.g., `.each { |x| ... }`)
+                        if rest[0] == b'}' {
+                            return; // Next meaningful line is `}` — OK (last child)
                         }
                         // Control flow keywords that are part of the enclosing
                         // construct (if/unless/case/begin) — not a new statement
@@ -127,6 +177,26 @@ impl Cop for EmptyLineAfterExampleGroup {
             format!("Add an empty line after `{method_str}`."),
         ));
     }
+}
+
+/// Check if a line has a postfix `if`/`unless` after a given column.
+/// Handles both `end if condition` and `describe('X') { } unless condition`.
+fn has_postfix_conditional_after(line: &[u8], end_col: usize) -> bool {
+    // Look at content after the node's end position
+    if end_col + 1 >= line.len() {
+        return false;
+    }
+    let after = &line[end_col + 1..];
+    // Skip whitespace
+    let ws_end = after
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .unwrap_or(after.len());
+    if ws_end == after.len() {
+        return false;
+    }
+    let keyword_part = &after[ws_end..];
+    starts_with_keyword(keyword_part, b"if") || starts_with_keyword(keyword_part, b"unless")
 }
 
 /// Check if a byte slice starts with a Ruby keyword followed by a non-identifier char

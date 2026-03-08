@@ -36,8 +36,42 @@ RSpec.describe Foo do
   context 'with whitespace separator' do
     it { expect(true).to be(true) }
   end
-  
+
   context 'after whitespace separator' do
     it { expect(true).to be(true) }
+  end
+end
+
+# RSpec-prefixed groups with blank line separator are OK
+RSpec.describe 'first' do
+end
+
+RSpec.describe 'second' do
+end
+
+# Postfix if/unless on end line — RuboCop skips these
+module TestModule
+  describe 'conditional group' do
+    it 'works' do
+    end
+  end if ENV['RUN_TESTS']
+  describe 'next group' do
+    it 'also works' do
+    end
+  end
+end
+
+# Describe block as last child inside each loop
+items.each do |item|
+  describe item do
+    it { expect(item).not_to be_nil }
+  end
+end
+
+# Describe used as expression value (assigned to variable) — not a standalone group
+RSpec.describe 'parent' do
+  it "creates a group" do
+    group = RSpec.describe { include SomeMixin }
+    expect(group).not_to be_nil
   end
 end
