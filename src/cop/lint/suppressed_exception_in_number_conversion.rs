@@ -7,14 +7,16 @@ use crate::parse::source::SourceFile;
 /// Checks for cases where exceptions from numeric constructors like `Integer()`,
 /// `Float()`, etc. may be unintentionally swallowed using `rescue nil`.
 ///
-/// ## Investigation (2026-03-08)
-/// 4 FPs across celluloid, sentry-ruby, redmine, sharetribe.
-/// Root causes:
-/// 1. `visit_begin_node` did not check for `else_clause` — RuboCop skips begin blocks
-///    with an else clause (e.g., `begin; Integer(arg); rescue; nil; else; 42; end`).
-/// 2. `is_numeric_constructor` did not validate argument counts — `Float()` only accepts
-///    1 positional arg, so `Float(arg, extra) rescue nil` should not be flagged.
-///    Valid arg counts: Integer 1-2, Float 1, BigDecimal 1-2, Complex 1-2, Rational 1-2.
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=3, FN=0.
+///
+/// FP=3: Prism uses `BeginNode` for both explicit `begin ... rescue` and implicit
+/// method-body rescues (`def parse_value; Float(value); rescue ArgumentError; nil; end`).
+/// RuboCop only matches explicit `kwbegin`, so method bodies must be skipped by
+/// checking `begin_keyword_loc`. Earlier fixes for `else` clauses and constructor
+/// arity remain covered by fixtures.
+/// FN=0: no missing detections were reported for this cop in the corpus run.
 pub struct SuppressedExceptionInNumberConversion;
 
 const NUMERIC_METHODS: &[&[u8]] = &[b"Integer", b"Float", b"BigDecimal", b"Complex", b"Rational"];
@@ -81,6 +83,11 @@ impl<'pr> Visit<'pr> for NumConvVisitor<'_, '_> {
     fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
         // Handle: begin; Integer(arg); rescue; nil; end
         // Skip if there's an else clause — RuboCop doesn't flag these.
+        if node.begin_keyword_loc().is_none() {
+            ruby_prism::visit_begin_node(self, node);
+            return;
+        }
+
         if let Some(rescue_node) = node.rescue_clause() {
             if node.else_clause().is_none() {
                 if let Some(stmts) = node.statements() {
