@@ -33,15 +33,18 @@ Use this when the user wants commits from one or more branches landed onto
    Commits marked `-` are already present on `main` by patch equivalence and must
    not be cherry-picked.
 
-4. Cherry-pick onto local `main`:
+4. Cherry-pick onto local `main`, **one commit at a time**:
    - Stay on `main`.
-   - Preserve commit granularity: one original commit becomes one commit on
-     `main`.
-   - Preserve oldest-first order within each branch.
+   - Cherry-pick each patch-new commit individually in oldest-first order.
+     Do NOT pass multiple SHAs to a single `git cherry-pick` invocation.
+   - Verify each cherry-pick succeeds before moving to the next.
    - If multiple branches are independent, keep the user's branch order unless
      file overlap suggests a safer order.
    ```bash
-   git cherry-pick <oldest-sha> ... <newest-sha>
+   git cherry-pick <sha1>
+   # verify success, then:
+   git cherry-pick <sha2>
+   # ... and so on for each patch-new commit
    ```
 
 5. If a cherry-pick conflicts:
