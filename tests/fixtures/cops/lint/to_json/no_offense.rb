@@ -13,3 +13,11 @@ end
 def to_s
   'hello'
 end
+
+# Singleton method definitions should not be flagged
+obj = Object.new
+def obj.to_json
+  '{"role":"user"}'
+end
+
+def obj.to_json = '{"custom":"json"}'

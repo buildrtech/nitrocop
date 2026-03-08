@@ -3,6 +3,8 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation: 5 FPs were singleton method definitions (`def obj.to_json`)
+/// which RuboCop does not flag. Fixed by checking `def_node.receiver().is_some()`.
 pub struct ToJSON;
 
 impl Cop for ToJSON {
@@ -33,6 +35,11 @@ impl Cop for ToJSON {
         };
 
         if def_node.name().as_slice() != b"to_json" {
+            return;
+        }
+
+        // Skip singleton method definitions (e.g., def obj.to_json)
+        if def_node.receiver().is_some() {
             return;
         }
 
