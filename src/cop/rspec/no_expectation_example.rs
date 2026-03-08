@@ -8,14 +8,21 @@ use crate::parse::source::SourceFile;
 
 /// RSpec/NoExpectationExample - flags examples without expectations.
 ///
-/// Root cause of 272 FPs: x-prefixed examples (xit, xspecify, etc.) and
-/// examples with :skip/:pending metadata were being checked. RuboCop
-/// excludes these entirely via SkipOrPending mixin.
+/// ## Corpus investigation (2026-03-08)
 ///
-/// Root cause of 477 FNs: hardcoded `assert*` (starts_with "assert")
-/// suppressed offenses. RuboCop uses `^assert_` pattern (with underscore)
-/// via AllowedPatterns, so plain `assert(...)` should still be flagged.
-/// Also `focus` (focused example) was never checked.
+/// Corpus oracle reported FP=66, FN=0.
+///
+/// FP=66: receiver calls such as `group.it { }`, `group.specify { }`, and
+/// `subject.example { }` were incorrectly treated as real RSpec example
+/// declarations. RuboCop only checks receiverless example methods. Fixed by
+/// requiring `receiver().is_none()` before evaluating example metadata/body.
+///
+/// FN=0: no missing detections were reported for this cop in corpus data.
+///
+/// Historical fixes (already implemented here):
+/// - Exclude x-prefixed examples and examples with `:skip`/`:pending` metadata.
+/// - Match `AllowedPatterns` against in-body method calls (e.g. `^assert_`).
+/// - Include `focus` as a focused example method.
 pub struct NoExpectationExample;
 
 /// Returns true for regular and focused examples only.
@@ -100,6 +107,11 @@ impl Cop for NoExpectationExample {
             Some(c) => c,
             None => return,
         };
+
+        // Only receiverless `it/specify/example/...` are real RSpec example declarations.
+        if call.receiver().is_some() {
+            return;
+        }
 
         let method_name = call.name().as_slice();
         if !is_regular_or_focused_example(method_name) {

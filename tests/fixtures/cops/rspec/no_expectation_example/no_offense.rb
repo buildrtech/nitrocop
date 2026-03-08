@@ -56,4 +56,22 @@ RSpec.describe Foo do
     skip
     bar
   end
+
+  # Receiver calls like group.it/group.specify are not RSpec example declarations.
+  it 'builds dynamic examples on a separate group object' do
+    group = RSpec::Core::ExampleGroup.describe do
+    end
+    group.it('generated example') { }
+    group.specify('generated example') { }
+    group.example('generated example') { }
+    expect(group.examples.size).to eq(3)
+  end
+
+  # Methods named `example` on arbitrary objects are not RSpec example declarations.
+  it 'calls another object method named example' do
+    loader.example do
+      :value
+    end
+    expect(true).to be(true)
+  end
 end
