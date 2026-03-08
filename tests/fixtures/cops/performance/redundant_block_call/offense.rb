@@ -19,3 +19,18 @@ def filter!(&block)
     ^^^^^^^^^^^^^^^^ Performance/RedundantBlockCall: Use `yield` instead of `block.call`.
   end
 end
+
+# block.call inside inner block that shadows &block param (multi-statement method)
+def process_callbacks(name, &block)
+  logger.debug "running callbacks"
+  Array(callbacks[name]).each do |block|
+    block.call(args)
+    ^^^^^^^^^^^^^^^^ Performance/RedundantBlockCall: Use `yield` instead of `block.call`.
+  end
+end
+
+# block.call inside inline block that shadows &block (multi-statement method)
+def run_hooks(&block)
+  setup_state
+  @hooks.each { |block| block.call(config) }
+                        ^^^^^^^^^^^^^^^^^^ Performance/RedundantBlockCall: Use `yield` instead of `block.call`.

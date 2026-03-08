@@ -3,17 +3,14 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
-/// ## Corpus investigation (2026-03-04)
+/// ## Corpus investigation (2026-03-07)
 ///
-/// Corpus oracle reported FP=0, FN=3.
-///
-/// FN=3: All involve `block.call()` inside an inner block where `|block|` shadows
-/// the method's `&block` parameter. RuboCop had a bug in `shadowed_block_argument?`
-/// (only checked method body, not inner blocks) that was fixed in rubocop-performance
-/// v1.21.0 (commit 0d982851b, "[Fix #448] Fix a false positive for
-/// Performance/RedundantBlockCall"). Our vendor pins v1.26.1 which includes the fix.
-/// The corpus repos use older versions that still have this bug. No code change needed —
-/// nitrocop correctly implements v1.26.1 behavior.
+/// FP=0, FN=3 fixed. Root cause: RuboCop's `shadowed_block_argument?` only detects
+/// shadowing when the entire method body is a single block expression. If the method
+/// has multiple statements, the body is a `begin` node and the check returns false,
+/// so RuboCop still flags `block.call` inside inner blocks that shadow the param name.
+/// Our previous implementation was more correct (detected shadowing in all inner blocks)
+/// but caused FNs vs RuboCop. Now we match RuboCop's limited shadowing check exactly.
 pub struct RedundantBlockCall;
 
 impl Cop for RedundantBlockCall {
@@ -89,6 +86,24 @@ fn check_def(
         Some(b) => b,
         None => return,
     };
+
+    // RuboCop's shadowed_block_argument? — only detects shadowing when the
+    // entire method body is a single block expression (body.block_type?).
+    // If the method has multiple statements, the shadowing is NOT detected.
+    if let Some(stmts) = body.as_statements_node() {
+        let stmts_vec: Vec<_> = stmts.body().iter().collect();
+        if stmts_vec.len() == 1 {
+            if let Some(call) = stmts_vec[0].as_call_node() {
+                if let Some(block) = call.block() {
+                    if let Some(block_node) = block.as_block_node() {
+                        if block_params_include(&block_node, arg_name) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Check if the block arg is reassigned in the body — if so, skip
     let mut reassign_finder = ReassignFinder {
@@ -191,22 +206,27 @@ impl<'pr> Visit<'pr> for BlockCallFinder<'_, '_, '_> {
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
-        // Don't descend into blocks where the arg name shadows the block param
-        if let Some(params) = node.parameters() {
-            if let Some(params) = params.as_block_parameters_node() {
-                if let Some(inner_params) = params.parameters() {
-                    for req in inner_params.requireds().iter() {
-                        if let Some(req_param) = req.as_required_parameter_node() {
-                            if req_param.name().as_slice() == self.arg_name {
-                                return;
-                            }
+        // Visit all blocks normally — RuboCop's shadowed_block_argument? only checks
+        // at the top level (single-block method body), not inner blocks.
+        ruby_prism::visit_block_node(self, node);
+    }
+}
+
+fn block_params_include(block: &ruby_prism::BlockNode<'_>, name: &[u8]) -> bool {
+    if let Some(params) = block.parameters() {
+        if let Some(bp) = params.as_block_parameters_node() {
+            if let Some(inner) = bp.parameters() {
+                for req in inner.requireds().iter() {
+                    if let Some(rp) = req.as_required_parameter_node() {
+                        if rp.name().as_slice() == name {
+                            return true;
                         }
                     }
                 }
             }
         }
-        ruby_prism::visit_block_node(self, node);
     }
+    false
 }
 
 #[cfg(test)]
