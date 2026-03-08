@@ -88,3 +88,31 @@ define_method("dynamic_#{suffix}") do
   q = 17
   r = 18
 end
+
+# Case with else should NOT add extra condition for the else branch.
+# RuboCop only counts each `when` as a condition, not the `case` else.
+# A=15, B=7, C=3 (when nodes) => sqrt(225+49+9) = 16.82. Below 17 = no offense.
+# Buggy +1 for case-else would make C=4 => sqrt(225+49+16) = 17.03 > 17 = FP.
+def method_with_case_else(x)
+  a = x.foo
+  b = x.bar
+  c = x.baz
+  d = x.qux
+  e = x.quux
+  f = x.corge
+  g = x.grault
+  case a
+  when :alpha
+    h = 1
+    i = 2
+    j = 3
+  when :beta
+    k = 1
+    l = 2
+    m = 3
+  when :gamma
+    n = 1
+  else
+    o = 1
+  end
+end

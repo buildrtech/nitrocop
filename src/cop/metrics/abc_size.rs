@@ -21,6 +21,26 @@ use crate::parse::source::SourceFile;
 /// FN root cause: `[]=` setter calls were not counted as assignments.
 /// RuboCop's ABC calculator counts setter sends as assignments (and branches).
 /// In hash-heavy methods this undercount led to missed offenses.
+///
+/// ## Corpus investigation (2026-03-07)
+///
+/// Corpus oracle reported FP=191, FN=551.
+///
+/// FP root cause #1: CaseNode with else was counting +1 condition, but in
+/// RuboCop `case` is NOT in CONDITION_NODES — only `when` nodes are. The
+/// `else_branch?` method in RuboCop checks `[:case, :if]` but is only called
+/// from `evaluate_condition_node` which requires the node to be in
+/// CONDITION_NODES first. Since `case` isn't there, the else bonus is never
+/// applied. Fix: removed CaseNode else condition counting entirely.
+///
+/// FP root cause #2: Score was not rounded to 2 decimal places before the
+/// threshold comparison. RuboCop uses `.round(2)` in the calculator, so
+/// scores like 17.003 round to 17.0 and don't fire. Fix: round score.
+///
+/// FN root cause: MultiWriteNode (`a, b, c = expr`) was counted as a single
+/// assignment instead of counting each target individually. RuboCop's
+/// `compound_assignment` method counts each non-setter child as a separate
+/// assignment. Fix: iterate over lefts/rest/rights targets.
 pub struct AbcSize;
 
 /// Known iterating method names that make blocks count toward conditions.
@@ -147,7 +167,6 @@ impl AbcCounter {
             | ruby_prism::Node::GlobalVariableWriteNode { .. }
             | ruby_prism::Node::ConstantWriteNode { .. }
             | ruby_prism::Node::ConstantPathWriteNode { .. }
-            | ruby_prism::Node::MultiWriteNode { .. }
             | ruby_prism::Node::LocalVariableOperatorWriteNode { .. }
             | ruby_prism::Node::InstanceVariableOperatorWriteNode { .. }
             | ruby_prism::Node::ClassVariableOperatorWriteNode { .. }
@@ -155,6 +174,66 @@ impl AbcCounter {
             | ruby_prism::Node::ConstantOperatorWriteNode { .. }
             | ruby_prism::Node::ConstantPathOperatorWriteNode { .. } => {
                 self.assignments += 1;
+            }
+
+            // Multi-assignment: `a, b, c = expr` — each target counts as a separate
+            // assignment in RuboCop (compound_assignment counts non-setter children).
+            // The child LocalVariableTargetNode/etc are not counted elsewhere, so we
+            // count them here. Targets starting with _ are excluded.
+            ruby_prism::Node::MultiWriteNode { .. } => {
+                if let Some(mw) = node.as_multi_write_node() {
+                    for target in mw.lefts().iter() {
+                        let skip = match &target {
+                            ruby_prism::Node::LocalVariableTargetNode { .. } => target
+                                .as_local_variable_target_node()
+                                .is_some_and(|t| t.name().as_slice().starts_with(b"_")),
+                            ruby_prism::Node::SplatNode { .. } => {
+                                // Splat targets like `*rest` — check the inner expression
+                                if let Some(splat) = target.as_splat_node() {
+                                    splat.expression().is_none()
+                                        || splat.expression().is_some_and(|expr| {
+                                            expr.as_local_variable_target_node().is_some_and(|t| {
+                                                t.name().as_slice().starts_with(b"_")
+                                            })
+                                        })
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        if !skip {
+                            self.assignments += 1;
+                        }
+                    }
+                    // Also count the rest target if present
+                    if let Some(rest) = mw.rest() {
+                        let skip = if let Some(splat) = rest.as_splat_node() {
+                            splat.expression().is_none()
+                                || splat.expression().is_some_and(|expr| {
+                                    expr.as_local_variable_target_node()
+                                        .is_some_and(|t| t.name().as_slice().starts_with(b"_"))
+                                })
+                        } else {
+                            false
+                        };
+                        if !skip {
+                            self.assignments += 1;
+                        }
+                    }
+                    // Count rights too (e.g., `a, *b, c = ...`)
+                    for target in mw.rights().iter() {
+                        let skip = match &target {
+                            ruby_prism::Node::LocalVariableTargetNode { .. } => target
+                                .as_local_variable_target_node()
+                                .is_some_and(|t| t.name().as_slice().starts_with(b"_")),
+                            _ => false,
+                        };
+                        if !skip {
+                            self.assignments += 1;
+                        }
+                    }
+                }
             }
 
             // ||= and &&= count as BOTH assignment AND condition in RuboCop.
@@ -340,14 +419,12 @@ impl AbcCounter {
                     }
                 }
             }
-            ruby_prism::Node::CaseNode { .. } => {
-                // case itself is not in CONDITION_NODES but we check for else
-                if let Some(case_node) = node.as_case_node() {
-                    if case_node.else_clause().is_some() {
-                        self.conditions += 1;
-                    }
-                }
-            }
+            // CaseNode: `case` is NOT in RuboCop's CONDITION_NODES, so it
+            // does not count as a condition at all. Each `when` branch counts
+            // as a condition (handled by WhenNode below), but the `else` does
+            // NOT add an extra condition — unlike `if/unless` where `else` does.
+            // (RuboCop's else_branch? filters for :case/:if types but case is
+            //  never reached since it's not in CONDITION_NODES.)
             // ForNode counts as BOTH a condition and an assignment (for the loop variable)
             ruby_prism::Node::ForNode { .. } => {
                 self.conditions += 1;
@@ -448,7 +525,9 @@ impl AbcSize {
         let mut counter = AbcCounter::new(count_repeated_attributes);
         counter.visit(&body);
 
-        let score = counter.score();
+        let raw_score = counter.score();
+        // RuboCop rounds to 2 decimal places before the threshold comparison.
+        let score = (raw_score * 100.0).round() / 100.0;
         if score > max as f64 {
             let start_offset = def_node.def_keyword_loc().start_offset();
             let (line, column) = source.offset_to_line_col(start_offset);
@@ -509,7 +588,9 @@ impl AbcSize {
         let mut counter = AbcCounter::new(count_repeated_attributes);
         counter.visit(&body);
 
-        let score = counter.score();
+        let raw_score = counter.score();
+        // RuboCop rounds to 2 decimal places before the threshold comparison.
+        let score = (raw_score * 100.0).round() / 100.0;
         if score > max as f64 {
             let start_offset = call_node.location().start_offset();
             let (line, column) = source.offset_to_line_col(start_offset);

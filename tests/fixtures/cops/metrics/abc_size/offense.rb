@@ -98,3 +98,11 @@ def indexed_assignment_heavy
   hash[:k] = 11
   hash[:l] = 12
 end
+
+# Multi-assignment targets each count as an assignment in RuboCop.
+# a, b, c, ... = x.split('|') => each target is an assignment.
+# A=18 (targets), B=1 (split), C=0 => score = sqrt(324+1) = 18.03
+def multi_write_method(data)
+^^^ Metrics/AbcSize: Assignment Branch Condition size for multi_write_method is too high. [18.03/17]
+  a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r = data.split("|")
+end
