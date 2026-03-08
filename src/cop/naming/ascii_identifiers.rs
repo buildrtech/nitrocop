@@ -1,3 +1,4 @@
+use crate::cop::node_type::ALIAS_METHOD_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
@@ -19,6 +20,21 @@ use crate::parse::source::SourceFile;
 ///
 /// RuboCop reports the offense at the first contiguous run of non-ASCII characters
 /// within the identifier, not at the identifier start.
+///
+/// ## Investigation (2026-03-08, round 2)
+/// FP=29, FN=1. Two root causes:
+///
+/// FP=29 (BOM handling): All FPs from files starting with UTF-8 BOM (EF BB BF).
+/// BOM's lead byte 0xEF satisfies is_ident_start(), causing the scanner to merge
+/// the 3 BOM bytes with the following identifier (e.g., `require`), creating a
+/// false non-ASCII match. The old exact-match check `ident == [EF,BB,BF]` failed
+/// because the identifier was longer than just the BOM. Fix: skip BOM bytes before
+/// entering the identifier scanner.
+///
+/// FN=1 (alias identifiers): `alias new old` in Prism produces AliasMethodNode
+/// with SymbolNode children. The CodeMap marks SymbolNodes as non-code, so the
+/// check_source scanner skips them. Fix: added check_node for AliasMethodNode
+/// to inspect the bare method name symbols directly.
 pub struct AsciiIdentifiers;
 
 impl Cop for AsciiIdentifiers {
@@ -41,6 +57,13 @@ impl Cop for AsciiIdentifiers {
         let mut i = 0;
 
         while i < len {
+            // Skip UTF-8 BOM (EF BB BF) wherever it appears. The BOM's lead
+            // byte 0xEF satisfies is_ident_start(), so without this skip it
+            // merges with the next identifier, creating false non-ASCII matches.
+            if i + 2 < len && bytes[i] == 0xEF && bytes[i + 1] == 0xBB && bytes[i + 2] == 0xBF {
+                i += 3;
+                continue;
+            }
             // Skip non-code regions (comments, strings, regexes, symbols)
             if !code_map.is_code(i) {
                 i += 1;
@@ -93,12 +116,6 @@ impl Cop for AsciiIdentifiers {
                     continue;
                 }
 
-                // Skip BOM (byte order mark, U+FEFF = EF BB BF). The parser
-                // strips it and doesn't produce a token for it.
-                if ident == [0xEF, 0xBB, 0xBF] {
-                    continue;
-                }
-
                 // Determine if this is a constant (starts with uppercase A-Z)
                 let is_constant = bytes[start].is_ascii_uppercase();
 
@@ -129,6 +146,60 @@ impl Cop for AsciiIdentifiers {
             } else {
                 i += 1;
             }
+        }
+    }
+
+    fn interested_node_types(&self) -> &'static [u8] {
+        &[ALIAS_METHOD_NODE]
+    }
+
+    fn check_node(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        // Handle `alias new_name old_name` — Prism represents the bare method
+        // names as SymbolNodes, which the CodeMap marks as non-code. The
+        // check_source scanner skips them, so we catch non-ASCII identifiers
+        // in alias arguments here via check_node.
+        let alias_node = match node.as_alias_method_node() {
+            Some(n) => n,
+            None => return,
+        };
+        let ascii_constants = config.get_bool("AsciiConstants", true);
+        for name_node in [alias_node.new_name(), alias_node.old_name()] {
+            let sym = match name_node.as_symbol_node() {
+                Some(s) => s,
+                None => continue,
+            };
+            let name_bytes = sym.unescaped();
+            if name_bytes.iter().all(|&b| b.is_ascii()) {
+                continue;
+            }
+            let is_constant = name_bytes.first().is_some_and(|b| b.is_ascii_uppercase());
+            if is_constant && !ascii_constants {
+                continue;
+            }
+            // Find offset of first non-ASCII char in the source location
+            let loc = sym.location();
+            let src_bytes = &source.content[loc.start_offset()..loc.end_offset()];
+            let first_non_ascii = src_bytes
+                .iter()
+                .enumerate()
+                .find(|&(_, &b)| !b.is_ascii() && (b & 0xC0) != 0x80)
+                .map(|(idx, _)| loc.start_offset() + idx)
+                .unwrap_or(loc.start_offset());
+            let (line, column) = source.offset_to_line_col(first_non_ascii);
+            let message = if is_constant {
+                "Use only ascii symbols in constants."
+            } else {
+                "Use only ascii symbols in identifiers."
+            };
+            diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
         }
     }
 }

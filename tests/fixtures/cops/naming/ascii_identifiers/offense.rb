@@ -16,3 +16,6 @@ naïve = 1
 
 foo∂∂bar = baz
    ^ Naming/AsciiIdentifiers: Use only ascii symbols in identifiers.
+
+alias now_in_microseconds now_in_μs
+                                 ^ Naming/AsciiIdentifiers: Use only ascii symbols in identifiers.

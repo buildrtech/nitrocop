@@ -13,3 +13,7 @@ x = "café"
 # Comment with accénts
 
 :symbol_ok
+
+﻿require 'webmachine/configuration'
+
+﻿puts 'foo'
