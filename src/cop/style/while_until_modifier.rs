@@ -8,6 +8,14 @@ use ruby_prism::Visit;
 /// (e.g., `while a && \n b`). RuboCop checks both body AND predicate line span
 /// before suggesting modifier form. Fixed by adding predicate line-span check
 /// after the existing body line-span check.
+///
+/// Second round (2026-03-08): 19 FPs from missing StatementModifier checks:
+/// - `nonempty_line_count > 3`: skip if the node spans more than 3 non-empty lines
+///   (catches cases with comment lines between keyword and body)
+/// - `line_with_comment?(end_line)`: skip if end keyword's line has a comment
+/// - `contains_comment?(body.source_range)`: skip if any comment falls within body range
+/// - `code_after(node)`: include trailing code after `end` in modifier length calculation
+/// - `first_line_comment && code_after`: skip if keyword line has comment AND end has trailing code
 pub struct WhileUntilModifier;
 
 /// Returns true if the node or any descendant contains a local variable assignment.
@@ -82,9 +90,10 @@ impl Cop for WhileUntilModifier {
         };
 
         // If no closing (end), it's already modifier form
-        if closing_loc.is_none() {
-            return;
-        }
+        let closing_loc = match closing_loc {
+            Some(cl) => cl,
+            None => return,
+        };
 
         let body = match statements {
             Some(s) => s,
@@ -97,6 +106,45 @@ impl Cop for WhileUntilModifier {
         }
 
         let body_node = &body_stmts[0];
+        let src_bytes = source.as_bytes();
+
+        // non_eligible_node?: nonempty_line_count > 3
+        // Count non-empty lines in the entire while/until node span
+        let node_start = node.location().start_offset();
+        let node_end = node.location().end_offset();
+        let node_src = &src_bytes[node_start..node_end];
+        let nonempty_line_count = node_src
+            .split(|&b| b == b'\n')
+            .filter(|line| line.iter().any(|&b| b != b' ' && b != b'\t' && b != b'\r'))
+            .count();
+        if nonempty_line_count > 3 {
+            return;
+        }
+
+        // non_eligible_node?: comment on end keyword's line
+        let (end_line, _) = source.offset_to_line_col(closing_loc.start_offset());
+        for comment in _parse_result.comments() {
+            let (comment_line, _) = source.offset_to_line_col(comment.location().start_offset());
+            if comment_line == end_line {
+                return;
+            }
+        }
+
+        // non_eligible_body?: comment within body source range
+        let body_start = body_node.location().start_offset();
+        let body_end = body_node.location().end_offset();
+        // Extend body_end to include the rest of the line (catches inline comments)
+        let body_line_end = src_bytes[body_end..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| body_end + p)
+            .unwrap_or(src_bytes.len());
+        for comment in _parse_result.comments() {
+            let comment_start = comment.location().start_offset();
+            if comment_start >= body_start && comment_start < body_line_end {
+                return;
+            }
+        }
 
         // Body must be on a single line
         let (body_start_line, _) = source.offset_to_line_col(body_node.location().start_offset());
@@ -130,6 +178,39 @@ impl Cop for WhileUntilModifier {
             return;
         }
 
+        // Skip if the condition contains a local variable assignment
+        // (e.g., `while (chunk = file.read(1024))`)
+        if contains_lvar_assignment(&predicate) {
+            return;
+        }
+
+        // code_after(node): text after the `end` keyword on the same line
+        let closing_end = closing_loc.end_offset();
+        let closing_line_end = src_bytes[closing_end..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| closing_end + p)
+            .unwrap_or(src_bytes.len());
+        let code_after = &src_bytes[closing_end..closing_line_end];
+        let code_after_trimmed = code_after
+            .iter()
+            .skip_while(|&&b| b == b' ' || b == b'\t')
+            .copied()
+            .collect::<Vec<_>>();
+        let has_code_after = !code_after_trimmed.is_empty();
+
+        // first_line_comment(node): comment on the keyword's line (non-disable)
+        let (kw_line, _) = source.offset_to_line_col(kw_loc.start_offset());
+        let has_first_line_comment = _parse_result.comments().any(|comment| {
+            let (comment_line, _) = source.offset_to_line_col(comment.location().start_offset());
+            comment_line == kw_line
+        });
+
+        // first_line_comment && code_after => skip
+        if has_first_line_comment && has_code_after {
+            return;
+        }
+
         // Check if the modifier form would fit within the max line length.
         // RuboCop considers Layout/LineLength Max (default 120).
         let max_line_length = _config
@@ -139,24 +220,17 @@ impl Cop for WhileUntilModifier {
             .unwrap_or(120) as usize;
 
         // Estimate modifier form length: "body keyword condition"
-        let body_src = &source.as_bytes()
-            [body_node.location().start_offset()..body_node.location().end_offset()];
+        let body_src =
+            &src_bytes[body_node.location().start_offset()..body_node.location().end_offset()];
         let body_str = String::from_utf8_lossy(body_src);
         let body_trimmed = body_str.trim();
 
-        // Skip if the condition contains a local variable assignment
-        // (e.g., `while (chunk = file.read(1024))`)
-        if contains_lvar_assignment(&predicate) {
-            return;
-        }
-
-        let pred_src = &source.as_bytes()
-            [predicate.location().start_offset()..predicate.location().end_offset()];
+        let pred_src =
+            &src_bytes[predicate.location().start_offset()..predicate.location().end_offset()];
         let pred_str = String::from_utf8_lossy(pred_src);
 
         // Calculate indentation of the original while/until keyword
         let kw_offset = kw_loc.start_offset();
-        let src_bytes = source.as_bytes();
         // Walk back to find the start of the line
         let line_start = src_bytes[..kw_offset]
             .iter()
@@ -168,8 +242,40 @@ impl Cop for WhileUntilModifier {
             .take_while(|&&b| b == b' ' || b == b'\t')
             .count();
 
-        // "  body keyword condition"
-        let modifier_len = indent + body_trimmed.len() + 1 + keyword.len() + 1 + pred_str.len();
+        // Include first_line_comment in modifier form if present
+        let first_line_comment_len = if has_first_line_comment {
+            // Find the comment text
+            let mut comment_len = 0;
+            for comment in _parse_result.comments() {
+                let (cl, _) = source.offset_to_line_col(comment.location().start_offset());
+                if cl == kw_line {
+                    let csrc = &src_bytes
+                        [comment.location().start_offset()..comment.location().end_offset()];
+                    comment_len = 1 + csrc.len(); // space + comment
+                    break;
+                }
+            }
+            comment_len
+        } else {
+            0
+        };
+
+        // Include code_after in modifier length
+        let code_after_len = if has_code_after {
+            String::from_utf8_lossy(&code_after_trimmed).len()
+        } else {
+            0
+        };
+
+        // "  body keyword condition [# comment] [trailing_code]"
+        let modifier_len = indent
+            + body_trimmed.len()
+            + 1
+            + keyword.len()
+            + 1
+            + pred_str.len()
+            + first_line_comment_len
+            + code_after_len;
         if modifier_len > max_line_length {
             return;
         }
