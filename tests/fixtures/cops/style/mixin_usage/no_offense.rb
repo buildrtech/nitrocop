@@ -9,3 +9,7 @@ Class.new do
   include M
 end
 obj.include(M)
+# Method call arguments should not be flagged (only constants)
+include T('default/layout/html')
+extend some_method
+prepend build_module(:foo)

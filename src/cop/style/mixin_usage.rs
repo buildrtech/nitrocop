@@ -4,6 +4,10 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation: 14+ FPs from `include T('default/layout/html')` in YARD templates.
+/// Root cause: we checked `node.arguments().is_some()` which matches any argument including
+/// method calls. RuboCop's node pattern requires arguments to be `const` nodes. Fixed by
+/// verifying all arguments are ConstantReadNode or ConstantPathNode before flagging.
 pub struct MixinUsage;
 
 const MIXIN_METHODS: &[&[u8]] = &[b"include", b"extend", b"prepend"];
@@ -51,8 +55,16 @@ impl<'pr> Visit<'pr> for MixinUsageVisitor<'_> {
             && !self.in_class_or_module
             && !self.in_block
         {
-            // Check that it has arguments (bare include/extend/prepend without args is not a mixin call)
-            if node.arguments().is_some() {
+            // RuboCop's node pattern requires `const` args — only flag when all
+            // arguments are constants (ConstantReadNode or ConstantPathNode).
+            // Method call arguments like `include T('...')` are not flagged.
+            let is_const_mixin = node.arguments().is_some_and(|args| {
+                args.arguments().iter().all(|arg| {
+                    arg.as_constant_read_node().is_some() || arg.as_constant_path_node().is_some()
+                })
+            });
+
+            if is_const_mixin {
                 let method_str = std::str::from_utf8(method_bytes).unwrap_or("include");
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
