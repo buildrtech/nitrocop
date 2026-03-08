@@ -4,6 +4,29 @@ use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 use std::collections::HashSet;
 
+/// Style/BlockDelimiters checks for uses of braces or do/end around single-line
+/// or multi-line blocks.
+///
+/// ## Investigation findings (2026-03-08)
+///
+/// Root cause of 2,263 FPs: RuboCop suppresses nested block offenses. When a block
+/// is flagged (e.g., outer multi-line `{...}`), RuboCop calls `ignore_node(block)` in
+/// the `add_offense` handler. This causes `part_of_ignored_node?` to return true for
+/// all blocks whose source range is contained within the flagged block. As a result,
+/// only the outermost offending block is flagged — inner blocks are suppressed.
+///
+/// nitrocop was missing this suppression: it flagged every multi-line `{...}` block
+/// independently, including those nested inside already-flagged blocks. This produced
+/// many duplicate offenses that RuboCop does not emit.
+///
+/// Additionally, blocks in non-parenthesized argument positions (already handled via
+/// `ignored_blocks`) were not propagating their suppression to nested child blocks.
+/// A block inside an ignored block's body should also be suppressed, matching
+/// RuboCop's `part_of_ignored_node?` range-containment check.
+///
+/// Fix: track "suppressed ranges" (byte offset ranges). When a block is ignored
+/// (non-parenthesized arg) or flagged (offense registered), add its full byte range.
+/// Before checking any block, verify it is not contained within a suppressed range.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -43,6 +66,7 @@ impl Cop for BlockDelimiters {
             cop: self,
             diagnostics: Vec::new(),
             ignored_blocks: HashSet::new(),
+            suppressed_ranges: Vec::new(),
             allowed_methods: allowed,
             allowed_patterns: patterns,
             braces_required_methods: braces_required,
@@ -57,25 +81,43 @@ struct BlockDelimitersVisitor<'a> {
     cop: &'a BlockDelimiters,
     diagnostics: Vec<Diagnostic>,
     ignored_blocks: HashSet<usize>,
+    /// Byte ranges of blocks that suppress nested block checks.
+    /// Includes: (1) blocks in non-parenthesized arg positions (binding change),
+    /// (2) blocks that already received an offense (RuboCop `ignore_node` behavior).
+    suppressed_ranges: Vec<(usize, usize)>,
     allowed_methods: Vec<String>,
     allowed_patterns: Vec<String>,
     braces_required_methods: Vec<String>,
 }
 
 impl<'a> BlockDelimitersVisitor<'a> {
-    fn check_block(&mut self, block_node: &ruby_prism::BlockNode<'_>, method_name: &[u8]) {
+    /// Check if a block's byte range is contained within any suppressed range.
+    fn is_suppressed(&self, start: usize, end: usize) -> bool {
+        self.suppressed_ranges
+            .iter()
+            .any(|&(s, e)| s <= start && end <= e)
+    }
+
+    /// Add a block's byte range to the suppressed set.
+    fn suppress_block(&mut self, block_node: &ruby_prism::BlockNode<'_>) {
+        let start = block_node.opening_loc().start_offset();
+        let end = block_node.closing_loc().end_offset();
+        self.suppressed_ranges.push((start, end));
+    }
+
+    fn check_block(&mut self, block_node: &ruby_prism::BlockNode<'_>, method_name: &[u8]) -> bool {
         let method_str = std::str::from_utf8(method_name).unwrap_or("");
 
         // Skip AllowedMethods (default: lambda, proc, it)
         if self.allowed_methods.iter().any(|m| m == method_str) {
-            return;
+            return false;
         }
 
         // Skip AllowedPatterns
         for pattern in &self.allowed_patterns {
             if let Ok(re) = regex::Regex::new(pattern) {
                 if re.is_match(method_str) {
-                    return;
+                    return false;
                 }
             }
         }
@@ -101,14 +143,15 @@ impl<'a> BlockDelimitersVisitor<'a> {
                         method_str
                     ),
                 ));
+                return true;
             }
-            return;
+            return false;
         }
 
         // require_do_end: single-line do-end blocks with rescue/ensure clauses
         // cannot be converted to braces (syntax error). Skip these.
         if is_single_line && opening == b"do" && block_has_rescue_or_ensure(block_node) {
-            return;
+            return false;
         }
 
         // line_count_based style
@@ -120,6 +163,7 @@ impl<'a> BlockDelimitersVisitor<'a> {
                 column,
                 "Prefer `{...}` over `do...end` for single-line blocks.".to_string(),
             ));
+            return true;
         } else if !is_single_line && opening == b"{" {
             let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
             self.diagnostics.push(self.cop.diagnostic(
@@ -128,7 +172,9 @@ impl<'a> BlockDelimitersVisitor<'a> {
                 column,
                 "Prefer `do...end` over `{...}` for multi-line blocks.".to_string(),
             ));
+            return true;
         }
+        false
     }
 }
 
@@ -158,8 +204,19 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
                 let offset = block_node.opening_loc().start_offset();
-                if !self.ignored_blocks.contains(&offset) {
-                    self.check_block(&block_node, method_name);
+                let block_end = block_node.closing_loc().end_offset();
+
+                if self.ignored_blocks.contains(&offset) {
+                    // Block is in non-parenthesized arg position — suppress it
+                    // and all nested blocks (RuboCop's part_of_ignored_node? behavior)
+                    self.suppress_block(&block_node);
+                } else if !self.is_suppressed(offset, block_end) {
+                    // Block is not inside a suppressed range — check it
+                    let flagged = self.check_block(&block_node, method_name);
+                    if flagged {
+                        // Suppress nested blocks (RuboCop's ignore_node in add_offense)
+                        self.suppress_block(&block_node);
+                    }
                 }
             }
         }
@@ -280,6 +337,48 @@ mod tests {
             "Should not flag lambda block in keyword arg, got: {:?}",
             diags
         );
+    }
+
+    #[test]
+    fn no_offense_nested_in_non_parens_arg() {
+        // text html { body { ... } } — html's block is in non-parenthesized arg of text,
+        // body's block is inside html's ignored block => both suppressed
+        let source = b"text html {\n  body {\n    input(type: 'text')\n  }\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag blocks nested in non-parenthesized arg, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_deeply_nested_in_non_parens_arg() {
+        // foo browser { text html { body { ... } } } — browser's block is in foo's
+        // non-parens arg, all inner blocks are suppressed
+        let source =
+            b"foo browser {\n  text html {\n    body {\n      input(type: 'text')\n    }\n  }\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag deeply nested blocks in non-parens arg, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn offense_only_outermost_nested_braces() {
+        // When multiple multi-line brace blocks are nested, only the outermost
+        // should be flagged (RuboCop's ignore_node behavior)
+        let source = b"items.map {\n  items.select {\n    true\n  }\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag only outermost multi-line brace block, got: {:?}",
+            diags
+        );
+        assert_eq!(diags[0].location.line, 1);
     }
 
     #[test]

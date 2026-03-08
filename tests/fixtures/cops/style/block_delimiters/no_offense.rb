@@ -44,3 +44,19 @@ get '/:path', to: redirect { |params|
 
 # Single-line do-end with rescue clause — cannot convert to braces
 foo do next unless bar; rescue StandardError; end
+
+# Nested blocks inside non-parenthesized argument — all ignored
+text html {
+  body {
+    input(type: 'text')
+  }
+}
+
+# Deeply nested blocks inside non-parenthesized argument — all ignored
+foo browser {
+  text html {
+    body {
+      input(type: 'text')
+    }
+  }
+}
