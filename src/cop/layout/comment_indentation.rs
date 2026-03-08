@@ -4,6 +4,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Layout/CommentIndentation: checks that comments are indented correctly.
+///
+/// ## Investigation findings (2026-03-08)
+///
+/// Root cause of 6,355 FPs: nitrocop was skipping comment lines when looking for
+/// the "next line" to determine expected indentation, while RuboCop uses the next
+/// non-blank line regardless of whether it's a comment or code. This caused massive
+/// FPs when comment blocks appeared before code at a different indentation level —
+/// every comment in the block was checked against the distant code line instead of
+/// the immediately following comment line.
+///
+/// Fix: Changed to match RuboCop's `line_after_comment` algorithm — find the next
+/// non-blank line (including other comments). Also added handling for:
+/// - Comments at end of file with no following line (expected indent = 0)
+/// - The `is_less_indented` and `is_two_alternative_keyword` checks only apply
+///   when the next non-blank line is actual code (not another comment)
 pub struct CommentIndentation;
 
 /// Check if a line starts with one of the "two alternative" keywords.
@@ -96,90 +112,102 @@ impl Cop for CommentIndentation {
 
             let comment_col = trimmed;
 
-            // Find the next non-blank, non-comment line to check alignment
-            let mut next_code_line: Option<&[u8]> = None;
-            let mut next_code_col = None;
-            for j in (i + 1)..lines.len() {
-                let next_trimmed = lines[j].iter().position(|&b| b != b' ' && b != b'\t');
+            // Find the next non-blank line (including comments).
+            // This matches RuboCop's `line_after_comment` which finds the first
+            // non-blank line, regardless of whether it's a comment or code.
+            let mut next_line: Option<&[u8]> = None;
+            let mut next_col = None;
+            let mut next_line_idx = 0;
+            for (j, ln) in lines.iter().enumerate().skip(i + 1) {
+                let next_trimmed = ln.iter().position(|&b| b != b' ' && b != b'\t');
                 if let Some(nt) = next_trimmed {
-                    if lines[j][nt] == b'#' {
-                        // Check if this # is a real comment or inside string/regex
-                        let next_hash_offset = line_offsets[j] + nt;
-                        if comment_starts.contains(&next_hash_offset) {
-                            continue; // skip other comments
-                        }
-                    }
-                    next_code_line = Some(lines[j]);
-                    next_code_col = Some(nt);
+                    next_line = Some(ln);
+                    next_col = Some(nt);
+                    next_line_idx = j;
                     break;
                 }
             }
 
-            if let Some(next_col) = next_code_col {
-                let next_line = next_code_line.unwrap();
-
-                // Calculate the correct expected indentation.
-                // If the next line is `end`, `)`, `}`, `]`, the comment should
-                // align with the body (one indent level deeper).
-                let expected = if is_less_indented(next_line) {
-                    next_col + indent_width
+            // When no next line exists, expected indentation is 0
+            // (matches RuboCop: `return 0 unless next_line`)
+            let (expected, next_is_code) = if let Some(nc) = next_col {
+                let nl = next_line.unwrap();
+                // Check if the next non-blank line is a comment
+                let is_comment = if nl[nc] == b'#' {
+                    let next_hash_offset = line_offsets[next_line_idx] + nc;
+                    comment_starts.contains(&next_hash_offset)
                 } else {
-                    next_col
+                    false
                 };
+                // is_less_indented only applies to code lines, not comments
+                let exp = if !is_comment && is_less_indented(nl) {
+                    nc + indent_width
+                } else {
+                    nc
+                };
+                (exp, !is_comment)
+            } else {
+                (0, false)
+            };
 
-                if comment_col == expected {
-                    continue;
-                }
+            if comment_col == expected {
+                continue;
+            }
 
-                // Two-alternative keywords: comment can match keyword indent OR body indent
-                if is_two_alternative_keyword(next_line) {
-                    let alt = next_col + indent_width;
-                    if comment_col == next_col || comment_col == alt {
-                        continue;
-                    }
-                }
-
-                // AllowForAlignment: if enabled, check if this comment is aligned
-                // with a preceding inline (end-of-line) comment
-                if allow_for_alignment {
-                    let mut aligned_with_preceding = false;
-                    // Walk backwards through preceding comments looking for an
-                    // end-of-line comment at the same column
-                    for k in (0..i).rev() {
-                        let prev = lines[k];
-                        let prev_first = prev.iter().position(|&b| b != b' ' && b != b'\t');
-                        match prev_first {
-                            Some(pos) if prev[pos] == b'#' => {
-                                // own-line comment — skip
-                                continue;
-                            }
-                            Some(_) => {
-                                // code line — check if it has an inline comment at our column
-                                if let Some(hash_pos) = prev.iter().position(|&b| b == b'#') {
-                                    if hash_pos == comment_col {
-                                        aligned_with_preceding = true;
-                                    }
-                                }
-                                break;
-                            }
-                            None => break, // blank line
+            // Two-alternative keywords: comment can match keyword indent OR body indent
+            // Only applies when next line is code (not a comment)
+            if next_is_code {
+                if let Some(nl) = next_line {
+                    if is_two_alternative_keyword(nl) {
+                        let nc = next_col.unwrap();
+                        let alt = nc + indent_width;
+                        if comment_col == nc || comment_col == alt {
+                            continue;
                         }
                     }
-                    if aligned_with_preceding {
-                        continue;
+                }
+            }
+
+            // AllowForAlignment: if enabled, check if this comment is aligned
+            // with a preceding inline (end-of-line) comment
+            if allow_for_alignment {
+                let mut aligned_with_preceding = false;
+                // Walk backwards through preceding comments looking for an
+                // end-of-line comment at the same column
+                for k in (0..i).rev() {
+                    let prev = lines[k];
+                    let prev_first = prev.iter().position(|&b| b != b' ' && b != b'\t');
+                    match prev_first {
+                        Some(pos) if prev[pos] == b'#' => {
+                            // own-line comment — skip
+                            continue;
+                        }
+                        Some(_) => {
+                            // code line — check if it has an inline comment at our column
+                            if let Some(hash_pos) = prev.iter().position(|&b| b == b'#') {
+                                if hash_pos == comment_col {
+                                    aligned_with_preceding = true;
+                                }
+                            }
+                            break;
+                        }
+                        None => break, // blank line
                     }
                 }
-
-                diagnostics.push(self.diagnostic(
-                    source,
-                    i + 1,
-                    comment_col,
-                    format!(
-                        "Incorrect indentation detected (column {} instead of column {}).",
-                        comment_col, expected
-                    ),
-                ));
+                if aligned_with_preceding {
+                    continue;
+                }
             }
+
+            diagnostics.push(self.diagnostic(
+                source,
+                i + 1,
+                comment_col,
+                format!(
+                    "Incorrect indentation detected (column {} instead of column {}).",
+                    comment_col, expected
+                ),
+            ));
         }
     }
 }

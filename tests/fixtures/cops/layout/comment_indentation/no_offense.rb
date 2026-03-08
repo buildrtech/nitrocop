@@ -78,3 +78,56 @@ system "bundle exec dartsass \
   #{@guides_dir}/assets/stylesrc/style.scss:#{@output_dir}/style.css \
   #{@guides_dir}/assets/stylesrc/highlight.scss:#{@output_dir}/highlight.css \
   #{@guides_dir}/assets/stylesrc/print.scss:#{@output_dir}/print.css"
+
+# Multiple comments before end: each comment aligns with the next non-blank
+# line (the following comment), not jumping over comments to code.
+def baz
+  x = 1
+  # closing comment line 1
+  # closing comment line 2
+  # closing comment line 3
+end
+
+# Comment block aligned with body before else
+if condition
+  do_something
+  # comment line 1
+  # comment line 2
+else
+  do_other
+end
+
+# Comment block before when
+case value
+when 1
+  a = 1
+  # about next case line 1
+  # about next case line 2
+when 2
+  b = 2
+end
+
+# Comments inside brackets
+a = {
+  #
+  x: [
+    1
+    #
+  ],
+  #
+  y: func(
+    1
+    #
+  )
+  #
+}
+#
+
+# Comment with blank line following before end
+def m
+  # comment
+
+end
+
+# Comments at top level (no next code line means expected = 0)
+# top level standalone comment
