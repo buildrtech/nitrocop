@@ -5,6 +5,23 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=5, FN=5.
+///
+/// FP=5 / FN=5: the reproduced multiline mismatches were all selector-range
+/// issues when `.send` was wrapped after the receiver. RuboCop anchors the
+/// offense at the selector range (`send(:include, Foo)`), not the whole call
+/// expression starting at the receiver. While fixing the span, also build the
+/// replacement/module list from every mixin argument to match upstream behavior.
+///
+/// Local rerun after the fix still undercounts 3 offenses in aggregate, but the
+/// remaining gap is concentrated in vendor-path repos (`webistrano`,
+/// `standalone-migrations`, `SquareSquash/web`) while `jruby` contributes
+/// file-drop noise. `--list-target-files` under the corpus baseline config
+/// skips those remaining vendor files locally, and the exact multiline/no-paren
+/// shapes are covered by fixtures, so the remaining mismatch appears to be
+/// corpus file-selection noise outside this cop's AST matching logic.
 pub struct SendWithMixinArgument;
 
 const SEND_METHODS: &[&[u8]] = &[b"send", b"public_send", b"__send__"];
@@ -86,33 +103,34 @@ impl Cop for SendWithMixinArgument {
             return;
         }
 
-        // Second argument should be a constant
-        let second_arg = &arg_list[1];
-        if second_arg.as_constant_read_node().is_none()
-            && second_arg.as_constant_path_node().is_none()
-        {
-            return;
+        let mut module_names = Vec::new();
+        for arg in &arg_list[1..] {
+            if arg.as_constant_read_node().is_none() && arg.as_constant_path_node().is_none() {
+                return;
+            }
+
+            let start = arg.location().start_offset();
+            let end = arg.location().end_offset();
+            let module_name = source.byte_slice(start, end, "Module");
+            module_names.push(module_name.to_string());
         }
 
         let mixin_str = std::str::from_utf8(&mixin_name).unwrap_or("include");
-        let module_name = std::str::from_utf8(second_arg.location().as_slice()).unwrap_or("Module");
-
-        // Build the "bad method" string for the message
-        // Only include the method name and arguments, not the receiver
-        let method_str = std::str::from_utf8(method_name).unwrap_or("send");
-        let args_src = if let Some(args_loc) = call.arguments().map(|a| a.location()) {
-            std::str::from_utf8(args_loc.as_slice()).unwrap_or("...")
-        } else {
-            "..."
-        };
-
-        let loc = call.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let msg_loc = call.message_loc().unwrap_or(call.location());
+        let bad_method = source.byte_slice(
+            msg_loc.start_offset(),
+            call.location().end_offset(),
+            "send(...)",
+        );
+        let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
         diagnostics.push(self.diagnostic(
             source,
             line,
             column,
-            format!("Use `{mixin_str} {module_name}` instead of `{method_str}({args_src})`."),
+            format!(
+                "Use `{mixin_str} {}` instead of `{bad_method}`.",
+                module_names.join(", ")
+            ),
         ));
     }
 }
