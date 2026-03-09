@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-09)
+///
+/// Corpus oracle reported FP=2, FN=0.
+///
+/// FP=2: Fixed by skipping `::` scope resolution operators — only `.` and `&.` should be checked.
+/// The 2 FPs were from rufo's spec file with `foo::\n bar` patterns.
 pub struct DotPosition;
 
 impl Cop for DotPosition {
@@ -35,6 +41,11 @@ impl Cop for DotPosition {
             Some(loc) => loc,
             None => return,
         };
+
+        // Skip `::` scope resolution operators — only `.` and `&.` are relevant
+        if dot_loc.as_slice() == b"::" {
+            return;
+        }
 
         // Must have a receiver
         let receiver = match call.receiver() {

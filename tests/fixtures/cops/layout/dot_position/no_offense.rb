@@ -8,3 +8,10 @@ foo
   .baz
 
 x = object.method
+
+# Scope resolution operator :: should not be flagged
+Foo::
+  bar
+
+Foo::
+  Bar
