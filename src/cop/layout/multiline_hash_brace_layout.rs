@@ -3,6 +3,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Layout/MultilineHashBraceLayout
+///
+/// ## Investigation (2026-03-09)
+/// FP in forem (spec/swagger_helper.rb:480) and puppet (spec/unit/datatypes_spec.rb:317):
+/// both involve hashes where the last value is a heredoc. The heredoc terminator forces
+/// the closing brace onto a separate line, so RuboCop skips brace layout checks when
+/// any hash element contains a heredoc. Fixed by adding a heredoc element check before
+/// enforcing brace placement.
 pub struct MultilineHashBraceLayout;
 
 impl Cop for MultilineHashBraceLayout {
@@ -45,6 +53,12 @@ impl Cop for MultilineHashBraceLayout {
 
         let elements = hash.elements();
         if elements.is_empty() {
+            return;
+        }
+
+        // Skip if any element contains a heredoc — the heredoc terminator forces
+        // unusual brace placement that RuboCop allows.
+        if elements.iter().any(|e| contains_heredoc(&e)) {
             return;
         }
 
@@ -114,6 +128,39 @@ impl Cop for MultilineHashBraceLayout {
             _ => {}
         }
     }
+}
+
+/// Check if a hash element node contains a heredoc string.
+/// Walks into AssocNode values and method call receivers/arguments.
+fn contains_heredoc(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(s) = node.as_interpolated_string_node() {
+        if let Some(open) = s.opening_loc() {
+            return open.as_slice().starts_with(b"<<");
+        }
+    }
+    if let Some(s) = node.as_string_node() {
+        if let Some(open) = s.opening_loc() {
+            return open.as_slice().starts_with(b"<<");
+        }
+    }
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            if contains_heredoc(&recv) {
+                return true;
+            }
+        }
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                if contains_heredoc(&arg) {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(assoc) = node.as_assoc_node() {
+        return contains_heredoc(&assoc.value());
+    }
+    false
 }
 
 #[cfg(test)]

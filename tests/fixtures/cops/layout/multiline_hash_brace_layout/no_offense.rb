@@ -13,3 +13,18 @@ h = {
   two: 2,
   three: 3
 }
+
+# Heredoc as last value — closing brace on separate line is allowed
+config = {
+  name: "test",
+  description: <<~DESC
+    Some description
+    across multiple lines
+  DESC
+}
+
+data = { key: "value",
+         body: <<~BODY
+           heredoc content
+         BODY
+}
