@@ -229,9 +229,56 @@ jobs:
             nitrocop-cops.txt
           retention-days: 7
 
+  # ── Run synthetic benchmark (parallel with corpus batches) ────
+  run-synthetic:
+    needs: [build-nitrocop]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Download nitrocop binary
+        uses: actions/download-artifact@v4
+        with:
+          name: nitrocop-binary
+          path: bin/
+
+      - name: Make binary executable
+        run: chmod +x bin/nitrocop
+
+      - uses: ruby/setup-ruby@v1
+
+      - name: Cache synthetic bundle
+        uses: actions/cache@v4
+        with:
+          path: bench/synthetic/vendor/bundle
+          key: synthetic-bundle-${{ hashFiles('bench/synthetic/Gemfile') }}
+
+      - name: Install synthetic gems
+        run: |
+          cd bench/synthetic
+          bundle config set --local path vendor/bundle
+          bundle install --jobs 4 --retry 3
+
+      - name: Run synthetic benchmark
+        run: |
+          # run_synthetic.py expects the binary at target/release/nitrocop
+          mkdir -p target/release
+          cp bin/nitrocop target/release/nitrocop
+          python3 bench/synthetic/run_synthetic.py --verbose
+
+      - name: Upload synthetic results
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-results
+          path: bench/synthetic/synthetic-results.json
+          retention-days: 7
+
   # ── Collect and diff all results ───────────────────────────────
   collect-results:
-    needs: [oracle-repo]
+    needs: [oracle-repo, run-synthetic]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -244,6 +291,15 @@ jobs:
           pattern: corpus-results-*
           path: all-results/
           merge-multiple: true
+
+      - name: Download synthetic results
+        uses: actions/download-artifact@v4
+        with:
+          name: synthetic-results
+          path: synthetic-dl/
+
+      - name: Place synthetic results
+        run: cp synthetic-dl/synthetic-results.json bench/synthetic/synthetic-results.json
 
       - name: Diff and generate report
         run: |
@@ -286,6 +342,7 @@ jobs:
             corpus-results.json
             corpus-results.md
             tiers.json
+            bench/synthetic/synthetic-results.json
           retention-days: 30
 
       - name: Update corpus report

@@ -147,6 +147,10 @@ def _try_gh(repo: str | None) -> tuple[Path, int, str] | None:
 
     # Cache for next time
     shutil.copy2(path, cache_path)
+
+    # Also cache synthetic-results.json if present in the artifact
+    _cache_synthetic_from_dir(Path(tmpdir), run_id)
+
     return cache_path, run_id, head_sha
 
 
@@ -266,6 +270,8 @@ def _try_curl_api(repo: str | None) -> tuple[Path, int, str] | None:
                 return None
             with zf.open("corpus-results.json") as f:
                 cache_path.write_bytes(f.read())
+            # Also extract synthetic-results.json if present
+            _cache_synthetic_from_zip(zf, run_id)
     except zipfile.BadZipFile:
         print("Downloaded artifact is not a valid zip file", file=sys.stderr)
         return None
@@ -396,6 +402,37 @@ def _try_corpus_md() -> tuple[Path, int, str] | None:
 
     print(f"Using docs/corpus.md as fallback (summary data only, dated {run_date})", file=sys.stderr)
     return cache_path, 0, head_sha
+
+
+def _cache_synthetic_from_dir(tmpdir: Path, run_id: int) -> None:
+    """Cache synthetic-results.json from a gh-downloaded artifact directory."""
+    # The artifact may nest it under bench/synthetic/ or at the top level
+    for candidate in [
+        tmpdir / "bench" / "synthetic" / "synthetic-results.json",
+        tmpdir / "synthetic-results.json",
+    ]:
+        if candidate.exists():
+            dest = _cache_dir() / f"synthetic-results-{run_id}.json"
+            shutil.copy2(candidate, dest)
+            print(f"Cached synthetic-results.json from artifact", file=sys.stderr)
+            return
+
+
+def _cache_synthetic_from_zip(zf: zipfile.ZipFile, run_id: int) -> None:
+    """Cache synthetic-results.json from an artifact zip."""
+    for name in zf.namelist():
+        if name.endswith("synthetic-results.json"):
+            dest = _cache_dir() / f"synthetic-results-{run_id}.json"
+            with zf.open(name) as f:
+                dest.write_bytes(f.read())
+            print(f"Cached synthetic-results.json from artifact", file=sys.stderr)
+            return
+
+
+def get_synthetic_results_path(run_id: int) -> Path | None:
+    """Return the cached synthetic-results.json path for a given run, if available."""
+    path = _cache_dir() / f"synthetic-results-{run_id}.json"
+    return path if path.exists() else None
 
 
 def download_corpus_results(

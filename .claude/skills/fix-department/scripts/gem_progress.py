@@ -45,6 +45,7 @@ for gem, depts in GEM_DEPARTMENTS.items():
 
 
 from corpus_download import download_corpus_results as download_latest_corpus_results
+from corpus_download import get_synthetic_results_path
 
 
 def get_fixed_cops_from_git(oracle_sha: str) -> set[str]:
@@ -537,6 +538,7 @@ def main():
 
     # Load corpus results
     oracle_sha = ""
+    _run_id = 0
     if args.input:
         input_path = args.input
     else:
@@ -571,13 +573,19 @@ def main():
     if fixed_cops:
         print(f"Treating {len(fixed_cops)} cops as fixed (pending corpus confirmation)", file=sys.stderr)
 
-    # Load synthetic results if provided
+    # Load synthetic results: explicit path > local file > cached from CI artifact
     synthetic = None
     syn_path = args.synthetic or Path("bench/synthetic/synthetic-results.json")
     if syn_path.exists():
         syn_data = json.loads(syn_path.read_text())
         synthetic = {entry["cop"]: entry for entry in syn_data.get("by_cop", [])}
         print(f"Loaded {len(synthetic)} synthetic results from {syn_path}", file=sys.stderr)
+    elif _run_id:
+        cached_syn = get_synthetic_results_path(_run_id)
+        if cached_syn:
+            syn_data = json.loads(cached_syn.read_text())
+            synthetic = {entry["cop"]: entry for entry in syn_data.get("by_cop", [])}
+            print(f"Loaded {len(synthetic)} synthetic results from CI cache", file=sys.stderr)
 
     gems = build_gem_stats(by_cop, registry_cops if has_registry else None, fixed_cops, synthetic)
 
