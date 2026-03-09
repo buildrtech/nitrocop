@@ -27,7 +27,6 @@ UNSUPPORTED_COPS = frozenset([
     "Lint/NumberedParameterAssignment",      # syntax error in Ruby 3.4+
     "Lint/UselessElseWithoutRescue",         # syntax error in Ruby 3.4+
     "Security/YAMLLoad",                    # max Ruby 3.0 (YAML.load safe in 3.1+)
-    "Rails/StrongParametersExpect",          # requires railties >= 8.0 in Gemfile.lock
 ])
 
 # Cops with no corpus data, excluding UNSUPPORTED_COPS.
@@ -73,6 +72,7 @@ TARGET_COPS = sorted([
     "Rails/RequireDependency",
     "Rails/ResponseParsedBody",
     "Rails/ReversibleMigration",
+    "Rails/StrongParametersExpect",
     "Rails/ReversibleMigrationMethodDefinition",
     "Rails/ThreeStateBooleanColumn",
     "Rails/TimeZoneAssignment",

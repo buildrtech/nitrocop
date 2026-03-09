@@ -29,7 +29,6 @@ UNSUPPORTED_COPS = frozenset([
     "Lint/NumberedParameterAssignment",      # syntax error in Ruby 3.4+
     "Lint/UselessElseWithoutRescue",         # syntax error in Ruby 3.4+
     "Security/YAMLLoad",                    # max Ruby 3.0 (YAML.load safe in 3.1+)
-    "Rails/StrongParametersExpect",          # requires railties >= 8.0 in Gemfile.lock
 ])
 
 

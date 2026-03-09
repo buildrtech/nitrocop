@@ -1,6 +1,6 @@
 # Synthetic Corpus
 
-Handcrafted Ruby files that exercise the 56 cops with zero activity in the 1,000-repo corpus oracle. These cops target niche patterns (Rails migrations, specific API usage, edge-case lint rules) that don't appear in real-world repos.
+Handcrafted Ruby files that exercise cops with zero activity in the 1,000-repo corpus oracle. These cops target niche patterns (Rails migrations, specific API usage, edge-case lint rules) that don't appear in real-world repos.
 
 ## Usage
 
@@ -14,7 +14,7 @@ python3 bench/synthetic/run_synthetic.py --verbose  # per-cop breakdown
 ## How It Works
 
 1. Runs nitrocop and RuboCop on `project/` with the same config
-2. Filters offenses to only the 56 target cops
+2. Filters offenses to only the target cops
 3. Compares offense tuples `(file, line, cop_name)` — same approach as the corpus oracle
 4. Reports matches / FP / FN per cop
 
@@ -35,16 +35,15 @@ bench/synthetic/
     test/              # ActionController test cops
 ```
 
-## Cops Not Covered (6)
+## Cops Not Covered
 
-These cops cannot be triggered under our config / gem versions:
+These cops cannot be triggered under current Ruby versions:
 
 - `Lint/ItWithoutArgumentsInBlock` — `it` is a valid block param in Ruby 3.4+
 - `Lint/NonDeterministicRequireOrder` — Ruby 3.0+ sorts Dir results
 - `Lint/NumberedParameterAssignment` — `_1 = x` is a syntax error in Ruby 3.4+
 - `Lint/UselessElseWithoutRescue` — syntax error in Ruby 3.4+
 - `Security/YAMLLoad` — max Ruby 3.0 (YAML.load is safe in 3.1+)
-- `Rails/StrongParametersExpect` — requires railties >= 8.0
 
 ## Research Findings
 

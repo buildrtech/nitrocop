@@ -210,13 +210,12 @@ cargo run --release --bin bench_nitrocop -- bench # timing only
 
 ## Limitations
 
-6 cops are registered but cannot be exercised under current Ruby/gem versions:
+These cops are registered but cannot be exercised under current Ruby versions:
 
 - `Lint/ItWithoutArgumentsInBlock` — `it` is a block parameter in Ruby 3.4+, making this cop obsolete
 - `Lint/NonDeterministicRequireOrder` — `Dir` results are sorted since Ruby 3.0
 - `Lint/NumberedParameterAssignment` — assigning to `_1` is a syntax error in Ruby 3.4+
 - `Lint/UselessElseWithoutRescue` — syntax error in Ruby 3.4+
 - `Security/YAMLLoad` — `YAML.load` is safe since Ruby 3.1 (cop has max Ruby 3.0)
-- `Rails/StrongParametersExpect` — requires `railties >= 8.0` in the project's Gemfile.lock
 
 These cops are excluded from corpus reporting counts.
