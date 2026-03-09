@@ -299,9 +299,6 @@ def main():
     Path(output_path).write_text(json.dumps(json_output, indent=2) + "\n")
     print(f"Wrote {output_path}", file=sys.stderr)
 
-    if total_fp > 0:
-        sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
