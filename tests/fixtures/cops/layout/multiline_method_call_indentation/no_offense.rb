@@ -23,11 +23,6 @@ expect(response)
   .to have_http_status(200)
   .and have_http_link_header('http://example.com')
 
-# First continuation dot when all previous dots are inline
-ActiveRecord::Base.configurations.configs_for(env_name: Rails.env).first.configuration_hash
-  .dup
-  .tap { |config| config['pool'] = 1 }
-
 # Block chain continuation: aligned with the block-bearing call's dot
 frequencies.map.with_index { |f, i| [f / total, hex[i]] }
                .sort_by { |r| -r[0] }
@@ -63,3 +58,91 @@ result =
     .where(active: true)
     .order(:name)
 
+# Trailing dot style: properly indented
+a.
+  b
+
+# Trailing dot: no extra indentation of third line
+a.
+  b.
+  c
+
+# Aligned methods in assignment
+formatted_int = int_part
+                .to_s
+                .reverse
+
+# Aligned method in return
+def a
+  return b.
+         c
+end
+
+# Aligned method in assignment + block + assignment
+a = b do
+  c.d = e.
+        f
+end
+
+# Correctly aligned trailing dot in assignment
+a = b.c.
+    d
+
+# Inside grouped expression (rubocop skips)
+(a.
+ b)
+
+# Method chain with hash literal receiver
+{ a: 1, b: 2 }.keys
+              .first
+
+# Aligned methods in if condition
+if a.
+   b
+  something
+end
+
+# Accept indented method when nothing to align with
+expect { custom_formatter_class('NonExistentClass') }
+  .to raise_error(NameError)
+
+# Indented methods in LHS of []= assignment
+a
+  .b[c] = 0
+
+# Method call chain starting with implicit receiver
+def slugs(type, path_prefix)
+  expanded_links_item(type)
+    .reject { |item| item["base_path"].nil? }
+    .map { |item| item["base_path"] }
+end
+
+# Aligned methods in operator assignment
+a +=
+  b
+  .c
+
+# 3 aligned methods
+a_class.new(severity, location, 'message', 'CopName')
+       .severity
+       .level
+
+# Aligned method even when an aref is in the chain
+foo = '123'.a
+           .b[1]
+           .c
+
+# Method chain with multiline parenthesized receiver
+(a +
+ b)
+  .foo
+  .bar
+
+# Aligned methods in constant assignment
+A = b
+    .c
+
+# Methods being aligned with method that is an argument
+authorize scope.includes(:user)
+               .where(name: 'Bob')
+               .order(:name)

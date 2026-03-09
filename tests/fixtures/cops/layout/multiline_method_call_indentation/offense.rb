@@ -29,9 +29,33 @@ submission.template_submitters
 # Hash pair value: chain should align with chain root start column
 foo(key: receiver.chained
                           .misaligned)
-                          ^^^ Layout/MultilineMethodCallIndentation: Align `.misaligned` with `receiver` on line 25.
+                          ^^^ Layout/MultilineMethodCallIndentation: Align `.misaligned` with `receiver.chained` on line 25.
 
 bar = Foo
   .a
   ^^ Layout/MultilineMethodCallIndentation: Align `.a` with `Foo` on line 28.
       .b(c)
+
+# Trailing dot: unaligned methods (aligned style)
+User.a
+  .b
+  ^^ Layout/MultilineMethodCallIndentation: Align `.b` with `.a` on line 33.
+ .c
+ ^^ Layout/MultilineMethodCallIndentation: Align `.c` with `.a` on line 33.
+
+# Trailing dot: misaligned in assignment
+a = b.c.
+ d
+ ^ Layout/MultilineMethodCallIndentation: Align `d` with `b` on line 38.
+
+# Unaligned method in block body
+a do
+  b.c
+    .d
+    ^^ Layout/MultilineMethodCallIndentation: Align `.d` with `.c` on line 43.
+end
+
+# Hash pair value: misaligned multi-dot chain
+method(key: value.foo.bar
+                    .baz)
+                    ^^^^ Layout/MultilineMethodCallIndentation: Align `.baz` with `value.foo.bar` on line 48.
