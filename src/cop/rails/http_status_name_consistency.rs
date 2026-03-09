@@ -6,6 +6,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-09)
+///
+/// Synthetic benchmark reported FN=2 (corpus has zero activity for this cop).
+///
+/// FN=2: Fixed by replacing `has_target_rails_version()` (requires railties in
+/// lockfile) with `target_rails_version().is_none()`. The RuboCop cop uses
+/// `requires_gem 'rack', '>= 3.1.0'`, not `requires_gem 'railties'`. The
+/// railties check was too strict for projects without a Gemfile.lock (like
+/// the synthetic benchmark project).
 pub struct HttpStatusNameConsistency;
 
 /// Deprecated HTTP status names and their preferred replacements (Rack >= 3.1).
@@ -51,7 +60,7 @@ impl Cop for HttpStatusNameConsistency {
     ) {
         // requires_gem 'rack', '>= 3.1.0' — only fire in Rails projects.
         // Non-Rails projects won't have TargetRailsVersion set.
-        if !config.has_target_rails_version() {
+        if config.target_rails_version().is_none() {
             return;
         }
 
