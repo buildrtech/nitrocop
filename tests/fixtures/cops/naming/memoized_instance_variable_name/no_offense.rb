@@ -158,3 +158,33 @@ def parsed_data
     @data ||= load_data
   end
 end
+
+# NOT memoization: ||= is last of multiple statements in else branch
+def assign_handler(handler)
+  if @_handler = handler
+    @_request = handler.request if handler.respond_to?(:request)
+  else
+    @_request ||= nil
+    @_config = {}
+    @_default_handler ||= nil
+  end
+end
+
+# NOT memoization: ||= in multi-statement ensure block
+def run_inline(name, &block)
+  @running = true
+  @current ||= new_item(name)
+  block.call(@current)
+  @current = nil
+ensure
+  @running = false
+  @advanced ||= @current&.advanced?
+end
+
+# NOT memoization: define_method block inside a different def should not
+# be traversed from the enclosing def context
+def self.build_accessor(resource)
+  define_method :resource do
+    @resource ||= ResourceReader.new(resource.new(id))
+  end
+end

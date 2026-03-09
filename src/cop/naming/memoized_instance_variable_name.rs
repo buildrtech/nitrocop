@@ -37,6 +37,25 @@ use crate::parse::source::SourceFile;
 /// Remaining FN=2: 1 is from Parser's structural equality (two identical `||=`
 /// nodes in if/else branches compare as equal — a quirk we don't replicate),
 /// 1 may be from config resolution differences.
+///
+/// ## Investigation (2026-03-09, regression fix)
+/// Corpus oracle reported FP=3, FN=1 (previously 0 FP).
+///
+/// FP=3: All caused by `get_last_child_or_write()` being too aggressive:
+///   1. (rails) `||=` in multi-statement else branch of `assign_controller` — in Parser AST,
+///      multi-statement else maps to `begin` wrapper, `begin != or_asgn`, no match.
+///   2. (rails) `||=` in multi-statement ensure block of `run_step_inline` — same issue.
+///   3. (awspec) `||=` inside `define_method(:resource)` block inside `def self.aws_resource` —
+///      RuboCop walks UP from `||=` and finds the `define_method` block first (not the enclosing
+///      def), using method_name="resource" which matches `@resource`. Nitrocop walked DOWN from
+///      `def aws_resource` and incorrectly traversed into the define_method block.
+///
+/// Fix: (a) `unwrap_single_stmt_to_or_write` and `get_last_child_or_write` now only unwrap
+/// single-statement bodies (multi-statement = Parser's begin wrapper = no match).
+/// (b) `get_last_child_or_write` skips `define_method`/`define_singleton_method` blocks
+/// since those create their own method context handled by `check_dynamic_method`.
+///
+/// FN=1: (brakeman) `@attr_accessible ||= []` — may be config or line-number mismatch.
 pub struct MemoizedInstanceVariableName;
 
 impl MemoizedInstanceVariableName {
@@ -325,6 +344,12 @@ impl MemoizedInstanceVariableName {
 /// - `ensure` → ensure body (last of [body, ensure_body])
 /// - `block` → block body (last of [send, args, body])
 ///
+/// **Important**: In Parser AST, multi-statement sequences are wrapped in
+/// `begin` nodes, and `begin_node != or_asgn_node`. So when the target
+/// branch/clause has multiple statements, RuboCop's `children.last` returns
+/// the `begin` wrapper — which never equals the `or_asgn` — and no offense
+/// is raised. We replicate this by only unwrapping single-statement bodies.
+///
 /// Returns the "last child" Node, which may itself need StatementsNode
 /// unwrapping to reach the final value.
 fn get_last_child_or_write<'pr>(
@@ -335,10 +360,16 @@ fn get_last_child_or_write<'pr>(
         return Some(or_write);
     }
 
-    // StatementsNode → last statement (Prism wrapper, not a Parser operation)
+    // StatementsNode → last statement (Prism wrapper, not a Parser operation).
+    // In Parser AST, single-child sequences are bare nodes (no begin wrapper),
+    // while multi-child sequences are wrapped in begin. Only traverse single-child
+    // StatementsNodes to match Parser's behavior.
     if let Some(stmts) = node.as_statements_node() {
         let body: Vec<_> = stmts.body().iter().collect();
-        return body.last().and_then(|n| get_last_child_or_write(n));
+        if body.len() == 1 {
+            return body.last().and_then(|n| get_last_child_or_write(n));
+        }
+        return None;
     }
 
     // Now apply ONE level of Parser's children.last:
@@ -352,7 +383,7 @@ fn get_last_child_or_write<'pr>(
     if let Some(if_node) = node.as_if_node() {
         if let Some(subsequent) = if_node.subsequent() {
             if let Some(else_node) = subsequent.as_else_node() {
-                return unwrap_stmts_to_or_write(else_node.statements());
+                return unwrap_single_stmt_to_or_write(else_node.statements());
             }
             // elsif case: don't recurse — RuboCop doesn't catch ||= through elsif chains
         }
@@ -361,20 +392,20 @@ fn get_last_child_or_write<'pr>(
 
     // ElseNode → statements (reached when body itself is an ElseNode, unlikely but safe)
     if let Some(else_node) = node.as_else_node() {
-        return unwrap_stmts_to_or_write(else_node.statements());
+        return unwrap_single_stmt_to_or_write(else_node.statements());
     }
 
     // UnlessNode → statements (the unless body)
     // Parser: `unless cond body` = `if cond nil body`, last = body
     if let Some(unless_node) = node.as_unless_node() {
-        return unwrap_stmts_to_or_write(unless_node.statements());
+        return unwrap_single_stmt_to_or_write(unless_node.statements());
     }
 
     // CaseNode → else_clause
     // Parser: `case` children = [expr, when..., else], last = else
     if let Some(case_node) = node.as_case_node() {
         if let Some(else_clause) = case_node.else_clause() {
-            return unwrap_stmts_to_or_write(else_clause.statements());
+            return unwrap_single_stmt_to_or_write(else_clause.statements());
         }
         return None;
     }
@@ -383,14 +414,22 @@ fn get_last_child_or_write<'pr>(
     // Parser: `(ensure body ensure_body)` children.last = ensure_body
     if let Some(begin_node) = node.as_begin_node() {
         if let Some(ensure_clause) = begin_node.ensure_clause() {
-            return unwrap_stmts_to_or_write(ensure_clause.statements());
+            return unwrap_single_stmt_to_or_write(ensure_clause.statements());
         }
         return None;
     }
 
     // CallNode with block → block body
     // Parser: `block` children = [send, args, body], last = body
+    // Skip define_method/define_singleton_method blocks — those create their own
+    // method context and are handled separately by check_dynamic_method. RuboCop's
+    // find_definition walks UP and finds the block first, not the enclosing def.
     if let Some(call_node) = node.as_call_node() {
+        let method = call_node.name().as_slice();
+        let method_str = std::str::from_utf8(method).unwrap_or("");
+        if method_str == "define_method" || method_str == "define_singleton_method" {
+            return None;
+        }
         if let Some(block) = call_node.block() {
             if let Some(block_node) = block.as_block_node() {
                 if let Some(body) = block_node.body() {
@@ -430,15 +469,19 @@ fn unwrap_to_or_write<'pr>(
     None
 }
 
-/// Helper: extract ||= from an optional StatementsNode.
-/// Checks if the last (or only) statement is an ||= node.
-fn unwrap_stmts_to_or_write<'pr>(
+/// Helper: extract ||= from an optional StatementsNode with exactly ONE statement.
+/// In Parser AST, multi-statement sequences are wrapped in `begin` nodes, and
+/// `begin_node != or_asgn_node`, so RuboCop's `children.last == node` check fails
+/// for multi-statement bodies. Only single-statement bodies are transparent (no begin wrapper).
+fn unwrap_single_stmt_to_or_write<'pr>(
     stmts: Option<ruby_prism::StatementsNode<'pr>>,
 ) -> Option<ruby_prism::InstanceVariableOrWriteNode<'pr>> {
     let stmts = stmts?;
     let body: Vec<_> = stmts.body().iter().collect();
-    let last = body.last()?;
-    last.as_instance_variable_or_write_node()
+    if body.len() != 1 {
+        return None;
+    }
+    body[0].as_instance_variable_or_write_node()
 }
 
 /// Extract the ivar name from a `defined?` memoization pattern.
