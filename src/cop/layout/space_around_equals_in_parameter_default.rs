@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Checks spacing around `=` in optional parameter defaults.
+///
+/// Investigation: FP when tab character (0x09) preceded the `=` sign.
+/// The space check only compared against ASCII space (0x20).
+/// Fix: use `is_ascii_whitespace()` so tabs and other whitespace
+/// satisfy the "space" style requirement, matching RuboCop behavior.
 pub struct SpaceAroundEqualsInParameterDefault;
 
 impl Cop for SpaceAroundEqualsInParameterDefault {
@@ -39,8 +45,11 @@ impl Cop for SpaceAroundEqualsInParameterDefault {
         let op_start = op.start_offset();
         let op_end = op.end_offset();
 
-        let space_before = op_start > 0 && bytes.get(op_start - 1) == Some(&b' ');
-        let space_after = bytes.get(op_end) == Some(&b' ');
+        let space_before = op_start > 0
+            && bytes
+                .get(op_start - 1)
+                .is_some_and(|b| b.is_ascii_whitespace());
+        let space_after = bytes.get(op_end).is_some_and(|b| b.is_ascii_whitespace());
 
         match enforced {
             "space" => {

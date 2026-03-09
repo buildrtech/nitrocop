@@ -8,3 +8,5 @@ def qux(a, b, c)
 end
 def quux(x = nil, y = [])
 end
+def method_with_tab(param	= "value")
+end
