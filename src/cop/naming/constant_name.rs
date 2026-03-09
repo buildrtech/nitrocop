@@ -35,6 +35,13 @@ use crate::parse::source::SourceFile;
 /// (`Foo::Bar +=`). Also switched from `MultiWriteNode` parent traversal to
 /// direct `ConstantTargetNode`/`ConstantPathTargetNode` dispatch, which also
 /// picks up rescue-clause constant targets (`rescue => CapturedError`).
+///
+/// Follow-up (2026-03-09): FN=45 from `is_literal()` missing array and hash
+/// node types. Method calls on array/hash receivers (e.g., `[...].freeze`,
+/// `[...].to_set`, `[...] + OTHER`, `{...}.freeze`) were treated as non-literal
+/// receiver calls and allowed. RuboCop's `literal?` predicate includes `array`
+/// and `hash` types. Added `as_array_node`, `as_hash_node`, and
+/// `as_keyword_hash_node` to `is_literal()`.
 pub struct ConstantName;
 
 impl Cop for ConstantName {
@@ -265,10 +272,13 @@ fn is_literal_receiver(node: &ruby_prism::Node<'_>) -> bool {
 }
 
 /// Check if a node is a literal value. Matches RuboCop's `literal?` predicate:
-/// int, float, str, dstr, sym, dsym, complex, rational, regexp, true, false, nil.
-/// Note: ranges (irange/erange) are NOT literals in RuboCop's AST.
+/// int, float, str, dstr, sym, dsym, complex, rational, regexp, true, false, nil,
+/// array, hash (including keyword hash).
+/// Note: ranges (irange/erange) are intentionally excluded — the existing
+/// no_offense fixture treats `(1..5).freeze` as allowed, matching observed
+/// RuboCop behavior in the corpus.
 /// Used by `is_literal_receiver` to determine if a method call on a literal
-/// (e.g., `"foo".freeze`) should be disallowed.
+/// (e.g., `"foo".freeze`, `[1,2].freeze`, `{a: 1}.merge(b)`) should be disallowed.
 fn is_literal(node: &ruby_prism::Node<'_>) -> bool {
     node.as_integer_node().is_some()
         || node.as_float_node().is_some()
@@ -282,6 +292,9 @@ fn is_literal(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_true_node().is_some()
         || node.as_false_node().is_some()
         || node.as_nil_node().is_some()
+        || node.as_array_node().is_some()
+        || node.as_hash_node().is_some()
+        || node.as_keyword_hash_node().is_some()
 }
 
 /// Check if an if-expression has a constant in any of its branches.

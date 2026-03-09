@@ -66,6 +66,30 @@ ConstSpecs::OpAndPath &&= 1
 ConstSpecs::OpAddPath += 2
             ^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
 
+# Array literal with .freeze (literal receiver)
+AsyncResponse = [-1, {}, []].freeze
+^^^^^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Array literal with .to_set (literal receiver)
+BoldStyle = [:bold].to_set
+^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Array literal with + operator (literal receiver)
+FieldSpec = [1, 2] + OTHER_SPEC
+^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# %w array literal with .freeze
+IconNames = %w(fab far fas).freeze
+^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Hash literal with .freeze (literal receiver)
+PageModes = { 'a' => 1, 'b' => 2 }.freeze
+^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Hash literal with .merge (literal receiver)
+StatusCodes = { ok: 200 }.merge(extra)
+^^^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
 # Rescue constant target
 begin
   something
