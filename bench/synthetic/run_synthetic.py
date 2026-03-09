@@ -18,14 +18,13 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Cops with no corpus data. Originally 62; reduced to 55 because 7 cannot
-# be triggered under Ruby 3.4 / our config:
+# Cops with no corpus data. Originally 62; reduced to 56 because 6 cannot
+# be triggered under our config:
 #   - Lint/ItWithoutArgumentsInBlock: Ruby 3.4 treats `it` as block param
 #   - Lint/NonDeterministicRequireOrder: Ruby 3.0+ sorts Dir results
 #   - Lint/NumberedParameterAssignment: Ruby 3.4 syntax error on `_1 = x`
 #   - Lint/UselessElseWithoutRescue: Ruby 3.4 syntax error
 #   - Security/YAMLLoad: max Ruby 3.0 (YAML.load is safe in 3.1+)
-#   - Style/ReverseFind: requires Ruby 4.0
 #   - Rails/StrongParametersExpect: requires railties >= 8.0 in Gemfile.lock
 TARGET_COPS = sorted([
     "Lint/ArrayLiteralInRegexp",
@@ -83,6 +82,7 @@ TARGET_COPS = sorted([
     "Style/DoubleCopDisableDirective",
     "Style/MultilineInPatternThen",
     "Style/RedundantConstantBase",
+    "Style/ReverseFind",
 ])
 
 

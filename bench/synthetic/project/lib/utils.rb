@@ -54,6 +54,18 @@ class Utils
       puts "critical"
     end
   end
+  # ReverseFind
+  def find_last_match(items)
+    items.reverse.find { |i| i.valid? }
+  end
+
+  def find_last_even(numbers)
+    numbers.reverse.find { |n| n.even? }
+  end
+
+  def find_last_active(records)
+    records.reverse.find { |r| r.active? }
+  end
 end
 
 # RedundantConstantBase (at top level, :: prefix is redundant)

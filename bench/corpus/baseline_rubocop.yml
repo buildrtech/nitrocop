@@ -16,7 +16,7 @@ plugins:
 AllCops:
   NewCops: enable
   SuggestExtensions: false
-  TargetRubyVersion: 3.4
+  TargetRubyVersion: 4.0
   TargetRailsVersion: 7.0
   # Standard junk exclusions — same for both tools
   Exclude:

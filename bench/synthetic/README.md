@@ -1,6 +1,6 @@
 # Synthetic Corpus
 
-Handcrafted Ruby files that exercise the 55 cops with zero activity in the 1,000-repo corpus oracle. These cops target niche patterns (Rails migrations, specific API usage, edge-case lint rules) that don't appear in real-world repos.
+Handcrafted Ruby files that exercise the 56 cops with zero activity in the 1,000-repo corpus oracle. These cops target niche patterns (Rails migrations, specific API usage, edge-case lint rules) that don't appear in real-world repos.
 
 ## Usage
 
@@ -14,7 +14,7 @@ python3 bench/synthetic/run_synthetic.py --verbose  # per-cop breakdown
 ## How It Works
 
 1. Runs nitrocop and RuboCop on `project/` with the same config
-2. Filters offenses to only the 55 target cops
+2. Filters offenses to only the 56 target cops
 3. Compares offense tuples `(file, line, cop_name)` — same approach as the corpus oracle
 4. Reports matches / FP / FN per cop
 
@@ -35,16 +35,15 @@ bench/synthetic/
     test/              # ActionController test cops
 ```
 
-## Cops Not Covered (7)
+## Cops Not Covered (6)
 
-These cops cannot be triggered under Ruby 3.4 / our gem versions:
+These cops cannot be triggered under our config / gem versions:
 
-- `Lint/ItWithoutArgumentsInBlock` — `it` is a valid block param in Ruby 3.4
+- `Lint/ItWithoutArgumentsInBlock` — `it` is a valid block param in Ruby 3.4+
 - `Lint/NonDeterministicRequireOrder` — Ruby 3.0+ sorts Dir results
-- `Lint/NumberedParameterAssignment` — `_1 = x` is a syntax error in Ruby 3.4
-- `Lint/UselessElseWithoutRescue` — syntax error in Ruby 3.4
+- `Lint/NumberedParameterAssignment` — `_1 = x` is a syntax error in Ruby 3.4+
+- `Lint/UselessElseWithoutRescue` — syntax error in Ruby 3.4+
 - `Security/YAMLLoad` — max Ruby 3.0 (YAML.load is safe in 3.1+)
-- `Style/ReverseFind` — requires Ruby 4.0
 - `Rails/StrongParametersExpect` — requires railties >= 8.0
 
 ## Research Findings
@@ -74,7 +73,7 @@ These patterns are resolved **relative to the `.rubocop.yml` location**. Running
 
 Several cops use `minimum_target_ruby_version` or `maximum_target_ruby_version`:
 - `Security/YAMLLoad`: `maximum_target_ruby_version 3.0` — YAML.load became safe in Ruby 3.1
-- `Style/ReverseFind`: `minimum_target_ruby_version 4.0` — `rfind` doesn't exist until Ruby 4.0
+- `Style/ReverseFind`: `minimum_target_ruby_version 4.0` — `rfind` only exists in Ruby 4.0+ (now covered with TargetRubyVersion: 4.0)
 - `Lint/NonDeterministicRequireOrder`: only fires on Ruby 2.7 and below (Dir results sorted since 3.0)
 
 Some patterns are Ruby 3.4 **syntax errors**, not just version-gated:
