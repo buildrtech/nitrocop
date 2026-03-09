@@ -212,10 +212,15 @@ Do not leave retained progress only in a worktree branch.
 - Do not pause or block on unrelated working-tree changes; continue your task and leave those files untouched.
 - Commit each cop fix separately for safe cherry-picks, then integrate into `main` before ending the run.
 - Never use `git stash` or `git stash pop`.
-- **Do not run nitrocop or rubocop directly on corpus repos** — they require special env vars
-  (BUNDLE_GEMFILE, BUNDLE_PATH, GIT_CEILING_DIRECTORIES) that only `check-cop.py` sets up
-  correctly. Use `check-cop.py --rerun` for modified cops and `check-cop.py --verbose`
-  (artifact mode) for untouched cops.
+- **Do not run nitrocop or rubocop directly** — not on corpus repos, not on ad-hoc files in
+  `/tmp/`, not anywhere outside the test fixtures. Running `nitrocop` on arbitrary paths fails
+  ("No lockfile found") and wastes tokens. The ONLY ways to verify cop behavior are:
+  - **Unit tests**: add patterns to `offense.rb` / `no_offense.rb` fixtures and run
+    `cargo test --lib -- <cop_name_snake>`.
+  - **Corpus validation**: `check-cop.py --rerun` for modified cops; `check-cop.py --verbose`
+    (artifact mode) for untouched cops.
+  - **Synthetic corpus**: `python3 bench/synthetic/run_synthetic.py --verbose` for synthetic-only cops.
+  Never create test Ruby files outside the fixture directories.
 - Use local corpus files under `vendor/corpus/` when available.
 - Do not copy identifiers from private repositories into source, fixtures, or commit messages.
 
