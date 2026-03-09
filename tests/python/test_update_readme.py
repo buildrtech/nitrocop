@@ -25,22 +25,6 @@ Old generated cops section.
 
 Every cop reads its RuboCop YAML config options and has fixture-based test coverage.
 
-## Conformance
-
-We diff nitrocop against RuboCop on [**500 open-source repos**](docs/corpus.md) (163k Ruby files) with all cops enabled. Every offense is compared by file, line, and cop name.
-
-|                        |    Count |  Rate |
-|:-----------------------|--------: |------:|
-| Agreed                 |     4.0M | 93.0% |
-| nitrocop extra (FP)    |   200.0K |  3.5% |
-| nitrocop missed (FN)   |   200.0K |  3.5% |
-
-Per-repo results (top 15 by GitHub stars):
-
-| Repo | .rb files | RuboCop offenses | nitrocop extra (FP) | nitrocop missed (FN) | Agreement |
-|------|----------:|-----------------:|--------------------:|---------------------:|----------:|
-| [rails](https://github.com/rails/rails) | 3,000 | 11,760 | 240 | 240 | 95.0% |
-
 More text here.
 """
 
@@ -195,16 +179,23 @@ def test_write():
         assert "96.0% conformance" in updated
         assert "167k Ruby files" in updated
         assert "nitrocop supports 14 cops from 6 RuboCop gems." in updated
-        assert "Current corpus status: 6 cops match RuboCop exactly on the corpus, 4 diverge, and 4 have no corpus data." in updated
+        assert "The coverage numbers below come from comparing nitrocop against RuboCop on [**500 open-source repos**](docs/corpus.md) (167k Ruby files)." in updated
+        assert "Matched RuboCop on 96.0% of compared issue reports (4.9M of 5.1M)." in updated
+        assert "6 of 14 rules (cops) matched RuboCop exactly across the corpus." in updated
+        assert "4 rules (cops) differed from RuboCop, and 4 had no corpus data." in updated
+        assert "\"Matched exactly\" means nitrocop produced no extra issues and missed no issues for that cop anywhere in the corpus." in updated
         assert "No corpus data means the cop never appeared in the corpus, so it has not been compared yet." in updated
-        assert "| Department | Total cops | Exact match | Diverging | No corpus data | Exact match % |" in updated
+        assert "See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown." in updated
+        assert "| Department | Rules (cops) | Matched exactly | Differed | No corpus data |" in updated
         assert "**[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (9 cops)" in updated
-        assert "| **Total** | **9** | **4** | **2** | **3** | **44.4%** |" in updated
-        assert "| Rails | 1 | 0 | 1 | 0 | 0.0% |" in updated
-        assert "| Performance | 1 | 1 | 0 | 0 | ✓ 100.0% |" in updated
+        assert "| **Total** | **9** | **4** | **2** | **3** |" in updated
+        assert "| Rails | 1 | 0 | 1 |" in updated
+        assert "| Performance | 1 | 1 | 0 |" in updated
         assert "| **Total** | **1** |" not in updated
         assert "Old generated cops section." not in updated
-        assert "| RuboCop offenses |" in updated
+        assert "## Conformance" not in updated
+        assert "Per-repo results (top 15 by GitHub stars):" not in updated
+        assert "| RuboCop offenses |" not in updated
 
 
 def test_conformance_includes_fp():

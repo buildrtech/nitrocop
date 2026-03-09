@@ -15,7 +15,7 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 **Features**
 
 - **910 cops** from 6 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot)
-- **95.9% conformance** against RuboCop across [**1,000 open-source repos**](#conformance)
+- **95.9% conformance** against RuboCop across [**1,000 open-source repos**](docs/corpus.md)
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
 - Uses [Prism](https://github.com/ruby/prism) (Ruby's official parser) via `ruby-prism` crate
@@ -54,87 +54,63 @@ Config auto-discovery walks up from the target directory to find `.rubocop.yml`.
 <!-- corpus-cops:start -->
 nitrocop supports 910 cops from 6 RuboCop gems.
 
-Current corpus status: 362 cops match RuboCop exactly, 548 diverge.
+The coverage numbers below come from comparing nitrocop against RuboCop on [**1,000 open-source repos**](docs/corpus.md) (232k Ruby files). Every reported issue is compared by file, line, and cop name.
+
+Matched RuboCop on 95.9% of compared issue reports (11.5M of 12.0M).
+
+362 of 910 rules (cops) matched RuboCop exactly across the corpus.
+548 rules (cops) differed from RuboCop.
 
 **[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (588 cops)
 
-| Department | Total cops | Exact match | Diverging | Exact match % |
-|------------|-----------:|------------:|----------:|--------------:|
-| Layout | 100 | 19 | 81 | 19.0% |
-| Lint | 148 | 64 | 84 | 43.2% |
-| Style | 287 | 69 | 218 | 24.0% |
-| Metrics | 10 | 4 | 6 | 40.0% |
-| Naming | 19 | 8 | 11 | 42.1% |
-| Security | 6 | 6 | 0 | ✓ 100.0% |
-| Bundler | 7 | 7 | 0 | ✓ 100.0% |
-| Gemspec | 10 | 10 | 0 | ✓ 100.0% |
-| Migration | 1 | 1 | 0 | ✓ 100.0% |
-| **Total** | **588** | **188** | **400** | **31.9%** |
+| Department | Rules (cops) | Matched exactly | Differed |
+|------------|-------------:|----------------:|---------:|
+| Layout | 100 | 19 | 81 |
+| Lint | 148 | 64 | 84 |
+| Style | 287 | 69 | 218 |
+| Metrics | 10 | 4 | 6 |
+| Naming | 19 | 8 | 11 |
+| Security | 6 | 6 | 0 |
+| Bundler | 7 | 7 | 0 |
+| Gemspec | 10 | 10 | 0 |
+| Migration | 1 | 1 | 0 |
+| **Total** | **588** | **188** | **400** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 
-| Department | Total cops | Exact match | Diverging | Exact match % |
-|------------|-----------:|------------:|----------:|--------------:|
-| Rails | 138 | 51 | 87 | 36.9% |
+| Department | Rules (cops) | Matched exactly | Differed |
+|------------|-------------:|----------------:|---------:|
+| Rails | 138 | 51 | 87 |
 
 **[rubocop-performance](https://github.com/rubocop/rubocop-performance)** `1.26.1` (52 cops)
 
-| Department | Total cops | Exact match | Diverging | Exact match % |
-|------------|-----------:|------------:|----------:|--------------:|
-| Performance | 52 | 52 | 0 | ✓ 100.0% |
+| Department | Rules (cops) | Matched exactly | Differed |
+|------------|-------------:|----------------:|---------:|
+| Performance | 52 | 52 | 0 |
 
 **[rubocop-rspec](https://github.com/rubocop/rubocop-rspec)** `3.9.0` (113 cops)
 
-| Department | Total cops | Exact match | Diverging | Exact match % |
-|------------|-----------:|------------:|----------:|--------------:|
-| RSpec | 113 | 53 | 60 | 46.9% |
+| Department | Rules (cops) | Matched exactly | Differed |
+|------------|-------------:|----------------:|---------:|
+| RSpec | 113 | 53 | 60 |
 
 **[rubocop-rspec_rails](https://github.com/rubocop/rubocop-rspec_rails)** `2.32.0` (8 cops)
 
-| Department | Total cops | Exact match | Diverging | Exact match % |
-|------------|-----------:|------------:|----------:|--------------:|
-| RSpecRails | 8 | 7 | 1 | 87.5% |
+| Department | Rules (cops) | Matched exactly | Differed |
+|------------|-------------:|----------------:|---------:|
+| RSpecRails | 8 | 7 | 1 |
 
 **[rubocop-factory_bot](https://github.com/rubocop/rubocop-factory_bot)** `2.28.0` (11 cops)
 
-| Department | Total cops | Exact match | Diverging | Exact match % |
-|------------|-----------:|------------:|----------:|--------------:|
-| FactoryBot | 11 | 11 | 0 | ✓ 100.0% |
+| Department | Rules (cops) | Matched exactly | Differed |
+|------------|-------------:|----------------:|---------:|
+| FactoryBot | 11 | 11 | 0 |
+
+"Matched exactly" means nitrocop produced no extra issues and missed no issues for that cop anywhere in the corpus.
+See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown.
 <!-- corpus-cops:end -->
 
 Every cop reads its RuboCop YAML config options and has fixture-based test coverage.
-
-## Conformance
-
-We diff nitrocop against RuboCop on [**1,000 open-source repos**](docs/corpus.md) (232k Ruby files) with all cops enabled. Every offense is compared by file, line, and cop name.
-
-|                        |    Count |  Rate |
-|:-----------------------|--------: |------:|
-| Agreed                 |    11.5M | 95.9% |
-| nitrocop extra (FP)    |    60.0K | 0.5% |
-| nitrocop missed (FN)   |   427.6K | 3.6% |
-
-Per-repo results (top 15 by GitHub stars):
-
-| Repo | .rb files | RuboCop offenses | nitrocop extra (FP) | nitrocop missed (FN) | Agreement |
-|------|----------:|-----------------:|--------------------:|---------------------:|----------:|
-| [rails](https://github.com/rails/rails) | 3,498 | 314,886 | 976 | 13,737 | 95.3% |
-| [jekyll](https://github.com/jekyll/jekyll) | 190 | 13,053 | 72 | 665 | 94.3% |
-| [mastodon](https://github.com/mastodon/mastodon) | 3,123 | 76,406 | 121 | 1,810 | 97.4% |
-| [huginn](https://github.com/huginn/huginn) | 451 | 34,403 | 110 | 677 | 97.7% |
-| [discourse](https://github.com/discourse/discourse) | 9,182 | 621,167 | 5,275 | 10,938 | 97.4% |
-| [fastlane](https://github.com/fastlane/fastlane) | 1,302 | 118,741 | 196 | 2,290 | 97.9% |
-| [devdocs](https://github.com/freeCodeCamp/devdocs) | 833 | 19,908 | 110 | 1,246 | 93.2% |
-| [chatwoot](https://github.com/chatwoot/chatwoot) | 2,262 | 64,944 | 135 | 1,109 | 98.0% |
-| [vagrant](https://github.com/hashicorp/vagrant) | 1,460 | 86,131 | 208 | 2,425 | 96.9% |
-| [devise](https://github.com/heartcombo/devise) | 206 | 5,800 | 28 | 347 | 93.5% |
-| [forem](https://github.com/forem/forem) | 3,390 | 128,541 | 348 | 3,136 | 97.2% |
-| [postal](https://github.com/postalserver/postal) | 294 | 13,952 | 37 | 626 | 95.2% |
-| [CocoaPods](https://github.com/CocoaPods/CocoaPods) | 438 | 28,428 | 362 | 1,570 | 93.2% |
-| [openproject](https://github.com/opf/openproject) | 9,286 | 389,032 | 1,522 | 7,937 | 97.5% |
-| [gollum](https://github.com/gollum/gollum) | 55 | 3,793 | 19 | 282 | 92.1% |
-
-Remaining gaps are mostly in complex layout cops (indentation, alignment) and a few style cops. See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown.
 
 ## Hybrid Mode
 

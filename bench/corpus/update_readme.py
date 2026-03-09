@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Update README.md sections from corpus oracle results.
 
-Reads corpus-results.json and manifest.jsonl to update the generated Cops
-breakdown plus the conformance percentages, offense counts, and top-15 repo
-table in README.md.
+Reads corpus-results.json to update the generated Cops breakdown plus the
+headline conformance percentage in README.md.
 
 Usage:
     python3 bench/corpus/update_readme.py \
         --input corpus-results.json \
-        --manifest bench/corpus/manifest.jsonl \
         --readme README.md
 
     # Include synthetic corpus results (fills in cops with no corpus data)
@@ -75,32 +73,6 @@ GEMS = [
     },
 ]
 
-
-def load_manifest_stars(path: Path) -> dict[str, tuple[str, int]]:
-    """Load manifest and extract repo_url + star count from notes.
-
-    Returns dict mapping repo ID prefix (owner__name) to (repo_url, stars).
-    """
-    repos = {}
-    with open(path) as f:
-        for line in f:
-            entry = json.loads(line.strip())
-            repo_id = entry["id"]
-            repo_url = entry["repo_url"]
-            notes = entry.get("notes", "")
-
-            # Parse star count from notes: "..., 51454 stars" or "auto-discovered, 51454 stars"
-            m = re.search(r"(\d+)\s+stars", notes)
-            stars = int(m.group(1)) if m else 0
-
-            # Key by owner__name prefix (strip the SHA suffix)
-            parts = repo_id.split("__")
-            prefix = "__".join(parts[:2])
-            repos[prefix] = (repo_url, stars)
-
-    return repos
-
-
 def load_synthetic_results(path: Path) -> dict[str, dict]:
     """Load synthetic results and return a dict keyed by cop name.
 
@@ -129,13 +101,14 @@ def format_match_rate(rate: float) -> str:
     return f"{math.floor(rate * 1000) / 10:.1f}%"
 
 
-def format_exact_match_pct(exact: int, total: int) -> str:
-    """Format exact-match coverage across total cops for README tables."""
+def format_offense_match_pct(matches: int, fp: int, fn: int) -> str:
+    """Format match rate across all compared issue reports."""
+    total = matches + fp + fn
     if total <= 0:
         return "N/A"
-    rate = exact / total
+    rate = matches / total
     pct = format_match_rate(rate)
-    return f"✓ {pct}" if exact == total else pct
+    return f"✓ {pct}" if fp == 0 and fn == 0 else pct
 
 
 def build_department_stats(data: dict, synthetic: dict[str, dict] | None = None) -> dict[str, dict]:
@@ -190,13 +163,14 @@ def build_department_stats(data: dict, synthetic: dict[str, dict] | None = None)
     for entry in data.get("by_department", []):
         dept = entry["department"]
         derived_entry = derived.get(dept, {})
+        has_derived = dept in derived
         stats_by_department[dept] = {
             "department": dept,
             "cops": entry.get("cops", derived_entry.get("cops", 0)),
             "seen_cops": entry.get("seen_cops", entry.get("exercised_cops", derived_entry.get("seen_cops", 0))),
-            "perfect_cops": derived_entry.get("perfect_cops", 0),
-            "diverging_cops": derived_entry.get("diverging_cops", 0),
-            "no_data_cops": derived_entry.get("no_data_cops", 0),
+            "perfect_cops": derived_entry.get("perfect_cops", 0) if has_derived else entry.get("perfect_cops", 0),
+            "diverging_cops": derived_entry.get("diverging_cops", 0) if has_derived else entry.get("diverging_cops", 0),
+            "no_data_cops": derived_entry.get("no_data_cops", 0) if has_derived else entry.get("inactive_cops", 0),
             "matches": entry.get("matches", derived_entry.get("matches", 0)),
             "fp": entry.get("fp", derived_entry.get("fp", 0)),
             "fn": entry.get("fn", derived_entry.get("fn", 0)),
@@ -232,20 +206,38 @@ def build_cops_section(data: dict, synthetic: dict[str, dict] | None = None) -> 
     perfect_cops = sum(d["perfect_cops"] for d in by_department.values())
     diverging_cops = sum(d["diverging_cops"] for d in by_department.values())
     no_data_cops = sum(d["no_data_cops"] for d in by_department.values())
+    total_matches = summary.get("matches", 0)
+    total_fp = summary.get("fp", 0)
+    total_fn = summary.get("fn", 0)
+    total_compared = total_matches + total_fp + total_fn
+    total_repos = summary.get("total_repos", 0)
+    total_files = summary.get("total_files_inspected", 0)
+    files_str = format_files(total_files) if total_files > 0 else None
 
     lines = []
     lines.append(f"nitrocop supports {total_cops:,} cops from {len(GEMS)} RuboCop gems.")
     lines.append("")
+    if total_repos > 0:
+        corpus_line = "The coverage numbers below come from comparing nitrocop against RuboCop on "
+        corpus_line += f"[**{total_repos:,} open-source repos**](docs/corpus.md)"
+        if files_str:
+            corpus_line += f" ({files_str} Ruby files)"
+        corpus_line += ". Every reported issue is compared by file, line, and cop name."
+        lines.append(corpus_line)
+        lines.append("")
+    if total_compared > 0:
+        lines.append(
+            f"Matched RuboCop on {format_offense_match_pct(total_matches, total_fp, total_fn)} "
+            f"of compared issue reports ({format_count_summary(total_matches)} of {format_count_summary(total_compared)})."
+        )
+    lines.append(f"{perfect_cops:,} of {total_cops:,} rules (cops) matched RuboCop exactly across the corpus.")
     if no_data_cops > 0:
         lines.append(
-            f"Current corpus status: {perfect_cops:,} cops match RuboCop exactly on the corpus, "
-            f"{diverging_cops:,} diverge, and {no_data_cops:,} have no corpus data."
+            f"{diverging_cops:,} rules (cops) differed from RuboCop, and "
+            f"{no_data_cops:,} had no corpus data."
         )
     else:
-        lines.append(
-            f"Current corpus status: {perfect_cops:,} cops match RuboCop exactly, "
-            f"{diverging_cops:,} diverge."
-        )
+        lines.append(f"{diverging_cops:,} rules (cops) differed from RuboCop.")
     lines.append("")
 
     for gem in GEMS:
@@ -258,36 +250,39 @@ def build_cops_section(data: dict, synthetic: dict[str, dict] | None = None) -> 
         lines.append(f"**[{gem['key']}]({gem['url']})** `{version}` ({total:,} cops)")
         lines.append("")
         if no_data > 0:
-            lines.append("| Department | Total cops | Exact match | Diverging | No corpus data | Exact match % |")
-            lines.append("|------------|-----------:|------------:|----------:|---------------:|--------------:|")
+            lines.append("| Department | Rules (cops) | Matched exactly | Differed | No corpus data |")
+            lines.append("|------------|-------------:|----------------:|---------:|---------------:|")
             for row in rows:
                 lines.append(
                     f"| {row['department']} | {row['cops']:,} | "
-                    f"{row['perfect_cops']:,} | {row['diverging_cops']:,} | {row['no_data_cops']:,} | "
-                    f"{format_exact_match_pct(row['perfect_cops'], row['cops'])} |"
+                    f"{row['perfect_cops']:,} | {row['diverging_cops']:,} | {row['no_data_cops']:,} |"
                 )
             if len(rows) > 1:
                 lines.append(
                     f"| **Total** | **{total:,}** | **{perfect:,}** | "
-                    f"**{diverging:,}** | **{no_data:,}** | "
-                    f"**{format_exact_match_pct(perfect, total)}** |"
+                    f"**{diverging:,}** | **{no_data:,}** |"
                 )
         else:
-            lines.append("| Department | Total cops | Exact match | Diverging | Exact match % |")
-            lines.append("|------------|-----------:|------------:|----------:|--------------:|")
+            lines.append("| Department | Rules (cops) | Matched exactly | Differed |")
+            lines.append("|------------|-------------:|----------------:|---------:|")
             for row in rows:
                 lines.append(
                     f"| {row['department']} | {row['cops']:,} | "
-                    f"{row['perfect_cops']:,} | {row['diverging_cops']:,} | "
-                    f"{format_exact_match_pct(row['perfect_cops'], row['cops'])} |"
+                    f"{row['perfect_cops']:,} | {row['diverging_cops']:,} |"
                 )
             if len(rows) > 1:
                 lines.append(
                     f"| **Total** | **{total:,}** | **{perfect:,}** | "
-                    f"**{diverging:,}** | "
-                    f"**{format_exact_match_pct(perfect, total)}** |"
+                    f"**{diverging:,}** |"
                 )
         lines.append("")
+
+    lines.append(
+        "\"Matched exactly\" means nitrocop produced no extra issues and missed no issues for that cop anywhere in the corpus."
+    )
+    if no_data_cops > 0:
+        lines.append("No corpus data means the cop never appeared in the corpus, so it has not been compared yet.")
+    lines.append("See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown.")
 
     return "\n".join(lines).rstrip()
 
@@ -305,73 +300,9 @@ def replace_marked_section(text: str, start_marker: str, end_marker: str, body: 
     return text[:start] + "\n" + body + "\n" + text[end:]
 
 
-def build_top15_table(by_repo: list, manifest: dict[str, tuple[str, int]]) -> str:
-    """Build the top-15 repos markdown table with FP/FN columns."""
-    # Match corpus results to manifest entries and attach stars
-    enriched = []
-    for repo in by_repo:
-        if repo["status"] != "ok":
-            continue
-        repo_id = repo["repo"]
-        prefix = "__".join(repo_id.split("__")[:2])
-        if prefix not in manifest:
-            continue
-        repo_url, stars = manifest[prefix]
-        if stars == 0:
-            continue
-        # Extract short name from URL: https://github.com/rails/rails -> rails
-        short_name = repo_url.rstrip("/").split("/")[-1]
-        total_offenses = repo["matches"] + repo["fn"]
-        files = repo.get("files_inspected", 0)
-        enriched.append({
-            "name": short_name,
-            "url": repo_url,
-            "stars": stars,
-            "files": files,
-            "fp": repo["fp"],
-            "fn": repo["fn"],
-            "offenses": total_offenses,
-            "match_rate": repo["match_rate"],
-        })
-
-    # Filter to repos with meaningful offense counts (exclude trivial repos)
-    enriched = [r for r in enriched if r["offenses"] >= 1000]
-
-    # Sort by stars descending (most recognizable repos), take top 15
-    enriched.sort(key=lambda x: x["stars"], reverse=True)
-    top15 = enriched[:15]
-
-    lines = []
-    lines.append("| Repo | .rb files | RuboCop offenses | nitrocop extra (FP) | nitrocop missed (FN) | Agreement |")
-    lines.append("|------|----------:|-----------------:|--------------------:|---------------------:|----------:|")
-    for r in top15:
-        name_link = f"[{r['name']}]({r['url']})"
-        lines.append(f"| {name_link} | {r['files']:,} | {r['offenses']:,} | {r['fp']:,} | {r['fn']:,} | {format_match_rate(r['match_rate'])} |")
-
-    return "\n".join(lines)
-
-
-def build_summary_table(summary: dict) -> str:
-    """Build the FP/FN summary table."""
-    matches = summary["matches"]
-    fp = summary["fp"]
-    fn = summary["fn"]
-    total = matches + fp + fn
-
-    lines = []
-    lines.append("|                        |    Count |  Rate |")
-    lines.append("|:-----------------------|--------: |------:|")
-    lines.append(f"| Agreed                 | {format_count_summary(matches):>8} | {matches/total:.1%} |")
-    lines.append(f"| nitrocop extra (FP)    | {format_count_summary(fp):>8} | {fp/total:.1%} |")
-    lines.append(f"| nitrocop missed (FN)   | {format_count_summary(fn):>8} | {fn/total:.1%} |")
-    return "\n".join(lines)
-
-
-def update_readme(readme_text: str, data: dict, manifest: dict[str, tuple[str, int]],
-                  synthetic: dict[str, dict] | None = None) -> str:
+def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | None = None) -> str:
     """Replace conformance data in README text."""
     summary = data["summary"]
-    by_repo = data["by_repo"]
     total_repos = summary["total_repos"]
     matches = summary["matches"]
     fp = summary["fp"]
@@ -420,30 +351,14 @@ def update_readme(readme_text: str, data: dict, manifest: dict[str, tuple[str, i
             readme_text,
         )
 
-    # 4. Summary table: Agreed / nitrocop extra (FP) / nitrocop missed (FN)
-    new_summary = build_summary_table(summary)
-    readme_text = re.sub(
-        r"\|[^\n]*Count[^\n]*\n\|[^\n]*-+[^\n]*\n(?:\|[^\n]*\n){2,3}",
-        new_summary + "\n",
-        readme_text,
-    )
-
-    # 7. Replace the top-15 table (header + separator + data rows)
-    new_table = build_top15_table(by_repo, manifest)
-    readme_text = re.sub(
-        r"\| Repo \| (?:Stars|Files|\.rb files|FP|Extra|Offenses|RuboCop|nitrocop) [^\n]*\n\|[-| :]+\n(?:\| .+\n)*",
-        new_table + "\n",
-        readme_text,
-    )
-
     return readme_text
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Update README.md conformance section")
+    parser = argparse.ArgumentParser(description="Update README.md corpus summary")
     parser.add_argument("--input", required=True, type=Path, help="Path to corpus-results.json")
     parser.add_argument("--manifest", type=Path, default=Path("bench/corpus/manifest.jsonl"),
-                        help="Path to manifest.jsonl")
+                        help="Path to manifest.jsonl (deprecated; ignored)")
     parser.add_argument("--readme", type=Path, default=Path("README.md"),
                         help="Path to README.md")
     parser.add_argument("--synthetic", type=Path, default=None,
@@ -452,11 +367,10 @@ def main():
     args = parser.parse_args()
 
     data = json.loads(args.input.read_text())
-    manifest = load_manifest_stars(args.manifest)
     synthetic = load_synthetic_results(args.synthetic) if args.synthetic else None
 
     readme_text = args.readme.read_text()
-    updated = update_readme(readme_text, data, manifest, synthetic)
+    updated = update_readme(readme_text, data, synthetic)
 
     if updated == readme_text:
         print("No changes needed", file=sys.stderr)
