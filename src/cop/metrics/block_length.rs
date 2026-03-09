@@ -91,6 +91,31 @@ use crate::parse::source::SourceFile;
 ///
 /// Result: accepted. The fix recovered 65 missing offenses vs the prior CI
 /// baseline (193 -> 128) without introducing false-positive regressions.
+///
+/// ## Corpus investigation (2026-03-09, second pass)
+///
+/// Investigated the remaining 128 FN without corpus repo access. Compared
+/// RuboCop's `CodeLengthCalculator.code_length` (which uses `body.source.lines`)
+/// with nitrocop's `count_block_lines` (offset-based line counting).
+///
+/// Found one verified FN cause: when a block's body starts on the same line
+/// as the opening `do`/`{` AND that line is line 1 of the file,
+/// `count_body_lines_ex` excludes it (counts from start_line+1 which is 2).
+/// RuboCop's `body.source.lines` includes the opening line's body content.
+/// Fix: add 1 when body_start_line == 1 && opening_line == 1.
+///
+/// This edge case is rare in practice (block starting on line 1 of a file),
+/// so it likely explains very few of the 128 FN. The remaining FN require
+/// corpus repo access to investigate — need per-repo FN examples from
+/// `check-cop.py --rerun` to identify the systematic pattern.
+///
+/// Other investigated areas that do NOT explain the FN:
+/// - Blocks with rescue/ensure: BeginNode bodies count correctly
+/// - heredoc_descendant_max_line: matches RuboCop's source_from_node_with_heredoc
+///   for all tested patterns (single heredoc, multiple heredocs, heredoc+code)
+/// - method_receiver_excluded?: not implemented but would cause FP, not FN
+/// - is_single_heredoc_expression: correctly handles single-heredoc-body blocks
+/// - Brace blocks with body on closing line: already handled by closing-line adjustment
 pub struct BlockLength;
 
 impl Cop for BlockLength {
@@ -342,13 +367,25 @@ fn count_block_lines(
     all_foldable.sort();
     all_foldable.dedup();
 
-    count_body_lines_ex(
+    let mut count = count_body_lines_ex(
         source,
         effective_start_offset,
         effective_end_offset,
         count_comments,
         &all_foldable,
-    )
+    );
+
+    // When body_start_line > 1, effective_start is set to the previous line,
+    // so count_body_lines_ex counts from body_start_line onwards (correct).
+    // When body_start_line == 1 AND the body is on the opening line, there is
+    // no "previous line" to set as start, so count_body_lines_ex starts from
+    // line 2, missing the body content on line 1. Add 1 to compensate.
+    let (opening_line, _) = source.offset_to_line_col(opening_offset);
+    if body_start_line == 1 && opening_line == 1 {
+        count += 1;
+    }
+
+    count
 }
 
 /// When the body contains heredoc descendants, compute the max last_line across
@@ -593,6 +630,73 @@ mod tests {
         assert!(
             diags[0].message.contains("[5/3]"),
             "Expected [5/3] but got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn block_body_on_same_line_as_opening() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(3.into()))]),
+            ..CopConfig::default()
+        };
+        // Body starts on same line as do: 4 body lines (a, b, c, d) exceeds Max:3
+        let source = b"items.each do |x| a = 1\n  b = 2\n  c = 3\n  d = 4\nend\n";
+        let diags = run_cop_full_with_config(&BlockLength, source, config);
+        assert!(
+            !diags.is_empty(),
+            "Should fire when body starts on same line as do"
+        );
+        assert!(
+            diags[0].message.contains("[4/3]"),
+            "Expected [4/3] but got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn single_line_block_body_on_opening() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(0.into()))]),
+            ..CopConfig::default()
+        };
+        // Single line block: foo do a = 1; end → 1 body line exceeds Max:0
+        let source = b"foo do a = 1\nend\n";
+        let diags = run_cop_full_with_config(&BlockLength, source, config);
+        assert!(!diags.is_empty(), "Should fire on single-line body");
+        assert!(
+            diags[0].message.contains("[1/0]"),
+            "Expected [1/0] but got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn block_body_on_same_line_not_first_line() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(3.into()))]),
+            ..CopConfig::default()
+        };
+        // Body starts on same line as do, but NOT on line 1 of the file
+        // RuboCop counts 4 body lines (a, b, c, d)
+        let source = b"x = 1\nitems.each do |x| a = 1\n  b = 2\n  c = 3\n  d = 4\nend\n";
+        let diags = run_cop_full_with_config(&BlockLength, source, config);
+        assert!(
+            !diags.is_empty(),
+            "Should fire when body starts on same line as do (not first file line)"
+        );
+        assert!(
+            diags[0].message.contains("[4/3]"),
+            "Expected [4/3] but got: {}",
             diags[0].message
         );
     }
