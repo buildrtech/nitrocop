@@ -21,3 +21,7 @@ def foo(baz_2: nil); end
 # Integer symbols are valid (all-digit names pass the format regex)
 :"42"
 %i[1 2 3]
+# Empty symbols — RuboCop's Parser gem creates dsym (not sym) for these,
+# so on_sym never fires and they are never checked
+:''
+:""

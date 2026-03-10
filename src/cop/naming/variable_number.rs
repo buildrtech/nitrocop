@@ -22,14 +22,13 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Corpus investigation (2026-03-10)
 ///
-/// Corpus oracle reported FP=0, FN=1. FN from hexapdf
-/// (`test/hexapdf/test_serializer.rb:101`), "Use normalcase for symbol numbers."
-/// Root cause: empty-string symbol `:""`  used as a hash key (`"": true`).
-/// RuboCop's format regex (`/(?:\D|[^_\d]\d+|\A\d+)\z/`) doesn't match
-/// empty string, so it flags the offense. nitrocop's `has_digit` early
-/// return skipped empty names, and the format validators returned `true`
-/// for empty strings. Fix: allow empty names through the digit check, and
-/// return `false` from all three format validators for empty strings.
+/// Corpus oracle reported FP=32. All 32 FPs from empty symbols like `:''"`,
+/// `:""`  used as hash keys, symbol arguments, etc. Root cause: RuboCop's
+/// Parser gem creates `dsym` (dynamic symbol) for empty symbols, not `sym`.
+/// The VariableNumber cop only has `on_sym`, NOT `on_dsym`, so RuboCop
+/// never checks empty symbols. In Prism, empty symbols are `SymbolNode`
+/// with an empty `unescaped()` value, so nitrocop was processing them.
+/// Fix: skip empty names early in `check_number_style` (`!has_digit || name.is_empty()`).
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -249,10 +248,10 @@ fn check_number_style(
     identifier_type: &str,
 ) -> Option<Diagnostic> {
     // Find if name contains digits.
-    // Empty names (e.g. `:""`  empty-string symbol) are also invalid — RuboCop's
-    // format regex doesn't match empty string, so the cop flags it.
+    // Empty names (e.g. `:""`  empty-string symbol) are skipped — RuboCop's
+    // Parser gem creates dsym (not sym) for these, so on_sym never fires.
     let has_digit = name.bytes().any(|b| b.is_ascii_digit());
-    if !has_digit && !name.is_empty() {
+    if !has_digit || name.is_empty() {
         return None;
     }
 
@@ -360,9 +359,10 @@ mod tests {
     crate::cop_fixture_tests!(VariableNumber, "cops/naming/variable_number");
 
     #[test]
-    fn empty_string_symbol_is_offense() {
+    fn empty_string_symbol_is_not_offense() {
+        // RuboCop's Parser gem creates dsym (not sym) for empty symbols,
+        // so the cop never checks them.
         let diags = crate::testutil::run_cop_full(&VariableNumber, b":\"\"\n");
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].message, "Use normalcase for symbol numbers.");
+        assert_eq!(diags.len(), 0);
     }
 }
