@@ -92,6 +92,27 @@ use crate::parse::source::SourceFile;
 /// No code change was taken in this run. The stale artifact FP/FN counts do
 /// not represent a current excess regression once the corpus rerun uses the
 /// correct Ruby/Bundler environment.
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=22, FN=275. Local rerun shows 0 excess (PASS).
+/// The FP/FN are per-location differences, not aggregate count mismatches.
+///
+/// Bug 1 (FP): `/regex/ =~ expr` was counted as a branch (CallNode with
+/// name `=~`), but in Parser gem this is `match_with_lvasgn` which is NOT
+/// a `:send` and thus not counted as a branch. Fix: skip branch counting
+/// when CallNode `=~` has a regex literal receiver.
+///
+/// Bug 2 (FN): `rescue => var` was not counted as an assignment. In Parser
+/// gem, the rescue reference is a `:lvasgn` (counted by `simple_assignment?`).
+/// In Prism, it's a `LocalVariableTargetNode` (or other *TargetNode) inside
+/// `RescueNode.reference` that was not handled. Fix: count rescue reference
+/// as assignment in `visit_rescue_node`.
+///
+/// Bug 3 (FN): Lambda literals (`-> {}`) were not counted as branches. In
+/// Parser gem, `-> {}` is `(block (send nil :lambda) ...)` and the `:lambda`
+/// send counts as B+1. In Prism, `-> {}` is `LambdaNode` with no CallNode.
+/// Fix: count `LambdaNode` as B+1.
 pub struct AbcSize;
 
 /// Known iterating method names that make blocks count toward conditions.
@@ -454,6 +475,18 @@ impl AbcCounter {
             ruby_prism::Node::CallNode { .. } => {
                 if let Some(call) = node.as_call_node() {
                     let method_name = call.name().as_slice();
+                    // In Parser gem, `/regex/ =~ expr` is `match_with_lvasgn` (not a :send),
+                    // so it's NOT counted as a branch. In Prism, it's a CallNode with name `=~`.
+                    // Skip it to match RuboCop behavior.
+                    if method_name == b"=~" {
+                        if let Some(receiver) = call.receiver() {
+                            if receiver.as_regular_expression_node().is_some()
+                                || receiver.as_interpolated_regular_expression_node().is_some()
+                            {
+                                return;
+                            }
+                        }
+                    }
                     if is_comparison_method(method_name) {
                         // Comparison operators are conditions, not branches
                         self.conditions += 1;
@@ -500,6 +533,15 @@ impl AbcCounter {
 
             // yield counts as a branch
             ruby_prism::Node::YieldNode { .. } => {
+                self.branches += 1;
+            }
+
+            // Lambda literal (-> {}) counts as a branch. In Parser gem,
+            // -> {} is (block (send nil :lambda) ...) and the :lambda send
+            // counts as B+1. In Prism, -> {} is LambdaNode with no CallNode
+            // for the implicit lambda call. Note: `lambda {}` (method form)
+            // is already a CallNode and handled above.
+            ruby_prism::Node::LambdaNode { .. } => {
                 self.branches += 1;
             }
 
@@ -588,13 +630,27 @@ impl<'pr> Visit<'pr> for AbcCounter {
         // RuboCop counts `rescue` as a single condition for the entire chain.
         // In Prism, rescue clauses are chained via `subsequent`, so visit_rescue_node
         // is called once per clause. Only count +1 for the first rescue in the chain.
-        if !self.in_rescue_chain {
+        let is_first = !self.in_rescue_chain;
+        if is_first {
             self.conditions += 1;
             self.in_rescue_chain = true;
-            ruby_prism::visit_rescue_node(self, node);
+        }
+
+        // `rescue => var` — the rescue reference is an assignment in RuboCop
+        // (lvasgn/ivasgn/etc in Parser AST). In Prism it's a *TargetNode that
+        // is not otherwise counted. Count it here.
+        if let Some(ref_node) = node.reference() {
+            let skip = ref_node
+                .as_local_variable_target_node()
+                .is_some_and(|t| t.name().as_slice().starts_with(b"_"));
+            if !skip {
+                self.assignments += 1;
+            }
+        }
+
+        ruby_prism::visit_rescue_node(self, node);
+        if is_first {
             self.in_rescue_chain = false;
-        } else {
-            ruby_prism::visit_rescue_node(self, node);
         }
     }
 

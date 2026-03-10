@@ -163,3 +163,28 @@ def method_with_case_else(x)
     o = 1
   end
 end
+
+# Regex-on-left =~ is match_with_lvasgn in Parser (NOT a send/branch).
+# In Prism it's a CallNode, but should NOT count as a branch.
+# A=17, B=0, C=0 => score = 17.0 which is NOT > 17 => no offense.
+# If =~ were wrongly counted as B+1: sqrt(289+1) = 17.03 > 17 => FP.
+def method_with_regex_match_no_offense
+  a = 1
+  b = 2
+  c = 3
+  d = 4
+  e = 5
+  f = 6
+  g = 7
+  h = 8
+  i = 9
+  j = 10
+  k = 11
+  l = 12
+  m = 13
+  n = 14
+  o = 15
+  p = 16
+  q = 17
+  /pattern/ =~ a
+end
