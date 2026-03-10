@@ -121,3 +121,34 @@ def self.auto_bump_topic!
          ^^^^^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
   Category.shuffle.any?(&:auto_bump_topic!)
 end
+
+# Parenthesized compound boolean expression (and)
+def check_both
+    ^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  (x.present? && y.present?)
+end
+
+# Parenthesized compound boolean expression (or)
+def check_either
+    ^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  (a > b || c < d)
+end
+
+# Parenthesized negation
+def check_not
+    ^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  (!disabled?)
+end
+
+# Parenthesized boolean in larger and-chain
+def compare_values(existing, latest)
+    ^^^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  existing.value != latest[:value] ||
+    (!latest[:locked].nil? && existing.locked != latest[:locked])
+end
+
+# Parenthesized or in and chain
+def email_oauth_enabled
+    ^^^^^^^^^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  @inbox.inbox_type == 'Email' && (@channel.microsoft? || @channel.google?)
+end

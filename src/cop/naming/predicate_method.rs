@@ -28,6 +28,26 @@ use crate::parse::source::SourceFile;
 ///    (`call_type?`). Non-call AST nodes (variables, `:block`, `:self`, etc.)
 ///    don't trigger skip. Fix: changed non-call returns from `Unknown` to `Opaque`,
 ///    and distinguished BlockNode (Opaque) from BlockArgumentNode (still a call).
+///
+/// ## Follow-up investigation (2026-03-10, FP=1, FN=20)
+///
+/// Root cause: ParenthesesNode not unwrapped in `collect_implicit_return`.
+/// In RuboCop's Parser gem, parentheses don't create AST nodes — `(a? && b?)`
+/// is just `(and (send nil :a?) (send nil :b?))`. In Prism, parens create
+/// `ParenthesesNode` wrapping the inner expression. `collect_implicit_return`
+/// didn't handle ParenthesesNode, so it fell through to `classify_node` which
+/// only called `classify_node` recursively (not `collect_implicit_return`).
+/// This meant compound expressions (AndNode, OrNode, IfNode, etc.) inside
+/// parens were classified as `Opaque` instead of being decomposed into their
+/// component return types.
+///
+/// Fix: Added ParenthesesNode handling in `collect_implicit_return` that
+/// unwraps the paren and recurses via `collect_implicit_return` (not
+/// `classify_node`), so inner compound expressions are properly decomposed.
+///
+/// Remaining FP=1, FN=~15 may be due to other edge cases (e.g., ForNode
+/// not handled as conditional, or config resolution differences). Further
+/// investigation would need corpus example locations.
 pub struct PredicateMethod;
 
 const MSG_PREDICATE: &str = "Predicate method names should end with `?`.";
@@ -369,6 +389,21 @@ fn collect_implicit_return(
         return;
     }
 
+    // ParenthesesNode -- unwrap and recurse. In Parser gem, parentheses
+    // don't create an AST node, so RuboCop processes the inner expression
+    // directly through process_return_values (expanding and/or/conditionals).
+    // We must do the same: recurse via collect_implicit_return, not classify_node,
+    // so compound expressions (AndNode, OrNode, IfNode, etc.) inside parens
+    // are properly decomposed.
+    if let Some(paren) = node.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            collect_implicit_return(&body, returns, wayward);
+        } else {
+            returns.push(ReturnType::NonBooleanLiteral);
+        }
+        return;
+    }
+
     // RescueModifierNode (inline rescue) -- treat as Opaque
     if node.as_rescue_modifier_node().is_some() {
         returns.push(ReturnType::Opaque);
@@ -570,7 +605,6 @@ fn collect_implicit_return(
     }
 
     // Leaf node: classify directly.
-    // ParenthesesNode is handled in classify_node, NOT unwrapped here.
     returns.push(classify_node(node, wayward));
 }
 

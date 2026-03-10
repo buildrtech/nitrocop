@@ -109,17 +109,6 @@ rescue StandardError => e
   Rails.logger.error(e.message)
 end
 
-# parenthesized boolean chain -- parens make inner and/or opaque
-def compare_values(existing, latest)
-  existing.value != latest[:value] ||
-    (!latest[:locked].nil? && existing.locked != latest[:locked])
-end
-
-# parenthesized or in and chain
-def email_oauth_enabled
-  @inbox.inbox_type == 'Email' && (@channel.microsoft? || @channel.google?)
-end
-
 # method call with block (non-predicate name, yields)
 def evidence(node)
   file_open?(node) do |filename|
