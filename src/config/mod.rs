@@ -563,6 +563,10 @@ pub struct ResolvedConfig {
     /// `railties` is not in the lockfile, cops with `minimum_target_rails_version`
     /// are silently disabled regardless of `TargetRailsVersion` in config.
     railties_in_lockfile: bool,
+    /// The `rack` gem version from Gemfile.lock (e.g. 3.1 for "3.1.8").
+    /// Used by `Rails/HttpStatusNameConsistency` and `RSpecRails/HttpStatusNameConsistency`
+    /// which require `rack >= 3.1.0` (via RuboCop's `requires_gem 'rack', '>= 3.1.0'`).
+    rack_version: Option<f64>,
     /// Base directory for resolving Include/Exclude path patterns.
     /// RuboCop's `base_dir_for_path_parameters`: if the config filename starts
     /// with `.rubocop`, this is the config file's parent (canonical). Otherwise
@@ -590,6 +594,7 @@ impl ResolvedConfig {
             project_enabled_depts: HashSet::new(),
             dir_overrides: Vec::new(),
             railties_in_lockfile: false,
+            rack_version: None,
             base_dir: None,
         }
     }
@@ -1024,6 +1029,19 @@ pub fn load_config(
         }
     }
 
+    // Parse rack gem version from lockfile for HttpStatusNameConsistency cops.
+    // RuboCop uses `requires_gem 'rack', '>= 3.1.0'` to gate these cops.
+    let mut rack_version: Option<f64> = None;
+    for lock_name in &["Gemfile.lock", "gems.locked"] {
+        let lock_path = config_dir.join(lock_name);
+        if let Ok(content) = std::fs::read_to_string(&lock_path) {
+            if let Some(ver) = parse_gem_version_from_lockfile(&content, "rack") {
+                rack_version = Some(ver);
+                break;
+            }
+        }
+    }
+
     // Discover and parse nested .rubocop.yml files for per-directory cop overrides.
     // These provide cop-specific option overrides for files in subdirectories
     // (e.g., db/migrate/.rubocop.yml setting CheckSymbols: false for Naming/VariableNumber).
@@ -1050,6 +1068,7 @@ pub fn load_config(
         project_enabled_depts,
         dir_overrides,
         railties_in_lockfile,
+        rack_version,
         base_dir: Some(base_dir),
     })
 }
@@ -2038,6 +2057,19 @@ impl ResolvedConfig {
             .options
             .entry("__RailtiesInLockfile".to_string())
             .or_insert_with(|| Value::Bool(self.railties_in_lockfile));
+        // Inject rack version for HttpStatusNameConsistency cops
+        // (requires_gem 'rack', '>= 3.1.0')
+        if matches!(
+            name,
+            "Rails/HttpStatusNameConsistency" | "RSpecRails/HttpStatusNameConsistency"
+        ) {
+            if let Some(ver) = self.rack_version {
+                config
+                    .options
+                    .entry("__RackVersion".to_string())
+                    .or_insert_with(|| Value::Number(serde_yml::Number::from(ver)));
+            }
+        }
         // Inject MaxLineLength and LineLengthEnabled from Layout/LineLength into
         // cops that need it (mirrors RuboCop's `config.for_cop('Layout/LineLength')`).
         // When Layout/LineLength is disabled, max_line_length returns nil in RuboCop,

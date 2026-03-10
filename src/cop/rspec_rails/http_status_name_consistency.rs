@@ -13,6 +13,15 @@ use crate::parse::source::SourceFile;
 /// `requires_gem 'rack', '>= 3.1.0'`, not `requires_gem 'railties'`. The
 /// railties check was too strict for projects without a Gemfile.lock (like
 /// the synthetic benchmark project).
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// 579 FP, 0 FN. All FPs from firing on projects with Rack < 3.1.0.
+/// The previous `target_rails_version().is_none()` check only gated on
+/// "is this a Rails project", not on the actual Rack version. Most corpus
+/// repos have Rack 2.x, causing 579 FPs. Fixed by parsing the `rack` gem
+/// version from Gemfile.lock and gating on `rack >= 3.1.0`, matching
+/// RuboCop's `requires_gem 'rack', '>= 3.1.0'`.
 pub struct HttpStatusNameConsistency;
 
 /// Mapping of deprecated status names to their preferred replacements.
@@ -50,9 +59,9 @@ impl Cop for HttpStatusNameConsistency {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // requires_gem 'rack', '>= 3.1.0' — only fire in Rails projects.
-        // Non-Rails projects won't have TargetRailsVersion set.
-        if config.target_rails_version().is_none() {
+        // requires_gem 'rack', '>= 3.1.0' — only fire when the project has
+        // Rack >= 3.1 in its lockfile (where status names were renamed).
+        if !config.rack_version().is_some_and(|v| v >= 3.1) {
             return;
         }
 
@@ -104,9 +113,95 @@ impl Cop for HttpStatusNameConsistency {
 #[cfg(test)]
 mod tests {
     use super::*;
-    crate::cop_rails_fixture_tests!(
-        HttpStatusNameConsistency,
-        "cops/rspecrails/http_status_name_consistency",
-        7.0
-    );
+
+    fn rack31_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.0_f64)),
+        );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RackVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(3.1_f64)),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HttpStatusNameConsistency,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspecrails/http_status_name_consistency/offense.rb"
+            ),
+            rack31_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HttpStatusNameConsistency,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspecrails/http_status_name_consistency/no_offense.rb"
+            ),
+            rack31_config(),
+        );
+    }
+
+    #[test]
+    fn skipped_when_no_rack_version() {
+        // Projects without rack in lockfile should not trigger this cop.
+        let source = include_bytes!(
+            "../../../tests/fixtures/cops/rspecrails/http_status_name_consistency/offense.rb"
+        );
+        let parsed = crate::testutil::parse_fixture(source);
+        let diagnostics = crate::testutil::run_cop_full_internal(
+            &HttpStatusNameConsistency,
+            &parsed.source,
+            CopConfig::default(),
+            "test.rb",
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "Should not fire when rack version is not set, but got {} offenses",
+            diagnostics.len()
+        );
+    }
+
+    #[test]
+    fn skipped_when_rack_below_31() {
+        // Projects with rack < 3.1 should not trigger this cop.
+        let source = include_bytes!(
+            "../../../tests/fixtures/cops/rspecrails/http_status_name_consistency/offense.rb"
+        );
+        let parsed = crate::testutil::parse_fixture(source);
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "__RackVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(2.2_f64)),
+        );
+        let config = CopConfig {
+            options,
+            ..CopConfig::default()
+        };
+        let diagnostics = crate::testutil::run_cop_full_internal(
+            &HttpStatusNameConsistency,
+            &parsed.source,
+            config,
+            "test.rb",
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "Should not fire when rack version is 2.2, but got {} offenses",
+            diagnostics.len()
+        );
+    }
 }
