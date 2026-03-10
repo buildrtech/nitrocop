@@ -18,10 +18,13 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Corpus investigation (2026-03-10)
 ///
-/// 579 FP (shared with RSpecRails variant), 0 FN. All FPs from firing on
-/// projects with Rack < 3.1.0. Fixed by parsing the `rack` gem version
-/// from Gemfile.lock and gating on `rack >= 3.1.0`, matching RuboCop's
-/// `requires_gem 'rack', '>= 3.1.0'`.
+/// 580 FP (shared with RSpecRails variant), 0 FN. Root cause: config
+/// loader resolved `rack_version` from `config_dir` (config file's parent)
+/// instead of `base_dir` (CWD for non-dotfile configs). In corpus oracle
+/// CI, `config_dir` = `bench/corpus/` whose `Gemfile.lock` has rack 3.2.5
+/// as a transitive dep, causing the cop to fire on all repos. Fixed by
+/// changing lockfile resolution to use `base_dir`, matching RuboCop's
+/// `bundler_lock_file_path` / `base_dir_for_path_parameters`.
 pub struct HttpStatusNameConsistency;
 
 /// Deprecated HTTP status names and their preferred replacements (Rack >= 3.1).

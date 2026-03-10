@@ -16,12 +16,18 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Corpus investigation (2026-03-10)
 ///
-/// 579 FP, 0 FN. All FPs from firing on projects with Rack < 3.1.0.
-/// The previous `target_rails_version().is_none()` check only gated on
-/// "is this a Rails project", not on the actual Rack version. Most corpus
-/// repos have Rack 2.x, causing 579 FPs. Fixed by parsing the `rack` gem
-/// version from Gemfile.lock and gating on `rack >= 3.1.0`, matching
-/// RuboCop's `requires_gem 'rack', '>= 3.1.0'`.
+/// 580 FP, 0 FN. Root cause: nitrocop resolved `rack_version` from
+/// `config_dir` (the config file's parent), but RuboCop uses
+/// `base_dir_for_path_parameters` (CWD for non-dotfile configs like
+/// `--config baseline_rubocop.yml`). In corpus oracle CI, `config_dir` =
+/// `bench/corpus/` whose `Gemfile.lock` has `rack (3.2.5)` as a transitive
+/// rubocop dependency, causing the cop to fire on ALL repos regardless of
+/// their actual Rack version. RuboCop searches upward from CWD (checkout
+/// root) which has no `Gemfile.lock`, so it skips the cop entirely.
+///
+/// Fixed by changing lockfile resolution in config loader to use `base_dir`
+/// (CWD for non-dotfile configs, config_dir for `.rubocop*` dotfiles),
+/// matching RuboCop's `bundler_lock_file_path` behavior.
 pub struct HttpStatusNameConsistency;
 
 /// Mapping of deprecated status names to their preferred replacements.

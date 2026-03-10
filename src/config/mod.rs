@@ -999,10 +999,18 @@ pub fn load_config(
 
     // Fall back to Gemfile.lock if TargetRailsVersion wasn't set in config.
     // RuboCop looks for the 'railties' gem in the lockfile.
+    //
+    // Use `base_dir` (not `config_dir`) for lockfile resolution to match
+    // RuboCop's `bundler_lock_file_path` which uses `base_dir_for_path_parameters`:
+    // CWD for non-dotfile configs (e.g. `--config baseline_rubocop.yml`),
+    // config file's parent for `.rubocop*` dotfiles. This prevents reading
+    // a Gemfile.lock from an unrelated directory when `--config` points to
+    // a config file outside the target project (e.g. corpus oracle CI).
+    let lockfile_dir = &base_dir;
     let mut railties_in_lockfile = false;
     let target_rails_version = base.target_rails_version.or_else(|| {
         for lock_name in &["Gemfile.lock", "gems.locked"] {
-            let lock_path = config_dir.join(lock_name);
+            let lock_path = lockfile_dir.join(lock_name);
             if let Ok(content) = std::fs::read_to_string(&lock_path) {
                 if let Some(ver) = parse_gem_version_from_lockfile(&content, "railties") {
                     railties_in_lockfile = true;
@@ -1019,7 +1027,7 @@ pub fn load_config(
     // of the TargetRailsVersion config option.
     if !railties_in_lockfile && base.target_rails_version.is_some() {
         for lock_name in &["Gemfile.lock", "gems.locked"] {
-            let lock_path = config_dir.join(lock_name);
+            let lock_path = lockfile_dir.join(lock_name);
             if let Ok(content) = std::fs::read_to_string(&lock_path) {
                 if parse_gem_version_from_lockfile(&content, "railties").is_some() {
                     railties_in_lockfile = true;
@@ -1033,7 +1041,7 @@ pub fn load_config(
     // RuboCop uses `requires_gem 'rack', '>= 3.1.0'` to gate these cops.
     let mut rack_version: Option<f64> = None;
     for lock_name in &["Gemfile.lock", "gems.locked"] {
-        let lock_path = config_dir.join(lock_name);
+        let lock_path = lockfile_dir.join(lock_name);
         if let Ok(content) = std::fs::read_to_string(&lock_path) {
             if let Some(ver) = parse_gem_version_from_lockfile(&content, "rack") {
                 rack_version = Some(ver);
