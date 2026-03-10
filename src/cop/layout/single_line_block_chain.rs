@@ -3,6 +3,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=0, FN=2.
+///
+/// FP=0: no corpus false positives are currently known.
+///
+/// FN=2: `super { ... }.call` was missed in `jruby` and `natalie` because the
+/// receiver is a `SuperNode` with an attached `BlockNode`, not a `CallNode` or
+/// `LambdaNode`. This cop now treats `SuperNode` and `ForwardingSuperNode`
+/// receivers the same way it already treated receiver calls with attached
+/// blocks.
 pub struct SingleLineBlockChain;
 
 impl Cop for SingleLineBlockChain {
@@ -48,32 +59,9 @@ impl Cop for SingleLineBlockChain {
             None => return,
         };
 
-        let (block_open_line, block_close_line) = if let Some(recv_call) = receiver.as_call_node() {
-            // Check if the receiver call has a block
-            if let Some(block_ref) = recv_call.block() {
-                if let Some(block) = block_ref.as_block_node() {
-                    let open_line = source
-                        .offset_to_line_col(block.opening_loc().start_offset())
-                        .0;
-                    let close_line = source
-                        .offset_to_line_col(block.closing_loc().start_offset())
-                        .0;
-                    (open_line, close_line)
-                } else {
-                    return;
-                }
-            } else {
-                return;
-            }
-        } else if let Some(lambda) = receiver.as_lambda_node() {
-            let open_line = source
-                .offset_to_line_col(lambda.opening_loc().start_offset())
-                .0;
-            let close_line = source
-                .offset_to_line_col(lambda.closing_loc().start_offset())
-                .0;
-            (open_line, close_line)
-        } else {
+        let Some((block_open_line, block_close_line)) =
+            single_line_block_receiver_lines(source, &receiver)
+        else {
             return;
         };
 
@@ -120,9 +108,63 @@ impl Cop for SingleLineBlockChain {
     }
 }
 
+fn single_line_block_receiver_lines(
+    source: &SourceFile,
+    receiver: &ruby_prism::Node<'_>,
+) -> Option<(usize, usize)> {
+    if let Some(recv_call) = receiver.as_call_node() {
+        let block = recv_call.block()?.as_block_node()?;
+        return Some(block_delimiter_lines(source, &block));
+    }
+
+    if let Some(lambda) = receiver.as_lambda_node() {
+        let open_line = source
+            .offset_to_line_col(lambda.opening_loc().start_offset())
+            .0;
+        let close_line = source
+            .offset_to_line_col(lambda.closing_loc().start_offset())
+            .0;
+        return Some((open_line, close_line));
+    }
+
+    if let Some(super_node) = receiver.as_super_node() {
+        let block = super_node.block()?.as_block_node()?;
+        return Some(block_delimiter_lines(source, &block));
+    }
+
+    if let Some(forwarding_super_node) = receiver.as_forwarding_super_node() {
+        let block = forwarding_super_node.block()?;
+        return Some(block_delimiter_lines(source, &block));
+    }
+
+    None
+}
+
+fn block_delimiter_lines(source: &SourceFile, block: &ruby_prism::BlockNode<'_>) -> (usize, usize) {
+    let open_line = source
+        .offset_to_line_col(block.opening_loc().start_offset())
+        .0;
+    let close_line = source
+        .offset_to_line_col(block.closing_loc().start_offset())
+        .0;
+    (open_line, close_line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SingleLineBlockChain, "cops/layout/single_line_block_chain");
+
+    #[test]
+    fn super_block_receiver_offense() {
+        let source =
+            b"parent = Class.new { def foo(&block); block; end }\nchild = Class.new(parent) { def foo; super { break 1 }.call; end }\n";
+        let diagnostics = crate::testutil::run_cop_full(&SingleLineBlockChain, source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Expected one offense: {diagnostics:?}"
+        );
+    }
 }
