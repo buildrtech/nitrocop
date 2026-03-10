@@ -42,6 +42,13 @@ use crate::parse::source::SourceFile;
 /// receiver calls and allowed. RuboCop's `literal?` predicate includes `array`
 /// and `hash` types. Added `as_array_node`, `as_hash_node`, and
 /// `as_keyword_hash_node` to `is_literal()`.
+///
+/// Follow-up (2026-03-10): FP=5 from CallNode with block not recognized as
+/// allowed assignment. In Parser AST, `[1,2].map { |x| x }` becomes a `:block`
+/// node wrapping the `:send`, and RuboCop's `allowed_assignment?` allows `:block`
+/// immediately. In Prism, the CallNode itself has a block child. Fixed by checking
+/// `call.block().is_some()` before the literal receiver check in
+/// `is_valid_rhs_for_assignment()`.
 pub struct ConstantName;
 
 impl Cop for ConstantName {
@@ -231,6 +238,12 @@ fn is_valid_rhs_for_assignment(value: &ruby_prism::Node<'_>) -> bool {
     // `Uchar1max = (1<<7) - 1` (receiver is a call expression, not a literal).
     // Only method calls ON bare literals like `"foo".freeze` or `1 + 2` are disallowed.
     if let Some(call) = value.as_call_node() {
+        // CallNode with a block — equivalent to Parser's :block type node.
+        // In Parser AST, `[1,2].map { |x| x }` wraps the send in a block node.
+        // In Prism, the CallNode itself has a block child. RuboCop allows these.
+        if call.block().is_some() {
+            return true;
+        }
         match call.receiver() {
             None => return true, // receiverless method call
             Some(receiver) => {

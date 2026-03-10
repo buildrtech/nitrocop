@@ -33,3 +33,10 @@ begin
   something
 rescue => LAST_ERROR
 end
+
+# CallNode with block — equivalent to Parser's :block type (always allowed)
+Icons = { note: "info" }.transform_values { |v| v.upcase }
+Items = [1, 2, 3].map { |x| x * 2 }
+Config = %w[a b c].each_with_object({}) do |item, hash|
+  hash[item] = true
+end
