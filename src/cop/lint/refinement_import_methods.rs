@@ -11,10 +11,15 @@ use crate::parse::source::SourceFile;
 ///
 /// Corpus oracle reported FP=1, FN=0.
 ///
-/// FP=1: the remaining mismatch is an excluded `ruby-next` fixture under
-/// `spec/core/**/*`, so this is config/path-filtering noise rather than a cop-logic
-/// mismatch. Earlier fixes already aligned the cop's pending default-disabled state
-/// and restricted matches to direct `include`/`prepend` children of a `refine` block.
+/// FP=1: the remaining mismatch is still `ruby-next`'s excluded
+/// `spec/core/refinement/fixtures/import.rb`, so the corpus divergence is
+/// config/path-filter noise rather than active cop logic. Earlier fixes already
+/// aligned the cop's pending default-disabled state and restricted matches to
+/// direct `include`/`prepend` children of a `refine` block.
+///
+/// Additional correctness fix: RuboCop declares `minimum_target_ruby_version 3.1`,
+/// so `include`/`prepend` inside `refine` must be ignored when the project
+/// targets Ruby 3.0 or below.
 /// FN=0: no missing detections were reported for this cop in the corpus run.
 pub struct RefinementImportMethods;
 
@@ -36,10 +41,20 @@ impl Cop for RefinementImportMethods {
         source: &SourceFile,
         parse_result: &ruby_prism::ParseResult<'_>,
         _code_map: &crate::parse::codemap::CodeMap,
-        _config: &CopConfig,
+        config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // RuboCop: minimum_target_ruby_version 3.1
+        let ruby_version = config
+            .options
+            .get("TargetRubyVersion")
+            .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|u| u as f64)))
+            .unwrap_or(2.7);
+        if ruby_version < 3.1 {
+            return;
+        }
+
         let mut visitor = RefineVisitor {
             cop: self,
             source,
@@ -111,8 +126,50 @@ impl RefineVisitor<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    crate::cop_fixture_tests!(
-        RefinementImportMethods,
-        "cops/lint/refinement_import_methods"
-    );
+    use crate::cop::CopConfig;
+
+    fn ruby31_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "TargetRubyVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::Number::from(3.1)),
+        );
+        config
+    }
+
+    #[test]
+    fn offense_with_ruby31() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &RefinementImportMethods,
+            include_bytes!(
+                "../../../tests/fixtures/cops/lint/refinement_import_methods/offense.rb"
+            ),
+            ruby31_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &RefinementImportMethods,
+            include_bytes!(
+                "../../../tests/fixtures/cops/lint/refinement_import_methods/no_offense.rb"
+            ),
+            ruby31_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_below_ruby31() {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "TargetRubyVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::Number::from(3.0)),
+        );
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &RefinementImportMethods,
+            b"refine Foo do\n  include Bar\nend\n",
+            config,
+        );
+    }
 }

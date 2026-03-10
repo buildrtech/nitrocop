@@ -2538,7 +2538,6 @@ fn ruby_version_gates() {
         // No-op cops — obsolete under modern Ruby, kept for config compatibility
         "Lint/ItWithoutArgumentsInBlock",
         "Lint/NonDeterministicRequireOrder",
-        "Lint/RefinementImportMethods",
         "Lint/SafeNavigationChain",
         "Lint/SuppressedExceptionInNumberConversion",
         "Lint/UselessElseWithoutRescue",
