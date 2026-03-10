@@ -4,6 +4,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// FP/FN investigation (2026-03-10): FP=2, FN=2.
+///
+/// Root cause for the known FPs: nitrocop emitted an offense for every blank
+/// line in a whitespace gap before an argument or closing paren. RuboCop emits
+/// one offense per gap on the last blank line only.
+///
+/// The two corpus FNs from `fog` and `parslet` did not reproduce locally against
+/// the pinned corpus baseline, so this fix only addresses the verified FP shape.
 pub struct EmptyLinesAroundArguments;
 
 impl Cop for EmptyLinesAroundArguments {
@@ -131,18 +139,17 @@ fn check_blank_lines_before(
         source.offset_to_line_col(pos.saturating_sub(1)).0
     };
 
-    // If there's more than 1 line gap, there are blank lines between them
+    // If there's more than 1 line gap, there are blank lines between them.
+    // RuboCop reports a single offense on the last blank line in the gap.
     if target_line > prev_line + 1 {
-        // Flag each blank line in the gap
-        for line_num in (prev_line + 1)..target_line {
-            if line_num > 0 && line_num <= lines.len() && is_blank_line(lines[line_num - 1]) {
-                diagnostics.push(cop.diagnostic(
-                    source,
-                    line_num,
-                    0,
-                    "Empty line detected around arguments.".to_string(),
-                ));
-            }
+        let line_num = target_line - 1;
+        if line_num > 0 && line_num <= lines.len() && is_blank_line(lines[line_num - 1]) {
+            diagnostics.push(cop.diagnostic(
+                source,
+                line_num,
+                0,
+                "Empty line detected around arguments.".to_string(),
+            ));
         }
     }
 }

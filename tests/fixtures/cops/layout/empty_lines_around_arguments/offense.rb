@@ -7,6 +7,7 @@
 # nitrocop-expect: 43:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
 # nitrocop-expect: 45:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
 # nitrocop-expect: 47:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
+# nitrocop-expect: 54:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
 # Empty line between args
 foo(
   bar,
@@ -54,4 +55,12 @@ multi(
 
   biz,
 
+)
+
+# Multiple blank lines in one gap still report only the last blank line
+double_gap(
+  foo,
+
+
+  bar
 )
