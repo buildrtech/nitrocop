@@ -12,3 +12,7 @@ cache[ key] ||= {}
 
 totals[ key] += 1
        ^ Layout/SpaceInsideReferenceBrackets: Do not use space inside reference brackets.
+
+items[
+      ^ Layout/SpaceInsideReferenceBrackets: Do not use space inside empty reference brackets.
+]
