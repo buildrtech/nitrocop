@@ -2,6 +2,21 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=8, FN=13.
+///
+/// Attempted fix: skip leading comment lines and preserve UTF-8 BOM bytes when
+/// removing indentation from the first real code line.
+///
+/// Local fixture and unit coverage passed, and the rerun reached RuboCop's
+/// expected offense count (`Expected=32`, `Actual=32`), but the corpus
+/// acceptance gate still failed with `CI nitrocop baseline=27`,
+/// `File-drop noise=1`, and `FAIL: 4 excess over CI baseline`.
+///
+/// Result: reverted. A future fix needs to explain why matching RuboCop's raw
+/// offense total still counts as excess in the current oracle workflow, or pair
+/// the behavior change with a refreshed baseline.
 pub struct InitialIndentation;
 
 impl Cop for InitialIndentation {
