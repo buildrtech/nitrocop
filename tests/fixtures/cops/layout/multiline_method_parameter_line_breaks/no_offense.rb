@@ -14,3 +14,8 @@ def method_name(
   c
 )
 end
+
+def taz(
+  foo, bar
+)
+end

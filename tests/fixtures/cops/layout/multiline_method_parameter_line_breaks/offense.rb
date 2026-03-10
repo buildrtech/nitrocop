@@ -18,3 +18,8 @@ def method_name(
   c
 )
 end
+
+def build_cache store,
+                logger, notifier
+                        ^^^^^^^^ Layout/MultilineMethodParameterLineBreaks: Each parameter in a multi-line method definition must start on a separate line.
+end
