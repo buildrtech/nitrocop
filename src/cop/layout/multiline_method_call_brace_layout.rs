@@ -3,16 +3,19 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// FP=41 fixed: `is_heredoc_node` did not recurse into `KeywordHashNode` /
-/// `AssocNode` pairs, so heredocs used as keyword argument values
-/// (e.g., `success: <<-EOF.strip_heredoc)`) were missed and the closing
-/// paren position was incorrectly flagged. Added recursion into keyword
-/// hash elements and assoc node values.
+/// ## Corpus investigation (2026-03-10)
 ///
-/// FP=1 fixed: `is_heredoc_node` did not check arguments of nested method
-/// calls (only checked the receiver). For `doc(raw(<<~HEREDOC.chomp))`,
-/// `raw(...)` is a CallNode with no receiver, and the heredoc is its
-/// argument. Added recursion into call arguments.
+/// Corpus oracle reported FP=0, FN=3.
+///
+/// FP=0: previous false positives in heredoc-heavy calls were fixed by
+/// recursing into nested call arguments, keyword hashes, and assoc values when
+/// checking whether the last argument contains a conflicting heredoc.
+///
+/// FN=3: this cop previously skipped brace-layout checks when *any* argument
+/// contained a heredoc. RuboCop only skips when the *last* argument contains a
+/// heredoc terminator that forces the closing parenthesis placement. Narrowing
+/// the skip to the last argument fixes heredoc-first calls like
+/// `foo(<<~EOS, arg ... ).call`.
 pub struct MultilineMethodCallBraceLayout;
 
 impl Cop for MultilineMethodCallBraceLayout {
@@ -65,14 +68,11 @@ impl Cop for MultilineMethodCallBraceLayout {
             return;
         }
 
-        // RuboCop skips the brace layout check when any argument contains a
-        // heredoc, because heredoc terminators force unusual line placement for
-        // the closing paren. Detect heredoc arguments by checking if the
-        // opening location starts with `<<`.
-        for arg in &arg_list {
-            if is_heredoc_node(arg) {
-                return;
-            }
+        // Only a heredoc in the last argument can force the closing paren to a
+        // later line. Earlier heredoc arguments do not exempt the call.
+        let last_arg = arg_list.last().unwrap();
+        if is_heredoc_node(last_arg) {
+            return;
         }
 
         let (open_line, _) = source.offset_to_line_col(opening.start_offset());
@@ -84,7 +84,6 @@ impl Cop for MultilineMethodCallBraceLayout {
         }
 
         let first_arg = &arg_list[0];
-        let last_arg = arg_list.last().unwrap();
 
         let (first_arg_line, _) = source.offset_to_line_col(first_arg.location().start_offset());
 
@@ -204,9 +203,25 @@ fn is_heredoc_node(node: &ruby_prism::Node<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
         MultilineMethodCallBraceLayout,
         "cops/layout/multiline_method_call_brace_layout"
     );
+
+    #[test]
+    fn heredoc_only_in_earlier_argument_still_checks_brace_layout() {
+        let source = br#"foo(<<~EOS, arg
+  text
+EOS
+).do_something
+"#;
+        let diagnostics = run_cop_full(&MultilineMethodCallBraceLayout, source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Expected one offense: {diagnostics:?}"
+        );
+    }
 }

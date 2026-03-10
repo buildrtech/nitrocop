@@ -12,3 +12,9 @@ baz(c,
   d
 )
 ^ Layout/MultilineMethodCallBraceLayout: Closing method call brace must be on the same line as the last argument when opening brace is on the same line as the first argument.
+
+foo(<<~EOS, arg
+  text
+EOS
+).do_something
+^ Layout/MultilineMethodCallBraceLayout: Closing method call brace must be on the same line as the last argument when opening brace is on the same line as the first argument.
