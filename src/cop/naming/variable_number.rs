@@ -24,8 +24,12 @@ use crate::parse::source::SourceFile;
 ///
 /// Corpus oracle reported FP=0, FN=1. FN from hexapdf
 /// (`test/hexapdf/test_serializer.rb:101`), "Use normalcase for symbol numbers."
-/// Likely an edge case with empty-string symbol `""` as keyword hash key.
-/// Not fixed — FN=1 is acceptable.
+/// Root cause: empty-string symbol `:""`  used as a hash key (`"": true`).
+/// RuboCop's format regex (`/(?:\D|[^_\d]\d+|\A\d+)\z/`) doesn't match
+/// empty string, so it flags the offense. nitrocop's `has_digit` early
+/// return skipped empty names, and the format validators returned `true`
+/// for empty strings. Fix: allow empty names through the digit check, and
+/// return `false` from all three format validators for empty strings.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -186,14 +190,16 @@ impl Cop for VariableNumber {
                 let name = sym.unescaped();
                 let name_str = std::str::from_utf8(name).unwrap_or("");
                 if !is_allowed(name_str, &allowed_ids, &allowed_pats) {
-                    if let Some(diag) = check_number_style(
-                        self,
-                        source,
-                        name_str,
-                        &sym.value_loc().unwrap_or(sym.location()),
-                        enforced_style,
-                        "symbol",
-                    ) {
+                    // For empty-value symbols like :"", value_loc() may return
+                    // a zero-length range at an incorrect offset. Use the full
+                    // symbol location instead when value_loc has zero length.
+                    let loc = match sym.value_loc() {
+                        Some(vloc) if !vloc.as_slice().is_empty() => vloc,
+                        _ => sym.location(),
+                    };
+                    if let Some(diag) =
+                        check_number_style(self, source, name_str, &loc, enforced_style, "symbol")
+                    {
                         diagnostics.push(diag);
                     }
                 }
@@ -242,9 +248,11 @@ fn check_number_style(
     enforced_style: &str,
     identifier_type: &str,
 ) -> Option<Diagnostic> {
-    // Find if name contains digits
+    // Find if name contains digits.
+    // Empty names (e.g. `:""`  empty-string symbol) are also invalid — RuboCop's
+    // format regex doesn't match empty string, so the cop flags it.
     let has_digit = name.bytes().any(|b| b.is_ascii_digit());
-    if !has_digit {
+    if !has_digit && !name.is_empty() {
         return None;
     }
 
@@ -281,11 +289,12 @@ fn check_number_style(
 }
 
 /// normalcase: /(?:\D|[^_\d]\d+|\A\d+)\z/
-/// Valid if: ends with non-digit, OR ends with digits NOT preceded by _, OR is all digits
+/// Valid if: ends with non-digit, OR ends with digits NOT preceded by _, OR is all digits.
+/// Empty names are invalid (regex doesn't match empty string).
 fn is_valid_normalcase(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() {
-        return true;
+        return false;
     }
     let last = bytes[bytes.len() - 1];
     // Ends with non-digit → OK
@@ -306,11 +315,12 @@ fn is_valid_normalcase(name: &str) -> bool {
 }
 
 /// snake_case: /(?:\D|_\d+|\A\d+)\z/
-/// Valid if: ends with non-digit, OR ends with digits preceded by _, OR is all digits
+/// Valid if: ends with non-digit, OR ends with digits preceded by _, OR is all digits.
+/// Empty names are invalid (regex doesn't match empty string).
 fn is_valid_snake_case(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() {
-        return true;
+        return false;
     }
     let last = bytes[bytes.len() - 1];
     if !last.is_ascii_digit() {
@@ -328,11 +338,12 @@ fn is_valid_snake_case(name: &str) -> bool {
 }
 
 /// non_integer: /(\D|\A\d+)\z/
-/// Valid if: ends with non-digit, OR is all digits
+/// Valid if: ends with non-digit, OR is all digits.
+/// Empty names are invalid (regex doesn't match empty string).
 fn is_valid_non_integer(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() {
-        return true;
+        return false;
     }
     let last = bytes[bytes.len() - 1];
     if !last.is_ascii_digit() {
@@ -347,4 +358,11 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(VariableNumber, "cops/naming/variable_number");
+
+    #[test]
+    fn empty_string_symbol_is_offense() {
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b":\"\"\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Use normalcase for symbol numbers.");
+    }
 }

@@ -32,3 +32,7 @@ $global_var_1 += 10
 ^^^^^^^^^^^^^^^ Naming/VariableNumber: Use normalcase for variable numbers.
 @@class_var_2 ||= nil
 ^^^^^^^^^^^^^ Naming/VariableNumber: Use normalcase for variable numbers.
+
+# Empty-string symbol — RuboCop flags because the format regex doesn't match empty string
+:""
+^^^ Naming/VariableNumber: Use normalcase for symbol numbers.

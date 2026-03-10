@@ -18,3 +18,6 @@ def ipv4?; end
 # Keyword parameters are not checked by RuboCop (no on_kwarg/on_kwoptarg)
 def foo(bar_1:); end
 def foo(baz_2: nil); end
+# Integer symbols are valid (all-digit names pass the format regex)
+:"42"
+%i[1 2 3]
