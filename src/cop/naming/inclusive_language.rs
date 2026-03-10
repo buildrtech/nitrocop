@@ -65,6 +65,20 @@ use crate::parse::source::SourceFile;
 /// Fixed by making `is_fid_token` context-aware: it now checks for `def`/`alias`
 /// context via backward line scanning and only skips `?`/`!` identifiers in call
 /// contexts.
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=4, FN=1.
+///
+/// FP=4: All from `def self.xxx?` singleton method definitions containing flagged
+/// terms (blacklisted?, blacklist?, whitelisted?, is_blacklisted?). Investigated
+/// two hypotheses: (1) blanket tFID skip — caused FN=193, much worse; (2) skipping
+/// only `def self.` (singleton) cases — caused FN=149. Neither is correct.
+/// The root cause may be config-specific or related to subtle Parser gem tokenization
+/// differences for specific method names. Deferred — 4 FPs is acceptable.
+///
+/// FN=1: from jetpants (`:slave_monitor_dsn` inside string interpolation).
+/// Not investigated further.
 pub struct InclusiveLanguage;
 
 /// Global cache of compiled flagged terms, keyed by CopConfig pointer.
