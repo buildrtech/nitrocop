@@ -1,36 +1,156 @@
+# Basic duplicate instance method in class
 class Foo
   def bar
     1
   end
 
   def bar
-  ^^^ Lint/DuplicateMethods: Duplicated method definition.
+  ^^^^^^^ Lint/DuplicateMethods: Method `Foo#bar` is defined at both test.rb:3 and test.rb:7.
     2
   end
 end
 
-class Baz
-  def qux
-    :a
-  end
-
-  def quux
-    :b
-  end
-
-  def qux
-  ^^^ Lint/DuplicateMethods: Duplicated method definition.
-    :c
-  end
-end
-
+# Duplicate in module
 module MyMod
   def helper
     true
   end
 
   def helper
-  ^^^ Lint/DuplicateMethods: Duplicated method definition.
+  ^^^^^^^^^^ Lint/DuplicateMethods: Method `MyMod#helper` is defined at both test.rb:14 and test.rb:18.
     false
   end
+end
+
+# Duplicate self method
+class Widget
+  def self.create
+    1
+  end
+
+  def self.create
+  ^^^^^^^^^^^^^^^ Lint/DuplicateMethods: Method `Widget.create` is defined at both test.rb:25 and test.rb:29.
+    2
+  end
+end
+
+# Duplicate alias
+class WithAlias
+  def render
+    1
+  end
+  alias render other
+  ^^^^^^^^^^^^^^^^^^ Lint/DuplicateMethods: Method `WithAlias#render` is defined at both test.rb:36 and test.rb:39.
+end
+
+# Duplicate alias_method
+class WithAliasMethod
+  def process
+    1
+  end
+  alias_method :process, :other
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/DuplicateMethods: Method `WithAliasMethod#process` is defined at both test.rb:44 and test.rb:47.
+end
+
+# Duplicate attr_reader
+class WithAttr
+  def value
+  end
+  attr_reader :value
+  ^^^^^^^^^^^^^^^^^^ Lint/DuplicateMethods: Method `WithAttr#value` is defined at both test.rb:52 and test.rb:54.
+end
+
+# Duplicate attr_writer
+class WithAttrWriter
+  def value=(right)
+  end
+  attr_writer :value
+  ^^^^^^^^^^^^^^^^^^ Lint/DuplicateMethods: Method `WithAttrWriter#value=` is defined at both test.rb:59 and test.rb:61.
+end
+
+# Duplicate attr_accessor (both reader and writer)
+class WithAttrAccessor
+  attr_accessor :data
+
+  def data
+  ^^^^^^^^ Lint/DuplicateMethods: Method `WithAttrAccessor#data` is defined at both test.rb:66 and test.rb:68.
+  end
+  def data=(right)
+  ^^^^^^^^^ Lint/DuplicateMethods: Method `WithAttrAccessor#data=` is defined at both test.rb:66 and test.rb:70.
+  end
+end
+
+# private def (inline modifier)
+class WithPrivate
+  private def compute
+    1
+  end
+  private def compute
+          ^^^^^^^^^^^ Lint/DuplicateMethods: Method `WithPrivate#compute` is defined at both test.rb:76 and test.rb:79.
+    2
+  end
+end
+
+# Top-level duplicate methods
+def some_method
+  1
+end
+def some_method
+^^^^^^^^^^^^^^^ Lint/DuplicateMethods: Method `Object#some_method` is defined at both test.rb:85 and test.rb:88.
+  2
+end
+
+# Reopened class
+class Reopened
+  def act
+    1
+  end
+end
+class Reopened
+  def act
+  ^^^^^^^ Lint/DuplicateMethods: Method `Reopened#act` is defined at both test.rb:94 and test.rb:99.
+    2
+  end
+end
+
+# class << self
+class Singleton
+  class << self
+    def call
+      1
+    end
+    def call
+    ^^^^^^^^ Lint/DuplicateMethods: Method `Singleton.call` is defined at both test.rb:107 and test.rb:110.
+      2
+    end
+  end
+end
+
+# Nested modules
+module Outer
+  class Inner
+    def process
+      1
+    end
+    def process
+    ^^^^^^^^^^^ Lint/DuplicateMethods: Method `Outer::Inner#process` is defined at both test.rb:119 and test.rb:122.
+      2
+    end
+  end
+end
+
+# def_delegator
+class WithDelegator
+  def_delegator :target, :action
+
+  def action; end
+  ^^^^^^^^^^ Lint/DuplicateMethods: Method `WithDelegator#action` is defined at both test.rb:130 and test.rb:132.
+end
+
+# def_delegators
+class WithDelegators
+  def_delegators :target, :run, :stop
+
+  def run; end
+  ^^^^^^^ Lint/DuplicateMethods: Method `WithDelegators#run` is defined at both test.rb:137 and test.rb:139.
 end
