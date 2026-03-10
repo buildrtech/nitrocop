@@ -20,6 +20,23 @@ use ruby_prism::Visit;
 ///    block was inside any conditional but the outer var was not. Per RuboCop, suppression
 ///    only applies when BOTH the outer var and the block are in different branches of the
 ///    SAME conditional node. Fix: remove the incorrect `(None, Some(_))` case.
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=19, FN=51.
+///
+/// FP:
+/// - Method parameters were predeclared before any default expression ran, so later
+///   parameters leaked into earlier lambda defaults like
+///   `outer: ->(cursor) { ... }, cursor: nil`.
+/// - Class/module/singleton class bodies only pushed a nested scope, so top-level locals
+///   leaked into class-body procs and lambdas.
+///
+/// FN:
+/// - `params.posts()` and `params.keyword_rest()` were not checked or collected, so shadowing
+///   was missed for post-splat params and `**kwargs`.
+/// - Lambda/block body scopes also omitted some parameter kinds, so nested blocks could miss
+///   outer block params.
 pub struct ShadowingOuterLocalVariable;
 
 impl Cop for ShadowingOuterLocalVariable {
@@ -132,47 +149,137 @@ impl ShadowVisitor<'_, '_> {
             }
         }
     }
+
+    fn visit_def_parameters_in_order(&mut self, params: &ruby_prism::ParametersNode<'_>) {
+        for param in params.requireds().iter() {
+            self.declare_parameter_node(&param);
+        }
+
+        for param in params.optionals().iter() {
+            if let Some(optional) = param.as_optional_parameter_node() {
+                self.visit(&optional.value());
+                if let Ok(name) = std::str::from_utf8(optional.name().as_slice()) {
+                    self.add_local(name);
+                }
+            }
+        }
+
+        if let Some(rest) = params.rest() {
+            if let Some(rest_param) = rest.as_rest_parameter_node() {
+                if let Some(name) = rest_param.name() {
+                    if let Ok(name) = std::str::from_utf8(name.as_slice()) {
+                        self.add_local(name);
+                    }
+                }
+            }
+        }
+
+        for param in params.posts().iter() {
+            self.declare_parameter_node(&param);
+        }
+
+        for param in params.keywords().iter() {
+            if let Some(keyword) = param.as_required_keyword_parameter_node() {
+                if let Ok(name) = std::str::from_utf8(keyword.name().as_slice()) {
+                    self.add_local(name.trim_end_matches(':'));
+                }
+            } else if let Some(keyword) = param.as_optional_keyword_parameter_node() {
+                self.visit(&keyword.value());
+                if let Ok(name) = std::str::from_utf8(keyword.name().as_slice()) {
+                    self.add_local(name.trim_end_matches(':'));
+                }
+            }
+        }
+
+        if let Some(keyword_rest) = params.keyword_rest() {
+            if let Some(keyword_rest) = keyword_rest.as_keyword_rest_parameter_node() {
+                if let Some(name) = keyword_rest.name() {
+                    if let Ok(name) = std::str::from_utf8(name.as_slice()) {
+                        self.add_local(name);
+                    }
+                }
+            }
+        }
+
+        if let Some(block) = params.block() {
+            if let Some(name) = block.name() {
+                if let Ok(name) = std::str::from_utf8(name.as_slice()) {
+                    self.add_local(name);
+                }
+            }
+        }
+    }
+
+    fn declare_parameter_node(&mut self, node: &ruby_prism::Node<'_>) {
+        if let Some(required) = node.as_required_parameter_node() {
+            if let Ok(name) = std::str::from_utf8(required.name().as_slice()) {
+                self.add_local(name);
+            }
+            return;
+        }
+
+        if let Some(multi_target) = node.as_multi_target_node() {
+            let mut names = HashSet::new();
+            collect_multi_target_names(&multi_target, &mut names);
+            for name in names {
+                self.add_local(&name);
+            }
+            return;
+        }
+
+        if let Some(keyword_rest) = node.as_keyword_rest_parameter_node() {
+            if let Some(name) = keyword_rest.name() {
+                if let Ok(name) = std::str::from_utf8(name.as_slice()) {
+                    self.add_local(name);
+                }
+            }
+        }
+    }
 }
 
 impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        if let Some(receiver) = node.receiver() {
+            self.visit(&receiver);
+        }
+
         // def creates a completely new scope — save and replace the entire scope
         // stack. RuboCop's VariableForce treats method definitions as scope
         // barriers: class/module-level variables are NOT visible inside methods.
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_cond = std::mem::take(&mut self.conditional_branch_stack);
-        let mut name_set = HashSet::new();
+        self.scopes.push(HashMap::new());
         if let Some(params) = node.parameters() {
-            collect_param_names_into(&params, &mut name_set);
+            self.visit_def_parameters_in_order(&params);
         }
-        let scope: HashMap<String, VarInfo> = name_set
-            .into_iter()
-            .map(|n| {
-                (
-                    n,
-                    VarInfo {
-                        conditional_branch: None,
-                    },
-                )
-            })
-            .collect();
-        self.scopes.push(scope);
-        ruby_prism::visit_def_node(self, node);
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
         self.scopes = saved_scopes;
         self.conditional_branch_stack = saved_cond;
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
-        // class body is a new scope
+        self.visit(&node.constant_path());
+        if let Some(superclass) = node.superclass() {
+            self.visit(&superclass);
+        }
+        let saved_scopes = std::mem::take(&mut self.scopes);
         self.scopes.push(HashMap::new());
-        ruby_prism::visit_class_node(self, node);
-        self.scopes.pop();
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        self.scopes = saved_scopes;
     }
 
     fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        self.visit(&node.constant_path());
+        let saved_scopes = std::mem::take(&mut self.scopes);
         self.scopes.push(HashMap::new());
-        ruby_prism::visit_module_node(self, node);
-        self.scopes.pop();
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        self.scopes = saved_scopes;
     }
 
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
@@ -267,9 +374,13 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
 
     // Singleton class (class << self) creates a new scope
     fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        self.visit(&node.expression());
+        let saved_scopes = std::mem::take(&mut self.scopes);
         self.scopes.push(HashMap::new());
-        ruby_prism::visit_singleton_class_node(self, node);
-        self.scopes.pop();
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        self.scopes = saved_scopes;
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
@@ -288,61 +399,14 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         // Check block parameters against outer locals
         if let Some(params_node) = node.parameters() {
             if let Some(block_params) = params_node.as_block_parameters_node() {
-                // Check regular parameters
-                if let Some(inner_params) = block_params.parameters() {
-                    check_block_params_shadow(
-                        self.cop,
-                        self.source,
-                        &inner_params,
-                        &outer_locals,
-                        block_cond_branch,
-                        &mut self.diagnostics,
-                    );
-
-                    // Check multi-target (destructured) params: |(a, b, c)|
-                    for p in inner_params.requireds().iter() {
-                        if let Some(mt) = p.as_multi_target_node() {
-                            check_multi_target_shadow(
-                                self.cop,
-                                self.source,
-                                &mt,
-                                &outer_locals,
-                                block_cond_branch,
-                                &mut self.diagnostics,
-                            );
-                        }
-                    }
-                }
-
-                // Check block-local variables (|a; b| — b is a block-local)
-                for local in block_params.locals().iter() {
-                    let name = std::str::from_utf8(
-                        local
-                            .as_block_local_variable_node()
-                            .map_or(&[][..], |n| n.name().as_slice()),
-                    )
-                    .unwrap_or("")
-                    .to_string();
-                    if !name.is_empty() && !name.starts_with('_') {
-                        if let Some(info) = outer_locals.get(&name) {
-                            // Skip if in different branches of the same conditional
-                            if is_different_conditional_branch(
-                                info.conditional_branch,
-                                block_cond_branch,
-                            ) {
-                                continue;
-                            }
-                            let loc = local.location();
-                            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                            self.diagnostics.push(self.cop.diagnostic(
-                                self.source,
-                                line,
-                                column,
-                                format!("Shadowing outer local variable - `{}`.", name),
-                            ));
-                        }
-                    }
-                }
+                check_block_parameters_shadow(
+                    self.cop,
+                    self.source,
+                    &block_params,
+                    &outer_locals,
+                    block_cond_branch,
+                    &mut self.diagnostics,
+                );
             }
         }
 
@@ -353,20 +417,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         let mut body_scope = HashMap::new();
         if let Some(params_node) = node.parameters() {
             if let Some(block_params) = params_node.as_block_parameters_node() {
-                if let Some(inner_params) = block_params.parameters() {
-                    let mut param_names = HashSet::new();
-                    collect_param_names_into(&inner_params, &mut param_names);
-                    for name in param_names {
-                        body_scope.insert(
-                            name,
-                            VarInfo {
-                                conditional_branch: None,
-                            },
-                        );
-                    }
-                }
-                // Also add destructured params
-                collect_multi_target_names_from_block_params(&block_params, &mut body_scope);
+                body_scope = build_block_body_scope(&block_params);
             }
         }
         self.scopes.push(body_scope);
@@ -381,21 +432,26 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
 
         if let Some(params_node) = node.parameters() {
             if let Some(block_params) = params_node.as_block_parameters_node() {
-                if let Some(inner_params) = block_params.parameters() {
-                    check_block_params_shadow(
-                        self.cop,
-                        self.source,
-                        &inner_params,
-                        &outer_locals,
-                        block_cond_branch,
-                        &mut self.diagnostics,
-                    );
-                }
+                check_block_parameters_shadow(
+                    self.cop,
+                    self.source,
+                    &block_params,
+                    &outer_locals,
+                    block_cond_branch,
+                    &mut self.diagnostics,
+                );
+            }
+        }
+
+        let mut body_scope = HashMap::new();
+        if let Some(params_node) = node.parameters() {
+            if let Some(block_params) = params_node.as_block_parameters_node() {
+                body_scope = build_block_body_scope(&block_params);
             }
         }
 
         // Lambda creates an isolated scope — do NOT merge back.
-        self.scopes.push(HashMap::new());
+        self.scopes.push(body_scope);
         ruby_prism::visit_lambda_node(self, node);
         self.scopes.pop();
     }
@@ -572,6 +628,71 @@ fn check_multi_target_shadow(
     }
 }
 
+fn check_block_parameters_shadow(
+    cop: &ShadowingOuterLocalVariable,
+    source: &SourceFile,
+    block_params: &ruby_prism::BlockParametersNode<'_>,
+    outer_locals: &HashMap<String, VarInfo>,
+    block_cond_branch: Option<(usize, usize)>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Some(inner_params) = block_params.parameters() {
+        check_block_params_shadow(
+            cop,
+            source,
+            &inner_params,
+            outer_locals,
+            block_cond_branch,
+            diagnostics,
+        );
+
+        for param in inner_params.requireds().iter() {
+            if let Some(multi_target) = param.as_multi_target_node() {
+                check_multi_target_shadow(
+                    cop,
+                    source,
+                    &multi_target,
+                    outer_locals,
+                    block_cond_branch,
+                    diagnostics,
+                );
+            }
+        }
+
+        for param in inner_params.posts().iter() {
+            if let Some(multi_target) = param.as_multi_target_node() {
+                check_multi_target_shadow(
+                    cop,
+                    source,
+                    &multi_target,
+                    outer_locals,
+                    block_cond_branch,
+                    diagnostics,
+                );
+            }
+        }
+    }
+
+    for local in block_params.locals().iter() {
+        let name = std::str::from_utf8(
+            local
+                .as_block_local_variable_node()
+                .map_or(&[][..], |node| node.name().as_slice()),
+        )
+        .unwrap_or("")
+        .to_string();
+        check_shadow(
+            cop,
+            source,
+            &name,
+            local.location(),
+            outer_locals,
+            block_cond_branch,
+            diagnostics,
+        );
+    }
+}
+
 fn check_block_params_shadow(
     cop: &ShadowingOuterLocalVariable,
     source: &SourceFile,
@@ -616,6 +737,57 @@ fn check_block_params_shadow(
         }
     }
 
+    // Post params
+    for p in params.posts().iter() {
+        if let Some(req) = p.as_required_parameter_node() {
+            let name = std::str::from_utf8(req.name().as_slice())
+                .unwrap_or("")
+                .to_string();
+            check_shadow(
+                cop,
+                source,
+                &name,
+                req.location(),
+                outer_locals,
+                block_cond_branch,
+                diagnostics,
+            );
+        }
+    }
+
+    // Keyword params
+    for p in params.keywords().iter() {
+        if let Some(keyword) = p.as_required_keyword_parameter_node() {
+            let name = std::str::from_utf8(keyword.name().as_slice())
+                .unwrap_or("")
+                .trim_end_matches(':')
+                .to_string();
+            check_shadow(
+                cop,
+                source,
+                &name,
+                keyword.location(),
+                outer_locals,
+                block_cond_branch,
+                diagnostics,
+            );
+        } else if let Some(keyword) = p.as_optional_keyword_parameter_node() {
+            let name = std::str::from_utf8(keyword.name().as_slice())
+                .unwrap_or("")
+                .trim_end_matches(':')
+                .to_string();
+            check_shadow(
+                cop,
+                source,
+                &name,
+                keyword.location(),
+                outer_locals,
+                block_cond_branch,
+                diagnostics,
+            );
+        }
+    }
+
     // Rest param
     if let Some(rest) = params.rest() {
         if let Some(rest_param) = rest.as_rest_parameter_node() {
@@ -628,6 +800,26 @@ fn check_block_params_shadow(
                     source,
                     &name,
                     rest_param.location(),
+                    outer_locals,
+                    block_cond_branch,
+                    diagnostics,
+                );
+            }
+        }
+    }
+
+    // Keyword rest param (**kwargs)
+    if let Some(keyword_rest) = params.keyword_rest() {
+        if let Some(keyword_rest) = keyword_rest.as_keyword_rest_parameter_node() {
+            if let Some(name) = keyword_rest.name() {
+                let name = std::str::from_utf8(name.as_slice())
+                    .unwrap_or("")
+                    .to_string();
+                check_shadow(
+                    cop,
+                    source,
+                    &name,
+                    keyword_rest.location(),
                     outer_locals,
                     block_cond_branch,
                     diagnostics,
@@ -653,6 +845,42 @@ fn check_block_params_shadow(
             );
         }
     }
+}
+
+fn build_block_body_scope(
+    block_params: &ruby_prism::BlockParametersNode<'_>,
+) -> HashMap<String, VarInfo> {
+    let mut scope = HashMap::new();
+
+    if let Some(params) = block_params.parameters() {
+        let mut param_names = HashSet::new();
+        collect_param_names_into(&params, &mut param_names);
+        for name in param_names {
+            scope.insert(
+                name,
+                VarInfo {
+                    conditional_branch: None,
+                },
+            );
+        }
+        collect_multi_target_names_from_params(&params, &mut scope);
+    }
+
+    for local in block_params.locals().iter() {
+        let Some(local) = local.as_block_local_variable_node() else {
+            continue;
+        };
+        if let Ok(name) = std::str::from_utf8(local.name().as_slice()) {
+            scope.insert(
+                name.to_string(),
+                VarInfo {
+                    conditional_branch: None,
+                },
+            );
+        }
+    }
+
+    scope
 }
 
 fn check_shadow(
@@ -715,24 +943,37 @@ fn collect_multi_target_names(node: &ruby_prism::MultiTargetNode<'_>, names: &mu
     }
 }
 
-/// Extract names from multi-target (destructured) block params and add to scope.
-fn collect_multi_target_names_from_block_params(
-    block_params: &ruby_prism::BlockParametersNode<'_>,
+/// Extract names from multi-target (destructured) params and add to scope.
+fn collect_multi_target_names_from_params(
+    params: &ruby_prism::ParametersNode<'_>,
     scope: &mut HashMap<String, VarInfo>,
 ) {
-    if let Some(params) = block_params.parameters() {
-        for p in params.requireds().iter() {
-            if let Some(mt) = p.as_multi_target_node() {
-                let mut names = HashSet::new();
-                collect_multi_target_names(&mt, &mut names);
-                for name in names {
-                    scope.insert(
-                        name,
-                        VarInfo {
-                            conditional_branch: None,
-                        },
-                    );
-                }
+    for p in params.requireds().iter() {
+        if let Some(mt) = p.as_multi_target_node() {
+            let mut names = HashSet::new();
+            collect_multi_target_names(&mt, &mut names);
+            for name in names {
+                scope.insert(
+                    name,
+                    VarInfo {
+                        conditional_branch: None,
+                    },
+                );
+            }
+        }
+    }
+
+    for p in params.posts().iter() {
+        if let Some(mt) = p.as_multi_target_node() {
+            let mut names = HashSet::new();
+            collect_multi_target_names(&mt, &mut names);
+            for name in names {
+                scope.insert(
+                    name,
+                    VarInfo {
+                        conditional_branch: None,
+                    },
+                );
             }
         }
     }
@@ -762,6 +1003,19 @@ fn collect_param_names_into(params: &ruby_prism::ParametersNode<'_>, scope: &mut
             }
         }
     }
+    for p in params.posts().iter() {
+        if let Some(req) = p.as_required_parameter_node() {
+            if let Ok(s) = std::str::from_utf8(req.name().as_slice()) {
+                scope.insert(s.to_string());
+            }
+        } else if let Some(kw_rest) = p.as_keyword_rest_parameter_node() {
+            if let Some(name) = kw_rest.name() {
+                if let Ok(s) = std::str::from_utf8(name.as_slice()) {
+                    scope.insert(s.to_string());
+                }
+            }
+        }
+    }
     for p in params.keywords().iter() {
         if let Some(kw) = p.as_required_keyword_parameter_node() {
             if let Ok(s) = std::str::from_utf8(kw.name().as_slice()) {
@@ -770,6 +1024,15 @@ fn collect_param_names_into(params: &ruby_prism::ParametersNode<'_>, scope: &mut
         } else if let Some(kw) = p.as_optional_keyword_parameter_node() {
             if let Ok(s) = std::str::from_utf8(kw.name().as_slice()) {
                 scope.insert(s.trim_end_matches(':').to_string());
+            }
+        }
+    }
+    if let Some(keyword_rest) = params.keyword_rest() {
+        if let Some(keyword_rest) = keyword_rest.as_keyword_rest_parameter_node() {
+            if let Some(name) = keyword_rest.name() {
+                if let Ok(s) = std::str::from_utf8(name.as_slice()) {
+                    scope.insert(s.to_string());
+                }
             }
         }
     }

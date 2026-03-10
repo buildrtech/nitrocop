@@ -81,3 +81,20 @@ def some_method
   proc_taking_block.call do
   end
 end
+
+# Post parameter shadows in inner block
+def configure(*items, tail)
+  jobs.each do |tail|
+                ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `tail`.
+    puts tail
+  end
+end
+
+# Keyword rest parameter shadows in inner block
+def configure(**options)
+  handler = proc do |**options|
+                     ^^^^^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `options`.
+    options
+  end
+  handler.call
+end

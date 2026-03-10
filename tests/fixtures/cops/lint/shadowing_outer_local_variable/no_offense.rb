@@ -144,3 +144,21 @@ class MyTranslator
     name
   end
 end
+
+# Later method params are not visible in earlier default lambdas
+def build_handlers(
+  outer: ->(cursor) { cursor },
+  inner: ->(item, cursor) { [item, cursor] },
+  cursor: nil
+)
+  [outer, inner, cursor]
+end
+
+# Top-level locals do not leak into class body proc scopes
+command = "outer"
+
+class Worker
+  HANDLER = proc do |command|
+    puts command
+  end
+end
