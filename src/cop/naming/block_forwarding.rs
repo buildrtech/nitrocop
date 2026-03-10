@@ -32,6 +32,15 @@ use crate::parse::source::SourceFile;
 /// Fix: detect whitespace in the block param source (location length >
 /// name length + 1) and skip body forwarding offenses when present. This
 /// replicates RuboCop's source-comparison quirk.
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=0, FN=3. All 3 FNs from rest-client where
+/// both param and body usage have matching whitespace (e.g., `& block` in
+/// both positions). The previous fix blanket-skipped ALL body offenses when
+/// `has_space_in_param` was true, but RuboCop only skips when the source
+/// texts don't match. Fix: compare param source text against each forwarding
+/// usage source text per-usage, only skipping mismatches.
 pub struct BlockForwarding;
 
 impl Cop for BlockForwarding {
@@ -146,14 +155,15 @@ impl Cop for BlockForwarding {
 
             // RuboCop matches body forwarding usages by comparing source text
             // (e.g., "&block" == "&block"). When the param has extra whitespace
-            // (e.g., "& block"), the source strings don't match and RuboCop
-            // skips the body offenses. Replicate this behavior.
-            let param_loc_len = loc.end_offset() - loc.start_offset();
-            let has_space_in_param = param_loc_len > param_name_bytes.len() + 1;
+            // (e.g., "& block"), the source strings don't match against "&block"
+            // and RuboCop skips those body offenses. But if the body usage also
+            // has the same whitespace (e.g., "& block" == "& block"), the sources
+            // match and the offense is reported. Compare per-usage.
+            let param_source = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
 
-            if !has_space_in_param {
-                // Offense on each &block forwarding usage in the body
-                for (start, _end) in &checker.forwarding_locations {
+            for (start, end) in &checker.forwarding_locations {
+                let fwd_source = &source.as_bytes()[*start..*end];
+                if fwd_source == param_source {
                     let (line, column) = source.offset_to_line_col(*start);
                     diagnostics.push(self.diagnostic(
                         source,

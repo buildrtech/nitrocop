@@ -60,8 +60,27 @@ def other_procs(bar, &block)
   delegator.foo(&bar).each(&block)
                            ^^^^^^ Naming/BlockForwarding: Use anonymous block forwarding.
 end
-# space between & and param name — only param is flagged, not body forwarding
+# space between & and param name — body with no space is NOT flagged (source mismatch)
 def transmit uri, req, payload, & block
                                 ^^^^^^^ Naming/BlockForwarding: Use anonymous block forwarding.
   process_result(res, start_time, tempfile, &block)
+end
+# space between & and param name — body also has space, so sources MATCH → both flagged
+def forward_with_space(& blk)
+                       ^^^^^ Naming/BlockForwarding: Use anonymous block forwarding.
+  other_method(& blk)
+               ^^^^^ Naming/BlockForwarding: Use anonymous block forwarding.
+end
+# space in both param and multiple body usages
+def method_missing(s, *args, & b)
+                             ^^^ Naming/BlockForwarding: Use anonymous block forwarding.
+  r.send(s, *args, & b)
+                   ^^^ Naming/BlockForwarding: Use anonymous block forwarding.
+end
+# space in param, mixed body usages: one matches, one doesn't
+def mixed_spaces(& block)
+                 ^^^^^^^ Naming/BlockForwarding: Use anonymous block forwarding.
+  foo(& block)
+      ^^^^^^^ Naming/BlockForwarding: Use anonymous block forwarding.
+  bar(&block)
 end
