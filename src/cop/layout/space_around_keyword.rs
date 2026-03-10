@@ -3,6 +3,22 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// CI baseline reported FP=4, FN=93.
+///
+/// The current implementation is only a source scan for a narrow `keyword(`
+/// subset at statement boundaries. That explains the sampled FP on chained
+/// `Arel::Nodes::Case.new.when(...)` calls, where `when(` is a method send and
+/// not a keyword, and the much larger FN set on compact missing-space-before
+/// forms like `...:super`, `...and`, `...if`, `...rescue`, and `return(...)`
+/// in minified or DSL-heavy code.
+///
+/// A correct fix is not a local condition tweak. It needs RuboCop-like
+/// location-aware handling for both missing space before and missing space
+/// after many keyword node types, plus explicit exclusions for method sends
+/// such as `when(...)`. Treat this cop as needing a broader rewrite rather than
+/// another incremental source-scan patch.
 pub struct SpaceAroundKeyword;
 
 impl Cop for SpaceAroundKeyword {
