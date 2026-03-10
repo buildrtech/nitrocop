@@ -5,12 +5,20 @@ use crate::parse::source::SourceFile;
 
 /// Layout/MultilineHashBraceLayout
 ///
-/// ## Investigation (2026-03-09)
-/// FP in forem (spec/swagger_helper.rb:480) and puppet (spec/unit/datatypes_spec.rb:317):
-/// both involve hashes where the last value is a heredoc. The heredoc terminator forces
-/// the closing brace onto a separate line, so RuboCop skips brace layout checks when
-/// any hash element contains a heredoc. Fixed by adding a heredoc element check before
-/// enforcing brace placement.
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=0, FN=2.
+///
+/// FP=0: no corpus false positives are currently known.
+///
+/// FN=2:
+/// - `elastic/elasticsearch-ruby`: the outer hash had a heredoc in an earlier
+///   element, but the last element was a normal hash pair. RuboCop still checks
+///   brace layout there; only a heredoc in the last element forces the closing
+///   brace placement. Fixed by narrowing the heredoc skip to the last element.
+/// - `peritor/webistrano`: the remaining FN is a commented-out snippet that has
+///   not reproduced locally as a normal AST-based offense. Leave it for future
+///   investigation if it persists after the next corpus oracle run.
 pub struct MultilineHashBraceLayout;
 
 impl Cop for MultilineHashBraceLayout {
@@ -56,9 +64,11 @@ impl Cop for MultilineHashBraceLayout {
             return;
         }
 
-        // Skip if any element contains a heredoc — the heredoc terminator forces
-        // unusual brace placement that RuboCop allows.
-        if elements.iter().any(|e| contains_heredoc(&e)) {
+        let last_elem = elements.iter().last().unwrap();
+
+        // Only the last element can force the closing brace to move because of
+        // its heredoc terminator. Earlier heredocs do not exempt the hash.
+        if contains_heredoc(&last_elem) {
             return;
         }
 
@@ -67,7 +77,6 @@ impl Cop for MultilineHashBraceLayout {
 
         // Get first and last element lines
         let first_elem = elements.iter().next().unwrap();
-        let last_elem = elements.iter().last().unwrap();
         let (first_elem_line, _) = source.offset_to_line_col(first_elem.location().start_offset());
         let (last_elem_line, _) =
             source.offset_to_line_col(last_elem.location().end_offset().saturating_sub(1));
@@ -166,9 +175,26 @@ fn contains_heredoc(node: &ruby_prism::Node<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
         MultilineHashBraceLayout,
         "cops/layout/multiline_hash_brace_layout"
     );
+
+    #[test]
+    fn earlier_heredoc_still_checks_closing_brace() {
+        let source = br#"config = { subject: <<~BODY,
+             body line
+           BODY
+           attachment: "report.yml"
+}
+"#;
+        let diagnostics = run_cop_full(&MultilineHashBraceLayout, source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Expected one offense: {diagnostics:?}"
+        );
+    }
 }
