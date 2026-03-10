@@ -7,3 +7,6 @@ require 'csv'
 require 'set'
 # 'fiber' is only redundant in Ruby 3.1+; at default 2.7, it's NOT redundant
 require 'fiber'
+# 'pp' is NOT redundant when file uses PP constant
+require 'pp'
+PP.pp(data, $stderr)
