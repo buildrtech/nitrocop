@@ -56,3 +56,11 @@ def calculate
   x = 1
 end
 # rubocop:enable Metrics/MethodLength
+
+# Invalid token before a department disable should not leave a phantom department open
+# rubocop:disable /BlockLength, Metrics/
+RSpec.describe Example do
+  it "works" do
+    expect(result).to be_truthy
+  end
+end

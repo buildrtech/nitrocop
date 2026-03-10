@@ -31,6 +31,12 @@ use crate::parse::source::SourceFile;
 /// phantom cop names (e.g., `baz` from `bar, baz instead`). These phantom
 /// disables had no matching enable and were reported as FPs. Fix: strip text
 /// after `--` before splitting on commas.
+///
+/// **Round 4** — FP=1, FN=0. Root cause: malformed tokens such as `Metrics/`
+/// were still accepted as cop names. In real-world directives like
+/// `# rubocop:disable /BlockLength, Metrics/`, RuboCop ignores both malformed
+/// tokens entirely, so no later enable is required. Fix: reject tokens that do
+/// not start with an alphanumeric character or that end with `/`.
 pub struct MissingCopEnableDirective;
 
 impl Cop for MissingCopEnableDirective {
@@ -237,11 +243,15 @@ fn parse_directive(line: &str) -> Option<(&str, Vec<String>, usize)> {
 
 fn parse_cop_token(raw: &str) -> Option<String> {
     let trimmed = raw.trim_start();
+    let first = *trimmed.as_bytes().first()?;
+    if !first.is_ascii_alphanumeric() {
+        return None;
+    }
     let end = trimmed
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '/' || c == '_'))
         .unwrap_or(trimmed.len());
     let token = trimmed[..end].trim_end_matches('.');
-    if token.is_empty() {
+    if token.is_empty() || token.ends_with('/') {
         None
     } else {
         Some(token.to_string())
