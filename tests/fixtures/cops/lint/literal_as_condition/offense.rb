@@ -126,3 +126,14 @@ until 42
       ^^ Lint/LiteralAsCondition: Literal `42` appeared as a condition.
   top
 end
+
+# Interpolated xstring in condition
+if `#{ready}`
+   ^^^^^^^^^ Lint/LiteralAsCondition: Literal ``#{ready}`` appeared as a condition.
+  top
+end
+
+while `#{counter} < 10`
+      ^^^^^^^^^^^^^^^^^ Lint/LiteralAsCondition: Literal ``#{counter} < 10`` appeared as a condition.
+  break
+end

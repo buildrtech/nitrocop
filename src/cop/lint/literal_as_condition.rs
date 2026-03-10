@@ -34,6 +34,20 @@ use crate::parse::source::SourceFile;
 /// - Added case without predicate and case_match support
 /// - Added recursive condition checking (check_node/handle_node)
 /// - Added begin..end while/until (post-loop) via is_begin_modifier()
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=20, FN=17.
+///
+/// FP:
+/// - Remaining false positives are concentrated in corpus test/spec files and pattern-matching
+///   guards. The exact RuboCop suppression path is still unclear, so no FP-side change was made
+///   in this pass.
+///
+/// FN:
+/// - Opal-style backtick JavaScript with interpolation parses as `InterpolatedXStringNode`, not
+///   `XStringNode`. Treating only plain xstrings as literals missed conditions like
+///   ``if `#{value}``` and ``while `#{counter} < 10``.
 pub struct LiteralAsCondition;
 
 /// Check if a node is a literal value (matches RuboCop's `literal?`).
@@ -58,6 +72,7 @@ fn is_literal(node: &ruby_prism::Node<'_>) -> bool {
             | ruby_prism::Node::InterpolatedStringNode { .. }
             | ruby_prism::Node::InterpolatedSymbolNode { .. }
             | ruby_prism::Node::InterpolatedRegularExpressionNode { .. }
+            | ruby_prism::Node::InterpolatedXStringNode { .. }
             | ruby_prism::Node::XStringNode { .. }
     )
 }
