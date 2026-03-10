@@ -39,3 +39,30 @@ end
 
 _myLocal = 1
 ^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+badName, ok = [1, 2]
+^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+badCompound ||= 1
+^^^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+badAnd &&= true
+^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+badOp += 1
+^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+@badIvar ||= compute
+^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+@badIvarAnd &&= true
+^^^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+@badIvarOp += 1
+^^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+@@badCvar += 1
+^^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+@@badCvarOr ||= 0
+^^^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.

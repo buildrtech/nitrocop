@@ -1,6 +1,13 @@
 use crate::cop::node_type::{
-    BLOCK_NODE, CLASS_VARIABLE_WRITE_NODE, DEF_NODE, GLOBAL_VARIABLE_WRITE_NODE,
-    INSTANCE_VARIABLE_WRITE_NODE, LAMBDA_NODE, LOCAL_VARIABLE_READ_NODE, LOCAL_VARIABLE_WRITE_NODE,
+    BLOCK_NODE, CLASS_VARIABLE_AND_WRITE_NODE, CLASS_VARIABLE_OPERATOR_WRITE_NODE,
+    CLASS_VARIABLE_OR_WRITE_NODE, CLASS_VARIABLE_TARGET_NODE, CLASS_VARIABLE_WRITE_NODE, DEF_NODE,
+    GLOBAL_VARIABLE_AND_WRITE_NODE, GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+    GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_TARGET_NODE, GLOBAL_VARIABLE_WRITE_NODE,
+    INSTANCE_VARIABLE_AND_WRITE_NODE, INSTANCE_VARIABLE_OPERATOR_WRITE_NODE,
+    INSTANCE_VARIABLE_OR_WRITE_NODE, INSTANCE_VARIABLE_TARGET_NODE, INSTANCE_VARIABLE_WRITE_NODE,
+    LAMBDA_NODE, LOCAL_VARIABLE_AND_WRITE_NODE, LOCAL_VARIABLE_OPERATOR_WRITE_NODE,
+    LOCAL_VARIABLE_OR_WRITE_NODE, LOCAL_VARIABLE_READ_NODE, LOCAL_VARIABLE_TARGET_NODE,
+    LOCAL_VARIABLE_WRITE_NODE,
 };
 use crate::cop::util::is_snake_case;
 use crate::cop::{Cop, CopConfig};
@@ -34,6 +41,15 @@ use crate::parse::source::SourceFile;
 /// FN: RuboCop checks underscore-prefixed variables like `_myLocal` for
 /// style violations. Only bare `_` is skipped. Fixed by removing the
 /// underscore-prefix skip.
+///
+/// ## Corpus investigation (2026-03-10, round 2)
+///
+/// FN=90: Missing compound assignment nodes (||=, &&=, +=) and
+/// multi-assignment target nodes for all variable types. RuboCop's
+/// `on_lvasgn` alias covers these via Parser gem unification, but Prism
+/// splits them into separate node types. Fixed by adding
+/// LocalVariable{Or,And,Operator}WriteNode, LocalVariableTargetNode,
+/// and equivalent nodes for instance, class, and global variables.
 pub struct VariableName;
 
 impl Cop for VariableName {
@@ -45,9 +61,25 @@ impl Cop for VariableName {
         &[
             LOCAL_VARIABLE_WRITE_NODE,
             LOCAL_VARIABLE_READ_NODE,
+            LOCAL_VARIABLE_OR_WRITE_NODE,
+            LOCAL_VARIABLE_AND_WRITE_NODE,
+            LOCAL_VARIABLE_OPERATOR_WRITE_NODE,
+            LOCAL_VARIABLE_TARGET_NODE,
             INSTANCE_VARIABLE_WRITE_NODE,
+            INSTANCE_VARIABLE_OR_WRITE_NODE,
+            INSTANCE_VARIABLE_AND_WRITE_NODE,
+            INSTANCE_VARIABLE_OPERATOR_WRITE_NODE,
+            INSTANCE_VARIABLE_TARGET_NODE,
             CLASS_VARIABLE_WRITE_NODE,
+            CLASS_VARIABLE_OR_WRITE_NODE,
+            CLASS_VARIABLE_AND_WRITE_NODE,
+            CLASS_VARIABLE_OPERATOR_WRITE_NODE,
+            CLASS_VARIABLE_TARGET_NODE,
             GLOBAL_VARIABLE_WRITE_NODE,
+            GLOBAL_VARIABLE_OR_WRITE_NODE,
+            GLOBAL_VARIABLE_AND_WRITE_NODE,
+            GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+            GLOBAL_VARIABLE_TARGET_NODE,
             DEF_NODE,
             BLOCK_NODE,
             LAMBDA_NODE,
@@ -96,14 +128,53 @@ impl Cop for VariableName {
 
         // Extract variable name and location based on node type
         let (raw_name, start_offset, is_global) =
+            // Local variable writes and compound assignments
             if let Some(n) = node.as_local_variable_write_node() {
                 (n.name().as_slice(), n.name_loc().start_offset(), false)
-            } else if let Some(n) = node.as_instance_variable_write_node() {
+            } else if let Some(n) = node.as_local_variable_or_write_node() {
                 (n.name().as_slice(), n.name_loc().start_offset(), false)
-            } else if let Some(n) = node.as_class_variable_write_node() {
+            } else if let Some(n) = node.as_local_variable_and_write_node() {
                 (n.name().as_slice(), n.name_loc().start_offset(), false)
-            } else if let Some(n) = node.as_global_variable_write_node() {
+            } else if let Some(n) = node.as_local_variable_operator_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_local_variable_target_node() {
+                (n.name().as_slice(), n.location().start_offset(), false)
+            }
+            // Instance variable writes and compound assignments
+            else if let Some(n) = node.as_instance_variable_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_instance_variable_or_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_instance_variable_and_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_instance_variable_operator_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_instance_variable_target_node() {
+                (n.name().as_slice(), n.location().start_offset(), false)
+            }
+            // Class variable writes and compound assignments
+            else if let Some(n) = node.as_class_variable_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_class_variable_or_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_class_variable_and_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_class_variable_operator_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), false)
+            } else if let Some(n) = node.as_class_variable_target_node() {
+                (n.name().as_slice(), n.location().start_offset(), false)
+            }
+            // Global variable writes and compound assignments
+            else if let Some(n) = node.as_global_variable_write_node() {
                 (n.name().as_slice(), n.name_loc().start_offset(), true)
+            } else if let Some(n) = node.as_global_variable_or_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), true)
+            } else if let Some(n) = node.as_global_variable_and_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), true)
+            } else if let Some(n) = node.as_global_variable_operator_write_node() {
+                (n.name().as_slice(), n.name_loc().start_offset(), true)
+            } else if let Some(n) = node.as_global_variable_target_node() {
+                (n.name().as_slice(), n.location().start_offset(), true)
             } else {
                 return;
             };

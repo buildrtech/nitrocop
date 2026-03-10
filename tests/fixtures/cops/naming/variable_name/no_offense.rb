@@ -21,3 +21,8 @@ $LO = 0
 good_var = 1
 do_something(good_var)
 items.each { |item| item }
+good_name, ok = [1, 2]
+good_compound ||= 1
+@good_ivar ||= compute
+@@good_cvar += 1
+$GOOD_GLOBAL ||= 0
