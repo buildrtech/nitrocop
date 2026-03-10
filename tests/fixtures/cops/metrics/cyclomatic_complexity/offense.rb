@@ -184,6 +184,34 @@ def method_with_many_rescue_modifiers
   g = seventh_call rescue nil
 end
 
+# Nested rescue inside rescue body should count as a separate decision point.
+# The inner `rescue` at the nested begin...rescue...end must be counted even
+# though the outer rescue chain has already been entered.
+def method_with_nested_rescue_in_rescue(data)
+^^^ Metrics/CyclomaticComplexity: Cyclomatic complexity for method_with_nested_rescue_in_rescue is too high. [8/7]
+  if data.nil?
+    return
+  end
+  if data.empty?
+    return
+  end
+  begin
+    process(data)
+  rescue StandardError => e
+    if retryable?(e)
+      begin
+        fallback_process(data)
+      rescue StandardError
+        default_value
+      end
+    end
+    if loggable?(e)
+      log(e)
+    end
+    raise if critical?(e)
+  end
+end
+
 # with_index and with_object are iterating methods (enumerator category)
 def method_with_enumerator_blocks(items)
 ^^^ Metrics/CyclomaticComplexity: Cyclomatic complexity for method_with_enumerator_blocks is too high. [9/7]

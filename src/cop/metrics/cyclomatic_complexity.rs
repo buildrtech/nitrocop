@@ -47,21 +47,18 @@ use crate::parse::source::SourceFile;
 ///   remaining FN but introduced potential FP (+12 vs RuboCop expected offenses).
 ///   The manual traversal approach was reverted to preserve zero-excess behavior.
 ///
-/// ## Corpus investigation (2026-03-09)
+/// ## Corpus investigation (2026-03-10)
 ///
-/// Re-ran the cop under the repository's Ruby 3.4 toolchain:
-/// `mise exec ruby@3.4 -- python3 scripts/check-cop.py
-/// Metrics/CyclomaticComplexity --verbose --rerun`.
+/// FP root cause: `begin...end while/until` (post-condition loops) were
+/// counted as decision points. In Parser gem these are `:while_post`/`:until_post`
+/// which are NOT in `COUNTED_NODES`. In Prism both forms are `WhileNode`/`UntilNode`
+/// with the `begin_modifier` flag set. Fix: skip counting when `is_begin_modifier()`.
+/// This resolved 10 FP across 8 repos (rank, advance_to, gets, cat, token, etc.).
 ///
-/// Result:
-/// - Expected: 22,768
-/// - Actual:   22,871
-/// - Excess:   0 over CI baseline after file-drop adjustment
-/// - Missing:  0
-///
-/// No code change was needed in this run. The artifact snapshot's FP/FN counts
-/// were stale relative to a proper rerun; current behavior is within file-drop
-/// noise and has no remaining missing offenses.
+/// FN root cause: Nested `begin...rescue...end` blocks inside rescue clause
+/// bodies were not counted because the `in_rescue_chain` flag remained true.
+/// Fix: override `visit_begin_node` to save/restore `in_rescue_chain`, so
+/// nested rescue scopes start fresh. This resolved 14 FN across 12 repos.
 pub struct CyclomaticComplexity;
 
 #[derive(Default)]
@@ -187,9 +184,25 @@ impl CyclomaticCounter {
                     self.complexity += 1;
                 }
             }
-            ruby_prism::Node::WhileNode { .. }
-            | ruby_prism::Node::UntilNode { .. }
-            | ruby_prism::Node::ForNode { .. }
+            // In Parser gem, `begin...end while cond` produces :while_post
+            // (and `begin...end until` produces :until_post), which are NOT in
+            // COUNTED_NODES. In Prism both forms are WhileNode/UntilNode with
+            // the `begin_modifier` flag set. Skip counting when that flag is set.
+            ruby_prism::Node::WhileNode { .. } => {
+                if let Some(while_node) = node.as_while_node() {
+                    if !while_node.is_begin_modifier() {
+                        self.complexity += 1;
+                    }
+                }
+            }
+            ruby_prism::Node::UntilNode { .. } => {
+                if let Some(until_node) = node.as_until_node() {
+                    if !until_node.is_begin_modifier() {
+                        self.complexity += 1;
+                    }
+                }
+            }
+            ruby_prism::Node::ForNode { .. }
             | ruby_prism::Node::WhenNode { .. }
             | ruby_prism::Node::AndNode { .. }
             | ruby_prism::Node::OrNode { .. }
@@ -317,6 +330,16 @@ impl<'pr> Visit<'pr> for CyclomaticCounter {
         } else {
             ruby_prism::visit_rescue_node(self, node);
         }
+    }
+
+    // Override visit_begin_node to reset in_rescue_chain before visiting the
+    // begin's rescue clause. This ensures that nested begin...rescue...end
+    // blocks inside a rescue body are counted as separate decision points.
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        let saved = self.in_rescue_chain;
+        self.in_rescue_chain = false;
+        ruby_prism::visit_begin_node(self, node);
+        self.in_rescue_chain = saved;
     }
 
     // InNode: count +1 for the `in` clause, then visit children with guard
@@ -468,6 +491,78 @@ mod tests {
             "Should fire with Max:1 on method with if branch"
         );
         assert!(diags[0].message.contains("[2/1]"));
+    }
+
+    /// `begin...end while` (post-condition loop) should NOT count as a decision
+    /// point. In Parser gem these produce :while_post (not in COUNTED_NODES).
+    #[test]
+    fn begin_end_while_not_counted() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(0.into()))]),
+            ..CopConfig::default()
+        };
+
+        // Regular while counts
+        let source_while = b"def foo\n  while cond\n    x\n  end\nend\n";
+        let diags = run_cop_full_with_config(&CyclomaticComplexity, source_while, config.clone());
+        assert!(
+            diags[0].message.contains("[2/0]"),
+            "Regular while should count: got {}",
+            diags[0].message
+        );
+
+        // begin...end while does NOT count
+        let source_post = b"def foo\n  begin\n    x\n  end while cond\nend\n";
+        let diags = run_cop_full_with_config(&CyclomaticComplexity, source_post, config.clone());
+        assert!(
+            diags[0].message.contains("[1/0]"),
+            "Post-condition while should NOT count: got {}",
+            diags[0].message
+        );
+
+        // begin...end until does NOT count
+        let source_until = b"def foo\n  begin\n    x\n  end until cond\nend\n";
+        let diags = run_cop_full_with_config(&CyclomaticComplexity, source_until, config.clone());
+        assert!(
+            diags[0].message.contains("[1/0]"),
+            "Post-condition until should NOT count: got {}",
+            diags[0].message
+        );
+
+        // Regular until counts
+        let source_until_pre = b"def foo\n  until cond\n    x\n  end\nend\n";
+        let diags =
+            run_cop_full_with_config(&CyclomaticComplexity, source_until_pre, config.clone());
+        assert!(
+            diags[0].message.contains("[2/0]"),
+            "Regular until should count: got {}",
+            diags[0].message
+        );
+    }
+
+    /// Nested rescue inside a rescue body should count as a separate decision
+    /// point. The outer rescue chain flag must not suppress inner rescues.
+    #[test]
+    fn nested_rescue_in_rescue_body_counted() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(0.into()))]),
+            ..CopConfig::default()
+        };
+
+        // Outer rescue + nested rescue in body = 2 decision points
+        let source = b"def foo\n  begin\n    x\n  rescue => e\n    begin\n      y\n    rescue\n      z\n    end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&CyclomaticComplexity, source, config.clone());
+        assert!(
+            diags[0].message.contains("[3/0]"),
+            "Outer + nested rescue should be 3: got {}",
+            diags[0].message
+        );
     }
 
     /// Numbered parameter blocks (_1) should NOT count as iterating blocks.

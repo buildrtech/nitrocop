@@ -110,6 +110,51 @@ def method_with_numblock_iterating(response)
   end
 end
 
+# begin...end while/until (post-condition loops) are NOT counted as decision
+# points. In Parser gem these are :while_post/:until_post, which are not in
+# COUNTED_NODES. In Prism they are WhileNode/UntilNode with begin_modifier flag.
+# This method has 6 decision points + 1 base = 7 (at threshold).
+def method_with_post_condition_loop(items)
+  if items.nil?
+    return
+  end
+  if items.empty?
+    return
+  end
+  result = []
+  i = 0
+  begin
+    result << items[i] if items[i]
+    i += 1
+  end while i < items.size
+  if result.empty?
+    return
+  end
+  if result.size > 10
+    result = result.take(10)
+  end
+  result
+end
+
+# begin...end until (post-condition) is also not counted
+def method_with_post_condition_until(data)
+  if data.nil?
+    return
+  end
+  if data.empty?
+    return
+  end
+  idx = 0
+  begin
+    process(data[idx]) if valid?(data[idx])
+    idx += 1
+  end until idx >= data.size
+  if result.nil?
+    nil
+  end
+  data.select { |d| d }
+end
+
 # `it` blocks are also not counted as iterating blocks
 # (RuboCop's Parser gem produces :itblock, not :block, for these)
 def method_with_it_block_iterating(items)
