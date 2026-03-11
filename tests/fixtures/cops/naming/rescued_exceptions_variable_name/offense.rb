@@ -72,6 +72,14 @@ rescue MyException => _exc
   # ignored
 end
 
+# Multiple exception types (comma-separated) with bad variable name
+begin
+  something
+rescue ArgumentError, TypeError => ex
+                                   ^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `ex` for rescued exceptions.
+  handle(ex)
+end
+
 # Multiple rescues in same begin block
 begin
   something

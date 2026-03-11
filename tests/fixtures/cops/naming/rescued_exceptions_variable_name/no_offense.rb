@@ -69,6 +69,13 @@ rescue => storage.exception
   # do something
 end
 
+# Multiple exception types with correct variable name
+begin
+  something
+rescue ArgumentError, TypeError => e
+  handle(e)
+end
+
 # _e is accepted (underscore-prefixed preferred name)
 begin
   something

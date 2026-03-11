@@ -4,7 +4,7 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// ## Corpus investigation (2026-03-10)
+/// ## Corpus investigation (2026-03-11)
 ///
 /// Corpus oracle reported FP=0, FN=2. Both FNs from jruby
 /// (`test/jruby/test_local_jump_error.rb:7` and `:15`), `rescue LocalJumpError => lje`.
