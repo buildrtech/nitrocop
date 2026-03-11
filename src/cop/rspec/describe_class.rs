@@ -421,4 +421,173 @@ mod tests {
         assert!(!looks_like_constant(b"2Thing"));
         assert!(!looks_like_constant(b""));
     }
+
+    #[test]
+    fn explore_shared_examples_not_flagged() {
+        // shared_examples at top level should not be flagged
+        let source = b"shared_examples 'Common::Interface' do\n  it 'works' do\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert!(
+            diags.is_empty(),
+            "shared_examples should not be flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn explore_shared_examples_for_not_flagged() {
+        let source = b"shared_examples_for 'something' do\n  it 'works' do\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert!(
+            diags.is_empty(),
+            "shared_examples_for should not be flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn explore_feature_not_flagged() {
+        // feature 'something' at top level - describe_class only checks 'describe'
+        let source = b"feature 'Login' do\n  scenario 'works' do\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert!(diags.is_empty(), "feature should not be flagged: {diags:?}");
+    }
+
+    #[test]
+    fn explore_context_not_flagged() {
+        let source = b"context 'something' do\n  it 'works' do\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert!(diags.is_empty(), "context should not be flagged: {diags:?}");
+    }
+
+    #[test]
+    fn explore_describe_inside_shared_examples() {
+        // describe inside shared_examples should not be flagged (not top-level)
+        let source = b"shared_examples 'foo' do\n  describe '#method' do\n    it 'works' do\n    end\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert!(
+            diags.is_empty(),
+            "describe inside shared_examples should not be flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn explore_describe_inside_shared_context() {
+        let source = b"shared_context 'foo' do\n  describe '#method' do\n    it 'works' do\n    end\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert!(
+            diags.is_empty(),
+            "describe inside shared_context should not be flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn explore_describe_with_symbol_first_arg() {
+        // describe :symbol — should be flagged (not a constant)
+        let source = b"describe :foo do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert_eq!(diags.len(), 1, "describe with symbol should be flagged");
+    }
+
+    #[test]
+    fn explore_describe_with_method_call_first_arg() {
+        // describe method_call — should be flagged
+        let source = b"describe some_method do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "describe with method call should be flagged"
+        );
+    }
+
+    #[test]
+    fn explore_describe_with_self_first_arg() {
+        // RuboCop would flag describe(self)
+        let source = b"describe self do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert_eq!(diags.len(), 1, "describe with self should be flagged");
+    }
+
+    #[test]
+    fn explore_nested_describe_not_flagged() {
+        // nested describe inside another describe is not top-level
+        let source = b"describe SomeClass do\n  describe 'bad describe' do\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert!(
+            diags.is_empty(),
+            "nested describe should not be flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn explore_describe_with_block_pass() {
+        // describe &block - should be flagged
+        let source = b"describe &block do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        // This may not parse correctly, just checking behavior
+        eprintln!("block_pass diags: {diags:?}");
+    }
+
+    #[test]
+    fn explore_rspec_shared_examples() {
+        // RSpec.shared_examples should not be flagged
+        let source = b"RSpec.shared_examples 'something' do\n  it 'works' do\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert!(
+            diags.is_empty(),
+            "RSpec.shared_examples should not be flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn explore_describe_without_block() {
+        // describe 'foo' without a block — RuboCop wouldn't flag (not a spec_group?)
+        let source = b"describe 'foo'\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        eprintln!("describe without block: {diags:?}");
+    }
+
+    #[test]
+    fn explore_describe_inside_begin_rescue() {
+        // describe inside begin/rescue at top level
+        let source = b"begin\n  describe 'foo' do\n  end\nrescue\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        eprintln!("describe in begin/rescue: {diags:?}");
+    }
+
+    #[test]
+    fn explore_describe_inside_if() {
+        // describe inside if at top level
+        let source = b"if ENV['RUN_SPECS']\n  describe 'foo' do\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        eprintln!("describe in if: {diags:?}");
+    }
+
+    #[test]
+    fn explore_describe_with_heredoc() {
+        // RuboCop treats top_level_nodes -> begin (which is the program body)
+        // vs nitrocop which iterates program.statements
+        let source = b"require 'spec_helper'\n\ndescribe 'something' do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "describe with string should be flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn explore_describe_with_interpolated_string() {
+        // Interpolated string as first arg
+        let source = b"describe \"#{some_var}\" do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        eprintln!("interpolated string: {diags:?}");
+    }
+
+    #[test]
+    fn explore_describe_with_hash_rocket_metadata() {
+        // type => :model (hash rocket instead of symbol key)
+        let source = b"describe 'foo', 'type' => :model do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeClass, source);
+        eprintln!("hash rocket metadata: {diags:?}");
+    }
 }
