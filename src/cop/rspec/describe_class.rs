@@ -6,9 +6,29 @@ use crate::cop::util::RSPEC_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use std::collections::HashMap;
 
 /// RSpec/DescribeClass: The first argument to top-level describe should be
 /// the class or module being tested.
+///
+/// ## Investigation findings (2026-03-11)
+///
+/// **FN=154 — Not recursing into module/class wrappers**: RuboCop's `TopLevelGroup`
+/// mixin uses `top_level_nodes` which recurses into `module` and `class` bodies to
+/// find top-level describe calls. nitrocop only checked direct `program.statements()`.
+/// Fixed by adding `collect_top_level_nodes` that recurses into module/class/begin nodes.
+///
+/// **FP=4 — IgnoredMetadata value checking**: RuboCop's `IgnoredMetadata` is a hash
+/// of `key: [values]` (e.g., `type: [request, controller]`). It checks BOTH key AND
+/// value. nitrocop had a separate `has_type_metadata` that accepted ANY `type:` value,
+/// and `has_ignored_metadata` that only checked key presence. Fixed by removing the
+/// separate `type` check and implementing proper key+value matching against
+/// `IgnoredMetadata` config (which includes `type` with specific allowed values in
+/// its defaults).
+///
+/// **looks_like_constant regex mismatch**: RuboCop uses `/^(?:(?:::)?[A-Z]\w*)+$/`
+/// which requires each segment after `::` to start with uppercase. nitrocop's version
+/// only checked the first segment. Fixed to validate each `::` segment starts uppercase.
 pub struct DescribeClass;
 
 impl Cop for DescribeClass {
@@ -51,12 +71,89 @@ impl Cop for DescribeClass {
             None => return,
         };
 
-        let stmts = program.statements();
+        // Parse IgnoredMetadata config: hash of key -> array of allowed values
+        let ignored_metadata = parse_ignored_metadata(config);
 
+        let stmts = program.statements();
         for stmt in stmts.body().iter() {
-            check_top_level_describe(self, source, &stmt, diagnostics, config);
+            visit_top_level_nodes(self, source, &stmt, diagnostics, &ignored_metadata);
         }
     }
+}
+
+/// Recursively visit top-level nodes, unwrapping module/class/begin wrappers.
+/// When we reach a non-wrapper node, check if it's a top-level describe.
+/// This mirrors RuboCop's `TopLevelGroup#top_level_nodes`.
+fn visit_top_level_nodes(
+    cop: &DescribeClass,
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    ignored_metadata: &HashMap<String, Vec<String>>,
+) {
+    if let Some(module_node) = node.as_module_node() {
+        if let Some(body) = module_node.body() {
+            visit_body(cop, source, &body, diagnostics, ignored_metadata);
+        }
+    } else if let Some(class_node) = node.as_class_node() {
+        if let Some(body) = class_node.body() {
+            visit_body(cop, source, &body, diagnostics, ignored_metadata);
+        }
+    } else {
+        check_top_level_describe(cop, source, node, diagnostics, ignored_metadata);
+    }
+}
+
+/// Visit a body node (StatementsNode or BeginNode) and recurse into children.
+fn visit_body(
+    cop: &DescribeClass,
+    source: &SourceFile,
+    body: &ruby_prism::Node<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    ignored_metadata: &HashMap<String, Vec<String>>,
+) {
+    if let Some(stmts) = body.as_statements_node() {
+        for child in stmts.body().iter() {
+            visit_top_level_nodes(cop, source, &child, diagnostics, ignored_metadata);
+        }
+    } else if let Some(begin) = body.as_begin_node() {
+        if let Some(stmts) = begin.statements() {
+            for child in stmts.body().iter() {
+                visit_top_level_nodes(cop, source, &child, diagnostics, ignored_metadata);
+            }
+        }
+    } else {
+        // Single expression body
+        visit_top_level_nodes(cop, source, body, diagnostics, ignored_metadata);
+    }
+}
+
+/// Parse `IgnoredMetadata` config into a HashMap<String, Vec<String>>.
+/// The YAML format is: `IgnoredMetadata: { type: [request, controller, ...] }`.
+fn parse_ignored_metadata(config: &CopConfig) -> HashMap<String, Vec<String>> {
+    let mut result = HashMap::new();
+    let val = match config.options.get("IgnoredMetadata") {
+        Some(v) => v,
+        None => return result,
+    };
+    if let Some(mapping) = val.as_mapping() {
+        for (k, v) in mapping.iter() {
+            let key = match k.as_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let mut values = Vec::new();
+            if let Some(seq) = v.as_sequence() {
+                for item in seq {
+                    if let Some(s) = item.as_str() {
+                        values.push(s.to_string());
+                    }
+                }
+            }
+            result.insert(key, values);
+        }
+    }
+    result
 }
 
 fn check_top_level_describe(
@@ -64,10 +161,8 @@ fn check_top_level_describe(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
     diagnostics: &mut Vec<Diagnostic>,
-    config: &CopConfig,
+    ignored_metadata: &HashMap<String, Vec<String>>,
 ) {
-    // Config: IgnoredMetadata — metadata keys that make describe acceptable
-    let ignored_metadata = config.get_string_array("IgnoredMetadata");
     let call = match node.as_call_node() {
         Some(c) => c,
         None => return,
@@ -91,9 +186,6 @@ fn check_top_level_describe(
             return;
         }
     }
-
-    // Check if inside shared_examples/shared_context - skip if so
-    // (this is handled by the fact that we only check top-level statements)
 
     let args = match call.arguments() {
         Some(a) => a,
@@ -120,16 +212,9 @@ fn check_top_level_describe(
         }
     }
 
-    // Check for `type:` metadata - ignore if has type
-    if has_type_metadata(&arg_list) {
+    // Check for IgnoredMetadata (includes type: checks)
+    if has_ignored_metadata(&arg_list, ignored_metadata) {
         return;
-    }
-
-    // Check for IgnoredMetadata keys
-    if let Some(ref keys) = ignored_metadata {
-        if has_ignored_metadata(&arg_list, keys) {
-            return;
-        }
     }
 
     // Flag the first argument
@@ -143,28 +228,44 @@ fn check_top_level_describe(
     ));
 }
 
-/// Check if a string value looks like a Ruby constant name (starts uppercase, no spaces).
+/// Check if a string value looks like a Ruby constant name.
+/// Matches RuboCop's regex: `/^(?:(?:::)?[A-Z]\w*)+$/`
+/// Each segment (separated by `::`) must start with an uppercase letter.
 fn looks_like_constant(value: &[u8]) -> bool {
     if value.is_empty() {
         return false;
     }
-    // Must start with uppercase letter or ::
-    let start = if value.starts_with(b"::") {
-        &value[2..]
-    } else {
-        value
-    };
-    if start.is_empty() || !start[0].is_ascii_uppercase() {
+    // Skip leading ::
+    let mut i = 0;
+    if value.starts_with(b"::") {
+        i = 2;
+    }
+    // Must have at least one segment starting with uppercase
+    if i >= value.len() || !value[i].is_ascii_uppercase() {
         return false;
     }
-    // All characters must be alphanumeric, underscore, or ::
-    let mut i = 0;
+    // Parse segments separated by ::
     while i < value.len() {
-        let b = value[i];
-        if b.is_ascii_alphanumeric() || b == b'_' {
+        // Each segment must start with uppercase
+        if !value[i].is_ascii_uppercase() {
+            return false;
+        }
+        i += 1;
+        // Consume word chars (alphanumeric + underscore)
+        while i < value.len() && (value[i].is_ascii_alphanumeric() || value[i] == b'_') {
             i += 1;
-        } else if b == b':' && i + 1 < value.len() && value[i + 1] == b':' {
+        }
+        // If we're at end, success
+        if i >= value.len() {
+            return true;
+        }
+        // Must be ::
+        if i + 1 < value.len() && value[i] == b':' && value[i + 1] == b':' {
             i += 2;
+            // :: at end is invalid
+            if i >= value.len() {
+                return false;
+            }
         } else {
             return false;
         }
@@ -172,34 +273,46 @@ fn looks_like_constant(value: &[u8]) -> bool {
     true
 }
 
-fn has_ignored_metadata(args: &[ruby_prism::Node<'_>], keys: &[String]) -> bool {
+/// Check if any argument has metadata matching IgnoredMetadata config.
+/// Checks both key AND value against the configured hash.
+fn has_ignored_metadata(
+    args: &[ruby_prism::Node<'_>],
+    ignored_metadata: &HashMap<String, Vec<String>>,
+) -> bool {
+    if ignored_metadata.is_empty() {
+        return false;
+    }
     for arg in args {
-        if let Some(kw) = arg.as_keyword_hash_node() {
-            for elem in kw.elements().iter() {
-                if let Some(assoc) = elem.as_assoc_node() {
-                    if let Some(sym) = assoc.key().as_symbol_node() {
-                        let key_name = sym.unescaped();
-                        for k in keys {
-                            if key_name == k.as_bytes() {
+        let elements = if let Some(kw) = arg.as_keyword_hash_node() {
+            kw.elements()
+        } else if let Some(h) = arg.as_hash_node() {
+            h.elements()
+        } else {
+            continue;
+        };
+        for elem in elements.iter() {
+            if let Some(assoc) = elem.as_assoc_node() {
+                if let Some(sym) = assoc.key().as_symbol_node() {
+                    let key_name = sym.unescaped();
+                    let key_str = match std::str::from_utf8(key_name) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if let Some(allowed_values) = ignored_metadata.get(key_str) {
+                        // If allowed_values is empty, any value matches
+                        if allowed_values.is_empty() {
+                            return true;
+                        }
+                        // Check if the value is in the allowed list
+                        if let Some(val_sym) = assoc.value().as_symbol_node() {
+                            let val_name = val_sym.unescaped();
+                            let val_str = match std::str::from_utf8(val_name) {
+                                Ok(s) => s,
+                                Err(_) => continue,
+                            };
+                            if allowed_values.iter().any(|v| v == val_str) {
                                 return true;
                             }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-fn has_type_metadata(args: &[ruby_prism::Node<'_>]) -> bool {
-    for arg in args {
-        if let Some(kw) = arg.as_keyword_hash_node() {
-            for elem in kw.elements().iter() {
-                if let Some(assoc) = elem.as_assoc_node() {
-                    if let Some(sym) = assoc.key().as_symbol_node() {
-                        if sym.unescaped() == b"type" {
-                            return true;
                         }
                     }
                 }
@@ -216,22 +329,61 @@ mod tests {
     crate::cop_fixture_tests!(DescribeClass, "cops/rspec/describe_class");
 
     #[test]
-    fn ignored_metadata_skips_describe_with_matching_key() {
+    fn ignored_metadata_skips_describe_with_matching_key_and_value() {
         use crate::cop::CopConfig;
         use std::collections::HashMap;
 
+        // IgnoredMetadata: { feature: [true_val] } — key "feature" with value "true_val"
+        // Here we use the hash format: key -> array of values
+        let mut meta_map = serde_yml::Mapping::new();
+        let mut values = serde_yml::Sequence::new();
+        values.push(serde_yml::Value::String("true".into()));
+        meta_map.insert(
+            serde_yml::Value::String("feature".into()),
+            serde_yml::Value::Sequence(values),
+        );
         let config = CopConfig {
             options: HashMap::from([(
                 "IgnoredMetadata".into(),
-                serde_yml::Value::Sequence(vec![serde_yml::Value::String("feature".into())]),
+                serde_yml::Value::Mapping(meta_map),
             )]),
             ..CopConfig::default()
         };
-        let source = b"describe 'some feature', feature: true do\nend\n";
+        let source = b"describe 'some feature', feature: :true do\nend\n";
         let diags = crate::testutil::run_cop_full_with_config(&DescribeClass, source, config);
         assert!(
             diags.is_empty(),
-            "Should skip when IgnoredMetadata key is present"
+            "Should skip when IgnoredMetadata key+value matches"
+        );
+    }
+
+    #[test]
+    fn ignored_metadata_flags_when_value_does_not_match() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        // IgnoredMetadata: { type: [request] } — only "request" is allowed
+        let mut meta_map = serde_yml::Mapping::new();
+        let mut values = serde_yml::Sequence::new();
+        values.push(serde_yml::Value::String("request".into()));
+        meta_map.insert(
+            serde_yml::Value::String("type".into()),
+            serde_yml::Value::Sequence(values),
+        );
+        let config = CopConfig {
+            options: HashMap::from([(
+                "IgnoredMetadata".into(),
+                serde_yml::Value::Mapping(meta_map),
+            )]),
+            ..CopConfig::default()
+        };
+        // type: :model is NOT in the allowed list [request], so should flag
+        let source = b"describe 'some feature', type: :model do\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(&DescribeClass, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag when IgnoredMetadata value doesn't match"
         );
     }
 
@@ -240,15 +392,33 @@ mod tests {
         use crate::cop::CopConfig;
         use std::collections::HashMap;
 
+        let mut meta_map = serde_yml::Mapping::new();
+        let mut values = serde_yml::Sequence::new();
+        values.push(serde_yml::Value::String("bar".into()));
+        meta_map.insert(
+            serde_yml::Value::String("feature".into()),
+            serde_yml::Value::Sequence(values),
+        );
         let config = CopConfig {
             options: HashMap::from([(
                 "IgnoredMetadata".into(),
-                serde_yml::Value::Sequence(vec![serde_yml::Value::String("feature".into())]),
+                serde_yml::Value::Mapping(meta_map),
             )]),
             ..CopConfig::default()
         };
         let source = b"describe 'some feature' do\nend\n";
         let diags = crate::testutil::run_cop_full_with_config(&DescribeClass, source, config);
         assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn looks_like_constant_rejects_lowercase_after_separator() {
+        assert!(!looks_like_constant(b"Foo::bar"));
+        assert!(looks_like_constant(b"Foo::Bar"));
+        assert!(looks_like_constant(b"Foo::Bar::Baz"));
+        assert!(looks_like_constant(b"::Foo::Bar"));
+        assert!(!looks_like_constant(b"activeRecord"));
+        assert!(!looks_like_constant(b"2Thing"));
+        assert!(!looks_like_constant(b""));
     }
 }
