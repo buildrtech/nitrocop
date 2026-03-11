@@ -3,6 +3,33 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Checks whether the end keywords / closing braces are aligned properly for
+/// do..end and {..} blocks.
+///
+/// ## Corpus investigation findings (2026-03-11)
+///
+/// Root causes of 1,187 FP:
+/// 1. **Trailing-dot method chains** — `find_chain_expression_start` only checked
+///    for lines starting with `.` (leading dot) but NOT for lines ending with `.`
+///    (trailing dot style). This caused the chain root to not be found, computing
+///    wrong `expression_start_indent` and flagging correctly-aligned `end`.
+/// 2. **Tab indentation** — `line_indent` only counted spaces, returning 0 for
+///    tab-indented lines. But `offset_to_line_col` counts tabs as 1 character,
+///    causing a mismatch between computed indent and actual `end` column.
+/// 3. **Missing `begins_its_line?` check** — RuboCop skips alignment checks when
+///    `end`/`}` is not the first non-whitespace on its line (e.g., `end.select`).
+///    nitrocop checked all `end` keywords regardless.
+///
+/// Root causes of 334 FN:
+/// 1. **Brace blocks not checked** — RuboCop checks both `do..end` and `{..}`
+///    blocks, but nitrocop only checked `do..end`. Many FNs were misaligned `}`.
+///
+/// Fixes applied:
+/// - `line_indent` now counts both spaces and tabs
+/// - `find_chain_expression_start` now handles trailing-dot chains (lines ending with `.`)
+/// - Added `begins_its_line` check to skip non-line-beginning closers
+/// - Added brace block (`{..}`) checking with same alignment rules
+/// - Fixed `start_of_block` style to use do-line indent (not `do` column) per RuboCop spec
 pub struct BlockAlignment;
 
 impl Cop for BlockAlignment {
@@ -30,9 +57,17 @@ impl Cop for BlockAlignment {
         };
 
         let closing_loc = block_node.closing_loc();
+        let closing_slice = closing_loc.as_slice();
+        let is_do_end = closing_slice == b"end";
+        let is_brace = closing_slice == b"}";
+        if !is_do_end && !is_brace {
+            return;
+        }
 
-        // Only check do...end blocks, not brace blocks
-        if closing_loc.as_slice() != b"end" {
+        // RuboCop's begins_its_line? check: only inspect alignment when the
+        // closing keyword/brace is the first non-whitespace on its line.
+        let bytes = source.as_bytes();
+        if !begins_its_line(bytes, closing_loc.start_offset()) {
             return;
         }
 
@@ -40,7 +75,6 @@ impl Cop for BlockAlignment {
         let (opening_line, _) = source.offset_to_line_col(opening_loc.start_offset());
 
         // Find the indentation of the line containing the block opener.
-        let bytes = source.as_bytes();
         let start_of_line_indent = line_indent(bytes, opening_loc.start_offset());
 
         // For `start_of_line` and `either` styles, RuboCop walks up the
@@ -57,44 +91,47 @@ impl Cop for BlockAlignment {
         let expression_start_indent =
             find_chain_expression_start(bytes, opening_loc.start_offset());
 
-        // Get the column of `do` keyword itself
+        // Get the column of `do`/`{` keyword itself
         let (_, do_col) = source.offset_to_line_col(opening_loc.start_offset());
 
         // Find the column of the call expression that owns this block.
-        // Walk backward from `do` to find the start of the method call chain.
+        // Walk backward from `do`/`{` to find the start of the method call chain.
         let call_expr_col = find_call_expression_col(bytes, opening_loc.start_offset());
 
         let (end_line, end_col) = source.offset_to_line_col(closing_loc.start_offset());
 
-        // Only flag if end is on a different line
+        // Only flag if closing is on a different line than opening
         if end_line == opening_line {
             return;
         }
 
+        let close_word = if is_brace { "`}`" } else { "`end`" };
+        let open_word = if is_brace { "`{`" } else { "`do`" };
+
         match style {
             "start_of_block" => {
-                // `end` must align with `do`
-                if end_col != do_col {
+                // closing must align with do/{-line indent (first non-ws on that line)
+                if end_col != start_of_line_indent {
                     diagnostics.push(self.diagnostic(
                         source,
                         end_line,
                         end_col,
-                        "Align `end` with `do`.".to_string(),
+                        format!("Align {} with {}.", close_word, open_word),
                     ));
                 }
             }
             "start_of_line" => {
-                // `end` must align with start of the expression
+                // closing must align with start of the expression
                 if end_col != expression_start_indent {
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            end_line,
-                            end_col,
-                            "Align `end` with the start of the line where the block is defined."
-                                .to_string(),
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        end_line,
+                        end_col,
+                        format!(
+                            "Align {} with the start of the line where the block is defined.",
+                            close_word
                         ),
-                    );
+                    ));
                 }
             }
             _ => {
@@ -108,19 +145,32 @@ impl Cop for BlockAlignment {
                     && end_col != expression_start_indent
                     && end_col != call_expr_col
                 {
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            end_line,
-                            end_col,
-                            "Align `end` with the start of the line where the block is defined."
-                                .to_string(),
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        end_line,
+                        end_col,
+                        format!(
+                            "Align {} with the start of the line where the block is defined.",
+                            close_word
                         ),
-                    );
+                    ));
                 }
             }
         }
     }
+}
+
+/// Check if a byte offset is at the beginning of its line (only whitespace before it).
+/// Matches RuboCop's `begins_its_line?` helper.
+fn begins_its_line(bytes: &[u8], offset: usize) -> bool {
+    let mut pos = offset;
+    while pos > 0 && bytes[pos - 1] != b'\n' {
+        pos -= 1;
+        if bytes[pos] != b' ' && bytes[pos] != b'\t' {
+            return false;
+        }
+    }
+    true
 }
 
 /// Check if a line has unclosed parentheses or brackets (more opening than closing).
@@ -145,14 +195,18 @@ fn line_has_unclosed_bracket(line: &[u8]) -> bool {
     depth > 0
 }
 
-/// Get the indentation (number of leading spaces) for the line containing the given byte offset.
+/// Get the indentation (number of leading whitespace characters) for the line
+/// containing the given byte offset. Counts both spaces and tabs as 1 character
+/// each to match `offset_to_line_col` which uses character (codepoint) offsets.
 fn line_indent(bytes: &[u8], offset: usize) -> usize {
     let mut line_start = offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
         line_start -= 1;
     }
     let mut indent = 0;
-    while line_start + indent < bytes.len() && bytes[line_start + indent] == b' ' {
+    while line_start + indent < bytes.len()
+        && (bytes[line_start + indent] == b' ' || bytes[line_start + indent] == b'\t')
+    {
         indent += 1;
     }
     indent
@@ -221,7 +275,7 @@ fn find_call_expression_col(bytes: &[u8], do_offset: usize) -> usize {
 
 /// Walk backwards from the do-line to find the start of the method chain expression.
 /// If previous lines are continuations (e.g., starting with `.` or previous line
-/// ends with `\`), keep going up.
+/// ends with `\` or `.`), keep going up.
 fn find_chain_expression_start(bytes: &[u8], do_offset: usize) -> usize {
     // Find start of the line containing `do`
     let mut line_start = do_offset;
@@ -278,16 +332,16 @@ fn find_chain_expression_start(bytes: &[u8], do_offset: usize) -> usize {
             continue;
         }
 
-        // Check if previous line ends with `\` (backslash continuation)
-        // or ends with `,` (multiline argument list)
-        // or has unclosed brackets (multiline literal/args)
+        // Check if previous line ends with `\` (backslash continuation),
+        // `.` or `&.` (trailing dot method chain), `,` (multiline argument list),
+        // or has unclosed brackets (multiline literal/args).
         let prev_line_content = &bytes[prev_line_start..prev_line_end];
         let trimmed_end = prev_line_content
             .iter()
             .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r');
         if let Some(last_non_ws) = trimmed_end {
             let last_byte = prev_line_content[last_non_ws];
-            if last_byte == b'\\' || last_byte == b',' {
+            if last_byte == b'\\' || last_byte == b',' || last_byte == b'.' {
                 line_start = prev_line_start;
                 continue;
             }
@@ -301,9 +355,11 @@ fn find_chain_expression_start(bytes: &[u8], do_offset: usize) -> usize {
         break;
     }
 
-    // Return the indent of the expression start line
+    // Return the indent of the expression start line (count both spaces and tabs)
     let mut indent = 0;
-    while line_start + indent < bytes.len() && bytes[line_start + indent] == b' ' {
+    while line_start + indent < bytes.len()
+        && (bytes[line_start + indent] == b' ' || bytes[line_start + indent] == b'\t')
+    {
         indent += 1;
     }
     indent
@@ -353,14 +409,211 @@ mod tests {
             )]),
             ..CopConfig::default()
         };
-        // `end` aligned with start of line (col 0), not with `do` (col 11)
+        // In start_of_block style, `end` must align with the do-line indent
+        // (first non-ws on the do-line), not the `do` keyword column.
+        // For `items.each do |x|`, do-line indent = 0, so end at col 0 is fine.
         let src = b"items.each do |x|\n  puts x\nend\n";
-        let diags = run_cop_full_with_config(&BlockAlignment, src, config);
+        let diags = run_cop_full_with_config(&BlockAlignment, src, config.clone());
+        assert!(
+            diags.is_empty(),
+            "start_of_block: end at col 0 matches do-line indent 0. Got: {:?}",
+            diags
+        );
+
+        // But end at col 2 should be flagged (doesn't match do-line indent 0)
+        let src2 = b"items.each do |x|\n  puts x\n  end\n";
+        let diags2 = run_cop_full_with_config(&BlockAlignment, src2, config.clone());
+        assert_eq!(
+            diags2.len(),
+            1,
+            "start_of_block should flag end at col 2 (doesn't match do-line indent 0)"
+        );
+
+        // Chained: .each do at col 2, end should align at col 2
+        let src3 = b"foo.bar\n  .each do\n    baz\n  end\n";
+        let diags3 = run_cop_full_with_config(&BlockAlignment, src3, config.clone());
+        assert!(
+            diags3.is_empty(),
+            "start_of_block: end at col 2 matches .each do line indent. Got: {:?}",
+            diags3
+        );
+
+        // Chained: .each do at col 2, end at col 0 should flag
+        let src4 = b"foo.bar\n  .each do\n    baz\nend\n";
+        let diags4 = run_cop_full_with_config(&BlockAlignment, src4, config);
+        assert_eq!(
+            diags4.len(),
+            1,
+            "start_of_block: end at col 0 doesn't match .each do line indent 2"
+        );
+    }
+
+    // FP fix: trailing-dot method chains
+    #[test]
+    fn no_offense_trailing_dot_chain() {
+        let source =
+            b"all_objects.flat_map { |o| o }.\n  uniq(&:first).each do |a, o|\n  process(a, o)\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Trailing dot chain: end should align with chain root. Got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_trailing_dot_chain_indented() {
+        let source = b"def foo\n  objects.flat_map { |o| o }.\n    uniq.each do |item|\n    process(item)\n  end\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Indented trailing dot chain: end at col 2 matches chain start at col 2. Got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_trailing_dot_multi_line() {
+        let source = b"  records.\n    where(active: true).\n    order(:name).each do |r|\n    process(r)\n  end\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Multi trailing dot: end at col 2 matches chain root at col 2. Got: {:?}",
+            diags
+        );
+    }
+
+    // FP fix: tab indentation
+    #[test]
+    fn no_offense_tab_indented_block() {
+        let source = b"if true\n\titems.each do\n\t\tputs 'hello'\n\tend\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Tab-indented block should not be flagged. Got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_tab_indented_assignment_block() {
+        let source = b"\tvariable = test do |x|\n\t\tx.to_s\n\tend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Tab-indented assignment block should not be flagged. Got: {:?}",
+            diags
+        );
+    }
+
+    // FP fix: begins_its_line check
+    #[test]
+    fn fp_end_not_beginning_its_line() {
+        // end.select is at start of line (after whitespace) but has continuation
+        // The first block's end should not be checked since it has .select after it
+        let source = b"def foo(bar)\n  bar.get_stuffs\n      .reject do |stuff|\n        stuff.long_expr\n      end.select do |stuff|\n        stuff.other\n      end\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag end that doesn't begin its line. Got: {:?}",
+            diags
+        );
+    }
+
+    // FN fix: brace block misalignment
+    #[test]
+    fn offense_brace_block_misaligned() {
+        let source = b"test {\n  stuff\n  }\n";
+        let diags = run_cop_full(&BlockAlignment, source);
         assert_eq!(
             diags.len(),
             1,
-            "start_of_block should flag end not aligned with do"
+            "Misaligned brace block should be flagged. Got: {:?}",
+            diags
         );
-        assert!(diags[0].message.contains("do"));
+    }
+
+    #[test]
+    fn no_offense_brace_block_aligned() {
+        let source = b"test {\n  stuff\n}\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Aligned brace block should not be flagged. Got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_brace_block_not_beginning_line() {
+        let source = b"scope :bar, lambda { joins(:baz)\n                     .distinct }\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "closing brace not beginning its line should not be flagged"
+        );
+    }
+
+    // Other patterns from RuboCop spec
+    #[test]
+    fn no_offense_variable_assignment() {
+        let source = b"variable = test do |ala|\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "end aligned with variable start. Got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_op_asgn() {
+        let source = b"rb += files.select do |file|\n  file << something\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(diags.is_empty(), "end aligned with rb. Got: {:?}", diags);
+    }
+
+    #[test]
+    fn no_offense_logical_operand() {
+        let source = b"(value.is_a? Array) && value.all? do |subvalue|\n  type_check_value(subvalue, array_type)\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "end aligns with expression start. Got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_send_shovel() {
+        let source = b"parser.children << lambda do |token|\n  token << 1\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "end aligns with parser.children. Got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_chain_pretty_alignment() {
+        let source = b"def foo(bar)\n  bar.get_stuffs\n      .reject do |stuff|\n        stuff.long_expr\n      end\n      .select do |stuff|\n        stuff.other\n      end\nend\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "end at col 6 matches do-line indent. Got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_next_line_assignment() {
+        let source = b"variable =\n  a_long_method do |v|\n    v.foo\n  end\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "end aligns with a_long_method. Got: {:?}",
+            diags
+        );
     }
 }
