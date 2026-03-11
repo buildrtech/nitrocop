@@ -6,6 +6,26 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for mismatch between format string fields and arguments.
+///
+/// ## Corpus conformance investigation (2026-03-11)
+///
+/// **Root causes of FPs (54):**
+/// 1. Heredoc format strings — RuboCop explicitly skips heredocs via `heredoc?` check
+///    (source starts with `<<`). nitrocop was trying to parse heredoc content.
+/// 2. Interpolated string (dstr) with zero format fields — RuboCop skips when
+///    `expected_fields == 0 && first_arg.type?(:dstr, :array)`. Common with
+///    `format("#{foo}", bar, baz)` where the interpolation IS the format.
+/// 3. Zero fields + array RHS in String#% — `"text" % [value]` where string has
+///    no format sequences. RuboCop skips when fields=0 and arg is array.
+/// 4. format/sprintf with only 1 arg (just the format string, no extra args) —
+///    RuboCop requires `arguments.size > 1` to consider it a format call.
+///
+/// **Fixes applied:**
+/// - Skip heredoc format strings (check opening_loc starts with `<<`)
+/// - Require args.len() > 1 for format/sprintf (matches RuboCop)
+/// - Skip when zero fields AND format string is interpolated (dstr)
+/// - Skip when zero fields AND RHS is array for String#%
 pub struct FormatParameterMismatch;
 
 impl Cop for FormatParameterMismatch {
@@ -86,11 +106,17 @@ fn check_format_sprintf(
     };
 
     let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
-    if arg_list.is_empty() {
+    // RuboCop requires arguments.size > 1 (format string + at least one arg)
+    if arg_list.len() <= 1 {
         return Vec::new();
     }
 
     let first = &arg_list[0];
+
+    // Skip heredoc format strings (RuboCop behavior)
+    if is_heredoc_node(first) {
+        return Vec::new();
+    }
 
     // Format string must be a string literal (or interpolated string)
     let fmt_str = extract_format_string(first);
@@ -120,6 +146,16 @@ fn check_format_sprintf(
     let parse_result = parse_format_string(&fmt_str.value);
     match parse_result {
         FormatParseResult::Fields(field_count) => {
+            // When expected fields is zero and format string is interpolated (dstr)
+            // or first arg is array, skip — matches RuboCop's behavior where dynamic
+            // content may contain the actual format sequences at runtime
+            if field_count.count == 0
+                && !field_count.named
+                && (fmt_str.contains_interpolation || first.as_array_node().is_some())
+            {
+                return Vec::new();
+            }
+
             // For named formats (%{name} or %<name>), expect exactly 1 hash arg
             if field_count.named {
                 if arg_count != 1 {
@@ -182,6 +218,11 @@ fn check_string_percent(
 ) -> Vec<Diagnostic> {
     let receiver = call.receiver().unwrap();
 
+    // Skip heredoc receivers (RuboCop behavior)
+    if is_heredoc_node(&receiver) {
+        return Vec::new();
+    }
+
     // Receiver must be a string literal
     let fmt_str = extract_format_string(&receiver);
     let fmt_str = match fmt_str {
@@ -210,6 +251,19 @@ fn check_string_percent(
         FormatParseResult::Fields(field_count) => {
             if field_count.named {
                 // Named formats expect a hash — don't check further
+                return Vec::new();
+            }
+
+            // When expected fields is zero and first arg is dstr or array,
+            // skip — matches RuboCop's offending_node? guard
+            if field_count.count == 0
+                && (rhs.as_array_node().is_some() || rhs.as_interpolated_string_node().is_some())
+            {
+                return Vec::new();
+            }
+
+            // Also skip when format string is interpolated (dstr) with zero fields
+            if field_count.count == 0 && fmt_str.contains_interpolation {
                 return Vec::new();
             }
 
@@ -277,6 +331,21 @@ fn check_string_percent(
     Vec::new()
 }
 
+/// Returns true if the node is a heredoc string (opening starts with `<<`).
+fn is_heredoc_node(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(str_node) = node.as_interpolated_string_node() {
+        if let Some(open) = str_node.opening_loc() {
+            return open.as_slice().starts_with(b"<<");
+        }
+    }
+    if let Some(str_node) = node.as_string_node() {
+        if let Some(open) = str_node.opening_loc() {
+            return open.as_slice().starts_with(b"<<");
+        }
+    }
+    false
+}
+
 struct FormatString {
     value: String,
     contains_interpolation: bool,
@@ -306,11 +375,15 @@ fn extract_format_string(node: &ruby_prism::Node<'_>) -> Option<FormatString> {
                 // Check if the interpolation could affect format parsing
                 // If the string part right before this ends with `%` or `%-` etc.,
                 // the interpolation could be part of a format specifier
+                // Check if the string part before interpolation ends with a
+                // partial format specifier. Covers all flag chars: - + space 0 #
                 if result.ends_with('%')
                     || result.ends_with("%-")
                     || result.ends_with("%+")
                     || result.ends_with("%0")
                     || result.ends_with("%.")
+                    || result.ends_with("%#")
+                    || result.ends_with("% ")
                 {
                     format_affecting = true;
                 }

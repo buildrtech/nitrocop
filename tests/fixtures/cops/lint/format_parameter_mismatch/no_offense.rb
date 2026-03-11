@@ -17,3 +17,27 @@ puts "%s" % {"a" => 1}
 puts "%s" % CONST
 format("%%%<hex>02X", hex: 10)
 "duration: %10.fms" % 42
+
+# Heredoc format strings are skipped (RuboCop behavior)
+format(<<~MSG, 1, 2, 3)
+  Some message with args
+MSG
+sprintf(<<~MSG, 1)
+  Another message
+MSG
+
+# Interpolated string with zero format fields (dstr with no %s etc.)
+format("#{foo}", "bar", "baz")
+"#{foo}" % [1, 2]
+
+# Zero expected fields with array RHS (could be dynamic)
+"some text" % [value]
+
+# format/sprintf with only format string, no extra args
+format("%s")
+sprintf("%s %s")
+
+# Interpolated width/precision should bail
+format("%#{padding}s: %s", prefix, message)
+sprintf("| %-#{key_offset}s | %-#{val_offset}s |", key, value)
+Kernel.format("%.#{number_of_decimal_places}f", num)
