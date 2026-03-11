@@ -16,6 +16,13 @@ when 1 then "one"
 when 2 then "two"
 end
 
+case total
+when 1;
+  "one"
+when 2;
+  "two"
+end
+
 # Comment with semicolon between when condition and body
 case value
 when /pattern/
