@@ -5,7 +5,8 @@ use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
-/// RSpec/Output: flags output calls (p, puts, print, pp, $stdout.write, etc.) in specs.
+/// RSpec/Output: flags output calls (p, puts, print, pp, ap, pretty_print,
+/// $stdout.write, etc.) in specs.
 ///
 /// Investigation: 81 FPs caused by flagging `p(...)` when used as a method argument
 /// (e.g., `expect(p("abc/").normalized_pattern)`) or as a receiver of a chained call
@@ -13,13 +14,17 @@ use ruby_prism::Visit;
 /// output call's parent is another call node. Switched from check_node to check_source
 /// with a visitor that tracks parent-is-call context. This matches the RuboCop behavior
 /// at vendor/rubocop-rspec/lib/rubocop/cop/rspec/output.rb:61.
+///
+/// Fix (110 FN): Added missing kernel methods `ap` and `pretty_print`, missing IO
+/// method `write_nonblock`, and applied hash/block_pass argument skip to ALL kernel
+/// methods (was previously only applied to `p`).
 pub struct Output;
 
 /// Output methods without a receiver (Kernel print methods)
-const PRINT_METHODS: &[&[u8]] = &[b"p", b"puts", b"print", b"pp"];
+const PRINT_METHODS: &[&[u8]] = &[b"ap", b"p", b"pp", b"pretty_print", b"print", b"puts"];
 
 /// IO write methods called on $stdout, $stderr, STDOUT, STDERR
-const IO_WRITE_METHODS: &[&[u8]] = &[b"write", b"syswrite", b"binwrite"];
+const IO_WRITE_METHODS: &[&[u8]] = &[b"binwrite", b"syswrite", b"write", b"write_nonblock"];
 
 /// Global variable names for stdout/stderr
 const GLOBAL_VARS: &[&[u8]] = &[b"$stdout", b"$stderr"];
@@ -78,17 +83,16 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
             if PRINT_METHODS.contains(&method) && node.receiver().is_none() {
                 // Skip if it has a block (p { ... } is DSL usage like phlex)
                 if node.block().is_none() {
+                    // Skip if any argument is a hash or block_pass
+                    // (matches RuboCop: `node.arguments.any? { |arg| arg.type?(:hash, :block_pass) }`)
                     let mut skip = false;
-                    // For `p`, skip if there are keyword args or symbol proc args
-                    if method == b"p" {
-                        if let Some(args) = node.arguments() {
-                            for arg in args.arguments().iter() {
-                                if arg.as_keyword_hash_node().is_some()
-                                    || arg.as_block_argument_node().is_some()
-                                {
-                                    skip = true;
-                                    break;
-                                }
+                    if let Some(args) = node.arguments() {
+                        for arg in args.arguments().iter() {
+                            if arg.as_keyword_hash_node().is_some()
+                                || arg.as_block_argument_node().is_some()
+                            {
+                                skip = true;
+                                break;
                             }
                         }
                     }
