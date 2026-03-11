@@ -41,3 +41,11 @@ sprintf("%s %s")
 format("%#{padding}s: %s", prefix, message)
 sprintf("| %-#{key_offset}s | %-#{val_offset}s |", key, value)
 Kernel.format("%.#{number_of_decimal_places}f", num)
+
+# Format type chars not in [bBdiouxXeEfgGaAcps] are not format sequences
+# Only valid types (b B d i o u x X e E f g G a A c p s) count as fields.
+# %v, %n, %t, %r etc. are not valid Ruby format types.
+format("%s %version", val)
+format("%s %note: more", val)
+"%s %result here" % [val]
+'%' % []

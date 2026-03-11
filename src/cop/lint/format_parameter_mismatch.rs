@@ -21,11 +21,35 @@ use crate::parse::source::SourceFile;
 /// 4. format/sprintf with only 1 arg (just the format string, no extra args) —
 ///    RuboCop requires `arguments.size > 1` to consider it a format call.
 ///
-/// **Fixes applied:**
+/// **Fixes applied (round 1):**
 /// - Skip heredoc format strings (check opening_loc starts with `<<`)
 /// - Require args.len() > 1 for format/sprintf (matches RuboCop)
 /// - Skip when zero fields AND format string is interpolated (dstr)
 /// - Skip when zero fields AND RHS is array for String#%
+///
+/// ## Additional conformance investigation (2026-03-11)
+///
+/// **Root causes of remaining FPs (35) and FNs (13):**
+/// 1. Format type character acceptance too broad — nitrocop was treating ANY
+///    alphabetic character after `%` as a valid format type. RuboCop only accepts
+///    `[bBdiouxXeEfgGaAcps]`. Characters like `%v`, `%n`, `%t`, `%r` are NOT
+///    valid Ruby format types. This caused both FPs (over-counting fields) and
+///    FNs (wrong field count masking mismatches).
+/// 2. String#% splat handling — nitrocop special-cased splats in array RHS,
+///    only firing when splat count > expected fields. RuboCop does NOT
+///    special-case splats for `%` (only for format/sprintf). It counts child
+///    nodes literally and compares directly.
+/// 3. Numbered format without valid type — `%1$n` was counted as numbered
+///    format even though `n` is not a valid type. RuboCop's SEQUENCE regex
+///    requires TYPE at the end for numbered formats.
+/// 4. Annotated named format without valid type — `%<name>` without a
+///    following type character was counted as named. RuboCop requires TYPE
+///    after `%<name>` (only template `%{name}` format has no TYPE requirement).
+///
+/// **Fixes applied (round 2):**
+/// - Restrict format type to `[bBdiouxXeEfgGaAcps]` via `is_format_type()`
+/// - Remove splat special-casing for String#% (literal count like RuboCop)
+/// - Require valid type for numbered (`%N$X`) and annotated named (`%<name>X`)
 pub struct FormatParameterMismatch;
 
 impl Cop for FormatParameterMismatch {
@@ -283,26 +307,12 @@ fn check_string_percent(
                 }
             };
 
-            let has_splat = array_elements.iter().any(|e| e.as_splat_node().is_some());
-
             let arg_count = array_elements.len();
 
-            if has_splat && arg_count > field_count.count {
-                // Splat with more args than fields — always an error for String#%
-                let loc = call.message_loc().unwrap_or(call.location());
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                return vec![cop.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!(
-                        "Number of arguments ({}) to `String#%` doesn't match the number of fields ({}).",
-                        arg_count, field_count.count
-                    ),
-                )];
-            }
-
-            if !has_splat && arg_count != field_count.count {
+            // RuboCop does NOT special-case splats for String#% —
+            // it just counts child nodes literally (including splat nodes)
+            // and compares against expected fields
+            if arg_count != field_count.count {
                 let loc = call.message_loc().unwrap_or(call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 return vec![cop.diagnostic(
@@ -409,6 +419,31 @@ enum FormatParseResult {
     Invalid,
 }
 
+/// Returns true if the byte is a valid Ruby format conversion type character.
+/// Matches RuboCop's FormatString::TYPE = [bBdiouxXeEfgGaAcps]
+fn is_format_type(b: u8) -> bool {
+    matches!(
+        b,
+        b'b' | b'B'
+            | b'd'
+            | b'i'
+            | b'o'
+            | b'u'
+            | b'x'
+            | b'X'
+            | b'e'
+            | b'E'
+            | b'f'
+            | b'g'
+            | b'G'
+            | b'a'
+            | b'A'
+            | b'c'
+            | b'p'
+            | b's'
+    )
+}
+
 fn parse_format_string(fmt: &str) -> FormatParseResult {
     let bytes = fmt.as_bytes();
     let len = bytes.len();
@@ -450,15 +485,31 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
         }
 
         if bytes[i] == b'<' {
-            has_named = true;
             // Skip to closing >
             while i < len && bytes[i] != b'>' {
                 i += 1;
             }
             if i < len {
                 i += 1;
-                // Skip the conversion specifier after >
-                if i < len && bytes[i].is_ascii_alphabetic() {
+                // After >, may have more_flags, width, precision before TYPE
+                // Skip flags
+                while i < len && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') {
+                    i += 1;
+                }
+                // Skip width
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                // Skip precision
+                if i < len && bytes[i] == b'.' {
+                    i += 1;
+                    while i < len && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+                // TYPE is required for %<name>X format (annotated named)
+                if i < len && is_format_type(bytes[i]) {
+                    has_named = true;
                     i += 1;
                 }
             }
@@ -492,21 +543,31 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
             let num_str = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
             // Remove any flag characters from the front to get the number
             let num_part: String = num_str.chars().filter(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = num_part.parse::<usize>() {
-                has_numbered = true;
-                if n > max_numbered {
-                    max_numbered = n;
-                }
-            }
+            let parsed_num = num_part.parse::<usize>().ok();
             i += 1; // skip '$'
             // Skip the rest of the format specifier after $
             // Skip flags again
             while i < len && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') {
                 i += 1;
             }
-            // Skip width
-            while i < len && bytes[i].is_ascii_digit() {
+            // Skip width (could be * for dynamic width with numbered ref)
+            if i < len && bytes[i] == b'*' {
                 i += 1;
+                // Skip optional digit_dollar for width arg: *N$
+                let w_start = i;
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i < len && bytes[i] == b'$' {
+                    i += 1;
+                } else {
+                    i = w_start; // not a digit_dollar, reset
+                    // but still consumed the *
+                }
+            } else {
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
             }
             // Skip precision
             if i < len && bytes[i] == b'.' {
@@ -515,8 +576,15 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
                     i += 1;
                 }
             }
-            // Skip conversion
-            if i < len && bytes[i].is_ascii_alphabetic() {
+            // Conversion type must be valid — only then count as numbered format
+            // (matches RuboCop: SEQUENCE regex requires TYPE at end)
+            if i < len && is_format_type(bytes[i]) {
+                if let Some(n) = parsed_num {
+                    has_numbered = true;
+                    if n > max_numbered {
+                        max_numbered = n;
+                    }
+                }
                 i += 1;
             }
             continue;
@@ -535,17 +603,14 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
             }
         }
 
-        // Skip conversion specifier
-        if i < len && bytes[i].is_ascii_alphabetic() {
+        // Conversion specifier — must be a valid Ruby format type.
+        // RuboCop's FormatString::TYPE = [bBdiouxXeEfgGaAcps]
+        // If no valid type follows, this is NOT a format sequence at all
+        // (the preceding flags/width/precision/star are just literal text).
+        if i < len && is_format_type(bytes[i]) {
             has_unnumbered = true;
             count += 1 + extra_args;
             i += 1;
-        } else if i >= len || !bytes[i].is_ascii_alphabetic() {
-            // Could be something like `%` at end — skip
-            if extra_args > 0 {
-                has_unnumbered = true;
-                count += extra_args;
-            }
         }
     }
 
