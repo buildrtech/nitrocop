@@ -37,3 +37,19 @@ def label
 ^^^ Rails/Delegate: Use `delegate` to define delegations.
   self.class.label
 end
+
+# Prefixed delegation: def receiver_method; receiver.method; end
+def bar_foo
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+  bar.foo
+end
+
+def client_name
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+  client.name
+end
+
+def config_value(key)
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+  config.value(key)
+end

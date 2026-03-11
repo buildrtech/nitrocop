@@ -60,3 +60,47 @@ end
 def discoverable
   Account.discoverable
 end
+
+# module_function makes methods private — delegate doesn't apply
+module Helpers
+  module_function
+
+  def name
+    self.name
+  end
+end
+
+# module_function on a separate line before the method
+module Utils
+  module_function
+
+  def label
+    config.label
+  end
+end
+
+# inline module_function before def
+module Formatters
+  module_function def format
+    self.format
+  end
+end
+
+# private :method_name after def — makes the method private
+def status
+  record.status
+end
+private :status
+
+# EnforceForPrefixed: false patterns with non-CallNode receivers
+# (these are skipped in our prefix check but tested elsewhere)
+
+# Receiver is a method call with arguments — not a simple delegation target
+def fox
+  bar(42).fox
+end
+
+# Method args don't match (param is used as receiver, not forwarded)
+def fox(bar)
+  bar.fox
+end
