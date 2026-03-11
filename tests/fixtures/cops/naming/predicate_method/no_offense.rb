@@ -169,3 +169,22 @@ end
 def email_oauth_enabled
   @inbox.inbox_type == 'Email' && (@channel.microsoft? || @channel.google?)
 end
+
+# Nested def with non-boolean return — RuboCop's each_descendant(:return)
+# finds the return inside the nested def, preventing all_return_values_boolean
+def active
+  def cache_label
+    return "cached"
+  end
+  x == y
+end
+
+# Nested def inside singleton class — return leaks into outer analysis in RuboCop
+def enabled
+  class << self
+    def cached_value
+      return "data"
+    end
+  end
+  status == :ok
+end

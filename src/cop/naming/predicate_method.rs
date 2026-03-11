@@ -61,6 +61,29 @@ use crate::parse::source::SourceFile;
 /// `collect_and_or_leaves()` which decomposes nested and/or chains but treats
 /// ParenthesesNode leaves as Opaque instead of unwrapping them. Top-level
 /// ParenthesesNode (not inside and/or) is still unwrapped normally.
+///
+/// ## Nested def return leaking fix (2026-03-11, FP=6→0)
+///
+/// Root cause: ReturnFinder stopped at nested DefNode/ClassNode/ModuleNode
+/// boundaries, but RuboCop's `each_descendant(:return)` traverses the entire
+/// subtree without stopping. This means `return` statements inside nested
+/// defs "leak" into the outer method's return value analysis in RuboCop.
+/// While semantically incorrect (return inside nested def returns from that
+/// def, not the outer method), we must match RuboCop's behavior.
+///
+/// Impact: Methods containing nested defs with non-boolean explicit returns
+/// were incorrectly flagged as predicates (FP), because nitrocop didn't see
+/// the non-boolean return values that RuboCop included.
+///
+/// Fix: Removed the visit_def_node/visit_class_node/visit_module_node stops
+/// in ReturnFinder so it traverses the entire body subtree.
+///
+/// Remaining FN=6: Could not identify root cause without corpus example
+/// locations. Exhaustive comparison of RuboCop's return value analysis vs
+/// nitrocop's implementation showed no other logic divergences for:
+/// comparison_method (including <=> exclusion), predicate_method, negation,
+/// conditionals, and/or chains, parenthesized expressions, begin/kwbegin,
+/// rescue, assignments, variables, blocks, lambdas, super, etc.
 pub struct PredicateMethod;
 
 const MSG_PREDICATE: &str = "Predicate method names should end with `?`.";
@@ -372,10 +395,13 @@ impl<'pr> Visit<'pr> for ReturnFinder {
         }
     }
 
-    // Don't recurse into nested defs/classes/modules
-    fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
-    fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
-    fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
+    // NOTE: We intentionally do NOT stop at nested defs, classes, or modules.
+    // RuboCop uses `node.each_descendant(:return)` which traverses the entire
+    // subtree without stopping at scope boundaries. This means `return` statements
+    // inside nested defs/classes/modules "leak" into the outer method's return
+    // value analysis. While semantically incorrect (a `return` inside a nested def
+    // returns from that def, not the outer method), we match RuboCop's behavior
+    // for corpus conformance.
 }
 
 /// Collect the implicit return type(s) from a node.
