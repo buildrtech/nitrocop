@@ -3,6 +3,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=1, FN=0.
+///
+/// Attempted fix: require `File.read` to have exactly one argument so calls
+/// like `File.read(path, encoding: ...)` are ignored. That removed the known FP
+/// but regressed the corpus gate from `Actual=127` to `Actual=123` against
+/// `Expected=126`, introducing 3 FN.
+///
+/// Reverted. A correct fix needs to preserve RuboCop's positive cases for
+/// `YAML.load/safe_load/parse(File.read(path), ...)` while still excluding
+/// non-replaceable `File.read` variants with extra read-time options.
 pub struct YAMLFileRead;
 
 /// YAML methods that should use _file variants

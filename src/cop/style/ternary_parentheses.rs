@@ -9,6 +9,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=1, FN=0.
+///
+/// Attempted fix: treat setter-style `CallNode`s such as `[]=` as safe
+/// assignments in parenthesized ternary conditions. The focused fixture passed,
+/// but the corpus gate shifted from `Actual=1783` to `Actual=1781` against
+/// `Expected=1782`, replacing the known FP with an FN instead of improving
+/// total conformance.
+///
+/// Reverted. A correct fix needs to distinguish truly safe setter assignments
+/// from the existing ternary mismatches without changing the corpus count.
 pub struct TernaryParentheses;
 
 /// Check if a parenthesized node contains a safe assignment (=) in ternary context.

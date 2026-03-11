@@ -5,6 +5,22 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=1, FN=0.
+///
+/// FP=1: the corpus false positive is an explicit `class << self` body that
+/// contains `def ClassName.method`.
+///
+/// Attempted fixes:
+/// - skipping singleton-class scopes in the visitor regressed the corpus gate
+///   to `Actual=307` against `Expected=356` (49 FN)
+/// - rewriting the cop to inspect only direct class/module body children still
+///   regressed to `Actual=326` (30 FN)
+///
+/// Reverted. A correct fix needs to identify the explicit singleton-class false
+/// positive without suppressing the ordinary `def ClassName.method` shapes that
+/// the original visitor already catches across the corpus.
 pub struct ClassMethods;
 
 impl Cop for ClassMethods {
@@ -43,7 +59,6 @@ impl<'pr> Visit<'pr> for ClassMethodsVisitor<'_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         let name = node.constant_path().location().as_slice().to_vec();
         self.class_names.push(name);
-        // Visit children
         if let Some(body) = node.body() {
             self.visit(&body);
         }
@@ -60,19 +75,16 @@ impl<'pr> Visit<'pr> for ClassMethodsVisitor<'_, '_> {
     }
 
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        // Only check singleton methods (def X.method)
         let receiver = match node.receiver() {
             Some(r) => r,
             None => return,
         };
 
-        // Get the class/module name we're inside
         let current_class = match self.class_names.last() {
             Some(n) => n,
             None => return,
         };
 
-        // Check if receiver matches the enclosing class/module name
         let recv_bytes = receiver.location().as_slice();
         if recv_bytes == current_class.as_slice() {
             let method_name = node.name();
