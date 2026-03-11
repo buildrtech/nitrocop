@@ -227,7 +227,9 @@ directly on main.
    python3 bench/synthetic/run_synthetic.py --verbose
    ```
    **Corpus validation is the acceptance gate** for corpus-backed cops — unit tests
-   passing is necessary but NOT sufficient. For synthetic-only cops, re-run the
+   passing is necessary but NOT sufficient. The goal is `PASS: perfect conformance`
+   (0 FP and 0 FN). `PASS (no regression): N FP remain` means existing FPs from CI
+   are still present — the cop is NOT fixed yet. For synthetic-only cops, re-run the
    synthetic benchmark and inspect that cop's entry in
    `bench/synthetic/synthetic-results.json`; `check-cop.py` has no signal there.
    Use `--rerun` only for cops changed in this batch; for untouched corpus cops,

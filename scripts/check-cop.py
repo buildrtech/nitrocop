@@ -526,8 +526,30 @@ def main():
     # files RuboCop didn't inspect; reality is somewhere between 0 and this).
     adjusted_excess = max(0, ci_delta - file_drop_offenses)
 
+    # Show conformance vs RuboCop (the ground truth).
+    # "excess" = nitrocop fires more than RuboCop = false positives.
+    # "missing" = RuboCop fires more than nitrocop = false negatives.
+    # With file-drop noise, excess may be inflated (nitrocop processes files
+    # RuboCop can't parse). Adjust for display purposes.
+    display_excess = max(0, excess - file_drop_offenses) if file_drop_offenses > 0 else excess
+    if display_excess > 0 or missing > 0:
+        parts = []
+        if display_excess > 0:
+            parts.append(f"FP~={display_excess:,}")
+        if missing > 0:
+            parts.append(f"FN={missing:,}")
+        conformance_note = f"  vs RuboCop: {' '.join(parts)}"
+        if display_excess > 0 and display_excess <= baseline_fp:
+            conformance_note += f" (CI had FP={baseline_fp:,})"
+        if file_drop_offenses > 0 and excess > 0:
+            conformance_note += f" (FP approximate due to file-drop noise)"
+        print(conformance_note)
+    else:
+        print("  vs RuboCop: exact match (0 FP, 0 FN)")
+    print()
+
     if adjusted_excess > args.threshold:
-        print(f"FAIL: {adjusted_excess:,} excess over CI nitrocop baseline "
+        print(f"FAIL: {adjusted_excess:,} NEW excess over CI nitrocop baseline "
               f"(threshold: {args.threshold})")
         if ci_delta != adjusted_excess:
             print(f"  Raw delta: {ci_delta:+,} "
@@ -536,13 +558,20 @@ def main():
             print("Run with --verbose to see which repos have excess offenses")
         sys.exit(1)
     else:
-        print(f"PASS: {adjusted_excess:,} excess over CI nitrocop baseline "
-              f"(threshold: {args.threshold})")
-        if ci_delta > 0 and file_drop_offenses > 0:
-            print(f"  Raw delta: {ci_delta:+,} "
-                  f"(within file-drop noise of {file_drop_offenses:,})")
+        if excess == 0 and missing == 0:
+            print("PASS: perfect conformance with RuboCop")
+        elif adjusted_excess == 0 and excess > 0:
+            print(f"PASS (no regression): {excess:,} FP remain from CI baseline")
+            if ci_delta > 0 and file_drop_offenses > 0:
+                print(f"  Raw delta: {ci_delta:+,} "
+                      f"(within file-drop noise of {file_drop_offenses:,})")
+        else:
+            print(f"PASS (no regression): 0 new excess over CI baseline")
+            if ci_delta > 0 and file_drop_offenses > 0:
+                print(f"  Raw delta: {ci_delta:+,} "
+                      f"(within file-drop noise of {file_drop_offenses:,})")
         if missing > 0:
-            print(f"Note: {missing:,} potential FN remain (not a regression)")
+            print(f"Note: {missing:,} FN remain (nitrocop misses these offenses)")
 
 
 if __name__ == "__main__":

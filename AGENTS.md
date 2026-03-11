@@ -341,7 +341,14 @@ python3 scripts/check-cop.py Department/CopName --verbose --rerun --quick     # 
 python3 scripts/check-cop.py Department/CopName --input results.json          # use local corpus-results.json
 ```
 
-The script compares nitrocop offense counts against the RuboCop baseline from the latest CI corpus oracle run. `FAIL` means nitrocop produces more offenses than RuboCop (false positives). With `--verbose`, it uses enriched per-repo data from `corpus-results.json` when available (instant). Pass `--rerun` to force re-execution of nitrocop after making code changes. `--rerun` automatically uses batch `--corpus-check` mode (single process) when available, falling back to per-repo subprocesses. Add `--quick` to skip repos with zero baseline activity (3-10x faster, may miss new FPs on zero-baseline repos).
+The script compares nitrocop offense counts against the RuboCop baseline from the latest CI corpus oracle run. It reports two things:
+
+1. **vs RuboCop** — the ground truth: how many FP (nitrocop fires, RuboCop doesn't) and FN (RuboCop fires, nitrocop doesn't) exist. This is what you want to be zero.
+2. **PASS/FAIL** — regression check: whether the current code is WORSE than the CI baseline. `PASS (no regression)` means you haven't introduced new FPs, but existing FPs from CI may still remain. `PASS: perfect conformance` means 0 FP and 0 FN.
+
+**Important:** `PASS (no regression): N FP remain` does NOT mean the cop is correct — it means the FPs existed in CI too. The goal is `PASS: perfect conformance`.
+
+With `--verbose`, it uses enriched per-repo data from `corpus-results.json` when available (instant). Pass `--rerun` to force re-execution of nitrocop after making code changes. `--rerun` automatically uses batch `--corpus-check` mode (single process) when available, falling back to per-repo subprocesses. Add `--quick` to skip repos with zero baseline activity (3-10x faster, may miss new FPs on zero-baseline repos).
 
 ## Rules
 

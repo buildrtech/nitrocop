@@ -159,8 +159,10 @@ directly on main.
    python3 scripts/check-cop.py Department/CopName --verbose --rerun
    ```
    Run these in parallel (background). **Corpus validation is the acceptance gate** —
-   unit tests passing is necessary but NOT sufficient. Use `--rerun` only for cops
-   changed in this batch; for untouched cops, use artifact mode (`--verbose`).
+   unit tests passing is necessary but NOT sufficient. The goal is `PASS: perfect
+   conformance` (0 FP, 0 FN). `PASS (no regression): N FP remain` means FPs from CI
+   still exist — the cop is NOT fixed yet. Use `--rerun` only for cops changed in this
+   batch; for untouched cops, use artifact mode (`--verbose`).
 
 5. **Handle regressions**: if a fix increases FP count (even if unit tests pass), revert
    the code change but **add a detailed investigation comment** to the cop source file
