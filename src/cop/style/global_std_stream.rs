@@ -4,6 +4,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03):
+/// 3 FPs caused by `::STDOUT = expr` (ConstantPathWriteNode) patterns.
+/// In Prism, `::STDOUT = expr` creates a ConstantPathWriteNode whose target is a
+/// ConstantPathNode. The visitor visits the target ConstantPathNode, and since
+/// parent() is None (top-level `::STDOUT`), the cop was flagging it. But RuboCop's
+/// `on_const` callback is NOT called for constant assignment targets (they are
+/// `casgn` nodes in RuboCop's AST, not `const` nodes).
+/// Fix: track `in_const_path_write` flag to suppress flagging ConstantPathNode
+/// targets inside ConstantPathWriteNode/OrWriteNode/AndWriteNode/OperatorWriteNode.
 pub struct GlobalStdStream;
 
 impl Cop for GlobalStdStream {
@@ -25,6 +34,7 @@ impl Cop for GlobalStdStream {
             source,
             diagnostics: Vec::new(),
             in_gvar_assignment: false,
+            in_const_path_write: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -37,6 +47,8 @@ struct GlobalStdStreamVisitor<'a, 'src> {
     diagnostics: Vec<Diagnostic>,
     /// True when visiting the value side of a `$stdout = ...` assignment
     in_gvar_assignment: bool,
+    /// True when visiting inside a ConstantPathWriteNode (target is not a const read)
+    in_const_path_write: bool,
 }
 
 impl GlobalStdStreamVisitor<'_, '_> {
@@ -78,6 +90,10 @@ impl Visit<'_> for GlobalStdStreamVisitor<'_, '_> {
     }
 
     fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'_>) {
+        // Skip constant path write targets (::STDOUT = expr is not a const read)
+        if self.in_const_path_write {
+            return;
+        }
         // Must be top-level (::STDOUT) — parent is None
         if node.parent().is_some() {
             ruby_prism::visit_constant_path_node(self, node);
@@ -87,6 +103,46 @@ impl Visit<'_> for GlobalStdStreamVisitor<'_, '_> {
             self.check_std_stream(name.as_slice(), &node.location());
         }
         // Don't visit children — we already handled it
+    }
+
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'_>) {
+        // The target ConstantPathNode is a write target, not a const read.
+        // Set flag so visit_constant_path_node skips it, then visit value normally.
+        self.in_const_path_write = true;
+        self.visit_constant_path_node(&node.target());
+        self.in_const_path_write = false;
+        // Visit the value side normally (it may contain STDOUT references)
+        self.visit(&node.value());
+    }
+
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'_>,
+    ) {
+        self.in_const_path_write = true;
+        self.visit_constant_path_node(&node.target());
+        self.in_const_path_write = false;
+        self.visit(&node.value());
+    }
+
+    fn visit_constant_path_and_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathAndWriteNode<'_>,
+    ) {
+        self.in_const_path_write = true;
+        self.visit_constant_path_node(&node.target());
+        self.in_const_path_write = false;
+        self.visit(&node.value());
+    }
+
+    fn visit_constant_path_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOperatorWriteNode<'_>,
+    ) {
+        self.in_const_path_write = true;
+        self.visit_constant_path_node(&node.target());
+        self.in_const_path_write = false;
+        self.visit(&node.value());
     }
 }
 

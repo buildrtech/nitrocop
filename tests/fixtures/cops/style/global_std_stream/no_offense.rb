@@ -9,3 +9,8 @@ Foo::Bar::STDERR.puts('hello')
 $stdout = STDOUT
 $stderr = STDERR
 $stdin = STDIN
+
+# Constant write targets should not be flagged
+::STDOUT = something
+::STDERR = something
+::STDIN = something
