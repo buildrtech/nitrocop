@@ -5,9 +5,15 @@ use crate::parse::source::SourceFile;
 
 /// Enforces consistent ordering of the standard Rails RESTful controller actions.
 ///
-/// Root cause of FP=100: the cop iterated ALL `def` nodes in the class body without
-/// tracking visibility scope. Private/protected CRUD actions (after `private`/`protected`
-/// keywords or inline `private def foo`) were incorrectly flagged.
+/// Root cause of original FP batch: the cop iterated ALL `def` nodes in the class body
+/// without tracking visibility scope. Private/protected CRUD actions (after `private`/
+/// `protected` keywords or inline `private def foo`) were incorrectly flagged.
+///
+/// Root cause of second FP batch (100 FPs): the cop didn't handle `private :method_name`
+/// or `protected :method_name` (symbol-argument visibility modifiers). RuboCop's
+/// VisibilityHelp mixin checks right-siblings of a def node for `private :method_name`
+/// calls, treating those methods as non-public. Fix: pre-collect all symbol arguments
+/// to `private`/`protected` calls in the class body, then exclude matching def names.
 ///
 /// Root cause of FN=1: the cop only looked at direct children of the class StatementsNode,
 /// missing `def` nodes nested inside `if`/`unless` blocks.
@@ -15,7 +21,9 @@ use crate::parse::source::SourceFile;
 /// Fix: added visibility tracking while iterating class body statements. Bare `private`
 /// or `protected` calls (CallNode with no receiver, no arguments) set the visibility state.
 /// Inline `private def foo` / `protected def foo` (CallNode wrapping DefNode in arguments)
-/// are skipped. Also walks into `if`/`unless` blocks to find nested `def` nodes.
+/// are skipped. Symbol-arg visibility modifiers (`private :index, :show`) are collected
+/// in a pre-pass and used to exclude those methods. Also walks into `if`/`unless` blocks
+/// to find nested `def` nodes.
 pub struct ActionOrder;
 
 const STANDARD_ORDER: &[&[u8]] = &[
@@ -62,6 +70,32 @@ fn is_inline_visibility_def(node: &ruby_prism::Node<'_>) -> bool {
         }
     }
     false
+}
+
+/// Collect method names made non-public via symbol arguments:
+/// `private :index, :show` or `protected :create`.
+/// Returns a set of method name byte vectors.
+fn collect_symbol_visibility_methods(
+    stmts: &ruby_prism::StatementsNode<'_>,
+) -> std::collections::HashSet<Vec<u8>> {
+    let mut non_public = std::collections::HashSet::new();
+    for stmt in stmts.body().iter() {
+        if let Some(call) = stmt.as_call_node() {
+            if call.receiver().is_none() {
+                let name = call.name().as_slice();
+                if matches!(name, b"private" | b"protected") {
+                    if let Some(args) = call.arguments() {
+                        for arg in args.arguments().iter() {
+                            if let Some(sym) = arg.as_symbol_node() {
+                                non_public.insert(sym.unescaped().to_vec());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    non_public
 }
 
 /// Collect public def nodes from a statement, including defs inside if/unless blocks.
@@ -157,6 +191,9 @@ impl Cop for ActionOrder {
             None => STANDARD_ORDER.to_vec(),
         };
 
+        // Pre-collect methods made non-public via symbol args (e.g. `private :index, :show`)
+        let symbol_non_public = collect_symbol_visibility_methods(&stmts);
+
         // Collect (method_name, order_index, offset) for public standard actions,
         // tracking visibility state as we iterate class body statements.
         let mut actions: Vec<(Vec<u8>, usize, usize)> = Vec::new();
@@ -179,6 +216,10 @@ impl Cop for ActionOrder {
             collect_public_defs(&stmt, is_public, &mut defs);
 
             for (name, offset) in defs {
+                // Skip methods explicitly made non-public via symbol args
+                if symbol_non_public.contains(&name) {
+                    continue;
+                }
                 if let Some(idx) = order_list.iter().position(|&a| a == name.as_slice()) {
                     actions.push((name, idx, offset));
                 }

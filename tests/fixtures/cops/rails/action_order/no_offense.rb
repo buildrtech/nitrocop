@@ -55,3 +55,32 @@ class MixedController < ApplicationController
   def destroy; end
   def create; end
 end
+
+# Actions made private via `private :method_name` should not be checked
+class SymbolPrivateController < ApplicationController
+  def show; end
+  def index; end
+  private :index
+end
+
+# Actions made protected via `protected :method_name` should not be checked
+class SymbolProtectedController < ApplicationController
+  def show; end
+  def index; end
+  protected :index
+end
+
+# Multiple actions made private via `private :action1, :action2`
+class MultiSymbolPrivateController < ApplicationController
+  def show; end
+  def index; end
+  private :index, :show
+end
+
+# private :method after the def, mixed with public actions in order
+class MixedSymbolPrivateController < ApplicationController
+  def index; end
+  def destroy; end
+  def show; end
+  private :destroy, :show
+end
