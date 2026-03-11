@@ -93,11 +93,26 @@ fn is_filename_snake_case(segment: &str) -> bool {
 /// Fix: implemented `MigratedSchemaVersion` parsing and `is_migrated_file()` check
 /// in `CopFilterSet` + `lint_file()`, matching RuboCop's behavior globally.
 ///
-/// ### Remaining FP=2: timetrap + simplecov (likely CI environment difference)
-/// 1 from samg/timetrap (`lib/Getopt/Declare.rb`) and 1 from simplecov-ruby/simplecov
-/// (`spec/fixtures/iso-8859.rb`). These show as FP in CI corpus oracle but
-/// local `--rerun` verification shows 0 excess. Root cause likely CI-environment
-/// specific (different config resolution, file set, or Ruby version). Not cop bugs.
+/// ## Corpus investigation (2026-03-11) — remaining FP=2 fixed
+///
+/// The remaining corpus FPs were real, not CI noise. Direct RuboCop repro under the
+/// corpus bundle showed these files only get `Lint/Syntax: Invalid byte sequence in utf-8.`
+/// and do NOT run Naming/FileName:
+/// - `samg__timetrap__edacc04/lib/Getopt/Declare.rb`
+/// - `simplecov-ruby__simplecov__522dc7d/spec/fixtures/iso-8859.rb`
+///
+/// Both files contain invalid UTF-8 bytes and no Ruby magic encoding comment.
+/// nitrocop still ran FileName on them because Prism returned a parse result usable
+/// enough for the linter to reach `check_lines`. RuboCop suppresses normal cops in
+/// this situation and reports only the encoding syntax error.
+///
+/// Fix: skip Naming/FileName on non-UTF-8 source without a `coding:` / `encoding:`
+/// magic comment on the first two lines, while still checking non-UTF-8 files that
+/// explicitly declare an encoding (for example `euc-jp.rb`).
+///
+/// Note: local `check-cop.py --rerun` batch mode can mask this mismatch because
+/// `run_corpus_check()` strips the repo prefix before global exclude matching.
+/// The direct RuboCop repro was the signal that proved the remaining FP was real.
 pub struct FileName;
 
 /// Well-known Ruby files that don't follow snake_case convention.
@@ -213,6 +228,26 @@ fn has_matching_definition(source: &str, expected_namespace: &[String]) -> bool 
     false
 }
 
+fn skip_for_invalid_utf8_without_magic_encoding(source: &SourceFile) -> bool {
+    if std::str::from_utf8(source.as_bytes()).is_ok() {
+        return false;
+    }
+    !has_magic_encoding_comment(source.as_bytes())
+}
+
+fn has_magic_encoding_comment(source: &[u8]) -> bool {
+    for line in source.split(|&b| b == b'\n').take(2) {
+        let lower = String::from_utf8_lossy(line).to_ascii_lowercase();
+        if lower.contains("coding:") || lower.contains("coding=") {
+            return true;
+        }
+        if lower.contains("encoding:") || lower.contains("encoding=") {
+            return true;
+        }
+    }
+    false
+}
+
 impl Cop for FileName {
     fn name(&self) -> &'static str {
         "Naming/FileName"
@@ -225,6 +260,10 @@ impl Cop for FileName {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        if skip_for_invalid_utf8_without_magic_encoding(source) {
+            return;
+        }
+
         let expect_matching_definition = config.get_bool("ExpectMatchingDefinition", false);
         let check_def_path_hierarchy = config.get_bool("CheckDefinitionPathHierarchy", true);
         let check_def_path_roots = config.get_string_array("CheckDefinitionPathHierarchyRoots");
@@ -680,6 +719,32 @@ mod tests {
             diags.is_empty(),
             "Unicode lowercase filenames should not be flagged"
         );
+    }
+
+    #[test]
+    fn ignores_non_utf8_source_without_magic_encoding() {
+        let source = SourceFile::from_bytes(
+            "Declare.rb",
+            b"# localized to Espa\xf1ol thus:\nputs 'hi'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FileName.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "non-UTF8 source without magic encoding should be ignored"
+        );
+    }
+
+    #[test]
+    fn non_utf8_source_with_magic_encoding_still_registers_filename_offense() {
+        let source = SourceFile::from_bytes(
+            "BadName.rb",
+            b"# encoding: iso-8859-1\n# localized to Espa\xf1ol thus:\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FileName.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].cop_name, "Naming/FileName");
     }
 
     #[test]
