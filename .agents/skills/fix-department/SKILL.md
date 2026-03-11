@@ -1,14 +1,22 @@
 ---
 name: fix-department
-description: Bring all cops in a gem to 100% conformance with triage, TDD, and per-cop corpus or synthetic verification.
+description: Drive a department or gem all the way to 100% conformance, including regenerated README/docs corpus artifacts and Linux CI parity.
 allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob
 ---
 
 # Fix Department (Codex)
 
-This skill targets one gem (for example `rubocop-performance`, `rubocop-rspec`,
-or `rubocop-rails`) and drives it toward full conformance (0 FP + 0 FN on
-corpus-backed cops, plus no synthetic-only divergence).
+This skill targets one department or one gem (for example `Naming`,
+`rubocop-performance`, `rubocop-rspec`, or `rubocop-rails`) and drives it all
+the way to 100% conformance.
+
+Final stop condition:
+- The regenerated local conformance artifacts (`README.md`, `docs/corpus.md`,
+  and related benchmark outputs) show 100.0% / 0 FP / 0 FN for the target.
+- Linux CI/corpus oracle agrees with the local result.
+
+Per-cop `check-cop.py --rerun` results are intermediate gates only. They are
+necessary, but they are NOT sufficient to end `/fix-department`.
 Run fix work from a dedicated git worktree by default.
 
 ## Workflow
@@ -23,15 +31,27 @@ Run fix work from a dedicated git worktree by default.
    synthetic-only divergence is called out in the gem deep-dive rather than the
    summary row alone.
 
-2. If no gem is specified, pick one with:
+2. Determine the target:
+   - If the user specified a core `rubocop` department (for example `Naming`,
+     `Layout`, `Lint`, `Metrics`, `Style`), use the owning gem only for triage,
+     but treat the department row in `README.md` / `docs/corpus.md` as the real
+     scorecard.
+   - If the user specified a plugin gem (`rubocop-performance`,
+     `rubocop-rspec`, `rubocop-rails`, etc.), the gem is both the triage scope
+     and the final scorecard.
+
+3. If no gem/department is specified, pick one with:
    - Few diverging cops
    - No uncovered cops (preferred) - `Untest` means no corpus or synthetic coverage
    - High adoption value
 
-3. Run deep-dive for the selected gem:
+4. Run deep-dive for the selected gem:
    ```bash
    python3 .agents/skills/fix-department/scripts/gem_progress.py --gem <gem-name>
    ```
+   Also inspect the current checked-in scorecard row for the target in
+   `README.md` and `docs/corpus.md`. That row, not the per-cop rerun output, is
+   what must reach 100%.
 
 ### Phase 1: Plan Batch
 
@@ -91,12 +111,17 @@ Read reduced repros from `/tmp/nitrocop-reduce/` and capture root-cause hypothes
    python3 scripts/check-cop.py Department/CopName --verbose --rerun
    python3 bench/synthetic/run_synthetic.py --verbose
    ```
-   Corpus validation is the acceptance gate for corpus-backed cops. For synthetic-only cops,
-   rerun the synthetic benchmark and inspect that cop's entry in `bench/synthetic/synthetic-results.json`;
-   `check-cop.py` has no signal there. Unit tests passing is necessary but not sufficient.
-   Use `--rerun` only for cops whose behavior may have changed (cop source or related parsing/config logic).
-   For untouched corpus cops, prefer artifact mode (`python3 scripts/check-cop.py Department/CopName --verbose`)
-   when the latest corpus oracle run is current.
+   Corpus validation is the intermediate acceptance gate for corpus-backed cops.
+   For synthetic-only cops, rerun the synthetic benchmark and inspect that cop's
+   entry in `bench/synthetic/synthetic-results.json`; `check-cop.py` has no
+   signal there. Unit tests passing is necessary but not sufficient.
+   Use `--rerun` only for cops whose behavior may have changed (cop source or
+   related parsing/config logic). For untouched corpus cops, prefer artifact
+   mode (`python3 scripts/check-cop.py Department/CopName --verbose`) when the
+   latest corpus oracle run is current.
+
+   Do not stop here. Exact-match per-cop reruns can still leave the target
+   department/gem below 100% once the full corpus artifacts are regenerated.
 
 6. Handle regressions:
    - If FP increases (even with passing tests), revert the code change.
@@ -150,25 +175,41 @@ python3 bench/synthetic/run_synthetic.py --verbose
 ```
 Use `check-cop.py` for corpus-backed cops and `run_synthetic.py` for synthetic-only cops.
 
-Refresh department status:
+Refresh department/gem status:
 ```bash
 python3 .agents/skills/fix-department/scripts/gem_progress.py --gem <gem-name>
 ```
 
-Regenerate benchmark conformance artifacts only when explicitly requested by the user (or for a dedicated docs/release refresh):
+Regenerate benchmark conformance artifacts as the REQUIRED final local gate:
 ```bash
 cargo run --release --bin bench_nitrocop -- conform
 ```
+This is what updates `README.md`, `docs/corpus.md`, and the checked-in
+conformance tables. `/fix-department` is not done until these artifacts show the
+target at 100.0% / 0 FP / 0 FN.
+
+After regenerating, inspect the target row in `README.md` and `docs/corpus.md`:
+- If the row is still below 100%, loop back to Phase 1 even if the modified cops
+  passed `check-cop.py --rerun`.
+- If the row is 100% locally but Linux CI/corpus oracle is not yet green or
+  disagrees, treat that as a parity bug and keep investigating. Do not declare
+  the department/gem complete yet.
+- If local and Linux CI both show 100%, the target is done.
 
 If diverging cops remain, loop back to Phase 1.
 
 ### Phase 4: Report
 
 Report:
-- Gem targeted
+- Department/gem targeted
 - Cops fixed with FP/FN deltas
 - Cops deferred/reverted and why
-- Verification status (`fmt`, `clippy`, `test`, `check-cop`, `run_synthetic` when needed, benchmark artifacts if requested)
+- Verification status:
+  local `fmt` / `clippy` / `test`
+  per-cop `check-cop` / `run_synthetic`
+  regenerated `bench_nitrocop -- conform` artifact status
+  `README.md` / `docs/corpus.md` target row
+  Linux CI parity status (confirmed / pending / diverged)
 
 ### Phase 5: Integrate Back to Main (Default)
 
@@ -221,12 +262,16 @@ Do not leave retained progress only in a worktree branch.
     (artifact mode) for untouched cops.
   - **Synthetic corpus**: `python3 bench/synthetic/run_synthetic.py --verbose` for synthetic-only cops.
   Never create test Ruby files outside the fixture directories.
+- `check-cop.py` is a cop-level gate, not the completion gate. Never declare
+  `/fix-department` done while `README.md` / `docs/corpus.md` still show the
+  target below 100%, or while Linux CI parity is still unconfirmed.
 - Use local corpus files under `vendor/corpus/` when available.
 - Do not copy identifiers from private repositories into source, fixtures, or commit messages.
 
 ## Arguments
 
 - `$fix-department` — show scoreboard and choose a gem
+- `$fix-department Naming` — complete the `Naming` department and keep going until its README/docs rows hit 100%
 - `$fix-department rubocop-performance` — focus that gem
 - `$fix-department rubocop-rspec` — focus that gem
 - `$fix-department rubocop-rails` — focus that gem
