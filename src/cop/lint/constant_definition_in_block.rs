@@ -4,25 +4,27 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// ## Corpus investigation (2026-03-11)
+/// Flags constant definitions (constant assignment, class, module) inside blocks.
 ///
-/// Corpus oracle reported FP=66, FN=21.
+/// ## Investigation (2026-03-11)
 ///
-/// FP=66: nitrocop flags constants inside case/when, begin/rescue, while/for
-/// and other compound nodes that happen to be inside blocks. RuboCop's
-/// `{^any_block [^begin ^^any_block]}` pattern only matches constants whose
-/// DIRECT parent is a block or whose grandparent is a block with a begin in
-/// between — intermediate compound nodes (case, if, while, etc.) break the
-/// match. Needs compound-node transparency logic.
+/// **Root cause of FPs:** The original implementation used a blacklist approach —
+/// `direct_in_block` was set to `true` when entering a `BlockNode`, then selectively
+/// reset to `false` for known compound nodes (if, case, begin, etc.). Any node type
+/// NOT in the blacklist (e.g., `CaseMatchNode` for pattern matching) would leak the
+/// flag through, causing false positives for constants inside those constructs within
+/// blocks.
 ///
-/// FN=21: LambdaNode is an `any_block` type in RuboCop but nitrocop may not
-/// treat it as a block context. Also `[^begin ^^any_block]` pattern (constant
-/// inside a begin that is direct child of a block) may be missed.
+/// **Root cause of FNs:** `LambdaNode` (`->`) was not handled. In RuboCop, `any_block`
+/// includes `block`, `numblock`, `itblock`, and `lambda` nodes. Prism represents `->` as
+/// a separate `LambdaNode`, which the original code did not visit.
 ///
-/// Deferred: requires rewriting the parent-ancestry check to match RuboCop's
-/// node matcher semantics. The current visitor approach tracks `direct_in_block`
-/// flag but doesn't correctly model the `{^any_block [^begin ^^any_block]}`
-/// two-pattern disjunction.
+/// **Fix:** Switched to a whitelist approach. Instead of propagating a flag and resetting
+/// it for known compound nodes, we now directly inspect block body children at the block
+/// body level. `visit_block_body` iterates over the direct children of the block's
+/// `StatementsNode` and checks each for constant/class/module definitions. Only direct
+/// children of the block body are flagged — any deeper nesting is handled by normal
+/// recursive visitation. Added `visit_lambda_node` for `->` syntax.
 pub struct ConstantDefinitionInBlock;
 
 impl Cop for ConstantDefinitionInBlock {
@@ -50,7 +52,6 @@ impl Cop for ConstantDefinitionInBlock {
             cop: self,
             source,
             allowed_methods,
-            direct_in_block: false,
             current_block_method: Vec::new(),
             diagnostics: Vec::new(),
         };
@@ -63,13 +64,6 @@ struct BlockConstVisitor<'a, 'src> {
     cop: &'a ConstantDefinitionInBlock,
     source: &'src SourceFile,
     allowed_methods: Vec<String>,
-    /// Whether the current node is a direct child of a block body.
-    /// RuboCop's pattern `{^any_block [^begin ^^any_block]}` means the node
-    /// must be either: (a) a direct child of a block node, or (b) a direct
-    /// child of a `begin`/StatementsNode that is itself a direct child of a
-    /// block node. An `if`/`unless`/etc. between the block and the constant
-    /// definition breaks this direct-child relationship.
-    direct_in_block: bool,
     current_block_method: Vec<String>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -83,21 +77,89 @@ impl BlockConstVisitor<'_, '_> {
         }
     }
 
-    fn should_flag(&self) -> bool {
-        self.direct_in_block && !self.current_method_allowed()
+    /// Check the direct children of a block body for constant/class/module definitions.
+    /// This implements the RuboCop pattern `{^any_block [^begin ^^any_block]}`:
+    /// a constant must be either a direct child of a block, or a direct child of a
+    /// `begin` (StatementsNode) that is itself a direct child of a block.
+    fn visit_block_body(&mut self, body: &ruby_prism::Node<'_>) {
+        if let Some(stmts) = body.as_statements_node() {
+            for stmt in stmts.body().iter() {
+                self.check_block_body_child(&stmt);
+            }
+        } else {
+            // Single-expression body (no StatementsNode wrapper)
+            self.check_block_body_child(body);
+        }
+        // Now visit the body normally for nested blocks
+        self.visit(body);
+    }
+
+    fn check_block_body_child(&mut self, node: &ruby_prism::Node<'_>) {
+        if self.current_method_allowed() {
+            return;
+        }
+
+        // Check for constant assignment (FOO = 1)
+        // RuboCop's pattern uses `nil?` for the namespace, which means only bare
+        // constant writes are flagged, not namespaced ones (Mod::FOO = 1, ::FOO = 1).
+        if node.as_constant_write_node().is_some() {
+            let loc = node.location();
+            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+            self.diagnostics.push(self.cop.diagnostic(
+                self.source,
+                line,
+                column,
+                "Do not define constants this way within a block.".to_string(),
+            ));
+        }
+
+        // Check for class definition (class Foo; end)
+        if node.as_class_node().is_some() {
+            let loc = node.location();
+            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+            self.diagnostics.push(self.cop.diagnostic(
+                self.source,
+                line,
+                column,
+                "Do not define constants this way within a block.".to_string(),
+            ));
+        }
+
+        // Check for module definition (module Foo; end)
+        if node.as_module_node().is_some() {
+            let loc = node.location();
+            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+            self.diagnostics.push(self.cop.diagnostic(
+                self.source,
+                line,
+                column,
+                "Do not define constants this way within a block.".to_string(),
+            ));
+        }
     }
 }
 
 impl<'pr> Visit<'pr> for BlockConstVisitor<'_, '_> {
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = true;
-        ruby_prism::visit_block_node(self, node);
-        self.direct_in_block = old;
+        if let Some(body) = node.body() {
+            self.visit_block_body(&body);
+        }
+        // Don't call ruby_prism::visit_block_node — we already visited the body above.
+        // We skip parameters since they can't contain constant definitions.
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        // In RuboCop, `->` lambdas are `any_block` with method_name `lambda`.
+        self.current_block_method.push("lambda".to_string());
+        if let Some(body) = node.body() {
+            self.visit_block_body(&body);
+        }
+        self.current_block_method.pop();
+        // Don't call ruby_prism::visit_lambda_node — we already visited the body above.
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        // If this call has a block, record the method name
+        // If this call has a block, record the method name for AllowedMethods check
         if node.block().is_some() {
             let name = std::str::from_utf8(node.name().as_slice())
                 .unwrap_or("")
@@ -108,144 +170,6 @@ impl<'pr> Visit<'pr> for BlockConstVisitor<'_, '_> {
         } else {
             ruby_prism::visit_call_node(self, node);
         }
-    }
-
-    // StatementsNode is transparent — it corresponds to `begin` in Parser gem,
-    // which the RuboCop pattern considers transparent via `[^begin ^^any_block]`.
-    // So we do NOT reset `direct_in_block` when entering StatementsNode.
-
-    // All compound nodes that can contain statements reset `direct_in_block`
-    // because they break the direct parent relationship with the block.
-    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_if_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_unless_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_while_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_until_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_for_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_case_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_begin_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_rescue_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_ensure_node(&mut self, node: &ruby_prism::EnsureNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_ensure_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_def_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
-        if self.should_flag() {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Do not define constants this way within a block.".to_string(),
-            ));
-        }
-        ruby_prism::visit_constant_write_node(self, node);
-    }
-
-    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
-        // RuboCop only flags bare constant assignments (FOO = 1) in blocks,
-        // not namespaced ones (::FOO = 1 or Mod::FOO = 1). The RuboCop
-        // pattern uses `nil?` for the namespace, which excludes all
-        // ConstantPathWriteNode cases. Namespaced constant writes explicitly
-        // scope the constant, so they are intentional.
-        ruby_prism::visit_constant_path_write_node(self, node);
-    }
-
-    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
-        if self.should_flag() {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Do not define constants this way within a block.".to_string(),
-            ));
-            // Don't recurse into class body for more constant defs
-            return;
-        }
-        // Reset direct_in_block when entering class body
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_class_node(self, node);
-        self.direct_in_block = old;
-    }
-
-    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
-        if self.should_flag() {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Do not define constants this way within a block.".to_string(),
-            ));
-            return;
-        }
-        // Reset direct_in_block when entering module body
-        let old = self.direct_in_block;
-        self.direct_in_block = false;
-        ruby_prism::visit_module_node(self, node);
-        self.direct_in_block = old;
     }
 }
 

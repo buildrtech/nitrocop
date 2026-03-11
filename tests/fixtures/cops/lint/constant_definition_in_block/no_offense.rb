@@ -36,3 +36,43 @@ context 'conditional' do
     TIMEOUT = 30
   end
 end
+
+# Constant inside case/when inside a block
+describe 'config' do
+  case mode
+  when :production
+    SETTING = true
+  end
+end
+
+# Constant inside case/in (pattern matching) inside a block
+describe 'config' do
+  case value
+  in Integer
+    RESULT = value
+  end
+end
+
+# Constant inside begin/rescue inside a block
+describe 'retry' do
+  begin
+    LIMIT = calculate
+  rescue StandardError
+    nil
+  end
+end
+
+# Constant inside a while loop inside a block
+task :process do
+  while items.any?
+    BATCH_SIZE = 100
+  end
+end
+
+# Constant inside a for loop inside a block
+task :iterate do
+  for item in items
+    MARKER = true
+  end
+end
+

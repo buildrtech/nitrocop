@@ -15,3 +15,15 @@ module M
     ^^^^^^^^^ Lint/ConstantDefinitionInBlock: Do not define constants this way within a block.
   end
 end
+
+# Constant inside a lambda block
+handler = -> {
+  CONFIG = {}
+  ^^^^^^^^^^ Lint/ConstantDefinitionInBlock: Do not define constants this way within a block.
+}
+
+# Module inside a lambda block
+process = lambda do
+  module Helpers; end
+  ^^^^^^^^^^^^^^^^^^^ Lint/ConstantDefinitionInBlock: Do not define constants this way within a block.
+end
