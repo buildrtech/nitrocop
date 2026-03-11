@@ -2,8 +2,19 @@ use crate::cop::node_type::{CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Style/EmptyLiteral: prefers literal `[]`, `{}`, `''` over `Array.new`, `Hash.new`, `String.new`.
+///
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=1, FN=0.
+///
+/// FP=1: `Hash.new { Hash.new }` was incorrectly flagging the inner `Hash.new`.
+/// RuboCop skips a nested constructor when its parent block belongs to `Hash.new`
+/// or `Array.new`, because the parser parentage is the surrounding block rather than
+/// the constructor call itself. Fixed by walking ancestor blocks and checking the
+/// wrapped constructor call before flagging a nested empty literal constructor.
 ///
 /// **String.new special case:** RuboCop only flags `String.new` when `frozen_string_literal: false`
 /// is explicitly set. When the comment is absent or set to `true`, `String.new` is needed to
@@ -28,6 +39,74 @@ fn has_frozen_string_literal_false(source: &SourceFile) -> bool {
     false
 }
 
+fn is_matching_constructor_call(call: &ruby_prism::CallNode<'_>, const_name: &[u8]) -> bool {
+    if call.name().as_slice() != b"new" {
+        return false;
+    }
+
+    let Some(receiver) = call.receiver() else {
+        return false;
+    };
+
+    if let Some(cr) = receiver.as_constant_read_node() {
+        return cr.name().as_slice() == const_name;
+    }
+
+    if let Some(cp) = receiver.as_constant_path_node() {
+        return cp.parent().is_none()
+            && cp.name().is_some_and(|name| name.as_slice() == const_name);
+    }
+
+    false
+}
+
+struct ConstructorBlockFinder<'a> {
+    const_name: &'a [u8],
+    target_start: usize,
+    target_end: usize,
+    found: bool,
+}
+
+impl<'a, 'pr> Visit<'pr> for ConstructorBlockFinder<'a> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if self.found {
+            return;
+        }
+
+        if is_matching_constructor_call(node, self.const_name) {
+            if let Some(block_node) = node.block().and_then(|block| block.as_block_node()) {
+                if let Some(body) = block_node.body() {
+                    let body_loc = body.location();
+                    if body_loc.start_offset() <= self.target_start
+                        && self.target_end <= body_loc.end_offset()
+                    {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+        }
+
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+fn wrapped_by_constructor_block(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    call_node: &ruby_prism::CallNode<'_>,
+    const_name: &[u8],
+) -> bool {
+    let loc = call_node.location();
+    let mut finder = ConstructorBlockFinder {
+        const_name,
+        target_start: loc.start_offset(),
+        target_end: loc.end_offset(),
+        found: false,
+    };
+    finder.visit(&parse_result.node());
+    finder.found
+}
+
 impl Cop for EmptyLiteral {
     fn name(&self) -> &'static str {
         "Style/EmptyLiteral"
@@ -41,7 +120,7 @@ impl Cop for EmptyLiteral {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -93,6 +172,19 @@ impl Cop for EmptyLiteral {
 
         // Must not have a block (Hash.new { |h, k| h[k] = [] })
         if call_node.block().is_some() {
+            return;
+        }
+
+        // RuboCop also skips nested constructors inside the body of Array.new/Hash.new
+        // default-value blocks, e.g. Hash.new { Hash.new }.
+        if const_name.as_slice() == b"Array"
+            && wrapped_by_constructor_block(parse_result, &call_node, b"Array")
+        {
+            return;
+        }
+        if const_name.as_slice() == b"Hash"
+            && wrapped_by_constructor_block(parse_result, &call_node, b"Hash")
+        {
             return;
         }
 
