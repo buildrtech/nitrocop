@@ -3,6 +3,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/StabbyLambdaParentheses - checks parentheses around stabby lambda arguments.
+///
+/// ## FP fix (93 FP, 2 FN in corpus)
+///
+/// Root cause: nitrocop used `lambda_node.parameters().is_some()` to detect lambdas
+/// with arguments. In Prism, `parameters()` returns a `Node` that can be:
+/// - `BlockParametersNode` — explicit arguments like `->(x) {}` or `-> x {}`
+/// - `NumberedParametersNode` — implicit `_1`, `_2` usage like `-> { _1 + _2 }`
+/// - `ItParametersNode` — implicit `it` usage like `-> { it + 1 }` (Ruby 3.4+)
+///
+/// RuboCop's `arguments?` only returns true for explicit argument declarations.
+/// Numbered/it parameters are implicit and should not trigger this cop.
+///
+/// Additionally, `->() {}` (empty explicit parens, no actual arguments) has
+/// `arguments? = false` in RuboCop, so we must also check that the
+/// `BlockParametersNode` contains actual parameters.
 pub struct StabbyLambdaParentheses;
 
 impl Cop for StabbyLambdaParentheses {
@@ -30,8 +46,32 @@ impl Cop for StabbyLambdaParentheses {
 
         let enforced_style = config.get_str("EnforcedStyle", "require_parentheses");
 
-        // Only care if the lambda has parameters
-        if lambda_node.parameters().is_none() {
+        // Only care if the lambda has explicit arguments (BlockParametersNode).
+        // Skip implicit parameters (NumberedParametersNode for _1/_2,
+        // ItParametersNode for `it`) and lambdas with no parameters at all.
+        let params = match lambda_node.parameters() {
+            Some(p) => p,
+            None => return,
+        };
+        let block_params = match params.as_block_parameters_node() {
+            Some(bp) => bp,
+            None => return, // NumberedParametersNode or ItParametersNode — skip
+        };
+
+        // Also skip empty parameter lists like ->() {} — RuboCop's arguments?
+        // returns false when there are no actual arguments, just empty parens.
+        let has_actual_params = if let Some(inner) = block_params.parameters() {
+            !inner.requireds().is_empty()
+                || !inner.optionals().is_empty()
+                || inner.rest().is_some()
+                || !inner.posts().is_empty()
+                || !inner.keywords().is_empty()
+                || inner.keyword_rest().is_some()
+                || inner.block().is_some()
+        } else {
+            false
+        };
+        if !has_actual_params {
             return;
         }
 
@@ -104,5 +144,45 @@ mod tests {
         let diags = run_cop_full_with_config(&StabbyLambdaParentheses, source, config);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("Do not use parentheses"));
+    }
+
+    #[test]
+    fn no_offense_numbered_params() {
+        let source = b"f = -> { _1 + _2 }\n";
+        let diags = crate::testutil::run_cop_full(&StabbyLambdaParentheses, source);
+        assert_eq!(diags.len(), 0, "numbered params should not trigger offense");
+    }
+
+    #[test]
+    fn no_offense_it_param() {
+        let source = b"f = -> { it + 1 }\n";
+        let diags = crate::testutil::run_cop_full(&StabbyLambdaParentheses, source);
+        assert_eq!(diags.len(), 0, "it param should not trigger offense");
+    }
+
+    #[test]
+    fn no_offense_empty_parens() {
+        let source = b"f = ->() { true }\n";
+        let diags = crate::testutil::run_cop_full(&StabbyLambdaParentheses, source);
+        assert_eq!(diags.len(), 0, "empty parens should not trigger offense");
+    }
+
+    #[test]
+    fn no_offense_numbered_params_require_no_parens() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("require_no_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"f = -> { _1 + _2 }\n";
+        let diags = run_cop_full_with_config(&StabbyLambdaParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            0,
+            "numbered params should not trigger offense under require_no_parentheses"
+        );
     }
 }
