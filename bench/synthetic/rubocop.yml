@@ -1,5 +1,5 @@
 # Synthetic corpus config — inherits the corpus baseline (all cops enabled).
-# The run_synthetic.py script filters results to only the 62 target cops.
+# The run_synthetic.py script filters results to only the 58 target cops.
 #
 # Overrides vs baseline:
 #   - TargetRailsVersion: 8.0 (baseline has 7.0) — unlocks Rails/StrongParametersExpect,

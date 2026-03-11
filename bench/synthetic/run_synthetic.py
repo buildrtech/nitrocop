@@ -83,6 +83,7 @@ TARGET_COPS = sorted([
     "Rails/UnusedIgnoredColumns",
     "Rails/WhereMissing",
     "Rails/WhereRange",
+    "Style/AmbiguousEndlessMethodDefinition",
     "Style/Copyright",
     "Style/DoubleCopDisableDirective",
     "Style/MultilineInPatternThen",

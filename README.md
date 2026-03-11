@@ -56,22 +56,22 @@ nitrocop supports 910 cops from 6 RuboCop gems.
 
 Compared with RuboCop on [**1,000 open-source repos**](docs/corpus.md) (228k Ruby files).
 
-97.3% of compared issue reports matched (11.3M of 11.6M). 454 of 910 cops matched exactly; 455 differed; 1 had no corpus data.
+97.3% of compared issue reports matched (11.3M of 11.6M). 455 of 910 cops matched exactly; 455 differed.
 
 **[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (588 cops)
 
-| Department | Cops | Matched exactly | Differed | No corpus data | Matched exactly % |
-|------------|-----:|----------------:|---------:|---------------:|------------------:|
-| Layout | 100 | 34 | 66 | 0 | 34.0% |
-| Lint | 148 | 78 | 70 | 0 | 52.7% |
-| Style | 287 | 90 | 196 | 1 | 31.3% |
-| Metrics | 10 | 5 | 5 | 0 | 50.0% |
-| Naming | 19 | 15 | 4 | 0 | 78.9% |
-| Security | 6 | 6 | 0 | 0 | ✓ 100.0% |
-| Bundler | 7 | 7 | 0 | 0 | ✓ 100.0% |
-| Gemspec | 10 | 10 | 0 | 0 | ✓ 100.0% |
-| Migration | 1 | 1 | 0 | 0 | ✓ 100.0% |
-| **Total** | **588** | **246** | **341** | **1** | **41.8%** |
+| Department | Cops | Matched exactly | Differed | Matched exactly % |
+|------------|-----:|----------------:|---------:|------------------:|
+| Layout | 100 | 34 | 66 | 34.0% |
+| Lint | 148 | 78 | 70 | 52.7% |
+| Style | 287 | 91 | 196 | 31.7% |
+| Metrics | 10 | 5 | 5 | 50.0% |
+| Naming | 19 | 15 | 4 | 78.9% |
+| Security | 6 | 6 | 0 | ✓ 100.0% |
+| Bundler | 7 | 7 | 0 | ✓ 100.0% |
+| Gemspec | 10 | 10 | 0 | ✓ 100.0% |
+| Migration | 1 | 1 | 0 | ✓ 100.0% |
+| **Total** | **588** | **247** | **341** | **42.0%** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 
@@ -104,7 +104,6 @@ Compared with RuboCop on [**1,000 open-source repos**](docs/corpus.md) (228k Rub
 | FactoryBot | 11 | 11 | 0 | ✓ 100.0% |
 
 "Matched exactly" means nitrocop produced no extra issues and missed no issues for that cop anywhere in the corpus.
-No corpus data means the cop never appeared in the corpus, so it has not been compared yet.
 See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown.
 <!-- corpus-cops:end -->
 

@@ -483,6 +483,7 @@
     "Security/JSONLoad": "stable",
     "Security/MarshalLoad": "stable",
     "Security/Open": "stable",
+    "Style/AmbiguousEndlessMethodDefinition": "stable",
     "Style/ArrayCoercion": "stable",
     "Style/ArrayIntersect": "stable",
     "Style/ArrayIntersectWithSingleElement": "stable",
