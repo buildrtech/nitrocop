@@ -29,6 +29,15 @@ use std::collections::HashMap;
 /// **looks_like_constant regex mismatch**: RuboCop uses `/^(?:(?:::)?[A-Z]\w*)+$/`
 /// which requires each segment after `::` to start with uppercase. nitrocop's version
 /// only checked the first segment. Fixed to validate each `::` segment starts uppercase.
+///
+/// **FP=239 — Unconditional module/class unwrapping**: `visit_top_level_nodes` was
+/// recursing into ALL module/class wrappers unconditionally. But RuboCop's
+/// `TopLevelGroup#top_level_nodes` only unwraps module/class/begin when it is the
+/// **sole** child at that nesting level. When there are multiple siblings (e.g.,
+/// `require 'spec_helper'` + `module Foo`), none are unwrapped — each is checked
+/// directly. Fixed by adding a `stmts.len() == 1` guard before recursing into
+/// module/class wrappers. Same pattern as SpecFilePathFormat's
+/// `collect_top_level_spec_groups`.
 pub struct DescribeClass;
 
 impl Cop for DescribeClass {
@@ -74,37 +83,45 @@ impl Cop for DescribeClass {
         // Parse IgnoredMetadata config: hash of key -> array of allowed values
         let ignored_metadata = parse_ignored_metadata(config);
 
-        let stmts = program.statements();
-        for stmt in stmts.body().iter() {
-            visit_top_level_nodes(self, source, &stmt, diagnostics, &ignored_metadata);
-        }
+        let stmts: Vec<_> = program.statements().body().iter().collect();
+        visit_top_level_nodes(self, source, &stmts, diagnostics, &ignored_metadata);
     }
 }
 
-/// Recursively visit top-level nodes, unwrapping module/class/begin wrappers.
-/// When we reach a non-wrapper node, check if it's a top-level describe.
-/// This mirrors RuboCop's `TopLevelGroup#top_level_nodes`.
+/// Visit a list of sibling statements, mirroring RuboCop's `TopLevelGroup#top_level_nodes`.
+///
+/// RuboCop only unwraps module/class when it is the **sole** child at that nesting level.
+/// When there are multiple siblings (e.g., `require` + `module`), none are unwrapped —
+/// each is checked directly as a potential top-level describe.
 fn visit_top_level_nodes(
     cop: &DescribeClass,
     source: &SourceFile,
-    node: &ruby_prism::Node<'_>,
+    stmts: &[ruby_prism::Node<'_>],
     diagnostics: &mut Vec<Diagnostic>,
     ignored_metadata: &HashMap<String, Vec<String>>,
 ) {
-    if let Some(module_node) = node.as_module_node() {
-        if let Some(body) = module_node.body() {
-            visit_body(cop, source, &body, diagnostics, ignored_metadata);
+    if stmts.len() == 1 {
+        let node = &stmts[0];
+        if let Some(module_node) = node.as_module_node() {
+            if let Some(body) = module_node.body() {
+                visit_body(cop, source, &body, diagnostics, ignored_metadata);
+            }
+            return;
         }
-    } else if let Some(class_node) = node.as_class_node() {
-        if let Some(body) = class_node.body() {
-            visit_body(cop, source, &body, diagnostics, ignored_metadata);
+        if let Some(class_node) = node.as_class_node() {
+            if let Some(body) = class_node.body() {
+                visit_body(cop, source, &body, diagnostics, ignored_metadata);
+            }
+            return;
         }
-    } else {
-        check_top_level_describe(cop, source, node, diagnostics, ignored_metadata);
+    }
+    // Multiple siblings or non-wrapper node: check each directly
+    for stmt in stmts {
+        check_top_level_describe(cop, source, stmt, diagnostics, ignored_metadata);
     }
 }
 
-/// Visit a body node (StatementsNode or BeginNode) and recurse into children.
+/// Extract children from a body node (StatementsNode or BeginNode) and recurse.
 fn visit_body(
     cop: &DescribeClass,
     source: &SourceFile,
@@ -113,18 +130,16 @@ fn visit_body(
     ignored_metadata: &HashMap<String, Vec<String>>,
 ) {
     if let Some(stmts) = body.as_statements_node() {
-        for child in stmts.body().iter() {
-            visit_top_level_nodes(cop, source, &child, diagnostics, ignored_metadata);
-        }
+        let children: Vec<_> = stmts.body().iter().collect();
+        visit_top_level_nodes(cop, source, &children, diagnostics, ignored_metadata);
     } else if let Some(begin) = body.as_begin_node() {
         if let Some(stmts) = begin.statements() {
-            for child in stmts.body().iter() {
-                visit_top_level_nodes(cop, source, &child, diagnostics, ignored_metadata);
-            }
+            let children: Vec<_> = stmts.body().iter().collect();
+            visit_top_level_nodes(cop, source, &children, diagnostics, ignored_metadata);
         }
     } else {
-        // Single expression body
-        visit_top_level_nodes(cop, source, body, diagnostics, ignored_metadata);
+        // Single expression body — treat as sole child
+        check_top_level_describe(cop, source, body, diagnostics, ignored_metadata);
     }
 }
 
@@ -326,7 +341,14 @@ fn has_ignored_metadata(
 mod tests {
     use super::*;
 
-    crate::cop_fixture_tests!(DescribeClass, "cops/rspec/describe_class");
+    crate::cop_scenario_fixture_tests!(
+        DescribeClass,
+        "cops/rspec/describe_class",
+        bare_describe = "bare_describe.rb",
+        module_wrapper = "module_wrapper.rb",
+        nested_modules = "nested_modules.rb",
+        class_wrapper = "class_wrapper.rb",
+    );
 
     #[test]
     fn ignored_metadata_skips_describe_with_matching_key_and_value() {
