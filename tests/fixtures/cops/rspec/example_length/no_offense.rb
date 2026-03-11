@@ -49,4 +49,15 @@ RSpec.describe Foo do
     f = a + b + c + d + e
     expect(f).to eq(15)
   end
+
+  # Blocks with numbered parameters (_1) are numblock in Parser gem,
+  # which on_block does not match — RuboCop intentionally skips them
+  it do
+    _1.setup
+    _1.validate
+    _1.process
+    _1.transform
+    _1.finalize
+    _1.verify
+  end
 end

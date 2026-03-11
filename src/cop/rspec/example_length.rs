@@ -1,7 +1,4 @@
-use crate::cop::node_type::{
-    ARRAY_NODE, BLOCK_NODE, CALL_NODE, HASH_NODE, INTERPOLATED_STRING_NODE, STATEMENTS_NODE,
-    STRING_NODE,
-};
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::util::{self, RSPEC_DEFAULT_INCLUDE, is_rspec_example};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -9,10 +6,25 @@ use crate::parse::source::SourceFile;
 
 /// ## Corpus investigation (2026-03-10)
 ///
-/// FP=12, FN=27. FP root cause: missing receiver check — calls like
-/// `obj.it { ... }` or `config.specify { ... }` with blocks were being
-/// counted as RSpec examples. RuboCop's `example?` matcher uses `#rspec?`
-/// receiver check (nil receiver only for examples). Added receiver guard.
+/// FP=12, FN=27.
+///
+/// ### FP root causes (fixed):
+/// 1. Missing receiver check — calls like `obj.it { ... }` or `config.specify { ... }`
+///    with blocks were being counted as RSpec examples. RuboCop's `example?` matcher
+///    uses nil receiver only. Added receiver guard.
+/// 2. Numblock/itblock handling — RuboCop's `on_block` does NOT fire for `numblock`
+///    (numbered params like `_1`) or `itblock` (Ruby 3.4 `it` keyword param). In Prism
+///    these are still BlockNode but with NumberedParametersNode or ItParametersNode as
+///    parameters. Added guard to skip these block types.
+///
+/// ### FN root causes (fixed):
+/// 1. CountAsOne reduction was using line span instead of code length. RuboCop counts
+///    non-blank, non-comment lines in foldable constructs (`code_length`), subtracts
+///    `code_length - 1`. Nitrocop was subtracting `line_span - 1`, which over-reduces
+///    when foldable constructs contain blank/comment lines.
+/// 2. CountAsOne only checked top-level statements, missing arrays/hashes nested inside
+///    assignments or other expressions. RuboCop's `each_top_level_descendant` recursively
+///    descends into all descendants. Rewrote using Visit trait with skip_depth tracking.
 pub struct ExampleLength;
 
 impl Cop for ExampleLength {
@@ -29,15 +41,7 @@ impl Cop for ExampleLength {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            ARRAY_NODE,
-            BLOCK_NODE,
-            CALL_NODE,
-            HASH_NODE,
-            INTERPOLATED_STRING_NODE,
-            STATEMENTS_NODE,
-            STRING_NODE,
-        ]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -73,6 +77,18 @@ impl Cop for ExampleLength {
             None => return,
         };
 
+        // RuboCop's `on_block` does NOT fire for numblock (numbered params like _1)
+        // or itblock (Ruby 3.4 `it` keyword param). In Prism these are still BlockNode
+        // but with NumberedParametersNode or ItParametersNode as the parameters.
+        // Skip them to match RuboCop behavior.
+        if let Some(params) = block.parameters() {
+            if params.as_numbered_parameters_node().is_some()
+                || params.as_it_parameters_node().is_some()
+            {
+                return;
+            }
+        }
+
         let max = config.get_usize("Max", 5);
 
         // Count body lines, skipping blank lines and comment lines.
@@ -93,7 +109,8 @@ impl Cop for ExampleLength {
         // Adjust for CountAsOne: multi-line arrays/hashes/heredocs count as 1 line
         let count_as_one = config.get_string_array("CountAsOne").unwrap_or_default();
         let adjusted = if !count_as_one.is_empty() {
-            let reduction = count_multiline_reductions(source, &block, &count_as_one);
+            let reduction =
+                count_multiline_reductions(source, &block, &count_as_one, count_comments);
             count.saturating_sub(reduction)
         } else {
             count
@@ -113,105 +130,229 @@ impl Cop for ExampleLength {
 }
 
 /// Count how many extra lines multi-line constructs add.
-/// For each multi-line array/hash/heredoc, returns (span - 1) so they count as 1 line.
+/// RuboCop replaces each foldable construct with 1 line: `length - code_length(node) + 1`.
+/// So the reduction per construct is `code_length(node) - 1`, where `code_length` counts
+/// non-blank, non-comment lines in the construct's source (matching `irrelevant_line?`).
+///
+/// Uses `each_top_level_descendant` logic via Visit trait: recursively descends into
+/// all child nodes looking for foldable types. When found, counts reduction and does
+/// NOT recurse further (only top-level foldable nodes are folded).
 fn count_multiline_reductions(
     source: &SourceFile,
     block: &ruby_prism::BlockNode<'_>,
     count_as_one: &[String],
+    count_comments: bool,
 ) -> usize {
+    use ruby_prism::Visit;
+
+    struct FoldableVisitor<'a> {
+        source: &'a SourceFile,
+        count_as_one: &'a [String],
+        count_comments: bool,
+        reduction: usize,
+        /// When > 0, we're inside a foldable node and should NOT recurse further
+        skip_depth: usize,
+    }
+
+    impl FoldableVisitor<'_> {
+        fn is_foldable(&self, node: &ruby_prism::Node<'_>) -> bool {
+            if self.count_as_one.iter().any(|s| s == "array") && node.as_array_node().is_some() {
+                return true;
+            }
+            if self.count_as_one.iter().any(|s| s == "hash") && node.as_hash_node().is_some() {
+                return true;
+            }
+            if self.count_as_one.iter().any(|s| s == "heredoc")
+                && (node.as_interpolated_string_node().is_some() || node.as_string_node().is_some())
+            {
+                return true;
+            }
+            if self.count_as_one.iter().any(|s| s == "method_call") {
+                if let Some(call) = node.as_call_node() {
+                    if call.block().is_none() {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+    }
+
+    impl<'pr> Visit<'pr> for FoldableVisitor<'_> {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            if self.skip_depth > 0 {
+                self.skip_depth += 1;
+                return;
+            }
+            if self.is_foldable(&node) {
+                let code_len = node_code_length(self.source, &node.location(), self.count_comments);
+                if code_len > 1 {
+                    self.reduction += code_len - 1;
+                }
+                // Skip recursing into this foldable node
+                self.skip_depth = 1;
+            }
+        }
+
+        fn visit_branch_node_leave(&mut self) {
+            if self.skip_depth > 0 {
+                self.skip_depth -= 1;
+            }
+        }
+
+        fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            if self.skip_depth > 0 {
+                return;
+            }
+            // Leaf nodes that are foldable (e.g., single-line string)
+            if self.is_foldable(&node) {
+                let code_len = node_code_length(self.source, &node.location(), self.count_comments);
+                if code_len > 1 {
+                    self.reduction += code_len - 1;
+                }
+            }
+        }
+    }
+
     let body = match block.body() {
         Some(b) => b,
         None => return 0,
     };
-    let stmts = match body.as_statements_node() {
-        Some(s) => s,
-        None => return 0,
+
+    let mut visitor = FoldableVisitor {
+        source,
+        count_as_one,
+        count_comments,
+        reduction: 0,
+        skip_depth: 0,
     };
-
-    let mut reduction = 0;
-    for stmt in stmts.body().iter() {
-        reduction += count_node_reduction(source, &stmt, count_as_one);
-    }
-    reduction
+    visitor.visit(&body);
+    visitor.reduction
 }
 
-fn count_node_reduction(
+/// Trim leading and trailing whitespace (space, tab, CR) from a byte slice.
+fn trim_ws(b: &[u8]) -> &[u8] {
+    let start = b
+        .iter()
+        .position(|&c| c != b' ' && c != b'\t' && c != b'\r');
+    match start {
+        Some(s) => {
+            let end = b
+                .iter()
+                .rposition(|&c| c != b' ' && c != b'\t' && c != b'\r')
+                .unwrap();
+            &b[s..=end]
+        }
+        None => &[],
+    }
+}
+
+/// Count non-blank, non-comment lines within a node's source range.
+/// Matches RuboCop's `CodeLengthCalculator#code_length` for non-classlike nodes:
+/// `body.source.lines.count { |line| !irrelevant_line?(line) }`.
+fn node_code_length(
     source: &SourceFile,
-    node: &ruby_prism::Node<'_>,
-    count_as_one: &[String],
+    loc: &ruby_prism::Location<'_>,
+    count_comments: bool,
 ) -> usize {
-    let mut reduction = 0;
-
-    if count_as_one.iter().any(|s| s == "array") {
-        if let Some(arr) = node.as_array_node() {
-            let span = node_line_span(source, &arr.location());
-            if span > 1 {
-                reduction += span - 1;
-            }
-            return reduction;
-        }
-    }
-
-    // Note: keyword_hash_node (keyword args) intentionally not handled for CountAsOne —
-    // only hash literals spanning multiple lines are collapsed to one line in the count.
-    if count_as_one.iter().any(|s| s == "hash") {
-        if let Some(hash) = node.as_hash_node() {
-            let span = node_line_span(source, &hash.location());
-            if span > 1 {
-                reduction += span - 1;
-            }
-            return reduction;
-        }
-    }
-
-    if count_as_one.iter().any(|s| s == "heredoc")
-        && (node.as_interpolated_string_node().is_some() || node.as_string_node().is_some())
-    {
-        let span = node_line_span(source, &node.location());
-        if span > 1 {
-            reduction += span - 1;
-        }
-        return reduction;
-    }
-
-    if count_as_one.iter().any(|s| s == "method_call") {
-        if let Some(call) = node.as_call_node() {
-            // Only count multi-line calls that don't have blocks (blocks are not method_call)
-            if call.block().is_none() {
-                let span = node_line_span(source, &node.location());
-                if span > 1 {
-                    reduction += span - 1;
-                }
-                return reduction;
-            }
-        }
-    }
-
-    // Recurse into the node to find nested multi-line constructs
-    // (e.g., an array inside a method call argument)
-    if let Some(call) = node.as_call_node() {
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                reduction += count_node_reduction(source, &arg, count_as_one);
-            }
-        }
-        if let Some(recv) = call.receiver() {
-            reduction += count_node_reduction(source, &recv, count_as_one);
-        }
-    }
-
-    reduction
-}
-
-fn node_line_span(source: &SourceFile, loc: &ruby_prism::Location<'_>) -> usize {
     let (start_line, _) = source.offset_to_line_col(loc.start_offset());
     let end_off = loc.end_offset().saturating_sub(1).max(loc.start_offset());
     let (end_line, _) = source.offset_to_line_col(end_off);
-    end_line.saturating_sub(start_line) + 1
+
+    let lines: Vec<&[u8]> = source.lines().collect();
+    let mut count = 0;
+    for line_num in start_line..=end_line {
+        if line_num > lines.len() {
+            break;
+        }
+        let line = lines[line_num - 1];
+        let trimmed = trim_ws(line);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !count_comments && trimmed.starts_with(b"#") {
+            continue;
+        }
+        count += 1;
+    }
+    count
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ExampleLength, "cops/rspec/example_length");
+
+    use crate::testutil;
+
+    fn offenses(source: &str) -> Vec<crate::diagnostic::Diagnostic> {
+        testutil::run_cop_full_internal(
+            &ExampleLength,
+            source.as_bytes(),
+            CopConfig::default(),
+            "spec/test_spec.rb",
+        )
+    }
+
+    #[test]
+    fn does_not_fire_on_numblock() {
+        // Numbered parameters create numblock in Parser gem, on_block doesn't match
+        let src = "RSpec.describe Foo do\n  it do\n    _1.a\n    _1.b\n    _1.c\n    _1.d\n    _1.e\n    _1.f\n  end\nend\n";
+        assert!(offenses(src).is_empty(), "Should not fire on numblock");
+    }
+
+    #[test]
+    fn fires_on_regular_block_over_max() {
+        let src = "RSpec.describe Foo do\n  it do\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n    e = 5\n    f = 6\n  end\nend\n";
+        let diags = offenses(src);
+        assert_eq!(diags.len(), 1, "Should fire once for 6-line example");
+        assert!(
+            diags[0].message.contains("[6/5]"),
+            "Expected [6/5] in message, got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn blank_lines_not_counted() {
+        // 5 code lines + 2 blank lines = only 5 should count
+        let src = "RSpec.describe Foo do\n  it do\n    a = 1\n\n    b = 2\n    c = 3\n\n    d = 4\n    e = 5\n  end\nend\n";
+        assert!(offenses(src).is_empty(), "Blank lines should not count");
+    }
+
+    #[test]
+    fn comment_lines_not_counted_by_default() {
+        // 5 code lines + 3 comment lines = only 5 should count
+        let src = "RSpec.describe Foo do\n  it do\n    # comment 1\n    a = 1\n    # comment 2\n    b = 2\n    c = 3\n    # comment 3\n    d = 4\n    e = 5\n  end\nend\n";
+        assert!(
+            offenses(src).is_empty(),
+            "Comment lines should not count by default"
+        );
+    }
+
+    #[test]
+    fn count_as_one_array_with_blanks() {
+        // Array spans 7 lines (including blank line inside).
+        // RuboCop: code_length(array) = 6 non-blank lines, reduction = 6-1 = 5.
+        // Total body: a=1 (1) + array collapsed to 1 = 2 lines. <= Max(5), no offense.
+        use std::collections::HashMap;
+        let mut options = HashMap::new();
+        options.insert(
+            "CountAsOne".to_string(),
+            serde_yml::Value::Sequence(vec![serde_yml::Value::String("array".to_string())]),
+        );
+        let config = CopConfig {
+            options,
+            ..CopConfig::default()
+        };
+        let src = b"RSpec.describe Foo do\n  it do\n    a = 1\n    arr = [\n      1,\n\n      2,\n      3,\n      4\n    ]\n  end\nend\n";
+        let diags =
+            testutil::run_cop_full_internal(&ExampleLength, src, config, "spec/test_spec.rb");
+        // 2 code lines after folding (a=1 + array-as-1) — no offense with Max 5
+        assert!(
+            diags.is_empty(),
+            "CountAsOne array with blanks should fold correctly, got: {:?}",
+            diags
+        );
+    }
 }
