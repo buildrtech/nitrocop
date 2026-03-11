@@ -11,3 +11,39 @@ it 'third' do
   expect(x)
   ^^^^^^^^^ RSpec/VoidExpect: Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.
 end
+# Block form of expect (expect { ... })
+it 'block form' do
+  expect { something }
+  ^^^^^^^^^^^^^^^^^^^^ RSpec/VoidExpect: Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.
+end
+# Block form as sole statement
+it 'block form sole' do
+  expect{something}
+  ^^^^^^^^^^^^^^^^^ RSpec/VoidExpect: Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.
+end
+# Nested inside describe/context
+describe Foo do
+  context 'bar' do
+    it 'nested void expect' do
+      expect(result)
+      ^^^^^^^^^^^^^^ RSpec/VoidExpect: Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.
+    end
+  end
+end
+# Inside aggregate_failures
+it 'test' do
+  aggregate_failures do
+    expect(one)
+    ^^^^^^^^^^^ RSpec/VoidExpect: Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.
+  end
+end
+# Parenthesized expect with .to is still void per RuboCop
+# (parens create a begin node, making the expect's parent begin_type?)
+it 'parenthesized chained' do
+  (expect something).to be 1
+   ^^^^^^^^^^^^^^^^ RSpec/VoidExpect: Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.
+end
+it 'parenthesized chained not_to' do
+  (expect result).not_to eq(2)
+   ^^^^^^^^^^^^^ RSpec/VoidExpect: Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.
+end
