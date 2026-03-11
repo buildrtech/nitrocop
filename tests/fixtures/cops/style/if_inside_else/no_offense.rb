@@ -36,3 +36,14 @@ if a
 else
   c ? d : e
 end
+# semicolon-style if inside else should not be flagged (RuboCop crashes on autocorrect)
+if a
+  blah
+else
+  if b; foo; end
+end
+if a
+  blah
+else
+  if b; foo; else; bar; end
+end
