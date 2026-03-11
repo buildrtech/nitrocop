@@ -21,7 +21,7 @@ use crate::parse::source::SourceFile;
 ///    implementation had no namespace awareness, so even when it found a describe inside a
 ///    module, it generated the wrong expected path.
 ///
-/// ## Fix
+/// ## Fix (round 1)
 ///
 /// - Switched from `check_node(PROGRAM_NODE)` to `check_source` with manual AST traversal.
 /// - Implemented `top_level_nodes()` that recursively unwraps module/class/begin wrappers,
@@ -29,6 +29,33 @@ use crate::parse::source::SourceFile;
 /// - Implemented namespace extraction that collects enclosing module/class names when
 ///   traversing into wrappers, mirroring RuboCop's `Namespace#namespace`.
 /// - CustomTransform is checked per-component (namespace + class parts individually).
+///
+/// ## Root cause of remaining FPs/FNs (round 2, ~1,487 FP + ~1,023 FN)
+///
+/// Five issues identified by comparing against vendor RuboCop source:
+///
+/// 1. **`path_matches` used `contains()` instead of regex (~major FP/FN source):** RuboCop
+///    builds a regex like `my_class[^/]*_spec\.rb$` and matches it against the expanded file
+///    path. nitrocop used case-insensitive `contains()` which could match the class name
+///    anywhere in the path (e.g., `/home/foo/spec/bar_spec.rb` falsely matched class `Foo`
+///    because `foo` appeared in a parent directory). Fixed by implementing regex-based matching
+///    that anchors the class path pattern to the end of the file path.
+///
+/// 2. **Method name cleaning difference:** RuboCop uses `gsub(/\s/, '_').gsub(/\W/, '')` which
+///    replaces whitespace with `_` then strips non-word chars. nitrocop replaced ALL non-
+///    alphanumeric with `_`, causing double underscores (e.g., backtick-surrounded text
+///    produced `via__local_failures` instead of `via_local_failures`).
+///
+/// 3. **Shared groups excluded from top-level count (~FP source):** RuboCop's `top_level_groups`
+///    includes `shared_examples`/`shared_context` in the count for the `.one?` check. If a file
+///    has 1 describe + 1 shared_examples, RuboCop sees 2 groups and skips. nitrocop filtered
+///    shared groups out before counting, so it saw 1 and proceeded to flag.
+///
+/// 4. **No block requirement:** RuboCop only matches `(block (send ...))` — the describe must
+///    have a block. nitrocop matched bare call nodes without blocks.
+///
+/// 5. **No receiver check:** RuboCop requires `#rspec?` receiver (nil or `RSpec` constant).
+///    nitrocop accepted any receiver, causing FPs on `SomeLib.describe MyClass`.
 pub struct SpecFilePathFormat;
 
 impl Cop for SpecFilePathFormat {
@@ -68,18 +95,26 @@ impl Cop for SpecFilePathFormat {
 
         let stmts: Vec<ruby_prism::Node<'_>> = program.statements().body().iter().collect();
 
-        // Collect top-level example group calls, unwrapping module/class/begin wrappers.
-        // This mirrors RuboCop's TopLevelGroup#top_level_nodes.
-        let mut found: Vec<(ruby_prism::CallNode<'_>, Vec<String>)> = Vec::new();
+        // Collect ALL top-level spec groups (example groups + shared groups),
+        // unwrapping module/class/begin wrappers.
+        // This mirrors RuboCop's TopLevelGroup#top_level_nodes + spec_group? filter.
+        let mut all_spec_groups: Vec<(ruby_prism::CallNode<'_>, Vec<String>, bool)> = Vec::new();
         let namespace: Vec<String> = Vec::new();
-        collect_top_level_describes(&stmts, source, &namespace, &mut found);
+        collect_top_level_spec_groups(&stmts, source, &namespace, &mut all_spec_groups);
 
-        // If not exactly one top-level describe, skip (ambiguous or none)
-        if found.len() != 1 {
+        // If not exactly one top-level spec group, skip (ambiguous or none).
+        // This matches RuboCop's `return unless top_level_groups.one?`.
+        // Note: shared_examples/shared_context count toward this total.
+        if all_spec_groups.len() != 1 {
             return;
         }
 
-        let (call, namespace) = &found[0];
+        // The single group must be an example group (not shared_examples/shared_context).
+        // RuboCop only calls on_top_level_example_group for example_group? nodes.
+        let (call, namespace, is_example_group) = &all_spec_groups[0];
+        if !is_example_group {
+            return;
+        }
         let args = match call.arguments() {
             Some(a) => a,
             None => return,
@@ -141,44 +176,56 @@ impl Cop for SpecFilePathFormat {
         // Build expected path: namespace segments + class name segments
         let expected_path = build_expected_path(namespace, &class_name, &custom_transform);
 
-        // Get optional method description from second argument
-        let method_part = if ignore_methods {
+        // Get optional method description from second argument.
+        // RuboCop's ignore?() returns true if the argument is nil or not a string,
+        // or if IgnoreMethods is true. When not ignored, name_pattern() applies
+        // gsub(/\s/, '_').gsub(/\W/, '') to get the cleaned method name.
+        let has_method_arg = arg_list.len() >= 2 && arg_list[1].as_string_node().is_some();
+        let is_ignored = ignore_methods || !has_method_arg;
+
+        let method_part = if is_ignored {
             None
-        } else if arg_list.len() >= 2 {
-            if let Some(s) = arg_list[1].as_string_node() {
-                let val = std::str::from_utf8(s.unescaped()).unwrap_or("");
-                let cleaned: String = val
-                    .chars()
-                    .map(|c| {
-                        if c.is_alphanumeric() || c == '_' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                let cleaned = cleaned.trim_matches('_').to_string();
-                if cleaned.is_empty() {
-                    None
-                } else {
-                    Some(cleaned)
-                }
-            } else {
-                None
-            }
         } else {
-            None
+            let s = arg_list[1].as_string_node().unwrap();
+            let val = std::str::from_utf8(s.unescaped()).unwrap_or("");
+            // Match RuboCop: gsub(/\s/, '_').gsub(/\W/, '')
+            // First: replace whitespace with underscore
+            let step1: String = val
+                .chars()
+                .map(|c| if c.is_whitespace() { '_' } else { c })
+                .collect();
+            // Second: remove non-word characters (keep [a-zA-Z0-9_])
+            let cleaned: String = step1
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            Some(cleaned)
         };
 
-        let expected_suffix = match &method_part {
-            Some(m) => format!("{expected_path}*{m}*_spec.rb"),
-            None => format!("{expected_path}*_spec.rb"),
+        // Build the regex pattern matching RuboCop's correct_path_pattern:
+        //   expected_path [.* name_pattern] [^/]*_spec\.rb
+        // When the method arg is not ignored, insert .* between class and method,
+        // and the method name before [^/]*_spec\.rb.
+        let regex_pattern = if is_ignored {
+            format!(r"{expected_path}[^/]*_spec\.rb$")
+        } else {
+            let m = method_part.as_deref().unwrap_or("");
+            format!(r"{expected_path}.*{m}[^/]*_spec\.rb$")
+        };
+
+        // Build human-readable suffix (glob-like) for the offense message.
+        // RuboCop does: pattern.sub('.*', '*').sub('[^/]*', '*').sub('\.', '.')
+        let expected_suffix = if is_ignored {
+            format!("{expected_path}*_spec.rb")
+        } else {
+            let m = method_part.as_deref().unwrap_or("");
+            format!("{expected_path}*{m}*_spec.rb")
         };
 
         let file_path = source.path_str();
         let normalized = file_path.replace('\\', "/");
 
-        if !path_matches(&normalized, &expected_path, method_part.as_deref()) {
+        if !path_matches_regex(&normalized, &regex_pattern) {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             diagnostics.push(self.diagnostic(
@@ -191,23 +238,27 @@ impl Cop for SpecFilePathFormat {
     }
 }
 
-/// Recursively unwrap module/class/begin wrappers to find top-level describe calls.
-/// This mirrors RuboCop's `TopLevelGroup#top_level_nodes` + `Namespace#namespace`.
-fn collect_top_level_describes<'pr>(
+/// Recursively unwrap module/class/begin wrappers to find top-level spec groups.
+/// This mirrors RuboCop's `TopLevelGroup#top_level_nodes` + `spec_group?` filter.
+///
+/// Each found group is tagged with whether it's an example group (true) or shared group (false).
+/// Both count toward the total for the `.one?` check, but only example groups are processed.
+fn collect_top_level_spec_groups<'pr>(
     stmts: &[ruby_prism::Node<'pr>],
     source: &SourceFile,
     namespace: &[String],
-    found: &mut Vec<(ruby_prism::CallNode<'pr>, Vec<String>)>,
+    found: &mut Vec<(ruby_prism::CallNode<'pr>, Vec<String>, bool)>,
 ) {
     for stmt in stmts {
+        // In Prism, `describe MyClass do; end` is a CallNode with .block().is_some().
+        // RuboCop requires (any_block (send #rspec? ...)), so we check that the call
+        // has a block attached.
         if let Some(call) = stmt.as_call_node() {
-            let name = call.name().as_slice();
-            if is_rspec_example_group(name)
-                && name != b"shared_examples"
-                && name != b"shared_examples_for"
-                && name != b"shared_context"
-            {
-                found.push((call, namespace.to_vec()));
+            if call.block().is_some() {
+                if let Some(entry) = check_spec_group_call(call, namespace) {
+                    found.push(entry);
+                    continue;
+                }
             }
             continue;
         }
@@ -223,7 +274,7 @@ fn collect_top_level_describes<'pr>(
                         .iter()
                         .flat_map(|s| s.body().iter())
                         .collect();
-                    collect_top_level_describes(&children, source, &new_ns, found);
+                    collect_top_level_spec_groups(&children, source, &new_ns, found);
                 }
             }
             continue;
@@ -240,7 +291,7 @@ fn collect_top_level_describes<'pr>(
                         .iter()
                         .flat_map(|s| s.body().iter())
                         .collect();
-                    collect_top_level_describes(&children, source, &new_ns, found);
+                    collect_top_level_spec_groups(&children, source, &new_ns, found);
                 }
             }
             continue;
@@ -249,10 +300,49 @@ fn collect_top_level_describes<'pr>(
         if let Some(begin_node) = stmt.as_begin_node() {
             if let Some(stmts_node) = begin_node.statements() {
                 let children: Vec<_> = stmts_node.body().iter().collect();
-                collect_top_level_describes(&children, source, namespace, found);
+                collect_top_level_spec_groups(&children, source, namespace, found);
             }
         }
     }
+}
+
+/// Check if a call node is a spec group (example group or shared group) with valid receiver.
+/// Returns (call, namespace, is_example_group) or None if not a spec group.
+fn check_spec_group_call<'pr>(
+    call: ruby_prism::CallNode<'pr>,
+    namespace: &[String],
+) -> Option<(ruby_prism::CallNode<'pr>, Vec<String>, bool)> {
+    let name = call.name().as_slice();
+
+    // Check if it's an example group or shared group
+    let is_shared =
+        name == b"shared_examples" || name == b"shared_examples_for" || name == b"shared_context";
+    let is_example = is_rspec_example_group(name) && !is_shared;
+
+    if !is_example && !is_shared {
+        return None;
+    }
+
+    // Check receiver: must be nil (receiverless) or RSpec constant
+    // This matches RuboCop's `#rspec?` pattern: `{#explicit_rspec? nil?}`
+    if let Some(recv) = call.receiver() {
+        if let Some(cr) = recv.as_constant_read_node() {
+            if cr.name().as_slice() != b"RSpec" {
+                return None;
+            }
+        } else if let Some(cp) = recv.as_constant_path_node() {
+            // ::RSpec
+            let is_rspec =
+                cp.name().is_some_and(|n| n.as_slice() == b"RSpec") && cp.parent().is_none();
+            if !is_rspec {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+
+    Some((call, namespace.to_vec(), is_example))
 }
 
 /// Extract the defined name segments from a module/class constant path.
@@ -302,26 +392,103 @@ fn camel_to_snake(s: &str) -> String {
     crate::schema::camel_to_snake(s)
 }
 
-fn path_matches(path: &str, expected_class: &str, method: Option<&str>) -> bool {
-    let path_lower = path.to_lowercase();
-    let class_lower = expected_class.to_lowercase();
+/// Match the file path against the expected regex pattern.
+/// RuboCop uses `expanded_file_path.match?("#{pattern}$")` which is a regex match
+/// on the absolute file path.
+fn path_matches_regex(path: &str, regex_pattern: &str) -> bool {
+    // Simple regex engine for the patterns we generate.
+    // Our patterns only use: literal chars, `.` (literal in class path), `.*`, `[^/]*`, `\.`, `$`
+    // Convert to a simple matching approach.
+    //
+    // The pattern is always anchored at the end with `$`.
+    // RuboCop doesn't anchor at the start, so the pattern can match anywhere.
+    // We need to check if the path ends with something matching the pattern.
 
-    if !path_lower.contains(&class_lower) {
+    // Use Rust's regex crate if available; otherwise implement a simple matcher.
+    // Since we control the pattern format, we can use a simple approach:
+    // Build the regex pattern and use simple_regex_match.
+    simple_regex_match(path, regex_pattern)
+}
+
+/// Simple regex matcher for patterns like `foo/bar[^/]*_spec\.rb$` and `foo/bar.*method[^/]*_spec\.rb$`
+fn simple_regex_match(haystack: &str, pattern: &str) -> bool {
+    // Parse the pattern into segments and match against the haystack.
+    // Patterns we handle:
+    //   literal_path [^/]* _spec\.rb $    (no method)
+    //   literal_path .* method [^/]* _spec\.rb $   (with method)
+    //
+    // Strategy: convert to a form we can match by finding the expected_path suffix.
+
+    // Strip trailing $
+    let pat = pattern.strip_suffix('$').unwrap_or(pattern);
+
+    // The pattern always ends with `[^/]*_spec\.rb`
+    // Split on `[^/]*_spec\.rb` to get the prefix part
+    let spec_suffix = r"[^/]*_spec\.rb";
+    let prefix = match pat.strip_suffix(spec_suffix) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // The haystack must end with `_spec.rb`
+    if !haystack.ends_with("_spec.rb") {
         return false;
     }
 
-    if !path_lower.ends_with("_spec.rb") {
-        return false;
-    }
+    // Check if prefix contains `.*` (method case)
+    if let Some(dot_star_pos) = prefix.find(".*") {
+        let class_part = &prefix[..dot_star_pos];
+        let method_part = &prefix[dot_star_pos + 2..];
 
-    if let Some(m) = method {
-        let m_lower = m.to_lowercase();
-        if !path_lower.contains(&m_lower) {
-            return false;
+        // Find where class_part matches in the haystack
+        // RuboCop's regex is unanchored at start, so class_part can match anywhere
+        if let Some(class_pos) = find_in_path(haystack, class_part) {
+            let after_class = &haystack[class_pos + class_part.len()..];
+            // `.*` is greedy — matches as much as possible
+            // Then method_part must appear, followed by [^/]*_spec.rb
+            if method_part.is_empty() {
+                // Empty method part: `class_path.*[^/]*_spec.rb` — matches any suffix
+                return after_class.ends_with("_spec.rb");
+            }
+            // Try all positions of method_part in after_class (greedy: try latest match)
+            // Iterate from the end to find the rightmost match that satisfies [^/]*_spec.rb
+            let mut search_start = after_class.len();
+            while search_start > 0 {
+                if let Some(pos) = after_class[..search_start].rfind(method_part) {
+                    let after_method = &after_class[pos + method_part.len()..];
+                    if let Some(between) = after_method.strip_suffix("_spec.rb") {
+                        if !between.contains('/') {
+                            return true;
+                        }
+                    }
+                    search_start = pos;
+                } else {
+                    break;
+                }
+            }
         }
+        false
+    } else {
+        // No method: pattern is `class_path[^/]*_spec\.rb`
+        // class_part must appear in the path such that what follows has no `/` before `_spec.rb`
+        let class_part = prefix;
+        if let Some(class_pos) = find_in_path(haystack, class_part) {
+            let after_class = &haystack[class_pos + class_part.len()..];
+            // Must match [^/]*_spec.rb: no slashes, ending with _spec.rb
+            if let Some(between) = after_class.strip_suffix("_spec.rb") {
+                return !between.contains('/');
+            }
+        }
+        false
     }
+}
 
-    true
+/// Find a literal pattern in a path (case-sensitive, unanchored).
+/// Returns the start position of the match.
+fn find_in_path(haystack: &str, pattern: &str) -> Option<usize> {
+    // Unescape `\.` to `.` in the pattern for literal matching
+    let literal = pattern.replace(r"\.", ".");
+    haystack.find(&literal)
 }
 
 #[cfg(test)]
@@ -336,6 +503,7 @@ mod tests {
         scenario_wrong_path = "wrong_path.rb",
         scenario_module_wrong_path = "module_wrong_path.rb",
         scenario_nested_module_wrong_path = "nested_module_wrong_path.rb",
+        scenario_wrong_class_backtick_method = "wrong_class_backtick_method.rb",
     );
 
     #[test]
@@ -538,6 +706,241 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should not flag files without describe calls"
+        );
+    }
+
+    // Issue: path_matches uses contains() which matches class name anywhere in path.
+    // RuboCop uses regex anchored to the end, so class path must appear at the end
+    // of the file path before _spec.rb.
+    #[test]
+    fn path_contains_class_elsewhere_should_offense() {
+        // Path has "foo" in parent dir but filename is "bar_spec.rb"
+        // RuboCop flags this because the path doesn't end with foo*_spec.rb
+        let source = b"describe Foo do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "/home/foo/spec/models/bar_spec.rb",
+        );
+        assert!(
+            !diags.is_empty(),
+            "Should flag when class name only appears in parent directory, not in filename suffix"
+        );
+    }
+
+    // Issue: shared_examples should be counted as top-level groups for the .one? check
+    #[test]
+    fn describe_with_shared_examples_skips_check() {
+        // RuboCop counts shared_examples in top_level_groups, so if there are
+        // 1 describe + 1 shared_examples, that's 2 top-level groups → skip
+        let source = b"describe MyClass do; end\nshared_examples 'foo' do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "wrong_path_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should skip when multiple top-level groups (describe + shared_examples)"
+        );
+    }
+
+    // Issue: method description cleaning difference — RuboCop uses gsub(/\W/, '')
+    // which removes non-word chars, while nitrocop replaces them with underscore
+    #[test]
+    fn method_description_with_backticks() {
+        // "via `local_failures`" should become "via_local_failures" not "via__local_failures_"
+        let source = b"describe MyClass, \"via `local_failures`\" do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "my_class_via_local_failures_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when path matches cleaned method description, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    // Issue: describe without a block should not be checked
+    #[test]
+    fn describe_without_block_no_offense() {
+        let source = b"describe MyClass\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "wrong_path_spec.rb",
+        );
+        assert!(diags.is_empty(), "Should not flag describe without a block");
+    }
+
+    // Issue: call with non-nil receiver that isn't RSpec should be skipped
+    #[test]
+    fn describe_with_non_rspec_receiver_no_offense() {
+        let source = b"SomeLib.describe MyClass do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "wrong_path_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag describe with non-RSpec receiver"
+        );
+    }
+
+    // No-offense: RSpec.describe with correct path
+    #[test]
+    fn rspec_describe_with_correct_path_no_offense() {
+        let source = b"RSpec.describe MyClass do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "my_class_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag RSpec.describe with correct path"
+        );
+    }
+
+    // Ensure class path must appear at the END of the path (regex anchored)
+    #[test]
+    fn class_path_in_correct_suffix_no_offense() {
+        let source = b"describe Some::Class do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "parent_dir/some/class_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when path ends with correct class path suffix"
+        );
+    }
+
+    // RuboCop allows arbitrary directory prefix before the class path
+    #[test]
+    fn instance_method_in_subdirectory_no_offense() {
+        let source = b"describe Some::Class, '#inst' do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "some/class/instance_methods/inst_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when method in subdirectory"
+        );
+    }
+
+    // The method name pattern should allow arbitrary chars between class and method (via .*)
+    #[test]
+    fn class_method_flat_hierarchy_no_offense() {
+        let source = b"describe Some::Class, '.inst' do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "some/class_inst_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when method name appears flat in filename"
+        );
+    }
+
+    // Non-alphanumeric in method name (like ?) should be stripped
+    #[test]
+    fn predicate_method_no_offense() {
+        let source = b"describe Some::Class, '#pred?' do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "some/class/pred_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when predicate method name matches"
+        );
+    }
+
+    // Operator method name — all non-word chars removed, leaving empty method
+    #[test]
+    fn operator_method_no_offense() {
+        let source = b"describe MyLittleClass, '#<=>' do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "my_little_class/spaceship_operator_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when operator method (all non-word) yields empty name_pattern"
+        );
+    }
+
+    // Verify top-level ::ClassName is handled
+    #[test]
+    fn top_level_constant_no_offense() {
+        let source = b"describe ::MyClass do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "my_class_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag ::MyClass with correct path"
+        );
+    }
+
+    // Symbol argument should be ignored (not treated as method description)
+    #[test]
+    fn symbol_argument_no_offense() {
+        let source = b"describe MyClass, :foo do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "my_class_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when symbol argument and class path matches"
+        );
+    }
+
+    // Wrong path with incorrect collapsed namespace should be flagged
+    #[test]
+    fn incorrect_collapsed_namespace_offense() {
+        let source = b"describe Very::Long::Namespace::MyClass do; end\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "/home/foo/spec/very/my_class_spec.rb",
+        );
+        assert!(
+            !diags.is_empty(),
+            "Should flag when namespace is incorrectly collapsed"
+        );
+        assert!(
+            diags[0].message.contains("very/long/namespace/my_class"),
+            "Should show full namespace path, got: {}",
+            diags[0].message
         );
     }
 }
