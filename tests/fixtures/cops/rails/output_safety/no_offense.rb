@@ -16,3 +16,19 @@ I18n.translate('key').html_safe
 raw t('.owner_html', owner: user)
 raw I18n.t('key')
 raw translate('some.key')
+# Static heredoc receivers are exempt
+<<~HTML.html_safe
+  <p>static content</p>
+HTML
+<<~TEXT.html_safe
+  line one
+  line two
+TEXT
+# i18n nested in method chain arguments (deep search)
+some_helper(t('key')).html_safe
+format_text(I18n.t('msg'), 'extra').html_safe
+# safe_concat with string literal receiver
+"<b>bold</b>".safe_concat(content)
+# safe_concat with i18n in argument
+out.safe_concat(t('key'))
+buffer.safe_concat(I18n.translate('msg'))
