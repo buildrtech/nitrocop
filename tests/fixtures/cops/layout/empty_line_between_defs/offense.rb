@@ -92,3 +92,69 @@ class Plugh
     2
   end
 end
+
+# Endless method followed by regular method
+def compute() = x + y
+def process
+^^^ Layout/EmptyLineBetweenDefs: Use empty lines between method definitions.
+  z
+end
+
+# Regular method followed by endless method
+class Garply
+  def foo
+    x
+  end
+  def bar() = y
+  ^^^ Layout/EmptyLineBetweenDefs: Use empty lines between method definitions.
+end
+
+# Class method (self.) without blank line
+class Thud
+  def self.foo
+    true
+  end
+  def self.bar
+  ^^^ Layout/EmptyLineBetweenDefs: Use empty lines between method definitions.
+    true
+  end
+end
+
+# Mixed instance and class methods
+class Xyzzy
+  def foo
+    true
+  end
+  def self.bar
+  ^^^ Layout/EmptyLineBetweenDefs: Use empty lines between method definitions.
+    true
+  end
+end
+
+# Class after class without blank line
+class Alpha
+end
+class Bravo
+^^^^^^^^^ Layout/EmptyLineBetweenDefs: Use empty lines between class definitions.
+end
+
+# Module after module without blank line
+module Gamma
+end
+module Delta
+^^^^^^^^^^ Layout/EmptyLineBetweenDefs: Use empty lines between module definitions.
+end
+
+# Def after class without blank line
+class Epsilon
+end
+def zeta
+^^^ Layout/EmptyLineBetweenDefs: Use empty lines between method definitions.
+end
+
+# Class after def without blank line
+def eta
+end
+class Theta
+^^^^^ Layout/EmptyLineBetweenDefs: Use empty lines between class definitions.
+end

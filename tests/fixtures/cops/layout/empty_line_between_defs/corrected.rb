@@ -25,19 +25,19 @@ class Grault
   def alpha
     1
   end
-  # comment about bravo
 
+  # comment about bravo
   def bravo
     2
   end
+
   # first comment
   # second comment
-
   def charlie
     3
   end
-  # inline comment on end
 
+  # inline comment on end
   def delta
     4
   end
@@ -88,4 +88,70 @@ class Plugh
   def long
     2
   end
+end
+
+# Endless method followed by regular method
+def compute() = x + y
+
+def process
+  z
+end
+
+# Regular method followed by endless method
+class Garply
+  def foo
+    x
+  end
+
+  def bar() = y
+end
+
+# Class method (self.) without blank line
+class Thud
+  def self.foo
+    true
+  end
+
+  def self.bar
+    true
+  end
+end
+
+# Mixed instance and class methods
+class Xyzzy
+  def foo
+    true
+  end
+
+  def self.bar
+    true
+  end
+end
+
+# Class after class without blank line
+class Alpha
+end
+
+class Bravo
+end
+
+# Module after module without blank line
+module Gamma
+end
+
+module Delta
+end
+
+# Def after class without blank line
+class Epsilon
+end
+
+def zeta
+end
+
+# Class after def without blank line
+def eta
+end
+
+class Theta
 end

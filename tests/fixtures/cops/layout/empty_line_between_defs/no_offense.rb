@@ -115,3 +115,79 @@ class Waldo
     2
   end
 end
+
+# Endless methods with blank line between them
+def compute() = x + y
+
+def process() = z * w
+
+# Adjacent endless methods (AllowAdjacentOneLineDefs: true by default)
+def first_val() = 1
+def second_val() = 2
+
+# Endless method after regular method with blank line
+class Fred
+  def foo
+    x
+  end
+
+  def bar() = y
+end
+
+# Defs inside conditionals (not siblings, so no offense)
+if condition
+  def foo
+    true
+  end
+else
+  def foo
+    false
+  end
+end
+
+# Nested def inside block (not siblings)
+def build_model(*attrs)
+  Class.new do
+    def initialize(a)
+    end
+  end
+end
+
+# Single def after code line (only one def, not between defs)
+x = 0
+def calculate
+end
+
+# Single def after code and a comment
+x = 0
+# setup
+def calculate
+end
+
+# Def after access modifier (only one candidate in pair)
+class Service
+  def alpha
+    1
+  end
+
+  private
+
+  def bravo
+    2
+  end
+end
+
+# First def in a class right after class keyword
+class Simple
+  def only_method
+    1
+  end
+end
+
+# First def in a module after public
+module Helpers
+  public
+  #
+  def escape(s)
+  end
+end
