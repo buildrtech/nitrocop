@@ -16,3 +16,8 @@ unless foo.present?
 else
   something_else
 end
+
+# !foo is a boolean negation, not a nil check — should not trigger NilOrEmpty
+!foo || foo.empty?
+!record || record.empty?
+!@item || @item.empty?

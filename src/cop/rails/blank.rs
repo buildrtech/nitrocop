@@ -18,12 +18,21 @@ use ruby_prism::Visit;
 /// (`unless foo.present? ... end`) forms. Skips unless-with-else when Style/UnlessElse
 /// would conflict (conservative: always skip when else clause is present).
 ///
-/// **FP root cause (27 FP):** Missing `defining_blank?` check. RuboCop skips `!present?`
-/// when it appears inside `def blank?` (defining blank? in terms of present?). Nitrocop
-/// was incorrectly flagging these as offenses.
+/// **FP root cause (27 FP, first batch):** Missing `defining_blank?` check. RuboCop skips
+/// `!present?` when it appears inside `def blank?` (defining blank? in terms of present?).
+/// Nitrocop was incorrectly flagging these as offenses.
 ///
 /// **Fix:** Added parent context tracking in the visitor. When inside a `def blank?` method,
 /// `!present?` calls are suppressed.
+///
+/// **FP root cause (34 FP, second batch, 2026-03-10):** `nil_check_receiver` was matching
+/// `!foo` (boolean negation, method name `!`) as a nil-check pattern. This caused
+/// `!foo || foo.empty?` to be flagged as NilOrEmpty, but RuboCop's `nil_or_empty?`
+/// NodePattern only matches explicit nil checks: `nil?`, `== nil`, `nil ==`. It does NOT
+/// match `!foo`. The `!foo` branch was incorrectly added to `nil_check_receiver`.
+///
+/// **Fix:** Removed the `!` method name branch from `nil_check_receiver`. Only `nil?`,
+/// `== nil`, and `nil == foo` are valid nil-check patterns for the NilOrEmpty check.
 pub struct Blank;
 
 /// Extract the receiver source text from a CallNode, returning None if absent.
@@ -35,9 +44,10 @@ fn receiver_source<'a>(call: &ruby_prism::CallNode<'a>) -> Option<&'a [u8]> {
 /// - `foo.nil?`
 /// - `foo == nil`
 /// - `nil == foo`
-/// - `!foo`
 ///
 /// Returns (receiver source bytes, left side source bytes) if matched.
+/// Note: `!foo` is NOT a nil check (it's boolean negation) and is intentionally excluded.
+/// RuboCop's `nil_or_empty?` NodePattern only matches `nil?`, `== nil`, `nil ==`.
 fn nil_check_receiver<'a>(node: &ruby_prism::Node<'a>) -> Option<(&'a [u8], &'a [u8])> {
     let call = node.as_call_node()?;
     let method = call.name().as_slice();
@@ -66,11 +76,6 @@ fn nil_check_receiver<'a>(node: &ruby_prism::Node<'a>) -> Option<(&'a [u8], &'a 
             // nil == foo → receiver is arg
             return Some((arg.location().as_slice(), left_src));
         }
-    }
-
-    if method == b"!" {
-        // !foo
-        return receiver_source(&call).map(|r| (r, left_src));
     }
 
     None
