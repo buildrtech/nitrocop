@@ -17,3 +17,24 @@ unless user.name.blank?
 else
   ask_name
 end
+
+# Safe navigation with blank? should NOT be flagged
+# (RuboCop's `send` does not match `csend`/safe navigation)
+!foo&.blank?
+!user.name&.blank?
+
+# Safe navigation in unless blank? should NOT be flagged
+something unless foo&.blank?
+unless record&.blank?
+  do_something
+end
+
+# Safe navigation in empty? on the right side of && should NOT be flagged
+foo && !foo&.empty?
+!foo.nil? && !foo&.empty?
+
+# Different receivers in && patterns should NOT be flagged
+!x.nil? && !y.empty?
+foo != nil && !bar.empty?
+!!x && !y.empty?
+a && !b.empty?

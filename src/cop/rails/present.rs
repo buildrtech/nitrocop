@@ -18,6 +18,21 @@ use crate::parse::source::SourceFile;
 /// - `!!foo && !foo.empty?` (double negation)
 ///
 /// Fix: added patterns 3 and 4 for these forms.
+///
+/// ## Investigation (2026-03-10)
+///
+/// **FP root cause (68 FP):** Two issues:
+/// 1. Safe navigation (`&.`) not excluded. RuboCop's NodePatterns use `send` which does not
+///    match `csend` (safe navigation). So `!foo&.blank?`, `unless foo&.blank?`, and
+///    `!foo&.empty?` should NOT be flagged. Nitrocop was matching all CallNodes regardless
+///    of `call_operator_loc()`.
+/// 2. Receiver mismatch in `NotNilAndNotEmpty` patterns 1, 3, 4. RuboCop requires `var1 == var2`
+///    (same receiver on both sides of `&&`). Nitrocop only checked source equality in pattern 2
+///    but not in patterns 1 (`!x.nil? && !y.empty?`), 3 (`x != nil && !y.empty?`), or
+///    4 (`!!x && !y.empty?`).
+///
+/// Fix: Added `is_safe_nav()` helper to skip safe navigation calls in all three check methods.
+/// Added receiver source comparison for patterns 1, 3, and 4.
 pub struct Present;
 
 impl Cop for Present {
@@ -88,6 +103,11 @@ impl Cop for Present {
             return;
         }
 
+        // Skip safe navigation: !foo&.blank? — RuboCop's `send` doesn't match `csend`
+        if is_safe_nav(&inner_call) {
+            return;
+        }
+
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(
@@ -97,6 +117,12 @@ impl Cop for Present {
             "Use `present?` instead of `!blank?`.".to_string(),
         ));
     }
+}
+
+/// Returns true if the given CallNode uses safe navigation (`&.`).
+fn is_safe_nav(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.call_operator_loc()
+        .is_some_and(|op| op.as_slice() == b"&.")
 }
 
 impl Present {
@@ -115,10 +141,13 @@ impl Present {
             return None;
         }
 
-        // Predicate should be `foo.blank?`
+        // Predicate should be `foo.blank?` (not safe navigation `foo&.blank?`)
         let predicate = unless_node.predicate();
         let pred_call = predicate.as_call_node()?;
         if pred_call.name().as_slice() != b"blank?" {
+            return None;
+        }
+        if is_safe_nav(&pred_call) {
             return None;
         }
 
@@ -143,7 +172,7 @@ impl Present {
         let left = and_node.left();
         let right = and_node.right();
 
-        // Right must be: !foo.empty? (call to ! on empty?)
+        // Right must be: !foo.empty? (call to ! on empty?, not safe navigation)
         let right_not = right.as_call_node()?;
         if right_not.name().as_slice() != b"!" {
             return None;
@@ -153,6 +182,28 @@ impl Present {
         if right_pred.name().as_slice() != b"empty?" {
             return None;
         }
+        // Skip safe navigation: !foo&.empty? — RuboCop's `send` doesn't match `csend`
+        if is_safe_nav(&right_pred) {
+            return None;
+        }
+
+        // Helper: get the receiver source of the right-side empty? call
+        let right_recv_src = right_pred
+            .receiver()
+            .map(|r| &source.as_bytes()[r.location().start_offset()..r.location().end_offset()]);
+
+        // Helper: check if left-side receiver matches right-side receiver
+        let receivers_match = |left_recv: Option<ruby_prism::Node<'_>>| -> bool {
+            match (left_recv, right_recv_src) {
+                (Some(lr), Some(rr_src)) => {
+                    let lr_src = &source.as_bytes()
+                        [lr.location().start_offset()..lr.location().end_offset()];
+                    lr_src == rr_src
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        };
 
         // Pattern 1: Left is !foo.nil? (explicit nil check)
         let matches = if let Some(left_not) = left.as_call_node() {
@@ -160,6 +211,7 @@ impl Present {
                 if let Some(left_inner) = left_not.receiver() {
                     if let Some(left_pred) = left_inner.as_call_node() {
                         left_pred.name().as_slice() == b"nil?"
+                            && receivers_match(left_pred.receiver())
                     } else {
                         false
                     }
@@ -178,11 +230,8 @@ impl Present {
         let matches = matches || {
             let left_src =
                 &source.as_bytes()[left.location().start_offset()..left.location().end_offset()];
-            let right_recv = right_pred.receiver();
-            if let Some(rr) = right_recv {
-                let right_recv_src =
-                    &source.as_bytes()[rr.location().start_offset()..rr.location().end_offset()];
-                left_src == right_recv_src
+            if let Some(rr_src) = right_recv_src {
+                left_src == rr_src
             } else {
                 false
             }
@@ -196,6 +245,7 @@ impl Present {
                         let arg_list = args.arguments();
                         arg_list.len() == 1
                             && arg_list.first().is_some_and(|a| a.as_nil_node().is_some())
+                            && receivers_match(left_call.receiver())
                     } else {
                         false
                     }
@@ -213,7 +263,11 @@ impl Present {
                 if outer_not.name().as_slice() == b"!" {
                     if let Some(inner) = outer_not.receiver() {
                         if let Some(inner_not) = inner.as_call_node() {
-                            inner_not.name().as_slice() == b"!"
+                            if inner_not.name().as_slice() == b"!" {
+                                receivers_match(inner_not.receiver())
+                            } else {
+                                false
+                            }
                         } else {
                             false
                         }
