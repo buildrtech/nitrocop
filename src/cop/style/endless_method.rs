@@ -3,19 +3,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// Corpus investigation (2026-03):
-/// - FP=13 (11 opal/opal, 2 ruby-next/ruby-next) because nitrocop fired on repos
-///   targeting Ruby < 3.0 which don't support endless methods.
-/// - Root cause: RuboCop declares `minimum_target_ruby_version 3.0` so the cop only
-///   fires when the project targets Ruby >= 3.0. nitrocop had no such check.
-/// - Fix: Added TargetRubyVersion >= 3.0 guard at the start of check_node.
+/// ## Corpus investigation (2026-03-11)
 ///
-/// - Remaining FP=13 after TargetRubyVersion fix (corpus baseline sets 4.0):
-///   nitrocop was missing two early-return guards from RuboCop's `on_def`:
-///   (a) `node.assignment_method?` — skip setter methods (`def foo=(x)`) entirely.
-///   (b) `use_heredoc?(node)` — skip methods whose body is or contains a heredoc.
-///   Both cause multiline endless methods to be flagged by nitrocop but not RuboCop.
-///   Fix: Added assignment method check (name ends with `=`) and heredoc body check.
+/// Corpus oracle reported FP=13, FN=0.
+///
+/// Logic fixes already applied:
+/// - respect `minimum_target_ruby_version 3.0`
+/// - skip setter methods (`def foo=(x)`)
+/// - skip endless methods whose body is or contains a heredoc
+///
+/// Remaining FP root cause: RuboCop only handles instance-method `def` here; it does not
+/// register `on_defs`. Prism represents singleton methods as `DefNode` with a receiver,
+/// so nitrocop was incorrectly treating `def self.foo = ...` as eligible and flagging
+/// multiline singleton endless methods in opal and ruby-next that RuboCop ignores.
+///
+/// Fix: return early for receiver-bearing `DefNode`s before applying the endless-method
+/// style checks.
 pub struct EndlessMethod;
 
 impl EndlessMethod {
@@ -91,6 +94,12 @@ impl Cop for EndlessMethod {
             Some(d) => d,
             None => return,
         };
+
+        // RuboCop implements only `on_def`, not `on_defs`, for this cop.
+        // Prism represents singleton methods as DefNode with a receiver.
+        if def_node.receiver().is_some() {
+            return;
+        }
 
         // RuboCop: return if node.assignment_method?
         // Skip setter methods (e.g. def foo=(x)) — they end with '='

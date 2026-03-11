@@ -26,3 +26,18 @@ HEREDOC
 def my_method = puts <<~HEREDOC
   hello
 HEREDOC
+
+# Singleton endless methods (`defs`) are skipped by RuboCop for this cop
+def self.lookup(value) =
+  case value
+  in 1 | 2
+    true
+  else
+    false
+  end
+
+def self.payload() =
+  {
+    a: 1,
+    b: 2
+  }
