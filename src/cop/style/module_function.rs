@@ -4,6 +4,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=2, FN=0.
+///
+/// FP=2: Both false positives were `spec/.../fixtures/singleton_methods.rb` files in
+/// jruby and natalie. Attempted fix: skip single-statement module bodies whose only
+/// statement is `extend self`, based on Parser-vs-Prism body wrapping differences.
+/// Acceptance gate before: expected=540, actual=542, excess=2, missing=0.
+/// Acceptance gate after: expected=540, actual=537, excess=0, missing=3.
+/// Reverted because the change introduced 3 real false negatives. The remaining
+/// corpus FPs are not safely attributable to cop logic yet and likely depend on
+/// config or path-handling outside this cop.
 pub struct ModuleFunction;
 
 impl Cop for ModuleFunction {

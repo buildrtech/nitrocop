@@ -11,6 +11,18 @@ use ruby_prism::Visit;
 /// - Root cause 2: AllowedPatterns was checked against the source line text instead of
 ///   the enclosing def method name. RuboCop checks `matches_allowed_pattern?(def_node.method_name)`.
 ///   Fixed by matching AllowedPatterns against `enclosing_def_name` like AllowedMethods.
+///
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=3, FN=0.
+///
+/// Attempted fix: skip safe-navigation receiver chains such as `saved_only&.class == Ticket`
+/// and `error&.class&.to_s == "Errno::EACCES"`.
+/// Acceptance gate before: expected=542, actual=545, excess=3, missing=0.
+/// Acceptance gate after: expected=542, actual=538, excess=0, missing=4.
+/// Reverted because the change traded the 3 target false positives for 4 new false negatives.
+/// A correct fix needs a narrower distinction than simply checking for `&.` on the compared
+/// receiver call.
 pub struct ClassEqualityComparison;
 
 impl Cop for ClassEqualityComparison {
