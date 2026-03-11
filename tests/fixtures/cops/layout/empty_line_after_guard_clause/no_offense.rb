@@ -242,3 +242,48 @@ def multiline_guard_in_block
     next false
   end
 end
+
+# `and return` guard clause properly followed by blank line
+def and_return_ok
+  render :foo and return if condition
+
+  do_something
+end
+
+# `or return` guard clause properly followed by blank line
+def or_return_ok
+  render :foo or return if condition
+
+  do_something
+end
+
+# Guard with rubocop:enable followed by blank line
+def guard_rubocop_enable_ok
+  # rubocop:disable Department/Cop
+  return if condition
+  # rubocop:enable Department/Cop
+
+  bar
+end
+
+# Multiple statements on same line with semicolon
+def foo(item)
+  return unless item.positive?; item * 2
+end
+
+# Guard before begin with blank line
+def guard_before_begin_ok
+  return another_object if something_different?
+
+  begin
+    bar
+  rescue SomeException
+    baz
+  end
+end
+
+# Non-guard modifier if (not a guard clause)
+def normal_modifier_if
+  foo += 1 if need_add?
+  foobar
+end

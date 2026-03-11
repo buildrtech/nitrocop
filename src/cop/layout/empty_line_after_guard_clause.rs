@@ -4,6 +4,35 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Enforces empty line after guard clause.
+///
+/// ## Corpus conformance investigation (2026-03-11)
+///
+/// **Root causes of FN (nitrocop misses offenses RuboCop catches):**
+/// - `and`/`or` guard clauses: `render :foo and return if cond` parses as an
+///   AndNode wrapping a ReturnNode. The `is_guard_stmt` check was not recognizing
+///   AndNode/OrNode as guard statements. Fixed by recursing into the `right` child
+///   of and/or nodes, matching RuboCop's `operator_keyword?` → `rhs` handling.
+/// - Heredoc guard clauses: `raise "msg", <<-MSG unless cond` has the heredoc
+///   body after the if node's location. Nitrocop doesn't adjust for heredoc lines,
+///   so it checks the heredoc body as the "next line" instead of after the heredoc
+///   end marker. Not yet fixed (complex heredoc tracking needed).
+/// - Ternary guard clauses: `a ? raise(e) : b` is an IfNode with no if_keyword.
+///   Nitrocop skips ternaries. Rare in practice.
+///
+/// **Root causes of FP (nitrocop flags things RuboCop doesn't):**
+/// - Comment-then-blank pattern: `guard; # comment; blank; code` — nitrocop's
+///   `find_next_code_line` skips comments and finds the blank line, reporting no
+///   offense. But RuboCop checks only the immediate next line. If a regular comment
+///   (not a directive) follows the guard without a blank line first, RuboCop flags.
+///   Not yet fixed (structural change needed, risk of regressions).
+/// - Heredoc interference: when a guard has heredoc arguments, nitrocop may check
+///   the wrong "next line" (the heredoc body instead of after the heredoc end).
+///   Not yet fixed.
+///
+/// **Remaining gaps:** Heredoc handling is the largest remaining gap affecting both
+/// FP and FN counts. The comment-skipping behavior in `find_next_code_line` causes
+/// FPs when guards are followed by regular comments then blank lines.
 pub struct EmptyLineAfterGuardClause;
 
 /// Guard clause keywords that appear at the start of an expression.
@@ -200,9 +229,21 @@ fn is_guard_stmt(node: &ruby_prism::Node<'_>) -> bool {
         }
     }
     // Bare return/break/next
-    node.as_return_node().is_some()
+    if node.as_return_node().is_some()
         || node.as_break_node().is_some()
         || node.as_next_node().is_some()
+    {
+        return true;
+    }
+    // `and`/`or` guard clauses: `render :foo and return`, `do_thing || return`
+    // RuboCop's guard_clause? checks operator_keyword? and then the rhs.
+    if let Some(and_node) = node.as_and_node() {
+        return is_guard_stmt(&and_node.right());
+    }
+    if let Some(or_node) = node.as_or_node() {
+        return is_guard_stmt(&or_node.right());
+    }
+    false
 }
 
 /// Find the next non-blank, non-comment line starting from `start_idx` (0-indexed).
@@ -398,4 +439,69 @@ mod tests {
         EmptyLineAfterGuardClause,
         "cops/layout/empty_line_after_guard_clause"
     );
+
+    #[test]
+    fn and_return_guard_detected() {
+        let source = b"def bar\n  render :foo and return if condition\n  do_something\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for `and return` guard, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn or_return_guard_detected() {
+        let source = b"def baz\n  render :foo or return if condition\n  do_something\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for `or return` guard, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_before_begin_detected() {
+        let source = b"def foo\n  return another_object if something_different?\n  begin\n    bar\n  rescue SomeException\n    baz\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for guard before begin, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_then_rubocop_disable_detected() {
+        let source = b"def foo\n  return if condition\n  # rubocop:disable Department/Cop\n  bar\n  # rubocop:enable Department/Cop\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for guard then rubocop:disable, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_then_rubocop_enable_then_code_detected() {
+        let source = b"def foo\n  # rubocop:disable Department/Cop\n  return if condition\n  # rubocop:enable Department/Cop\n  bar\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for guard then rubocop:enable then code, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
 }

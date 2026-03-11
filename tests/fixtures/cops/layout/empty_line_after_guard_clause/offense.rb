@@ -33,3 +33,46 @@ def exception_class
   ^ Layout/EmptyLineAfterGuardClause: Add empty line after guard clause.
   raise NotImplementedError, "error response must define #exception_class"
 end
+
+# Guard clause with `and return` form
+def with_and_return
+  render :foo and return if condition
+  ^ Layout/EmptyLineAfterGuardClause: Add empty line after guard clause.
+  do_something
+end
+
+# Guard clause with `or return` form
+def with_or_return
+  render :foo or return if condition
+  ^ Layout/EmptyLineAfterGuardClause: Add empty line after guard clause.
+  do_something
+end
+
+# Guard clause before `begin` keyword
+def guard_before_begin
+  return another_object if something_different?
+  ^ Layout/EmptyLineAfterGuardClause: Add empty line after guard clause.
+  begin
+    bar
+  rescue SomeException
+    baz
+  end
+end
+
+# Guard clause followed by rubocop:disable comment (no blank line between)
+def guard_then_rubocop_disable
+  return if condition
+  ^ Layout/EmptyLineAfterGuardClause: Add empty line after guard clause.
+  # rubocop:disable Department/Cop
+  bar
+  # rubocop:enable Department/Cop
+end
+
+# Guard clause followed by rubocop:enable comment then code (no blank after enable)
+def guard_then_rubocop_enable
+  # rubocop:disable Department/Cop
+  return if condition
+  ^ Layout/EmptyLineAfterGuardClause: Add empty line after guard clause.
+  # rubocop:enable Department/Cop
+  bar
+end
