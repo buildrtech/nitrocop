@@ -25,6 +25,21 @@ use crate::parse::source::SourceFile;
 /// against a RuboCop expected total of 8,180, and `check-cop.py --rerun`
 /// cleared its FP-regression gate. Remaining localized divergence appears in a
 /// small number of repos, dominated by jruby's file-drop-noise repo.
+///
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=37, FN=100.
+///
+/// FP=37: Likely from quoting rules differences — nitrocop's
+/// `can_be_unquoted_symbol()` may accept symbols that actually need quoting
+/// in edge cases, or operator symbols in hash keys that RuboCop skips.
+///
+/// FN=100: Likely from missing `EnforcedStyle: consistent` mode (RuboCop
+/// flags unquoted keys when any key in the same hash needs quoting) and
+/// possibly missing `.to_sym`/`.intern` detection on interpolated strings.
+///
+/// Deferred: requires implementing the `consistent` EnforcedStyle and careful
+/// comparison of quoting rules with RuboCop's `properly_quoted?` logic.
 pub struct SymbolConversion;
 
 const BARE_OPERATOR_SYMBOLS: &[&[u8]] = &[

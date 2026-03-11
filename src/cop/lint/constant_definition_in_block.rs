@@ -4,6 +4,25 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=66, FN=21.
+///
+/// FP=66: nitrocop flags constants inside case/when, begin/rescue, while/for
+/// and other compound nodes that happen to be inside blocks. RuboCop's
+/// `{^any_block [^begin ^^any_block]}` pattern only matches constants whose
+/// DIRECT parent is a block or whose grandparent is a block with a begin in
+/// between — intermediate compound nodes (case, if, while, etc.) break the
+/// match. Needs compound-node transparency logic.
+///
+/// FN=21: LambdaNode is an `any_block` type in RuboCop but nitrocop may not
+/// treat it as a block context. Also `[^begin ^^any_block]` pattern (constant
+/// inside a begin that is direct child of a block) may be missed.
+///
+/// Deferred: requires rewriting the parent-ancestry check to match RuboCop's
+/// node matcher semantics. The current visitor approach tracks `direct_in_block`
+/// flag but doesn't correctly model the `{^any_block [^begin ^^any_block]}`
+/// two-pattern disjunction.
 pub struct ConstantDefinitionInBlock;
 
 impl Cop for ConstantDefinitionInBlock {
