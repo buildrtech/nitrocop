@@ -30,6 +30,37 @@ use ruby_prism::Visit;
 /// **Remaining gaps:** Large FN count likely has additional causes beyond block traversal,
 /// such as unhandled control flow patterns or context-tracking gaps. The block fix
 /// addresses the primary structural issue.
+///
+/// ## Investigation findings (2026-03-10)
+///
+/// **FP cause: receiver context suppression.** `visit_call_node` was pushing `Argument`
+/// context for ALL receivers, including non-persisted? method chains. This meant
+/// `object.save.to_s`, `object.save.inspect`, etc. were incorrectly suppressed
+/// because `save` (as receiver of `to_s`) got Argument context. In RuboCop, only
+/// `.persisted?` receivers are suppressed via `checked_immediately?`.
+///
+/// **Fix:** Only push Argument context for receivers when the call is `persisted?`.
+/// For other methods, the receiver inherits parent context, allowing persist calls
+/// to be flagged when chained with non-persisted? methods.
+///
+/// **FP cause: negation not treated as condition.** `!object.save` / `not object.save`
+/// was not recognized as condition context. RuboCop's `single_negative?` check treats
+/// unary `!`/`not` as part of `operator_or_single_negative?`, exempting modify methods.
+///
+/// **Fix:** Added special handling for `!` CallNodes (no arguments) to push Condition
+/// context for the receiver.
+///
+/// **FP cause: yield/super arguments not recognized.** `yield object.save` and
+/// `super(object.save)` were not treated as argument context because `visit_yield_node`
+/// and `visit_super_node` were not overridden.
+///
+/// **Fix:** Added `visit_yield_node` and `visit_super_node` to push Argument context.
+///
+/// **FN cause: string interpolation treated as argument.** `"#{object.save}"` was
+/// suppressed because `visit_embedded_statements_node` pushed Argument context.
+/// RuboCop does NOT treat interpolation as "using" the return value.
+///
+/// **Fix:** Removed Argument context push from `visit_embedded_statements_node`.
 pub struct SaveBang;
 
 /// Modify-type persistence methods whose return value indicates success/failure.
@@ -581,19 +612,33 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         }
 
         // Continue visiting children (e.g., receiver, arguments, block)
-        // But we need to set appropriate context for arguments
+        // Receivers do NOT get Argument context — in RuboCop, a persist call
+        // that is the receiver of another method (e.g., `object.save.to_s`)
+        // is still flagged because the return value is not meaningfully checked.
+        // Exceptions:
+        // - `.persisted?` counts as checking the result (checked_immediately?)
+        // - `!` / `not` operator counts as condition/compound boolean (single_negative?)
         if let Some(recv) = node.receiver() {
-            // If this call is persisted?, suppress create-assignment offenses in the receiver
-            // (handles patterns like `(user = User.create).persisted?`)
-            let is_persisted_check = node.name().as_slice() == b"persisted?";
+            let method_name = node.name().as_slice();
+            let is_persisted_check = method_name == b"persisted?";
+            let is_negation = method_name == b"!" && node.arguments().is_none();
+
             if is_persisted_check {
+                // persisted? on the result means the return value IS checked
                 self.suppress_create_assignment = true;
-            }
-            self.context_stack.push(Context::Argument);
-            self.visit(&recv);
-            self.context_stack.pop();
-            if is_persisted_check {
+                self.context_stack.push(Context::Argument);
+                self.visit(&recv);
+                self.context_stack.pop();
                 self.suppress_create_assignment = false;
+            } else if is_negation {
+                // `!object.save` / `not object.save` — RuboCop treats this as
+                // single_negative? which is part of condition/compound boolean.
+                self.context_stack.push(Context::Condition);
+                self.visit(&recv);
+                self.context_stack.pop();
+            } else {
+                // Non-persisted? receiver: inherit parent context (don't suppress offenses)
+                self.visit(&recv);
             }
         }
 
@@ -838,6 +883,29 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         }
     }
 
+    // ── YieldNode / SuperNode: arguments are in argument context ──────────
+
+    fn visit_yield_node(&mut self, node: &ruby_prism::YieldNode<'pr>) {
+        if let Some(args) = node.arguments() {
+            self.context_stack.push(Context::Argument);
+            self.visit_arguments_node(&args);
+            self.context_stack.pop();
+        }
+    }
+
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
+        if let Some(args) = node.arguments() {
+            self.context_stack.push(Context::Argument);
+            self.visit_arguments_node(&args);
+            self.context_stack.pop();
+        }
+        if let Some(block) = node.block() {
+            if let Some(block_node) = block.as_block_node() {
+                self.visit_block_node(&block_node);
+            }
+        }
+    }
+
     // ── And/Or nodes: both children are condition context ────────────────
 
     fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
@@ -1006,10 +1074,11 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
     // ── Interpolation: children are in argument context ──────────────────
 
     fn visit_embedded_statements_node(&mut self, node: &ruby_prism::EmbeddedStatementsNode<'pr>) {
+        // String interpolation does NOT suppress persist call offenses.
+        // RuboCop treats `"#{object.save}"` the same as a void-context `save` call
+        // because the return value is not meaningfully checked (only stringified).
         if let Some(stmts) = node.statements() {
-            self.context_stack.push(Context::Argument);
             self.visit_statements_node(&stmts);
-            self.context_stack.pop();
         }
     }
 }

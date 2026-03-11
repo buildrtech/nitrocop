@@ -101,3 +101,19 @@ items.each do |i|
            ^^^^^^ Rails/SaveBang: Use `create!` instead of `create` if the return value is not checked. Or check `persisted?` on model returned from `create`.
   nil
 end
+
+# Persist call chained as receiver of non-persisted? method (return value not meaningfully checked)
+def process
+  object.save.to_s
+         ^^^^ Rails/SaveBang: Use `save!` instead of `save` if the return value is not checked.
+  object.update(name: 'Tom').inspect
+         ^^^^^^ Rails/SaveBang: Use `update!` instead of `update` if the return value is not checked.
+  nil
+end
+
+# Persist call in string interpolation (return value not checked)
+def process
+  "result: #{object.save}"
+                    ^^^^ Rails/SaveBang: Use `save!` instead of `save` if the return value is not checked.
+  nil
+end

@@ -117,3 +117,24 @@ end
 
 # Persist call inside brace block — last expression (implicit return)
 items.each { |i| i.save }
+
+# Negation: ! / not on persist call (single_negative? in RuboCop — condition context)
+!object.save
+not object.save
+
+# Yield with persist call argument (return value used by yield)
+def process
+  yield object.save
+end
+
+# Yield with persist call as non-last statement (still an argument)
+def process
+  yield object.save
+  nil
+end
+
+# Super with persist call argument
+def process
+  super(object.save)
+  nil
+end
