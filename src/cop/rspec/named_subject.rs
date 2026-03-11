@@ -5,10 +5,18 @@ use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
-pub struct NamedSubject;
-
 /// Flags usage of bare `subject` inside examples/hooks when it should be named.
 ///
+/// Corpus investigation (FP=2, FN=88):
+/// - Fixed: `find_subject_in_block` now recognizes `subject!` definitions (not just
+///   `subject`). This affects `named_only` style where `subject!(:foo) { ... }` should
+///   be treated as a named subject definition.
+/// - The remaining FNs (without corpus data to confirm) may be from edge cases in
+///   how `subject` references are found in deeply nested AST structures, or from
+///   config resolution differences.
+/// - FP=2 cause unknown without corpus line-level data.
+pub struct NamedSubject;
+
 /// EnforcedStyle:
 /// - `always` (default): flag every bare `subject` reference in examples/hooks
 /// - `named_only`: only flag when the nearest enclosing subject definition is named
@@ -68,7 +76,8 @@ fn find_subject_in_block(block_node: &ruby_prism::BlockNode<'_>) -> Option<bool>
     let stmts = body.as_statements_node()?;
     for stmt in stmts.body().iter() {
         if let Some(call) = stmt.as_call_node() {
-            if call.name().as_slice() == b"subject"
+            let name = call.name().as_slice();
+            if (name == b"subject" || name == b"subject!")
                 && call.receiver().is_none()
                 && call.block().is_some()
             {
@@ -342,6 +351,63 @@ mod tests {
             diags.len(),
             1,
             "named_only should flag when nearest subject is named"
+        );
+    }
+
+    #[test]
+    fn subject_inside_block_within_example() {
+        // subject inside `expect { subject }` should be flagged
+        let source = b"RSpec.describe User do\n  subject { described_class.new }\n\n  it \"works\" do\n    expect { subject }.not_to raise_error\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&NamedSubject, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "subject inside block within example should be flagged, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn subject_inside_let_block_not_flagged() {
+        // subject inside `let` is not inside an example/hook — should NOT be flagged
+        let source = b"RSpec.describe User do\n  subject { described_class.new }\n  let(:result) { subject.process }\n\n  it 'works' do\n    expect(result).to be_truthy\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&NamedSubject, source);
+        assert!(
+            diags.is_empty(),
+            "subject inside let block should not be flagged, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn subject_with_empty_parens_flagged() {
+        // subject() with empty parens should be flagged same as bare subject
+        let source = b"RSpec.describe User do\n  subject { described_class.new }\n\n  it \"works\" do\n    expect(subject()).to be_valid\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&NamedSubject, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "subject() with empty parens should be flagged, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn subject_bang_definition_recognized_in_named_only() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("named_only".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // subject! definition is named — should flag bare `subject` usage
+        let source = b"RSpec.describe User do\n  subject!(:user) { described_class.new }\n\n  it \"is a User\" do\n    expect(subject).to be_a(User)\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(&NamedSubject, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "subject! named definition should be recognized in named_only mode"
         );
     }
 }

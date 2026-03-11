@@ -22,4 +22,21 @@ RSpec.describe User do
     ^^^^^^^ RSpec/NamedSubject: Name your test subject if you need to reference it explicitly.
     example.run
   end
+
+  after do
+    do_something_with(subject)
+                      ^^^^^^^ RSpec/NamedSubject: Name your test subject if you need to reference it explicitly.
+  end
+
+  # subject inside a block within an example is still flagged
+  it "does not raise" do
+    expect { subject }.not_to raise_error
+             ^^^^^^^ RSpec/NamedSubject: Name your test subject if you need to reference it explicitly.
+  end
+
+  # prepend_before is also a hook
+  prepend_before do
+    setup(subject)
+          ^^^^^^^ RSpec/NamedSubject: Name your test subject if you need to reference it explicitly.
+  end
 end

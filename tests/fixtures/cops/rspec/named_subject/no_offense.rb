@@ -49,3 +49,22 @@ RSpec.shared_examples 'a database connection' do
     expect(subject).to respond_to(:insert)
   end
 end
+
+# shared_examples_for with subject — also ignored
+shared_examples_for 'a valid record' do
+  it 'is valid' do
+    expect(subject).to be_valid
+  end
+end
+
+# shared_context with subject — also ignored
+shared_context 'with setup' do
+  before { subject.prepare }
+end
+
+# subject with arguments is NOT a bare subject reference
+RSpec.describe Config do
+  it 'passes' do
+    subject(:name)
+  end
+end
