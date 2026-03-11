@@ -11,3 +11,13 @@ z = [
   2,
   3
 ]
+
+# All elements on same line, separate from brackets
+w = [
+  1, 2, 3,
+]
+
+# Single element multiline array
+s = [
+  :only_one
+]
