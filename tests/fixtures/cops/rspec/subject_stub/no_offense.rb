@@ -65,6 +65,19 @@ RSpec.describe Widget do
   end
 end
 
+# Stubs inside class methods (def self.) are not flagged — RuboCop's
+# find_subject_expectations recurses into :def but not :defs nodes.
+describe Runner do
+  subject(:runner) { described_class.new(stdout, stderr) }
+
+  let(:stdout) { StringIO.new }
+  let(:stderr) { StringIO.new }
+
+  def self.cmds(cmds)
+    before { cmds.each { |cmd, str| allow(runner).to receive(:`).with(cmd.to_s).and_return(str) } }
+  end
+end
+
 # Subject from parent redefined with let in nested context (vendor spec case)
 RSpec.describe Service do
   subject(:service) { described_class.new }

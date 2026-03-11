@@ -32,6 +32,19 @@ use crate::parse::source::SourceFile;
 ///    chain to find `.to`/`.not_to`/`.to_not` when the outermost call doesn't match.
 /// 5. Explicit parens on `.to(receive(...))` followed by chain: `.to(receive(:bar)).and_return(baz)`
 ///    makes `.and_return` the outermost call. Same fix as #4.
+///
+/// Round 3 FP fix (3→?):
+/// 6. Singleton method definitions (`def self.foo`): RuboCop's `find_subject_expectations`
+///    recurses into `:def` child nodes but NOT `:defs` (singleton method definitions).
+///    In Prism, both `def foo` and `def self.foo` are `DefNode`; the difference is
+///    `def_node.receiver().is_some()`. Our code was recursing into all DefNodes, which
+///    caused FPs when `allow(subject).to receive(...)` appeared inside `def self.cmds(...)`.
+///    Fixed by skipping DefNode when `receiver().is_some()`.
+///    Example: travis-ci/dpl `spec/dpl/ctx/bash_spec.rb` — `def self.cmds(cmds)` contains
+///    `before { allow(bash).to receive(...)  }`.
+///    Remaining 2 FPs (ubicloud host_nexus_spec.rb:173,196) could not be diagnosed
+///    from pure code analysis — both tools should flag those `expect(nx).to receive(:bud)`
+///    lines identically. Root cause may be a corpus oracle run artifact.
 pub struct SubjectStub;
 
 impl Cop for SubjectStub {
@@ -289,8 +302,13 @@ fn check_for_subject_stubs(
         }
     }
 
-    // Check def nodes for subject stubs too
+    // Check instance method def nodes for subject stubs too.
+    // Skip singleton method definitions (def self.foo / def obj.foo) — RuboCop's
+    // find_subject_expectations recurses into :def but not :defs (singleton defs).
     if let Some(def_node) = node.as_def_node() {
+        if def_node.receiver().is_some() {
+            return;
+        }
         if let Some(body) = def_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 for s in stmts.body().iter() {
