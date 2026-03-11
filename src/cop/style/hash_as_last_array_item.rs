@@ -3,6 +3,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03-10): 3 FP, 0 FN, 1731 matches.
+///
+/// Root cause: Missing kwsplat check. RuboCop's `on_hash` has
+/// `return if node.children.first&.kwsplat_type?` which skips hashes whose
+/// first child is a double-splat (`**opts`). This applies to both braced
+/// (`{ **opts }`) and unbraced (`**opts`) hash forms. The braced form was
+/// already passing tests (HashNode with braces isn't flagged in default
+/// "braces" mode), but unbraced kwsplat (`[1, **opts]`) was incorrectly
+/// flagged as a KeywordHashNode needing braces.
+///
+/// Fix: Added `as_assoc_splat_node()` check on the first element of both
+/// KeywordHashNode (braces mode) and HashNode (no_braces mode).
 pub struct HashAsLastArrayItem;
 
 impl Cop for HashAsLastArrayItem {
@@ -46,7 +58,16 @@ impl Cop for HashAsLastArrayItem {
         match style {
             "braces" => {
                 // Flag keyword hash (no braces) as last array item
-                if last.as_keyword_hash_node().is_some() {
+                if let Some(kw_hash) = last.as_keyword_hash_node() {
+                    // RuboCop skips hashes where the first child is a kwsplat (**splat)
+                    if kw_hash
+                        .elements()
+                        .iter()
+                        .next()
+                        .is_some_and(|e| e.as_assoc_splat_node().is_some())
+                    {
+                        return;
+                    }
                     // RuboCop skips when ALL elements are hashes in the expected style.
                     // In "braces" mode, that means all elements must be HashNode (with braces).
                     let all_expected = elements.iter().all(|e| e.as_hash_node().is_some());
@@ -77,6 +98,15 @@ impl Cop for HashAsLastArrayItem {
                 if let Some(hash) = last.as_hash_node() {
                     // Don't flag empty hashes
                     if hash.elements().iter().next().is_none() {
+                        return;
+                    }
+                    // RuboCop skips hashes where the first child is a kwsplat (**splat)
+                    if hash
+                        .elements()
+                        .iter()
+                        .next()
+                        .is_some_and(|e| e.as_assoc_splat_node().is_some())
+                    {
                         return;
                     }
                     // RuboCop skips when ALL elements are hashes in the expected style.

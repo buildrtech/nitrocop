@@ -13,3 +13,12 @@ method_call 1, 2, key: value
 
 # Second-to-last element is also a hash - not flagged in no_braces mode
 [{ controller: "foo", action: "bar" }, { controller: "baz", action: "qux" }]
+
+# Hash with kwsplat (double-splat) as first child - not flagged
+[1, 2, { **opts }]
+[1, 2, { **defaults, key: 'val' }]
+
+# Unbraced hash with kwsplat as first child - not flagged (braces mode)
+[1, **opts]
+[1, **defaults, key: 'val']
+[1, 2, **config]
