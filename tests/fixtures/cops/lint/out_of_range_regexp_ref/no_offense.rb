@@ -154,3 +154,33 @@ puts $2
 /(foo)/ =~ str
 str.sub('x') { |m| m.upcase }
 puts $2
+
+# Chained method call: receiver has gsub with regexp, =~ should take precedence
+# (RuboCop's after_send fires AFTER children are visited, so =~ overwrites gsub's count)
+if "foo bar".gsub(/\s+/, "") =~ /(foo)(bar)/
+  p $1
+  p $2
+end
+
+# Chained method call: gsub with captures in receiver, =~ with more captures on RHS
+if "text".gsub(/(a)/, "") =~ /(b)(c)(d)/
+  p $1
+  p $2
+  p $3
+end
+
+# Chained method call: sub in receiver with captures, match on result
+"text".sub(/(old)/, "new").match(/(a)(b)(c)/)
+puts $1
+puts $2
+puts $3
+
+# Chained calls: receiver has index with regexp, === should take precedence
+str.index(/(x)/)
+/(a)(b)(c)/ === str
+puts $3
+
+# match with no arguments should reset capture state (RuboCop's after_send sets nil)
+/(foo)(bar)/ =~ str
+foo.match
+puts $2

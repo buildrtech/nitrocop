@@ -46,6 +46,25 @@ use ruby_prism::Visit;
 ///
 /// 3. **`visit_match_write_node` defensive fix:** Added else branch to reset to None
 ///    when the regexp has interpolation (can't count captures statically).
+///
+/// ## Investigation (2026-03-11, round 3)
+///
+/// **Root cause of remaining 13 FPs:** After-send timing mismatch in `=~`, `===`,
+/// and `match` handlers.
+///
+/// RuboCop uses `after_send` which fires AFTER all child nodes (including the
+/// receiver chain) have been visited. Nitrocop's handlers were setting the capture
+/// count BEFORE calling `ruby_prism::visit_call_node()`, which re-visits the
+/// receiver chain. This caused nested regexp-setting calls in the receiver (e.g.,
+/// `"foo".gsub(/(a)/, "") =~ /(b)(c)/`) to overwrite the outer call's capture
+/// count with the inner call's count.
+///
+/// **Fix:** Changed `=~`, `===`, and `match` handlers to use the same manual-visit
+/// pattern as `sets_backref` methods: visit receiver and args first, THEN set the
+/// capture count, THEN visit the block. This matches RuboCop's `after_send`
+/// semantics. Also fixed `match` to always reset to None unconditionally (matching
+/// RuboCop's `@valid_ref = nil` at the start of `after_send`), including when
+/// called with no arguments.
 pub struct OutOfRangeRegexpRef;
 
 impl Cop for OutOfRangeRegexpRef {
@@ -95,75 +114,95 @@ impl<'pr> Visit<'pr> for RegexpRefVisitor<'_, '_> {
         let method = node.name().as_slice();
 
         // `=~` operator
+        // Uses after_send pattern: visit children first, then set capture count.
+        // This prevents nested regexp calls in the receiver chain from clobbering
+        // the count (e.g., `"foo".gsub(/(a)/, "") =~ /(b)(c)/` should use /(b)(c)/).
         if method == b"=~" {
-            let mut found_captures = false;
+            // Visit receiver and args first (matches RuboCop's after_send timing)
+            if let Some(recv) = node.receiver() {
+                self.visit(&recv);
+            }
+            if let Some(args) = node.arguments() {
+                self.visit(&args.as_node());
+            }
+            // Now set capture count (after children visited, like after_send)
+            // Reset first, then set from regexp if found (matches RuboCop's @valid_ref = nil)
+            self.current_capture_count = None;
             if let Some(args) = node.arguments() {
                 let arg_list: Vec<ruby_prism::Node<'pr>> = args.arguments().iter().collect();
                 if let Some(arg) = arg_list.first() {
                     // RHS regexp takes precedence
                     if let Some(count) = count_captures_in_node(arg) {
                         self.current_capture_count = Some(count);
-                        found_captures = true;
                     } else if let Some(recv) = node.receiver() {
-                        // LHS regexp
+                        // LHS regexp (only if RHS is not a regexp)
                         if let Some(count) = count_captures_in_node(&recv) {
                             self.current_capture_count = Some(count);
-                            found_captures = true;
                         }
                     }
                 }
             }
-            // If neither side is a recognizable literal regexp (e.g., one is a constant
-            // reference), mark capture count as unknown so we don't false-positive on $N.
-            if !found_captures {
-                self.current_capture_count = None;
+            // Visit block (if any) with the correct capture count
+            if let Some(block) = node.block() {
+                self.visit(&block);
             }
-            ruby_prism::visit_call_node(self, node);
             return;
         }
 
         // `===` operator with regexp receiver
+        // Uses after_send pattern: visit children first, then set capture count.
         if method == b"===" {
-            let mut found = false;
+            // Visit receiver and args first
+            if let Some(recv) = node.receiver() {
+                self.visit(&recv);
+            }
+            if let Some(args) = node.arguments() {
+                self.visit(&args.as_node());
+            }
+            // Reset, then set from regexp receiver if found
+            self.current_capture_count = None;
             if let Some(recv) = node.receiver() {
                 if let Some(count) = count_captures_in_node(&recv) {
                     self.current_capture_count = Some(count);
-                    found = true;
                 }
             }
-            if !found {
-                // Receiver may be a constant regexp reference — mark as unknown
-                self.current_capture_count = None;
+            // Visit block (if any)
+            if let Some(block) = node.block() {
+                self.visit(&block);
             }
-            ruby_prism::visit_call_node(self, node);
             return;
         }
 
-        // `match` method with regexp receiver (but not `match?`)
+        // `match` method with regexp receiver or argument (but not `match?`)
+        // Uses after_send pattern: visit children first, then set capture count.
         if method == b"match" {
-            let mut found = false;
+            // Visit receiver and args first
+            if let Some(recv) = node.receiver() {
+                self.visit(&recv);
+            }
+            if let Some(args) = node.arguments() {
+                self.visit(&args.as_node());
+            }
+            // Reset first (matches RuboCop's @valid_ref = nil in after_send)
+            self.current_capture_count = None;
             if let Some(recv) = node.receiver() {
                 if let Some(count) = count_captures_in_node(&recv) {
-                    if node.arguments().is_some() {
-                        self.current_capture_count = Some(count);
-                        found = true;
-                    }
+                    // Regexp receiver: /re/.match(str) or /re/.match
+                    self.current_capture_count = Some(count);
                 } else if let Some(args) = node.arguments() {
-                    // match with regexp as argument
+                    // Non-regexp receiver, check if arg is regexp: str.match(/re/)
                     let arg_list: Vec<ruby_prism::Node<'pr>> = args.arguments().iter().collect();
                     if let Some(arg) = arg_list.first() {
                         if let Some(count) = count_captures_in_node(arg) {
                             self.current_capture_count = Some(count);
-                            found = true;
                         }
                     }
                 }
             }
-            if !found && node.arguments().is_some() {
-                // Regexp is a constant or dynamic reference — mark as unknown
-                self.current_capture_count = None;
+            // Visit block (if any) with the correct capture count
+            if let Some(block) = node.block() {
+                self.visit(&block);
             }
-            ruby_prism::visit_call_node(self, node);
             return;
         }
 
