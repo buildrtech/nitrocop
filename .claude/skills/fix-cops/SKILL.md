@@ -103,8 +103,11 @@ directly on main.
    verify cop behavior are:
    - **Unit tests**: add patterns to `offense.rb` / `no_offense.rb` fixtures and run
      `cargo test --lib -- <cop_name_snake>` — this is fast, reliable, and self-documenting.
-   - **Corpus validation**: `check-cop.py --rerun` for cops you modified; `check-cop.py
-     --verbose` for untouched cops when the latest corpus oracle run is current.
+   - **Corpus validation**: `check-cop.py --rerun` for aggregate count regression on
+     cops you modified; `check-cop.py --verbose` for untouched cops when the latest
+     corpus oracle run is current.
+   - **Location validation**: `python3 scripts/verify-cop-locations.py Department/CopName`
+     for modified cops when the corpus oracle includes concrete FP/FN examples.
    Never create test Ruby files outside the fixture directories.
 
 3. **Add test cases (TDD)**:
@@ -159,10 +162,12 @@ directly on main.
    python3 scripts/check-cop.py Department/CopName --verbose --rerun
    ```
    Run these in parallel (background). **Corpus validation is the acceptance gate** —
-   unit tests passing is necessary but NOT sufficient. The goal is `PASS: perfect
-   conformance` (0 FP, 0 FN). `PASS (no regression): N FP remain` means FPs from CI
-   still exist — the cop is NOT fixed yet. Use `--rerun` only for cops changed in this
-   batch; for untouched cops, use artifact mode (`--verbose`).
+   unit tests passing is necessary but NOT sufficient. The goal is `PASS: aggregate
+   offense count matches RuboCop for this cop`, plus `verify-cop-locations.py` when
+   concrete oracle locations exist. `PASS: no new excess vs CI nitrocop baseline`
+   alone is not enough — the cop may still have remaining mismatches. Use `--rerun`
+   only for cops changed in this batch; for untouched cops, use artifact mode
+   (`--verbose`).
 
 5. **Handle regressions**: if a fix increases FP count (even if unit tests pass), revert
    the code change but **add a detailed investigation comment** to the cop source file

@@ -15,8 +15,11 @@ Final stop condition:
   and related benchmark outputs) show 100.0% / 0 FP / 0 FN for the target.
 - Linux CI/corpus oracle agrees with the local result.
 
-Per-cop `check-cop.py --rerun` results are intermediate gates only. They are
-necessary, but they are NOT sufficient to end `/fix-department`.
+Per-cop `check-cop.py --rerun` results are intermediate count-based gates only.
+They are necessary, but they are NOT sufficient to end `/fix-department`.
+When the corpus oracle has concrete FP/FN examples for a cop, use
+`verify-cop-locations.py` as the location-level check before treating that cop
+as done locally.
 Run fix work from a dedicated git worktree by default.
 
 ## Workflow
@@ -190,7 +193,7 @@ target at 100.0% / 0 FP / 0 FN.
 
 After regenerating, inspect the target row in `README.md` and `docs/corpus.md`:
 - If the row is still below 100%, loop back to Phase 1 even if the modified cops
-  passed `check-cop.py --rerun`.
+  passed `check-cop.py --rerun` and `verify-cop-locations.py`.
 - If the row is 100% locally but Linux CI/corpus oracle is not yet green or
   disagrees, treat that as a parity bug and keep investigating. Do not declare
   the department/gem complete yet.
@@ -258,11 +261,15 @@ Do not leave retained progress only in a worktree branch.
   ("No lockfile found") and wastes tokens. The ONLY ways to verify cop behavior are:
   - **Unit tests**: add patterns to `offense.rb` / `no_offense.rb` fixtures and run
     `cargo test --lib -- <cop_name_snake>`.
-  - **Corpus validation**: `check-cop.py --rerun` for modified cops; `check-cop.py --verbose`
-    (artifact mode) for untouched cops.
+  - **Corpus validation**: `check-cop.py --rerun` for aggregate count regression on
+    modified cops; `check-cop.py --verbose` (artifact mode) for untouched cops.
+  - **Location validation**: `python3 scripts/verify-cop-locations.py Department/CopName`
+    for modified cops when the corpus oracle includes concrete FP/FN examples.
   - **Synthetic corpus**: `python3 bench/synthetic/run_synthetic.py --verbose` for synthetic-only cops.
   Never create test Ruby files outside the fixture directories.
-- `check-cop.py` is a cop-level gate, not the completion gate. Never declare
+- `check-cop.py` is a count-only cop-level gate, not the completion gate.
+  When the corpus oracle has concrete FP/FN examples, also run
+  `verify-cop-locations.py` before treating a cop as done locally. Never declare
   `/fix-department` done while `README.md` / `docs/corpus.md` still show the
   target below 100%, or while Linux CI parity is still unconfirmed.
 - Use local corpus files under `vendor/corpus/` when available.

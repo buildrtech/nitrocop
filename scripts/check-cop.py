@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-"""Check a single cop against the corpus for FP regressions.
+"""Check a single cop against the corpus for aggregate count regressions.
 
-Compares nitrocop's offense count against the RuboCop baseline from the
-latest corpus oracle CI run. Catches real-world false positive regressions
+Compares nitrocop's aggregate offense count against the RuboCop baseline from
+the latest corpus oracle CI run. Catches real-world false positive regressions
 that fixture tests miss.
+
+This is a count-only gate. It does NOT prove that nitrocop matches RuboCop at
+the exact offense locations, and it does NOT prove department-level completion
+in README.md / docs/corpus.md.
 
 Results are cached per (binary_mtime, cop_name, repo_id) so that re-running
 check-cop.py for a different cop after fixing one cop is instant — only the
 changed cop needs re-execution. Use --rerun to force a fresh run.
 
 Usage:
-    python3 scripts/check-cop.py Lint/Void              # quick aggregate check
-    python3 scripts/check-cop.py Lint/Void --verbose     # per-repo breakdown
+    python3 scripts/check-cop.py Lint/Void              # quick aggregate count check
+    python3 scripts/check-cop.py Lint/Void --verbose     # per-repo count breakdown
     python3 scripts/check-cop.py Lint/Void --verbose --rerun --quick  # fast iteration
     python3 scripts/check-cop.py Lint/Void --threshold 5 # allow up to 5 excess
 """
@@ -342,7 +346,7 @@ def run_nitrocop_aggregate(cop_name: str) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Check a cop against the corpus for FP regressions")
+        description="Check a cop against the corpus for aggregate count regressions")
     parser.add_argument("cop", help="Cop name (e.g., Lint/Void)")
     parser.add_argument("--input", type=Path,
                         help="Path to corpus-results.json (default: download from CI)")
@@ -387,6 +391,8 @@ def main():
         validate_corpus()
 
     print(f"Checking {args.cop} against corpus")
+    print("Gate: count-only cop-level regression check")
+    print("Not a location-level conformance proof or a department completion gate")
     print(f"Baseline (from CI): {baseline_matches:,} matches, "
           f"{baseline_fp:,} FP, {baseline_fn:,} FN")
     print(f"Expected RuboCop offenses: {expected_rubocop:,}")
@@ -538,14 +544,15 @@ def main():
             parts.append(f"FP~={display_excess:,}")
         if missing > 0:
             parts.append(f"FN={missing:,}")
-        conformance_note = f"  vs RuboCop: {' '.join(parts)}"
+        conformance_note = f"  vs RuboCop counts: {' '.join(parts)}"
         if display_excess > 0 and display_excess <= baseline_fp:
             conformance_note += f" (CI had FP={baseline_fp:,})"
         if file_drop_offenses > 0 and excess > 0:
             conformance_note += f" (FP approximate due to file-drop noise)"
         print(conformance_note)
     else:
-        print("  vs RuboCop: exact match (0 FP, 0 FN)")
+        print("  vs RuboCop counts: aggregate offense total matches (0 count delta)")
+    print("  Gate type: count-only / cop-level regression")
     print()
 
     if adjusted_excess > args.threshold:
@@ -559,19 +566,22 @@ def main():
         sys.exit(1)
     else:
         if excess == 0 and missing == 0:
-            print("PASS: perfect conformance with RuboCop")
+            print("PASS: aggregate offense count matches RuboCop for this cop")
         elif adjusted_excess == 0 and excess > 0:
-            print(f"PASS (no regression): {excess:,} FP remain from CI baseline")
+            print("PASS: no new excess vs CI nitrocop baseline")
+            print(f"  Aggregate count still differs from RuboCop by {excess:,} excess offenses")
             if ci_delta > 0 and file_drop_offenses > 0:
                 print(f"  Raw delta: {ci_delta:+,} "
                       f"(within file-drop noise of {file_drop_offenses:,})")
         else:
-            print(f"PASS (no regression): 0 new excess over CI baseline")
+            print("PASS: no new excess vs CI nitrocop baseline")
             if ci_delta > 0 and file_drop_offenses > 0:
                 print(f"  Raw delta: {ci_delta:+,} "
                       f"(within file-drop noise of {file_drop_offenses:,})")
         if missing > 0:
-            print(f"Note: {missing:,} FN remain (nitrocop misses these offenses)")
+            print(f"Note: aggregate count still misses {missing:,} RuboCop offenses")
+        print("Next: use scripts/verify-cop-locations.py for exact known FP/FN locations")
+        print("Next: use bench_nitrocop conform to prove department-level completion")
 
 
 if __name__ == "__main__":

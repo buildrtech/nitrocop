@@ -68,7 +68,7 @@ NITROCOP_COP_PROFILE=1 cargo run --release -- --debug bench/repos/mastodon
   hyperfine --warmup 2 --runs 5 'cargo run --release -- bench/repos/mastodon'
   ```
 - **Note on `--debug` timing:** The phase-level timings for filter+config and AST walk show cumulative thread time summed across all rayon workers, not wall time. This means the reported values will exceed wall clock time on multi-core machines.
-- **Corpus validation (current workflow):** use `python3 scripts/check-cop.py Department/Cop --input <local corpus-results.json> --verbose --rerun`. `--rerun` forces fresh per-repo execution, auto-rebuilds a stale release binary, and clears nitrocop's file cache before running. Prefer this over ad-hoc `--only` comparisons when validating conformance fixes.
+- **Corpus validation (current workflow):** use `python3 scripts/check-cop.py Department/Cop --input <local corpus-results.json> --verbose --rerun` for aggregate count deltas. `--rerun` forces fresh per-repo execution, auto-rebuilds a stale release binary, and clears nitrocop's file cache before running. Prefer this over ad-hoc `--only` comparisons when validating per-cop count regressions. For exact known FP/FN locations, also run `python3 scripts/verify-cop-locations.py Department/Cop`.
 - **Corpus bundle setup:** `check-cop.py --rerun` and `--corpus-check` mode require the corpus bundle to be installed for the active Ruby version. The bundle lives at `bench/corpus/vendor/bundle/`. If `bundle info rubocop` fails (wrong Ruby version or missing gems), config resolution falls back to hardcoded defaults, producing wildly incorrect offense counts (often 5-10x higher than expected). Fix with: `mise exec ruby@3.4 -- bash -c 'cd bench/corpus && BUNDLE_PATH=vendor/bundle bundle install'`. The CI corpus oracle runs on Linux with Ruby 3.4 — always prefix local reruns with `mise exec ruby@3.4 --` to match.
 - **Manual cache clear (fallback):** if you are running ad-hoc commands outside `check-cop.py`, clear `~/.cache/nitrocop/` to avoid stale per-file cache reuse.
 - **Verify conformance with correct JSON format:** nitrocop's JSON output uses `offenses` at the top level (not `files[].offenses[]` like RuboCop). Parse with `d.get('offenses', [])`, not `d.get('files', [])`.
@@ -331,7 +331,7 @@ Use this when `investigate-cop.py --context` shows an FP/FN in a large file and 
 
 ## Corpus Regression Testing
 
-After fixing any cop, run the corpus check to verify no FP regression against the real-world repo corpus:
+After fixing any cop, run the corpus count check to verify no aggregate regression against the real-world repo corpus:
 
 ```
 python3 scripts/check-cop.py Department/CopName                              # aggregate check (re-runs nitrocop)
@@ -341,12 +341,12 @@ python3 scripts/check-cop.py Department/CopName --verbose --rerun --quick     # 
 python3 scripts/check-cop.py Department/CopName --input results.json          # use local corpus-results.json
 ```
 
-The script compares nitrocop offense counts against the RuboCop baseline from the latest CI corpus oracle run. It reports two things:
+`check-cop.py` compares aggregate nitrocop offense counts against the RuboCop baseline from the latest CI corpus oracle run. It reports two things:
 
-1. **vs RuboCop** — the ground truth: how many FP (nitrocop fires, RuboCop doesn't) and FN (RuboCop fires, nitrocop doesn't) exist. This is what you want to be zero.
-2. **PASS/FAIL** — regression check: whether the current code is WORSE than the CI baseline. `PASS (no regression)` means you haven't introduced new FPs, but existing FPs from CI may still remain. `PASS: perfect conformance` means 0 FP and 0 FN.
+1. **vs RuboCop counts** — the aggregate offense-count delta: how many excess offenses nitrocop reports and how many RuboCop offenses nitrocop is still missing. Zero count delta is necessary, but exact locations may still differ.
+2. **PASS/FAIL** — regression check: whether the current code is WORSE than the CI baseline. `PASS: no new excess vs CI nitrocop baseline` means you haven't introduced new aggregate excess offenses, but existing location mismatches or missing offenses may still remain. `PASS: aggregate offense count matches RuboCop for this cop` means the totals match for that cop, not that the exact locations are proven identical.
 
-**Important:** `PASS (no regression): N FP remain` does NOT mean the cop is correct — it means the FPs existed in CI too. The goal is `PASS: perfect conformance`.
+**Important:** `check-cop.py` is count-only. Use `python3 scripts/verify-cop-locations.py Department/CopName` to verify the known oracle FP/FN locations for a cop. For `/fix-department`, the final completion gate is regenerated `README.md` / `docs/corpus.md` via `cargo run --release --bin bench_nitrocop -- conform`.
 
 With `--verbose`, it uses enriched per-repo data from `corpus-results.json` when available (instant). Pass `--rerun` to force re-execution of nitrocop after making code changes. `--rerun` automatically uses batch `--corpus-check` mode (single process) when available, falling back to per-repo subprocesses. Add `--quick` to skip repos with zero baseline activity (3-10x faster, may miss new FPs on zero-baseline repos).
 
@@ -361,6 +361,6 @@ With `--verbose`, it uses enriched per-repo data from `corpus-results.json` when
 - **Do not pause for unrelated working-tree changes.** If you see modified files unrelated to your current task, continue the task, do not edit those files, do not stage/commit them, and do not revert them. Treat unrelated changes as off-limits unless explicitly asked to work on them.
 - **Document all cop investigation findings** as `///` doc comments on the cop's struct. This applies to all cop investigation work, not just `/fix-cops` runs. Document root causes, fixes applied, remaining gaps, and whether issues are cop logic bugs vs config resolution problems. This prevents future investigators from repeating the same analysis.
 - **Do not run local benchmark regeneration by default during cop-fix loops.**
-  Use per-cop corpus gates (`scripts/check-cop.py ... --verbose [--rerun]`) as the acceptance check.
-  Only run `cargo run --release --bin bench_nitrocop -- conform` when explicitly requested (for example release/docs refresh), since it rewrites `bench/results.md`.
+  Use per-cop corpus gates (`scripts/check-cop.py ... --verbose [--rerun]`) as the default count-based acceptance check, and `scripts/verify-cop-locations.py` when you need location-level confirmation.
+  Only run `cargo run --release --bin bench_nitrocop -- conform` when explicitly requested or when closing out `/fix-department`, since it rewrites `bench/results.md`.
 - **When editing a skill, check for related skills that share conventions or interact with it.** Skills in `.claude/skills/` often form workflows (e.g., fix-cops/fix-department/fix-repo create branches, land-branch-commits lands them). Changes to shared conventions (commit message format, Co-Authored-By trailers, branch naming) must be applied consistently across all related skills.

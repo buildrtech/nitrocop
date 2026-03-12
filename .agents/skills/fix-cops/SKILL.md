@@ -77,10 +77,13 @@ After all selected cops are fixed:
    python3 scripts/check-cop.py Department/CopName --verbose --rerun
    ```
    Corpus validation is the acceptance gate: unit tests passing is necessary
-   but not sufficient. All fixed cops must report `PASS` with zero excess offenses.
-   Use `--rerun` only for cops changed in the current batch. For untouched cops,
-   prefer artifact mode (`python3 scripts/check-cop.py Department/CopName --verbose`)
-   when the latest corpus oracle run is current.
+   but not sufficient. All fixed cops must report `PASS: aggregate offense count
+   matches RuboCop for this cop`, and should also pass `verify-cop-locations.py`
+   when the corpus oracle includes concrete FP/FN examples. `PASS: no new excess
+   vs CI nitrocop baseline` alone is not enough. Use `--rerun` only for cops
+   changed in the current batch. For untouched cops, prefer artifact mode
+   (`python3 scripts/check-cop.py Department/CopName --verbose`) when the latest
+   corpus oracle run is current.
 
 3. Handle regressions: if a change increases FP count (even if unit tests pass),
    revert the code change but add a detailed investigation comment to the cop
@@ -174,8 +177,10 @@ Do not leave retained progress only in a worktree branch.
   ("No lockfile found") and wastes tokens. The ONLY ways to verify cop behavior are:
   - **Unit tests**: add patterns to `offense.rb` / `no_offense.rb` fixtures and run
     `cargo test --lib -- <cop_name_snake>`.
-  - **Corpus validation**: `check-cop.py --rerun` for modified cops; `check-cop.py --verbose`
-    (artifact mode) for untouched cops.
+  - **Corpus validation**: `check-cop.py --rerun` for aggregate count regression on
+    modified cops; `check-cop.py --verbose` (artifact mode) for untouched cops.
+  - **Location validation**: `python3 scripts/verify-cop-locations.py Department/CopName`
+    for modified cops when the corpus oracle includes concrete FP/FN examples.
   Never create test Ruby files outside the fixture directories.
 - Do not copy identifiers from private repos into fixtures or source.
 - Prefer generic minimal repros and generic naming in tests.
