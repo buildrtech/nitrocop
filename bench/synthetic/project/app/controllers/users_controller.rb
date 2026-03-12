@@ -5,6 +5,9 @@ class UsersController < ApplicationController
   end
 
   def create
+    nickname = params[:nickname]
+    return if nickname&.blank?
+
     # StrongParametersExpect
     user_params = params.require(:user).permit(:name, :email)
     @user = User.new(user_params)

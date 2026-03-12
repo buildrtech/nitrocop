@@ -74,6 +74,7 @@ TARGET_COPS = sorted([
     "Rails/ReversibleMigration",
     "Rails/StrongParametersExpect",
     "Rails/ReversibleMigrationMethodDefinition",
+    "Rails/SafeNavigationWithBlank",
     "Rails/ThreeStateBooleanColumn",
     "Rails/TimeZoneAssignment",
     "Rails/ToFormattedS",

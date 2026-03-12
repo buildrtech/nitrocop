@@ -56,7 +56,7 @@ nitrocop supports 910 cops from 6 RuboCop gems.
 
 Compared with RuboCop on [**1,000 open-source repos**](docs/corpus.md) (225k Ruby files).
 
-97.3% of compared issue reports matched (11.2M of 11.5M). 463 of 910 cops matched exactly; 446 differed; 1 had no corpus data.
+97.3% of compared issue reports matched (11.2M of 11.5M). 464 of 910 cops matched exactly; 446 differed.
 
 **[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (588 cops)
 
@@ -75,9 +75,9 @@ Compared with RuboCop on [**1,000 open-source repos**](docs/corpus.md) (225k Rub
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 
-| Department | Cops | Matched exactly | Differed | No corpus data | Matched exactly % |
-|------------|-----:|----------------:|---------:|---------------:|------------------:|
-| Rails | 138 | 80 | 57 | 1 | 57.9% |
+| Department | Cops | Matched exactly | Differed | Matched exactly % |
+|------------|-----:|----------------:|---------:|------------------:|
+| Rails | 138 | 81 | 57 | 58.6% |
 
 **[rubocop-performance](https://github.com/rubocop/rubocop-performance)** `1.26.1` (52 cops)
 
@@ -104,7 +104,6 @@ Compared with RuboCop on [**1,000 open-source repos**](docs/corpus.md) (225k Rub
 | FactoryBot | 11 | 10 | 1 | 90.9% |
 
 "Matched exactly" means nitrocop produced no extra issues and missed no issues for that cop anywhere in the corpus.
-No corpus data means the cop never appeared in the corpus, so it has not been compared yet.
 See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown.
 <!-- corpus-cops:end -->
 
