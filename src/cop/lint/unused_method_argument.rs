@@ -35,6 +35,16 @@ use ruby_prism::Visit;
 ///   a block-pass `&block` is a child of the send node, making it look like `binding` has
 ///   arguments. Prism separates block arguments from regular arguments. Fixed to also check
 ///   that the call's `block()` is not a `BlockArgumentNode`.
+///
+/// ## Additional fixes (corpus 99.7% → improved):
+/// - **FP: twisted scope expressions not visited** — RuboCop's VariableForce has
+///   `TWISTED_SCOPE_TYPES` which processes certain expressions belonging to the outer
+///   scope before entering a new scope. nitrocop's VarReadFinder was entirely skipping
+///   nested `DefNode`, `ClassNode`, `SingletonClassNode`, and `ModuleNode` — meaning
+///   method arguments used as: (1) singleton method receivers (`def obj.method_name`),
+///   (2) singleton class expressions (`class << obj`), (3) superclass expressions
+///   (`class Foo < base`) were not detected as used, producing false positives.
+///   Fixed to visit these "twisted" expressions while still skipping the body.
 pub struct UnusedMethodArgument;
 
 impl Cop for UnusedMethodArgument {
@@ -451,11 +461,28 @@ impl<'pr> Visit<'pr> for VarReadFinder {
         self.block_depth -= 1;
     }
 
-    // Don't recurse into nested def/class/module/sclass (they have their own scope)
-    fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
-    fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
+    // Don't recurse into the body of nested def/class/module/sclass (they
+    // have their own scope), BUT do visit their "twisted" expressions that
+    // belong to the outer scope:
+    // - DefNode: receiver (e.g., `def obj.method_name`)
+    // - ClassNode: superclass (e.g., `class Foo < base`)
+    // - SingletonClassNode: expression (e.g., `class << obj`)
+    // - ModuleNode: constant_path only (unlikely to contain local vars)
+    // This matches RuboCop's VariableForce TWISTED_SCOPE_TYPES handling.
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        if let Some(receiver) = node.receiver() {
+            self.visit(&receiver);
+        }
+    }
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        if let Some(superclass) = node.superclass() {
+            self.visit(&superclass);
+        }
+    }
     fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
-    fn visit_singleton_class_node(&mut self, _node: &ruby_prism::SingletonClassNode<'pr>) {}
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        self.visit(&node.expression());
+    }
 }
 
 #[cfg(test)]

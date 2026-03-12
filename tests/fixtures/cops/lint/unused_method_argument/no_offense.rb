@@ -115,3 +115,28 @@ def captured_in_nested_block(x)
     nested.each { |n| process(x, item, n) }
   end
 end
+
+# method argument used as receiver of a singleton method definition
+def define_singleton(obj)
+  def obj.to_s
+    "custom"
+  end
+end
+
+# method argument used in singleton class expression
+def extend_object(obj)
+  class << obj
+    def custom_method
+      42
+    end
+  end
+end
+
+# method argument used as superclass in class definition (twisted scope)
+def make_subclass(base)
+  class Custom < base
+    def greet
+      "hello"
+    end
+  end
+end
