@@ -18,3 +18,6 @@ obj[0]..obj[1]
 0/1r..1/1r
 # begin...end blocks are acceptable range boundaries (RuboCop's begin_type?)
 begin; compute_min; end..begin; compute_max; end
+# Method calls with block arguments (&) are acceptable — Prism puts &block in
+# CallNode.block(), but it's a BlockArgumentNode, not an actual block body.
+records.select(&:active?)..records.reject(&:archived?)

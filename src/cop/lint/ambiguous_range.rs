@@ -39,6 +39,16 @@ use crate::parse::source::SourceFile;
 /// missing `BeginNode`. A `begin; expr; end..begin; expr; end` range boundary
 /// was being flagged as ambiguous. Fixed by adding `as_begin_node()` check
 /// alongside `as_parentheses_node()`.
+///
+/// ## Corpus investigation (2026-03-11, round 3)
+///
+/// FP=1, FN=0. Root cause: Prism's `CallNode.block()` returns both
+/// `BlockNode` (do...end / {}) AND `BlockArgumentNode` (`&:sym`, `&block`).
+/// In the Parser gem, `&block` is a `block_pass` argument inside the `send`
+/// node, not a wrapping block — so `call_type?` is true and it enters
+/// `acceptable_call?` normally. nitrocop was blanket-rejecting any call with
+/// `block().is_some()`, which incorrectly rejected `foo(&:bar)..baz(&:qux)`.
+/// Fixed by only rejecting calls whose block is NOT a `BlockArgumentNode`.
 pub struct AmbiguousRange;
 
 impl Cop for AmbiguousRange {
@@ -179,9 +189,15 @@ fn is_acceptable_boundary(node: &ruby_prism::Node<'_>, require_parens_for_chains
 
     // Method calls
     if let Some(call) = node.as_call_node() {
-        // A trailing block keeps the boundary ambiguous: `1..limit.times do`.
-        if call.block().is_some() {
-            return false;
+        // A trailing do...end or {} block keeps the boundary ambiguous:
+        // `1..limit.times do`. But a block *argument* (`&:sym`) is just a
+        // regular argument in the Parser gem (block_pass inside send), so
+        // it should NOT cause rejection. Prism puts both BlockNode and
+        // BlockArgumentNode in CallNode.block(); only reject actual blocks.
+        if let Some(blk) = call.block() {
+            if blk.as_block_argument_node().is_none() {
+                return false;
+            }
         }
 
         // Unary operations (negation, etc) are acceptable
