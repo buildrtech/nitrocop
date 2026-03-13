@@ -18,3 +18,11 @@ x = ['alpha', 'beta', 'gamma']
 # Strings with newline/tab escapes are words per default WordRegex
 ["one\n", "hi\tthere"]
 ^ Style/WordArray: Use `%w` or `%W` for an array of words.
+
+# Matrix where all subarrays are simple words — each subarray still flagged
+[
+  ["one", "two"],
+  ^ Style/WordArray: Use `%w` or `%W` for an array of words.
+  ["three", "four"]
+  ^ Style/WordArray: Use `%w` or `%W` for an array of words.
+]

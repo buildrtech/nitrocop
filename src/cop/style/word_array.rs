@@ -1,13 +1,23 @@
-use crate::cop::node_type::{ARRAY_NODE, STRING_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Default WordRegex pattern matching RuboCop's default:
 /// `/\A(?:\p{Word}|\p{Word}-\p{Word}|\n|\t)+\z/`
 /// Translated to Rust regex syntax: \A → ^, \z → $, \p{Word} → \w
 const DEFAULT_WORD_REGEX: &str = r"^(?:\w|\w-\w|\n|\t)+$";
 
+/// Style/WordArray: flags bracket arrays of word-like strings that could use %w.
+///
+/// Investigation: The main source of false positives was missing the
+/// `within_matrix_of_complex_content?` check from RuboCop. When a bracket
+/// array is nested inside a parent array (a "matrix") where ALL elements are
+/// arrays, and at least ONE sibling subarray has complex content (strings with
+/// spaces, non-word characters, or invalid encoding), RuboCop exempts the
+/// entire matrix. This commonly occurs with arrays of pairs like
+/// `[["US", "United States"], ["UK", "United Kingdom"]]` where some country
+/// names contain spaces.
 pub struct WordArray;
 
 /// Extract a Ruby regexp pattern from a string like `/pattern/flags`.
@@ -45,31 +55,116 @@ fn build_word_regex(config_value: &str) -> Option<regex::Regex> {
     regex::Regex::new(&translated).ok()
 }
 
+/// Check if an array node has complex content (any string element that doesn't
+/// match the word regex, contains spaces, is empty, or has invalid encoding).
+fn array_has_complex_content(
+    array_node: &ruby_prism::ArrayNode<'_>,
+    word_re: &Option<regex::Regex>,
+) -> bool {
+    for elem in array_node.elements().iter() {
+        let string_node = match elem.as_string_node() {
+            Some(s) => s,
+            None => return true, // non-string element = complex
+        };
+        if string_node.opening_loc().is_none() {
+            return true;
+        }
+        let unescaped_bytes = string_node.unescaped();
+        if unescaped_bytes.is_empty() {
+            return true;
+        }
+        if unescaped_bytes.contains(&b' ') {
+            return true;
+        }
+        let content_str = match std::str::from_utf8(unescaped_bytes) {
+            Ok(s) => s,
+            Err(_) => return true,
+        };
+        if let Some(re) = word_re {
+            if !re.is_match(content_str) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a parent array is a "matrix of complex content": all elements are
+/// arrays, and at least one has complex content. Matches RuboCop's
+/// `matrix_of_complex_content?` method.
+fn is_matrix_of_complex_content(
+    array_node: &ruby_prism::ArrayNode<'_>,
+    word_re: &Option<regex::Regex>,
+) -> bool {
+    let elements = array_node.elements();
+    if elements.is_empty() {
+        return false;
+    }
+    let mut any_complex = false;
+    for elem in elements.iter() {
+        let sub = match elem.as_array_node() {
+            Some(a) => a,
+            None => return false, // not all elements are arrays
+        };
+        if !any_complex && array_has_complex_content(&sub, word_re) {
+            any_complex = true;
+        }
+    }
+    any_complex
+}
+
 impl Cop for WordArray {
     fn name(&self) -> &'static str {
         "Style/WordArray"
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[ARRAY_NODE, STRING_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
         parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let array_node = match node.as_array_node() {
-            Some(a) => a,
-            None => return,
-        };
+        let min_size = config.get_usize("MinSize", 2);
+        let enforced_style = config.get_str("EnforcedStyle", "percent");
+        let word_regex_str = config.get_str("WordRegex", "");
 
+        if enforced_style == "brackets" {
+            return;
+        }
+
+        let word_re = build_word_regex(word_regex_str);
+
+        let mut visitor = WordArrayVisitor {
+            cop: self,
+            source,
+            parse_result,
+            min_size,
+            word_re,
+            in_matrix_of_complex_content: false,
+            diagnostics: Vec::new(),
+        };
+        visitor.visit(&parse_result.node());
+        diagnostics.extend(visitor.diagnostics);
+    }
+}
+
+struct WordArrayVisitor<'a, 'src, 'pr> {
+    cop: &'a WordArray,
+    source: &'src SourceFile,
+    parse_result: &'a ruby_prism::ParseResult<'pr>,
+    min_size: usize,
+    word_re: Option<regex::Regex>,
+    in_matrix_of_complex_content: bool,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl<'pr> WordArrayVisitor<'_, '_, 'pr> {
+    fn check_array(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
         // Must have `[` opening (not %w or %W)
-        let opening = match array_node.opening_loc() {
+        let opening = match node.opening_loc() {
             Some(loc) => loc,
             None => return,
         };
@@ -78,78 +173,57 @@ impl Cop for WordArray {
             return;
         }
 
-        let elements = array_node.elements();
-        let min_size = config.get_usize("MinSize", 2);
-        let enforced_style = config.get_str("EnforcedStyle", "percent");
-        let word_regex_str = config.get_str("WordRegex", "");
+        let elements = node.elements();
 
-        // "brackets" style: never flag bracket arrays
-        if enforced_style == "brackets" {
+        if elements.len() < self.min_size {
             return;
         }
 
-        if elements.len() < min_size {
+        // Skip if inside a matrix of complex content
+        if self.in_matrix_of_complex_content {
             return;
         }
 
-        // Skip arrays that contain comments — converting to %w would lose them
+        // Skip arrays that contain comments
         let array_start = opening.start_offset();
-        let array_end = array_node
+        let array_end = node
             .closing_loc()
             .map(|c| c.end_offset())
             .unwrap_or(array_start);
-        if has_comment_in_range(parse_result, array_start, array_end) {
+        if has_comment_in_range(self.parse_result, array_start, array_end) {
             return;
         }
 
-        // Build compiled word regex (default handles hyphens, unicode, \n, \t)
-        let word_re = build_word_regex(word_regex_str);
-
         // All elements must be simple string nodes with word-like content
-        for elem in elements.iter() {
-            let string_node = match elem.as_string_node() {
-                Some(s) => s,
-                None => return,
-            };
-
-            // Must have an opening quote (not a bare string)
-            if string_node.opening_loc().is_none() {
-                return;
-            }
-
-            // Use unescaped content (interpreted value, like RuboCop's str_content)
-            let unescaped_bytes = string_node.unescaped();
-
-            // Content must not be empty (empty strings can't be in %w)
-            if unescaped_bytes.is_empty() {
-                return;
-            }
-
-            // Content must not contain spaces
-            if unescaped_bytes.contains(&b' ') {
-                return;
-            }
-
-            // Check content against WordRegex
-            let content_str = match std::str::from_utf8(unescaped_bytes) {
-                Ok(s) => s,
-                Err(_) => return, // Invalid UTF-8 → complex content
-            };
-
-            if let Some(ref re) = word_re {
-                if !re.is_match(content_str) {
-                    return;
-                }
-            }
+        if array_has_complex_content(node, &self.word_re) {
+            return;
         }
 
-        let (line, column) = source.offset_to_line_col(opening.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
+        let (line, column) = self.source.offset_to_line_col(opening.start_offset());
+        self.diagnostics.push(self.cop.diagnostic(
+            self.source,
             line,
             column,
             "Use `%w` or `%W` for an array of words.".to_string(),
         ));
+    }
+}
+
+impl<'pr> Visit<'pr> for WordArrayVisitor<'_, '_, 'pr> {
+    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
+        // Check if this array is a matrix of complex content before visiting children
+        let is_matrix = is_matrix_of_complex_content(node, &self.word_re);
+        let prev = self.in_matrix_of_complex_content;
+        if is_matrix {
+            self.in_matrix_of_complex_content = true;
+        }
+
+        self.check_array(node);
+
+        // Visit children to check nested arrays
+        ruby_prism::visit_array_node(self, node);
+
+        self.in_matrix_of_complex_content = prev;
     }
 }
 

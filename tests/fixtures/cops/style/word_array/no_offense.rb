@@ -28,3 +28,22 @@
 
 # Array with space in a string
 ["one space", "two", "three"]
+
+# Matrix of complex content: parent array where all elements are arrays and
+# at least one subarray has complex content (space in "United States").
+# RuboCop exempts all subarrays in such a matrix.
+[
+  ["US", "United States"],
+  ["UK", "United Kingdom"],
+  ["CA", "Canada"]
+]
+
+# Matrix with all-word subarrays but one has a space
+[
+  ["AL", "Albania"],
+  ["AS", "American Samoa"],
+  ["AD", "Andorra"]
+]
+
+# Simple 2-element matrix where one pair has space
+[["foo", "bar"], ["baz quux", "qux"]]
