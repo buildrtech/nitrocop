@@ -17,12 +17,12 @@ use crate::parse::source::SourceFile;
 /// lambda, etc.) creates an opaque scope. Fixed by replacing the opt-out approach with an
 /// opt-in approach: only transparent nodes (if, def, begin) pass through the top-level flag.
 ///
-/// Corpus investigation (round 3): a live 2026-03-11 rerun disproved two tempting
-/// follow-up theories. Treating multi-argument calls like `include A, B` as
-/// no-offense introduced 27 FN, so RuboCop clearly still counts many of those
-/// calls despite the simplified node-pattern reading. Treating `begin ...
-/// rescue/ensure` as opaque regressed even harder (32 FN). The remaining FPs
-/// need a narrower explanation than argument count or exception-wrapper shape.
+/// Corpus investigation (round 3): 6 FPs from `include`/`extend`/`prepend` inside
+/// `begin...rescue` or `begin...ensure` blocks at the top level. In RuboCop's Parser AST,
+/// `begin...rescue...end` wraps the body in a `rescue` node, making it opaque (not in the
+/// transparent `{kwbegin begin if def}` list). In Prism, statements are direct children
+/// of `BeginNode`. Fixed by overriding `visit_begin_node` to mark the scope as opaque when
+/// `rescue_clause` or `ensure_clause` is present. Plain `begin...end` remains transparent.
 pub struct MixinUsage;
 
 const MIXIN_METHODS: &[&[u8]] = &[b"include", b"extend", b"prepend"];
@@ -110,8 +110,25 @@ impl<'pr> Visit<'pr> for MixinUsageVisitor<'_> {
 
     // === Transparent wrappers (RuboCop considers these still "top level") ===
     // `begin`/`kwbegin`, `if`, and `def` are transparent.
-    // No need to override visit_begin_node, visit_if_node, or visit_def_node —
+    // No need to override visit_if_node or visit_def_node —
     // the default traversal descends into children without changing in_opaque_scope.
+    //
+    // However, `begin...rescue...end` and `begin...ensure...end` are special:
+    // In RuboCop's Parser AST, the `rescue`/`ensure` node becomes the parent of
+    // the body statements, and `rescue`/`ensure` is NOT in the transparent list.
+    // So we must treat BeginNode with rescue/ensure as opaque.
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        let has_rescue_or_ensure = node.rescue_clause().is_some() || node.ensure_clause().is_some();
+        if has_rescue_or_ensure {
+            let prev = self.in_opaque_scope;
+            self.in_opaque_scope = true;
+            ruby_prism::visit_begin_node(self, node);
+            self.in_opaque_scope = prev;
+        } else {
+            // Plain `begin...end` without rescue/ensure is transparent
+            ruby_prism::visit_begin_node(self, node);
+        }
+    }
 
     // === Opaque scopes (mixin calls inside these are NOT top-level) ===
 

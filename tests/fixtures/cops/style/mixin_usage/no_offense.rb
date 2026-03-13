@@ -29,3 +29,23 @@ when :bar
 end
 -> { include M }
 proc { include M }
+# include inside begin/rescue at top level is NOT flagged by RuboCop
+begin
+  include M
+rescue LoadError
+  nil
+end
+begin
+  require 'something'
+  include M
+rescue LoadError => e
+  puts e
+end
+# include inside if inside begin/ensure at top level
+begin
+  if condition
+    include M
+  end
+ensure
+  cleanup
+end
