@@ -40,6 +40,15 @@ end.to not_change(Conversation, :count) # No conversation created yet
 # end followed by dot and method call
 end.to eq(42) # some comment
 
+# keyword immediately followed by # with no space (RuboCop requires whitespace before #)
+end#comment
+end# Read about factories at http://github.com/thoughtbot/factory_girl
+end#end of context
+begin#comment
+class Foo#comment
+def bar#comment
+module Baz#comment
+
 # Comments inside heredocs are not real comments — parser doesn't see them
 x = <<~RUBY
   class Foo # this is inside a heredoc

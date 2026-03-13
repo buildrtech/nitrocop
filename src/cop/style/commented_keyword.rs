@@ -2,6 +2,11 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// FP investigation (2026-03): 14 FPs all from `end#comment` pattern (no space
+/// before `#`). RuboCop's `KEYWORD_REGEXES` uses `/^\s*keyword\s/` which requires
+/// whitespace after the keyword on the source line. Without a space before `#`,
+/// the keyword regex doesn't match. Fixed by checking that raw text before the
+/// comment ends with whitespace (space or tab).
 pub struct CommentedKeyword;
 
 /// Keywords that should not have comments on the same line.
@@ -77,6 +82,16 @@ impl Cop for CommentedKeyword {
 
             // Skip if the comment is the only thing on the line (full-line comment)
             if before_comment.is_empty() {
+                continue;
+            }
+
+            // RuboCop requires whitespace between keyword and `#`.
+            // `end#comment` (no space) is not flagged; only `end # comment` is.
+            let raw_before = match std::str::from_utf8(&bytes[line_start_offset..comment_start]) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if !raw_before.ends_with(' ') && !raw_before.ends_with('\t') {
                 continue;
             }
 
