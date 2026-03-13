@@ -2,6 +2,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// FP=778 root cause: Emacs-style magic comments like
+/// `# -*- encoding: utf-8; frozen_string_literal: true -*-` were not recognized.
+/// The `is_encoding_comment` function matched these lines (they contain "encoding"),
+/// causing them to be skipped, but `is_frozen_string_literal_comment` only checked for
+/// `# frozen_string_literal:` in simple format. Fix: (1) updated `is_frozen_string_literal_comment`
+/// and `is_frozen_string_literal_true` to also parse `frozen_string_literal:` inside
+/// `# -*- ... -*-` Emacs-style comments, and (2) added a check in the encoding-skip logic
+/// to detect when the encoding line also contains frozen_string_literal.
 pub struct FrozenStringLiteralComment;
 
 impl Cop for FrozenStringLiteralComment {
@@ -71,8 +79,20 @@ impl Cop for FrozenStringLiteralComment {
             idx += 1;
         }
 
-        // Skip encoding comment
+        // Skip encoding comment, but check if it also contains frozen_string_literal
+        // (Emacs-style: # -*- encoding: utf-8; frozen_string_literal: true -*-)
         if idx < lines.len() && is_encoding_comment(lines[idx]) {
+            if is_frozen_string_literal_comment(lines[idx]) {
+                if enforced_style == "always_true" && !is_frozen_string_literal_true(lines[idx]) {
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        idx + 1,
+                        0,
+                        "Frozen string literal comment must be set to `true`.".to_string(),
+                    ));
+                }
+                return;
+            }
             idx += 1;
         }
 
@@ -171,7 +191,14 @@ fn is_frozen_string_literal_comment(line: &[u8]) -> bool {
     let s = s.trim_start();
     let trimmed = s.strip_prefix('#').unwrap_or("");
     let trimmed = trimmed.trim_start();
-    trimmed.starts_with("frozen_string_literal:")
+    if trimmed.starts_with("frozen_string_literal:") {
+        return true;
+    }
+    // Emacs-style: # -*- ... frozen_string_literal: true/false ... -*-
+    if trimmed.starts_with("-*-") && trimmed.ends_with("-*-") {
+        return trimmed.contains("frozen_string_literal:");
+    }
+    false
 }
 
 fn is_frozen_string_literal_true(line: &[u8]) -> bool {
@@ -183,10 +210,19 @@ fn is_frozen_string_literal_true(line: &[u8]) -> bool {
     let s = s.trim_start();
     let trimmed = s.strip_prefix('#').unwrap_or("");
     let trimmed = trimmed.trim_start();
-    trimmed
-        .strip_prefix("frozen_string_literal:")
-        .map(|rest| rest.trim() == "true")
-        .unwrap_or(false)
+    if let Some(rest) = trimmed.strip_prefix("frozen_string_literal:") {
+        return rest.trim() == "true";
+    }
+    // Emacs-style: # -*- ... frozen_string_literal: true ... -*-
+    if trimmed.starts_with("-*-") && trimmed.ends_with("-*-") {
+        if let Some(pos) = trimmed.find("frozen_string_literal:") {
+            let after = &trimmed[pos + "frozen_string_literal:".len()..];
+            // Extract the value: take until `;` or `-*-`
+            let value = after.split(|c| c == ';' || c == '-').next().unwrap_or("");
+            return value.trim() == "true";
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -435,6 +471,65 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should find frozen_string_literal after shebang + typed comment"
+        );
+    }
+
+    #[test]
+    fn emacs_combined_encoding_and_frozen() {
+        // Emacs-style: # -*- encoding: utf-8; frozen_string_literal: true -*-
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"# -*- encoding: utf-8; frozen_string_literal: true -*-\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should recognize frozen_string_literal in Emacs-style combined comment"
+        );
+    }
+
+    #[test]
+    fn emacs_frozen_only() {
+        // Emacs-style with only frozen_string_literal
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"# -*- frozen_string_literal: true -*-\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should recognize Emacs-style frozen_string_literal-only comment"
+        );
+    }
+
+    #[test]
+    fn emacs_combined_frozen_false() {
+        // Emacs-style with frozen_string_literal: false — should still count as present
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"# -*- encoding: utf-8; frozen_string_literal: false -*-\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should recognize frozen_string_literal: false in Emacs-style comment"
+        );
+    }
+
+    #[test]
+    fn emacs_combined_with_shebang() {
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"#!/usr/bin/env ruby\n# -*- encoding: utf-8; frozen_string_literal: true -*-\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should recognize Emacs-style comment after shebang"
         );
     }
 
