@@ -22,6 +22,26 @@ use crate::parse::source::SourceFile;
 ///
 /// Remaining gap: 1,585 potential FN remain. This batch only fixed the
 /// Unicode/offset handling path; the remaining misses were not reduced further.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// CI baseline reported FP=87, FN=4. Fixed two root causes of false positives:
+///
+/// 1. **CRLF `__END__` handling**: The `__END__` check compared raw bytes
+///    (`*line == b"__END__"`), which failed on CRLF files where the line
+///    includes a trailing `\r`. Now strips `\r` before comparing, so
+///    `__END__\r` is correctly recognized as the data section marker.
+///    This was the primary FP source — files with `__END__` followed by
+///    data containing trailing whitespace were incorrectly flagged.
+///
+/// 2. **`__END__` inside heredocs**: The `__END__` check was unconditional,
+///    breaking out of the loop even when inside a heredoc (where `__END__`
+///    is just string content). Now only breaks at `__END__` when not inside
+///    a tracked heredoc. This was also causing FNs (missing offenses after
+///    the heredoc).
+///
+/// Also simplified heredoc terminator matching to use the already-stripped
+/// line (no redundant `\r` suffix check).
 pub struct TrailingWhitespace;
 
 fn strip_line_ending_carriage_return(line: &[u8]) -> &[u8] {
@@ -75,25 +95,27 @@ impl Cop for TrailingWhitespace {
         let mut heredoc_terminator: Option<Vec<u8>> = None;
 
         for (i, line) in lines.iter().enumerate() {
-            // Stop checking after __END__ marker (data section)
-            if *line == b"__END__" {
-                break;
-            }
+            // Strip trailing \r early for CRLF compatibility.
+            let stripped = strip_line_ending_carriage_return(line);
 
             // Check if we're inside a heredoc
             if let Some(ref terminator) = heredoc_terminator {
-                let trimmed: Vec<u8> = line
+                let trimmed: Vec<u8> = stripped
                     .iter()
                     .copied()
                     .skip_while(|&b| b == b' ' || b == b'\t')
                     .collect();
-                if trimmed == *terminator
-                    || trimmed.strip_suffix(b"\r").unwrap_or(&trimmed) == terminator.as_slice()
-                {
+                if trimmed == *terminator {
                     heredoc_terminator = None;
                 } else if allow_in_heredoc {
                     continue; // Skip trailing whitespace check inside heredoc
                 }
+            }
+
+            // Stop checking after __END__ marker (data section), but only when
+            // not inside a heredoc (where __END__ is just string content).
+            if stripped == b"__END__" && heredoc_terminator.is_none() {
+                break;
             }
 
             // Detect heredoc openers (<<~WORD, <<-WORD, <<WORD, <<~'WORD', etc.)
@@ -128,16 +150,15 @@ impl Cop for TrailingWhitespace {
                 }
             }
 
-            let line = strip_line_ending_carriage_return(line);
-            if line.is_empty() {
+            if stripped.is_empty() {
                 continue;
             }
-            if let Some(trailing_start) = trailing_whitespace_start(line) {
+            if let Some(trailing_start) = trailing_whitespace_start(stripped) {
                 let Some(line_start) = source.line_col_to_offset(i + 1, 0) else {
                     continue;
                 };
                 let start = line_start + trailing_start;
-                let end = line_start + line.len();
+                let end = line_start + stripped.len();
                 let (line_num, column) = source.offset_to_line_col(start);
                 let mut diag = self.diagnostic(
                     source,
@@ -285,5 +306,58 @@ mod tests {
         let cs = crate::correction::CorrectionSet::from_vec(corrections);
         let corrected = cs.apply(input);
         assert_eq!(corrected, b"x = 1");
+    }
+
+    #[test]
+    fn no_offense_after_end_marker_crlf() {
+        // CRLF line endings: __END__\r\n should still be recognized as end marker
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"x = 1\r\n__END__\r\ndata with trailing spaces   \r\nmore data   \r\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        TrailingWhitespace.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should not flag trailing whitespace after __END__ in CRLF files, got {:?}",
+            diags.iter().map(|d| d.location.line).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn shift_operator_not_heredoc() {
+        // << as shift/append operator should not trigger heredoc detection
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([("AllowInHeredoc".into(), serde_yml::Value::Bool(true))]),
+            ..CopConfig::default()
+        };
+        let source =
+            SourceFile::from_bytes("test.rb", b"array << \"item\"\nnext_line   \n".to_vec());
+        let mut diags = Vec::new();
+        TrailingWhitespace.check_lines(&source, &config, &mut diags, None);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag trailing whitespace on next_line even after << operator"
+        );
+        assert_eq!(diags[0].location.line, 2);
+    }
+
+    #[test]
+    fn heredoc_containing_end_marker() {
+        // __END__ inside a heredoc should not stop processing
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"x = <<~HEREDOC\n__END__\nHEREDOC\ny = 1   \n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        TrailingWhitespace.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag trailing whitespace after heredoc containing __END__"
+        );
+        assert_eq!(diags[0].location.line, 4);
     }
 }
