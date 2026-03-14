@@ -21,6 +21,26 @@ use crate::parse::source::SourceFile;
 ///
 /// These missing checks accounted for the vast majority of the 94K FN gap.
 /// The 26 FPs were likely from edge cases in the key-only check.
+///
+/// ## FP/FN fixes (2026-03-14)
+///
+/// 1. **kwsplat-first reference bug (FP):** When a hash starts with `**opts` (keyword
+///    splat), the cop was using the kwsplat as the alignment reference for key checks.
+///    RuboCop uses `node.pairs.first` (first non-kwsplat pair). This caused spurious
+///    key-alignment offenses on pairs that were correctly aligned with each other but
+///    at a different column than the kwsplat. Fixed by introducing `first_pair()` helper
+///    that skips kwsplats, matching RuboCop's behavior.
+///
+/// 2. **Table-style rocket value off-by-one (FP):** In table alignment for hash rockets,
+///    the expected value column was computed as `key_col + max_key_len + sep_len + 1`,
+///    missing the space before `=>`. RuboCop's `max_delimiter_width` for rockets is
+///    `" => ".length` = 4 (includes both surrounding spaces). Fixed to use `+ 2` instead
+///    of `+ 1` to account for spaces on both sides of `=>`.
+///
+/// 3. **Remaining gap:** `is_call_arg` heuristic for `EnforcedLastArgumentHashStyle`
+///    uses `!begins_its_line` as a proxy for "is last argument of call," which is
+///    imprecise for hashes on their own line inside calls. This only matters for
+///    non-default `always_ignore`/`ignore_explicit` configurations.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -193,6 +213,11 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
     }
 }
 
+/// Find the first non-kwsplat pair (matching RuboCop's `node.pairs.first`).
+fn first_pair(pairs: &[PairInfo]) -> Option<&PairInfo> {
+    pairs.iter().find(|p| !p.is_kwsplat)
+}
+
 /// Check a hash under the "key" alignment style.
 /// Returns offenses for this style.
 fn check_key_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffense> {
@@ -201,14 +226,22 @@ fn check_key_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffense>
         return offenses;
     }
 
-    let first = &pairs[0];
+    // Use first non-kwsplat pair as reference (matching RuboCop's `node.pairs.first`)
+    let first = match first_pair(pairs) {
+        Some(p) => p,
+        None => return offenses,
+    };
 
     // Check first pair's separator/value spacing
     if !first.is_kwsplat {
         check_key_style_spacing(source, first, &mut offenses);
     }
 
-    for pair in &pairs[1..] {
+    for pair in pairs {
+        // Skip the first pair (already checked via check_key_style_spacing above)
+        if std::ptr::eq(pair, first) {
+            continue;
+        }
         if !pair.begins_line {
             continue;
         }
@@ -303,9 +336,15 @@ fn check_separator_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOf
         return offenses;
     }
 
-    let first = &pairs[0];
+    let first = match first_pair(pairs) {
+        Some(p) => p,
+        None => return offenses,
+    };
 
-    for pair in &pairs[1..] {
+    for pair in pairs {
+        if std::ptr::eq(pair, first) {
+            continue;
+        }
         if !pair.begins_line {
             continue;
         }
@@ -407,7 +446,10 @@ fn check_table_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffens
         .max()
         .unwrap_or(0);
 
-    let first = &pairs[0];
+    let first = match first_pair(pairs) {
+        Some(p) => p,
+        None => return offenses,
+    };
 
     // For table style, check all pairs including first
     for pair in pairs {
@@ -449,15 +491,16 @@ fn check_table_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffens
         }
 
         if pair.is_rocket {
-            // Hash rocket: separator should be at first.col + max_key_len + 1
+            // Hash rocket: separator should be at first.col + max_key_len + 1 (space before =>)
             let expected_sep = first.col + max_key_len + 1;
             if let Some(sc) = pair.sep_col {
                 if sc != expected_sep {
                     bad = true;
                 }
             }
-            // Value should be at first.col + max_key_len + separator_len + 1
-            let expected_value = first.col + max_key_len + pair.sep_source_len + 1;
+            // Value should be after separator + 1 space:
+            // first.col + max_key_len + 1 (space before =>) + sep_len + 1 (space after =>)
+            let expected_value = first.col + max_key_len + pair.sep_source_len + 2;
             if let Some(vc) = pair.value_col {
                 if vc != expected_value {
                     bad = true;
@@ -572,7 +615,11 @@ impl Cop for HashAlignment {
             return;
         }
 
-        let first = &pairs[0];
+        // Use first non-kwsplat pair as reference (matching RuboCop's `node.pairs.first`)
+        let first = match first_pair(&pairs) {
+            Some(p) => p,
+            None => return,
+        };
 
         // autocorrect_incompatible_with_other_cops? check
         if fixed_indentation {
@@ -1041,6 +1088,72 @@ mod tests {
         assert!(
             diags.is_empty(),
             "kwargs on own line with fixed indentation should pass"
+        );
+    }
+
+    #[test]
+    fn kwsplat_first_pairs_aligned_no_offense() {
+        // When kwsplat is the first element, pairs should be checked against the
+        // first non-kwsplat pair (matching RuboCop's `node.pairs.first`), not the kwsplat.
+        // Here pairs are aligned with each other but at a different column than kwsplat.
+        // Only the kwsplat misalignment should be reported.
+        let src = b"{\n  **opts,\n    a: 1,\n    b: 2\n}\n";
+        let diags = run_cop_full(&HashAlignment, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "only kwsplat misalignment should be reported, not key offenses: {:?}",
+            diags
+        );
+        assert!(
+            diags[0].message.contains("keyword splats"),
+            "offense should be kwsplat alignment: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn table_style_rocket_correct_alignment() {
+        // Table style for rockets: values should be aligned at max_key_width + " => " width
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedHashRocketStyle".into(),
+                    serde_yml::Value::String("table".into()),
+                ),
+                (
+                    "EnforcedColonStyle".into(),
+                    serde_yml::Value::String("table".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        // Correctly table-aligned:
+        //   :a   => 0
+        //   :bbb => 1
+        // max_key_width = 4 (`:bbb`), delimiter = ` => ` (4 chars)
+        // values at col 2 + 4 + 4 = 10
+        let src = b"hash = {\n  :a   => 0,\n  :bbb => 1\n}\n";
+        let diags = run_cop_full_with_config(&HashAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "correctly table-aligned rockets should pass: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn kwsplat_first_all_aligned_no_offense() {
+        // When kwsplat is first and everything is at the same column, no offense
+        let src = b"{\n  **opts,\n  a: 1,\n  b: 2\n}\n";
+        let diags = run_cop_full(&HashAlignment, src);
+        assert!(
+            diags.is_empty(),
+            "all elements at same column should pass: {:?}",
+            diags
         );
     }
 }

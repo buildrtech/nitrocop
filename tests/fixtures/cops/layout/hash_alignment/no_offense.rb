@@ -51,3 +51,10 @@ hash4 = {
 # Hash value omission
 func(a:,
      b:)
+
+# Keyword splat as first element, pairs aligned with each other
+{
+  **opts,
+  a: 1,
+  b: 2
+}
