@@ -142,10 +142,14 @@ def find_project_root() -> Path:
 def get_registry_cops() -> set[str]:
     """Get all cop names from nitrocop's registry via --list-cops."""
     project_root = find_project_root()
-    result = subprocess.run(
-        ["cargo", "run", "--release", "--", "--list-cops"],
-        capture_output=True, text=True, cwd=project_root,
-    )
+    try:
+        result = subprocess.run(
+            ["cargo", "run", "--release", "--", "--list-cops"],
+            capture_output=True, text=True, cwd=project_root,
+        )
+    except UnicodeDecodeError:
+        print("Warning: could not decode cop list output (wrong-platform binary?), skipping untested cop tracking", file=sys.stderr)
+        return set()
     if result.returncode != 0:
         print("Warning: could not get cop list from registry, skipping untested cop tracking", file=sys.stderr)
         return set()

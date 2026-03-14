@@ -37,7 +37,7 @@ from corpus_download import download_corpus_results as _download_corpus
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_DIR = PROJECT_ROOT / "vendor" / "corpus"
 MANIFEST_PATH = PROJECT_ROOT / "bench" / "corpus" / "manifest.jsonl"
-NITROCOP_BIN = PROJECT_ROOT / "target" / "release" / "nitrocop"
+NITROCOP_BIN = PROJECT_ROOT / os.environ.get("CARGO_TARGET_DIR", "target") / "release" / "nitrocop"
 BASELINE_CONFIG = PROJECT_ROOT / "bench" / "corpus" / "baseline_rubocop.yml"
 LOCAL_CACHE_DIR = PROJECT_ROOT / ".check-cop-cache"
 

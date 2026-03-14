@@ -106,7 +106,7 @@ def main():
     project_root = find_project_root()
     corpus_dir = project_root / "vendor" / "corpus"
     config_path = project_root / "bench" / "corpus" / "baseline_rubocop.yml"
-    nitrocop_bin = project_root / "target" / "release" / "nitrocop"
+    nitrocop_bin = project_root / os.environ.get("CARGO_TARGET_DIR", "target") / "release" / "nitrocop"
 
     if not nitrocop_bin.exists():
         print("Building nitrocop (release)...", file=sys.stderr)

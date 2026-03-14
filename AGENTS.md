@@ -8,6 +8,12 @@ Fast Ruby linter in Rust targeting RuboCop compatibility. Uses Prism (ruby-prism
 git submodule update --init    # fetch vendor/rubocop (reference specs)
 ```
 
+## Dual-Platform Development
+
+This repo is developed simultaneously on macOS (native) and Linux (devcontainer). To prevent cross-platform binary conflicts in the shared workspace, the devcontainer sets `CARGO_TARGET_DIR=target-linux` so each platform builds to a separate directory (`target/` for macOS, `target-linux/` for Linux). Both are gitignored.
+
+Python scripts in `scripts/` resolve the binary path via `os.environ.get("CARGO_TARGET_DIR", "target")` so they work on both platforms automatically.
+
 ## Commands
 
 ```

@@ -5,6 +5,7 @@
     "source=/run/host-services/ssh-auth.sock,target=/ssh-agent,type=bind",
   ],
   "containerEnv": {
+    "CARGO_TARGET_DIR": "target-linux",
     "CC": "clang",
     "COLORTERM": "truecolor",
     "TERM": "xterm-256color",
