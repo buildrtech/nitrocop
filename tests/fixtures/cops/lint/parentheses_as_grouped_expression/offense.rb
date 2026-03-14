@@ -12,3 +12,5 @@ method_name (x)
             ^ Lint/ParenthesesAsGroupedExpression: `(x)` interpreted as grouped expression.
 foo ("bar")
     ^ Lint/ParenthesesAsGroupedExpression: `("bar")` interpreted as grouped expression.
+rand (1.to_i..10)
+     ^ Lint/ParenthesesAsGroupedExpression: `(1.to_i..10)` interpreted as grouped expression.

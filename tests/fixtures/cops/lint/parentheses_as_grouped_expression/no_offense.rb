@@ -19,3 +19,5 @@ do_something.eq (foo * bar).to_i
 a.concat (1..1).map { _1 * 10 }
 func (x) & mask
 func (x) + 1
+method ({a: 1})
+foo ({a: 1, b: 2})

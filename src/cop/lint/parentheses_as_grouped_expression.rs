@@ -5,29 +5,34 @@ use crate::parse::source::SourceFile;
 
 /// Checks for space between the name of a called method and a left parenthesis.
 ///
-/// ## Root cause analysis (corpus: 39 FP, 668 FN at 46.2% match)
+/// ## Root cause analysis (historical: 39 FP, 668 FN at 46.2% match)
 ///
-/// **FN root cause:** The `call_end > paren_end` check was meant to exclude
-/// chained calls like `func (x).bar`, but also incorrectly excluded calls with
-/// blocks like `func (x) { block }`. In Prism, chaining already causes the
-/// first argument to NOT be a ParenthesesNode (Prism folds the chain into the
-/// argument), so the `call_end > paren_end` check was both redundant for chains
-/// and harmful for blocks. Additionally, the source-text based
-/// `has_trailing_operator_or_chain` check was redundant — Prism already handles
-/// operators/chains by incorporating them into the argument structure (making
-/// `as_parentheses_node()` return None).
+/// **FN root cause (historical):** The `call_end > paren_end` check was meant
+/// to exclude chained calls like `func (x).bar`, but also incorrectly excluded
+/// calls with blocks like `func (x) { block }`. In Prism, chaining already
+/// causes the first argument to NOT be a ParenthesesNode (Prism folds the
+/// chain into the argument), so the check was both redundant for chains and
+/// harmful for blocks. The source-text based `has_trailing_operator_or_chain`
+/// check was also redundant — Prism already handles operators/chains by
+/// incorporating them into the argument structure.
 ///
-/// **FP root cause:** The source-text based trailing checks (for operators,
-/// chains, hash rockets, ternaries) were incomplete. After removing them, we
-/// rely purely on Prism's AST which correctly represents these structures by
-/// NOT wrapping the argument in ParenthesesNode when post-paren operators are
-/// present.
+/// **FP root cause (historical):** Source-text based trailing checks were
+/// incomplete. Simplified to pure AST-based approach.
 ///
-/// **Fix:** Simplified to a pure AST-based approach: check for CallNode with
-/// no `opening_loc`, exactly one ParenthesesNode argument, and whitespace
-/// between method name and paren. Removed redundant source-text trailing checks.
-/// Removed `call_end > paren_end` to fix block FN. Kept compound range
-/// exclusion (checks inside ParenthesesNode body).
+/// ## Follow-up fix (corpus: 2 FP, 1 FN at 99.8% match)
+///
+/// **FP root cause:** Missing hash body exclusion. `method ({a: 1})` with
+/// explicit braces produces a ParenthesesNode wrapping a HashNode. RuboCop's
+/// `first_arg.hash_type?` check skips hash literals. Added hash/keyword-hash
+/// body check inside the ParenthesesNode.
+///
+/// **FN root cause:** The compound range check was too broad. It excluded any
+/// range inside parens where an endpoint was a CallNode or ParenthesesNode
+/// (e.g., `rand (1.to_i..10)`). But Prism already handles true compound
+/// ranges like `rand (a - b)..(c - d)` correctly — the `(a - b)` only wraps
+/// the left operand, so Prism produces a RangeNode (not ParenthesesNode) as
+/// the argument, and `as_parentheses_node()` filters it. Removed the compound
+/// range check entirely.
 pub struct ParenthesesAsGroupedExpression;
 
 impl Cop for ParenthesesAsGroupedExpression {
@@ -119,28 +124,27 @@ impl Cop for ParenthesesAsGroupedExpression {
             return;
         }
 
-        // Check for compound range inside the parens: `rand (a - b)..(c - d)`
-        // Simple ranges like `rand (1..10)` ARE offenses, but compound ranges
-        // where sub-expressions are calls or parenthesized are NOT.
+        // Skip when the body of the parens is a hash literal — matches RuboCop's
+        // `first_arg.hash_type?` exclusion. `method ({a: 1})` with explicit braces
+        // produces a ParenthesesNode wrapping a HashNode.
         if let Some(body) = paren_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 let inner = stmts.body();
                 if inner.len() == 1 {
                     let expr = inner.iter().next().unwrap();
-                    if let Some(range) = expr.as_range_node() {
-                        let is_compound = |n: &ruby_prism::Node<'_>| -> bool {
-                            n.as_call_node().is_some() || n.as_parentheses_node().is_some()
-                        };
-                        let left_compound = range.left().map(|l| is_compound(&l)).unwrap_or(false);
-                        let right_compound =
-                            range.right().map(|r| is_compound(&r)).unwrap_or(false);
-                        if left_compound || right_compound {
-                            return;
-                        }
+                    if expr.as_hash_node().is_some() || expr.as_keyword_hash_node().is_some() {
+                        return;
                     }
                 }
             }
         }
+
+        // NOTE: The compound range check (`rand (a - b)..(c - d)`) was removed.
+        // Prism already handles this correctly: when the `(` only wraps the left
+        // operand of a range (not the whole range), Prism does NOT wrap the argument
+        // in a ParenthesesNode — it produces a RangeNode directly, which is filtered
+        // out by the `as_parentheses_node()` check above. Only ranges fully wrapped
+        // in parens (like `(1..10)`) reach here, and those should all be flagged.
 
         // Build the argument text for the message
         let paren_end = paren_node.location().end_offset();
@@ -214,6 +218,16 @@ mod tests {
             (b"method (x) || y\n", 0),
             (b"method (x) + 1\n", 0),
             (b"puts (2 + 3) * 4\n", 0),
+            // Hash inside parens - should NOT be flagged (FP fix)
+            (b"method ({a: 1})\n", 0),
+            (b"foo ({a: 1, b: 2})\n", 0),
+            (b"foo ({})\n", 0),
+            // Range inside parens with call endpoints - should be flagged
+            // (was FN: compound range check excluded ranges with call endpoints,
+            // but Prism already handles true compound ranges by not wrapping them
+            // in ParenthesesNode)
+            (b"rand (1.to_i..10)\n", 1),
+            (b"rand (a[0]..b[1])\n", 1),
         ];
         for (src, expected_count) in test_cases {
             let diagnostics = crate::testutil::run_cop_full(&cop, src);
