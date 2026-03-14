@@ -613,8 +613,8 @@ def main():
             md.append(f"| {c['cop']} | {c['matches']:,} | {c['fp']:,} | {c['fn']:,} | {pct} |")
         md.append("")
 
-        # Expandable details per cop (show up to 20 examples in markdown)
-        MD_EXAMPLE_LIMIT = 20
+        # Expandable details per cop (show up to 3 examples in markdown; full list in JSON)
+        MD_EXAMPLE_LIMIT = 3
         for c in diverging:
             fp_list = c.get("fp_examples", [])
             fn_list = c.get("fn_examples", [])
