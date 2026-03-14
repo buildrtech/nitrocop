@@ -12,3 +12,6 @@ items.each do |
 |
   puts x
 end
+->(x, y) { puts x }
+->() { puts "a" }
+->a { puts a }
