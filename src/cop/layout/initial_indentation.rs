@@ -54,9 +54,7 @@ impl Cop for InitialIndentation {
             };
 
             // Skip pure comment lines: first non-whitespace is '#'
-            let trimmed = effective
-                .iter()
-                .find(|&&b| b != b' ' && b != b'\t');
+            let trimmed = effective.iter().find(|&&b| b != b' ' && b != b'\t');
             if trimmed == Some(&b'#') {
                 continue;
             }
