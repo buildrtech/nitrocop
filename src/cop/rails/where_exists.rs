@@ -15,6 +15,16 @@ use crate::parse::source::SourceFile;
 /// "where" style had a secondary issue: flagged `exists?` with multiple args (e.g.,
 /// `exists?('name = ?', 'john')`) but RuboCop's pattern only captures a single non-splat arg.
 /// Fixed by requiring exactly one arg and skipping splat args.
+///
+/// ## Investigation (2026-03-14)
+///
+/// FP=43, FN=43 — equal counts per repo (location mismatch, not count mismatch).
+/// Nitrocop reported offense at `node.location()` (start of the entire receiver chain),
+/// but RuboCop reports at `node.receiver.loc.selector` (the `where` keyword).
+/// Example: `Category.topic_create_allowed(guardian).where(id: @cat.id).exists?` —
+/// nitrocop reported at line 267 (`Category`), RuboCop at line 269 (`where`).
+///
+/// Fix: Changed to report at `chain.inner_call.message_loc()` (the `where` keyword).
 pub struct WhereExists;
 
 impl Cop for WhereExists {
@@ -93,8 +103,16 @@ impl WhereExists {
             return Vec::new();
         }
 
-        let loc = node.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        // Report at the `where` keyword location (matching RuboCop's correction_range which
+        // spans from node.receiver.loc.selector — the `where` keyword — to node.loc.selector).
+        // Using node.location() would report at the start of the entire receiver chain (e.g.,
+        // line 267 for `Category.topic_create_allowed(...).where(...).exists?`), but RuboCop
+        // reports at the `where` call (e.g., line 269).
+        let where_loc = chain
+            .inner_call
+            .message_loc()
+            .unwrap_or_else(|| chain.inner_call.location());
+        let (line, column) = source.offset_to_line_col(where_loc.start_offset());
         vec![self.diagnostic(
             source,
             line,
