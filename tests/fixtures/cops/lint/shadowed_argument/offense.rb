@@ -15,3 +15,76 @@ def qux(name)
   ^^^^^^^^^^^^^^^^^^^^ Lint/ShadowedArgument: Argument `name` was shadowed by a local variable before it was used.
   name
 end
+
+# Assignment inside conditional followed by unconditional reassignment
+def cond_then_assign(foo)
+                     ^^^ Lint/ShadowedArgument: Argument `foo` was shadowed by a local variable before it was used.
+  if bar
+    foo = 43
+  end
+  foo = 42
+  puts foo
+end
+
+# Assignment inside block followed by unconditional reassignment
+def block_then_assign(foo)
+                      ^^^ Lint/ShadowedArgument: Argument `foo` was shadowed by a local variable before it was used.
+  something { foo = 43 }
+  foo = 42
+  puts foo
+end
+
+# Assignment inside lambda followed by unconditional reassignment
+def lambda_then_assign(foo)
+                       ^^^ Lint/ShadowedArgument: Argument `foo` was shadowed by a local variable before it was used.
+  lambda do
+    foo = 43
+  end
+  foo = 42
+  puts foo
+end
+
+# Block argument: conditional then unconditional reassignment
+do_something do |foo|
+                 ^^^ Lint/ShadowedArgument: Argument `foo` was shadowed by a local variable before it was used.
+  if bar
+    foo = 43
+  end
+  foo = 42
+  puts foo
+end
+
+# FN fix: arg = super shadows the argument (super doesn't explicitly reference arg)
+def deserialize(value)
+  value = super
+  ^^^^^^^^^^^^^ Lint/ShadowedArgument: Argument `value` was shadowed by a local variable before it was used.
+  cast_value(value) unless value.nil?
+end
+
+# FN fix: arg = super in method with more params
+def normalize_key(key, options)
+  key = super
+  ^^^^^^^^^^^ Lint/ShadowedArgument: Argument `key` was shadowed by a local variable before it was used.
+  process(key)
+end
+
+# FN fix: block arg shadowed inside a method (nested block)
+def process_data
+  items.each do |v|
+    v = transform(v.to_s)
+    use(v)
+  end
+  og.data.each do |k, v|
+    next if k == "title_attr"
+    v = og.send(k)
+    ^^^^^^^^^^^^^^ Lint/ShadowedArgument: Argument `v` was shadowed by a local variable before it was used.
+    @raw[k] ||= v unless v.nil?
+  end
+end
+
+# FN fix: block arg replaced with global variable
+gsub(/pattern/) {|match|
+  match = $1
+  ^^^^^^^^^^ Lint/ShadowedArgument: Argument `match` was shadowed by a local variable before it was used.
+  process(match)
+}

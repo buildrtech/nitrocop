@@ -50,3 +50,60 @@ items.each do |item|
   item = item.to_s
   puts item
 end
+
+# Argument reassigned but never referenced after -- RuboCop requires referenced?
+def unused_after_reassign(bar)
+  bar = 42
+end
+
+def unused_after_reassign2(bar)
+  bar = 42
+  puts 'done'
+end
+
+# Assignment only inside conditional, no outside reassignment
+def conditional_only(foo)
+  if bar
+    foo = 42
+  end
+  puts foo
+end
+
+# Assignment only inside block, no outside reassignment
+def block_only_assign(foo)
+  something { foo = 43 }
+  puts foo
+end
+
+# Block local variable (;j) is not a real argument -- should not flag
+numbers = [1, 2, 3]
+numbers.each do |i; j|
+  j = i * 2
+  puts j
+end
+
+# Shorthand assignment in block context should not flag
+def bar_shorthand(bar)
+  bar = 'baz' if foo
+  bar ||= {}
+end
+
+# FP fix: argument reassigned but never read as Ruby variable (backtick/xstring)
+def concat(other)
+  other = `convertToArray(other)`
+  `self.concat(other)`
+end
+
+# FP fix: argument reassigned but only "used" in string literal, not as variable
+def process(a)
+  a = 2
+  puts "a"
+end
+
+# FP fix: argument reassigned, never read afterward at all
+def shadow_no_read(a, b, c, d)
+  a = 123
+  b &&= 123
+  c += 123
+  d ||= 123
+end

@@ -1,3 +1,33 @@
+/// Lint/ShadowedArgument: checks for method/block arguments that are reassigned
+/// before being used.
+///
+/// ## Investigation findings
+///
+/// FP root cause: nitrocop did not check whether the argument was ever referenced
+/// (read) in the body. RuboCop's VariableForce checks `argument.referenced?` and
+/// skips unreferenced arguments. Without this, `def foo(x); x = 42; end` was
+/// flagged even though `x` is never read.
+///
+/// FN root cause: nitrocop only scanned top-level body statements for assignments.
+/// RuboCop does a deep scan of ALL assignments in the scope (including those nested
+/// inside conditionals, blocks, and lambdas). When a conditional/block assignment
+/// precedes an unconditional one, RuboCop reports at the declaration node (location
+/// unknown). Nitrocop missed these patterns entirely because it bailed out on
+/// encountering a conditional at the top level.
+///
+/// Additional FN: shorthand assignments (`||=`, `+=`) should stop the scan (the
+/// argument is used) but should not prevent detecting a later unconditional
+/// reassignment. The old code returned immediately on shorthand, which could miss
+/// a subsequent shadowing write.
+///
+/// Additional FN: `value = super` was treated as "RHS references arg" because
+/// `ForwardingSuperNode` unconditionally counted as a reference. RuboCop's
+/// `uses_var?` only matches `(lvar %)`, so bare `super` does NOT count.
+/// Split into `node_references_local_explicit` (no super) for RHS checks.
+///
+/// Additional FN: nested blocks/defs inside outer defs/blocks were never visited
+/// because `visit_def_node`/`visit_block_node`/`visit_lambda_node` did not recurse
+/// into their bodies. Added explicit recursion after checking parameters.
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -23,11 +53,12 @@ impl Cop for ShadowedArgument {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let _ignore_implicit = config.get_bool("IgnoreImplicitReferences", false);
+        let ignore_implicit = config.get_bool("IgnoreImplicitReferences", false);
         let mut visitor = ShadowedArgVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            ignore_implicit,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -38,6 +69,7 @@ struct ShadowedArgVisitor<'a, 'src> {
     cop: &'a ShadowedArgument,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    ignore_implicit: bool,
 }
 
 /// Extract parameter names from a ParametersNode.
@@ -71,86 +103,306 @@ fn collect_param_names(params: &ruby_prism::ParametersNode<'_>) -> Vec<Vec<u8>> 
     names
 }
 
-impl ShadowedArgVisitor<'_, '_> {
-    fn check_body_with_params(
+/// Information about an assignment to a parameter found during deep scan.
+#[derive(Debug)]
+struct ParamAssignment {
+    /// Byte offset of the assignment node start.
+    offset: usize,
+    /// Whether the RHS of the assignment references the parameter.
+    rhs_uses_param: bool,
+    /// Whether this is a shorthand assignment (||=, &&=, +=, etc.).
+    is_shorthand: bool,
+    /// Whether the assignment is inside a conditional, block, or rescue
+    /// (i.e., may not always execute).
+    is_conditional: bool,
+}
+
+/// Collect all assignments to `param_name` in the body, including nested ones.
+/// `scope_node` is the def/block/lambda node that defines the scope boundary.
+fn collect_assignments(body: &ruby_prism::Node<'_>, param_name: &[u8]) -> Vec<ParamAssignment> {
+    let mut collector = AssignmentCollector {
+        param_name: param_name.to_vec(),
+        assignments: Vec::new(),
+        conditional_depth: 0,
+    };
+    collector.visit(body);
+    // Sort by offset for ordered processing
+    collector.assignments.sort_by_key(|a| a.offset);
+    collector.assignments
+}
+
+struct AssignmentCollector {
+    param_name: Vec<u8>,
+    assignments: Vec<ParamAssignment>,
+    /// Depth inside conditional/block/rescue constructs.
+    conditional_depth: usize,
+}
+
+impl<'pr> Visit<'pr> for AssignmentCollector {
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        if node.name().as_slice() == self.param_name.as_slice() {
+            let rhs_uses_param = node_references_local_explicit(&node.value(), &self.param_name);
+            self.assignments.push(ParamAssignment {
+                offset: node.location().start_offset(),
+                rhs_uses_param,
+                is_shorthand: false,
+                is_conditional: self.conditional_depth > 0,
+            });
+        }
+        // Visit children (the value node)
+        self.visit(&node.value());
+    }
+
+    fn visit_local_variable_operator_write_node(
         &mut self,
-        param_names: &[Vec<u8>],
-        body: Option<ruby_prism::Node<'_>>,
+        node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
     ) {
-        if param_names.is_empty() {
-            return;
+        if node.name().as_slice() == self.param_name.as_slice() {
+            self.assignments.push(ParamAssignment {
+                offset: node.location().start_offset(),
+                rhs_uses_param: true, // always uses param
+                is_shorthand: true,
+                is_conditional: self.conditional_depth > 0,
+            });
         }
-        let body = match body {
-            Some(b) => b,
-            None => return,
-        };
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
-            None => return,
-        };
-        let body_nodes: Vec<_> = stmts.body().iter().collect();
-        if body_nodes.is_empty() {
-            return;
+        self.visit(&node.value());
+    }
+
+    fn visit_local_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOrWriteNode<'pr>,
+    ) {
+        if node.name().as_slice() == self.param_name.as_slice() {
+            self.assignments.push(ParamAssignment {
+                offset: node.location().start_offset(),
+                rhs_uses_param: true,
+                is_shorthand: true,
+                is_conditional: self.conditional_depth > 0,
+            });
         }
-        for param_name in param_names {
-            self.check_one_param(param_name, &body_nodes);
+        self.visit(&node.value());
+    }
+
+    fn visit_local_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableAndWriteNode<'pr>,
+    ) {
+        if node.name().as_slice() == self.param_name.as_slice() {
+            self.assignments.push(ParamAssignment {
+                offset: node.location().start_offset(),
+                rhs_uses_param: true,
+                is_shorthand: true,
+                is_conditional: self.conditional_depth > 0,
+            });
+        }
+        self.visit(&node.value());
+    }
+
+    // Conditionals increase depth
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_if_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_unless_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_case_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_case_match_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_while_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_until_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_rescue_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        // begin/rescue: the rescue part is conditional
+        self.conditional_depth += 1;
+        ruby_prism::visit_begin_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    // Blocks and lambdas are conditional (may not execute)
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_block_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        self.conditional_depth += 1;
+        ruby_prism::visit_lambda_node(self, node);
+        self.conditional_depth -= 1;
+    }
+
+    // Don't cross scope boundaries
+    fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
+    fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
+    fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
+}
+
+/// Collect all reference (read) positions for a local variable in the body.
+/// Returns byte offsets of each read. Does not include reads that are part
+/// of the RHS of assignments to the same variable (those are tracked separately).
+fn collect_reference_offsets(
+    body: &ruby_prism::Node<'_>,
+    param_name: &[u8],
+    ignore_implicit: bool,
+) -> Vec<usize> {
+    let mut collector = RefCollector {
+        param_name: param_name.to_vec(),
+        offsets: Vec::new(),
+        ignore_implicit,
+    };
+    collector.visit(body);
+    collector.offsets
+}
+
+struct RefCollector {
+    param_name: Vec<u8>,
+    offsets: Vec<usize>,
+    ignore_implicit: bool,
+}
+
+impl<'pr> Visit<'pr> for RefCollector {
+    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        if node.name().as_slice() == self.param_name.as_slice() {
+            self.offsets.push(node.location().start_offset());
         }
     }
 
-    fn check_one_param(&mut self, param_name: &[u8], body_nodes: &[ruby_prism::Node<'_>]) {
-        for stmt in body_nodes {
-            if let Some(write) = stmt.as_local_variable_write_node() {
-                let write_name = write.name().as_slice();
-                if write_name != param_name {
-                    if node_references_local(stmt, param_name) {
-                        return;
-                    }
-                    continue;
-                }
-                // RHS references the param => not shadowing (e.g. foo = foo.strip)
-                if node_references_local(&write.value(), param_name) {
-                    return;
-                }
-                let loc = write.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+    fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
+        if !self.ignore_implicit {
+            self.offsets.push(node.location().start_offset());
+        }
+    }
+
+    // Don't cross scope boundaries
+    fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
+    fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
+    fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
+}
+
+impl ShadowedArgVisitor<'_, '_> {
+    fn check_one_param(
+        &mut self,
+        param_name: &[u8],
+        param_decl_offset: usize,
+        body: &ruby_prism::Node<'_>,
+    ) {
+        // Collect all references (reads) to the param in the body
+        let ref_offsets = collect_reference_offsets(body, param_name, self.ignore_implicit);
+
+        // RuboCop: `return unless argument.referenced?`
+        // If the argument is never referenced at all, no offense.
+        if ref_offsets.is_empty() {
+            return;
+        }
+
+        // Collect all assignments to the param (deep scan)
+        let assignments = collect_assignments(body, param_name);
+        if assignments.is_empty() {
+            return;
+        }
+
+        // Walk assignments in order, mirroring RuboCop's
+        // `assignment_without_argument_usage` reduce logic.
+        let mut location_known = true;
+
+        for asgn in &assignments {
+            // Shorthand assignments always use the argument
+            if asgn.is_shorthand {
+                location_known = false;
+                continue;
+            }
+
+            // If the RHS uses the param, this is not shadowing (e.g., foo = foo + 1)
+            if asgn.rhs_uses_param {
+                // location remains known for subsequent assignments
+                continue;
+            }
+
+            // This assignment doesn't use the param on RHS.
+            if asgn.is_conditional {
+                // Inside a conditional/block: can't tell if it executes.
+                // Mark location as unknown and continue looking.
+                location_known = false;
+                continue;
+            }
+
+            // Unconditional assignment that doesn't use the param.
+            // Before flagging: check if there's a reference before this assignment.
+            let assignment_pos = asgn.offset;
+            let has_prior_ref = ref_offsets.iter().any(|&ref_pos| ref_pos <= assignment_pos);
+            if has_prior_ref {
+                return;
+            }
+
+            // This is a shadowing assignment.
+            if location_known {
+                // Report at the assignment location
+                let (line, column) = self.source.offset_to_line_col(assignment_pos);
                 self.diagnostics.push(self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     format!(
                         "Argument `{}` was shadowed by a local variable before it was used.",
-                        String::from_utf8_lossy(write_name)
+                        String::from_utf8_lossy(param_name)
                     ),
                 ));
-                return;
-            } else if let Some(op_write) = stmt.as_local_variable_operator_write_node() {
-                if op_write.name().as_slice() == param_name {
-                    return;
-                }
-            } else if let Some(or_write) = stmt.as_local_variable_or_write_node() {
-                if or_write.name().as_slice() == param_name {
-                    return;
-                }
-            } else if let Some(and_write) = stmt.as_local_variable_and_write_node() {
-                if and_write.name().as_slice() == param_name {
-                    return;
-                }
+            } else {
+                // Report at the declaration node (location unknown)
+                let (line, column) = self.source.offset_to_line_col(param_decl_offset);
+                self.diagnostics.push(self.cop.diagnostic(
+                    self.source,
+                    line,
+                    column,
+                    format!(
+                        "Argument `{}` was shadowed by a local variable before it was used.",
+                        String::from_utf8_lossy(param_name)
+                    ),
+                ));
             }
-            if node_references_local(stmt, param_name) {
-                return;
-            }
-            if is_conditional_node(stmt) {
-                return;
-            }
+            return;
         }
     }
 }
 
-/// Check if a node tree contains a local variable read of the given name.
-fn node_references_local(node: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
+/// Check if a node tree contains an explicit local variable read of the given name.
+/// This does NOT count `super` (ForwardingSuperNode) as a reference, because
+/// RuboCop's `uses_var?` (which checks RHS of assignments) only looks for `(lvar %)`.
+fn node_references_local_explicit(node: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
     let mut finder = LocalRefFinder {
         name: name.to_vec(),
         found: false,
+        include_super: false,
     };
     finder.visit(node);
     finder.found
@@ -159,6 +411,7 @@ fn node_references_local(node: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
 struct LocalRefFinder {
     name: Vec<u8>,
     found: bool,
+    include_super: bool,
 }
 
 impl<'pr> Visit<'pr> for LocalRefFinder {
@@ -169,7 +422,9 @@ impl<'pr> Visit<'pr> for LocalRefFinder {
     }
 
     fn visit_forwarding_super_node(&mut self, _node: &ruby_prism::ForwardingSuperNode<'pr>) {
-        self.found = true;
+        if self.include_super {
+            self.found = true;
+        }
     }
 
     fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
@@ -177,22 +432,61 @@ impl<'pr> Visit<'pr> for LocalRefFinder {
     fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
 }
 
-fn is_conditional_node(node: &ruby_prism::Node<'_>) -> bool {
-    node.as_if_node().is_some()
-        || node.as_unless_node().is_some()
-        || node.as_case_node().is_some()
-        || node.as_case_match_node().is_some()
-        || node.as_begin_node().is_some()
-        || node.as_rescue_node().is_some()
-        || node.as_while_node().is_some()
-        || node.as_until_node().is_some()
+/// Find the byte offset of a parameter name within a ParametersNode.
+fn find_param_offset(params: &ruby_prism::ParametersNode<'_>, name: &[u8]) -> Option<usize> {
+    for req in params.requireds().iter() {
+        if let Some(rp) = req.as_required_parameter_node() {
+            if rp.name().as_slice() == name {
+                return Some(rp.location().start_offset());
+            }
+        }
+    }
+    for opt in params.optionals().iter() {
+        if let Some(op) = opt.as_optional_parameter_node() {
+            if op.name().as_slice() == name {
+                return Some(op.location().start_offset());
+            }
+        }
+    }
+    if let Some(rest) = params.rest() {
+        if let Some(rp) = rest.as_rest_parameter_node() {
+            if let Some(pname) = rp.name() {
+                if pname.as_slice() == name {
+                    return Some(rp.location().start_offset());
+                }
+            }
+        }
+    }
+    for kw in params.keywords().iter() {
+        if let Some(kp) = kw.as_required_keyword_parameter_node() {
+            if kp.name().as_slice() == name {
+                return Some(kp.location().start_offset());
+            }
+        }
+        if let Some(kp) = kw.as_optional_keyword_parameter_node() {
+            if kp.name().as_slice() == name {
+                return Some(kp.location().start_offset());
+            }
+        }
+    }
+    None
 }
 
 impl<'pr> Visit<'pr> for ShadowedArgVisitor<'_, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         if let Some(params) = node.parameters() {
             let names = collect_param_names(&params);
-            self.check_body_with_params(&names, node.body());
+            for name in &names {
+                if let (Some(body), Some(decl_offset)) =
+                    (node.body(), find_param_offset(&params, name))
+                {
+                    self.check_one_param(name, decl_offset, &body);
+                }
+            }
+        }
+        // Recurse into the body to find nested blocks/defs/lambdas
+        if let Some(body) = node.body() {
+            self.visit(&body);
         }
     }
 
@@ -201,9 +495,19 @@ impl<'pr> Visit<'pr> for ShadowedArgVisitor<'_, '_> {
             if let Some(bp) = params_node.as_block_parameters_node() {
                 if let Some(inner) = bp.parameters() {
                     let names = collect_param_names(&inner);
-                    self.check_body_with_params(&names, node.body());
+                    for name in &names {
+                        if let (Some(body), Some(decl_offset)) =
+                            (node.body(), find_param_offset(&inner, name))
+                        {
+                            self.check_one_param(name, decl_offset, &body);
+                        }
+                    }
                 }
             }
+        }
+        // Recurse into the body to find nested blocks/defs/lambdas
+        if let Some(body) = node.body() {
+            self.visit(&body);
         }
     }
 
@@ -212,9 +516,19 @@ impl<'pr> Visit<'pr> for ShadowedArgVisitor<'_, '_> {
             if let Some(bp) = params_node.as_block_parameters_node() {
                 if let Some(inner) = bp.parameters() {
                     let names = collect_param_names(&inner);
-                    self.check_body_with_params(&names, node.body());
+                    for name in &names {
+                        if let (Some(body), Some(decl_offset)) =
+                            (node.body(), find_param_offset(&inner, name))
+                        {
+                            self.check_one_param(name, decl_offset, &body);
+                        }
+                    }
                 }
             }
+        }
+        // Recurse into the body to find nested blocks/defs/lambdas
+        if let Some(body) = node.body() {
+            self.visit(&body);
         }
     }
 }
