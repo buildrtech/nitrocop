@@ -7,3 +7,9 @@ y = 2
 # #patterns += patterns.collect(&:to_s)
 
 # #$FUNCTOR_EXCEPTIONS ||= [:binding]
+
+# !self.collection_items.unrevealed.empty?
+
+# !self.collection_items.anonymous.empty?
+
+# #!/usr/bin/env ruby

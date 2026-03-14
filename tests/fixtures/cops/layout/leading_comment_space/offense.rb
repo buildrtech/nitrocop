@@ -12,3 +12,12 @@ y = 2
 
 ##$FUNCTOR_EXCEPTIONS ||= [:binding]
 ^ Layout/LeadingCommentSpace: Missing space after `#`.
+
+#!self.collection_items.unrevealed.empty?
+^ Layout/LeadingCommentSpace: Missing space after `#`.
+
+#!self.collection_items.anonymous.empty?
+^ Layout/LeadingCommentSpace: Missing space after `#`.
+
+##!/usr/bin/env ruby
+^ Layout/LeadingCommentSpace: Missing space after `#`.

@@ -17,6 +17,23 @@ use crate::parse::source::SourceFile;
 /// are likely in the config-gated comment families (`#ruby`, RBS inline,
 /// Steep annotations, shebang continuation) rather than the compact `##...`
 /// shape fixed here.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// FP=5, FN=10.
+///
+/// FP root causes:
+/// - 3 FPs: `#\ -p 4000` on line 1 of `config.ru` files. RuboCop allows
+///   `#\` as rackup options on the first line of `config.ru`. Fixed by
+///   checking filename + line 1 + `#\` prefix.
+/// - 2 FPs: `#~# ORIGINAL` in `.rb.spec` files (rufo). These are
+///   file-discovery differences — RuboCop doesn't process `.rb.spec`
+///   files at all. Not a cop logic issue; no cop change needed.
+///
+/// FN root cause: All 10 FNs were `#!` comments NOT on line 1 (e.g.,
+/// `#!self.collection_items.unrevealed.empty?`). The old code skipped
+/// ALL `#!` comments as shebangs, but RuboCop only allows `#!` on the
+/// very first line of the file. Fixed by checking line number.
 pub struct LeadingCommentSpace;
 
 impl Cop for LeadingCommentSpace {
@@ -53,12 +70,19 @@ impl Cop for LeadingCommentSpace {
                 continue;
             }
 
-            // Skip shebangs (#!)
-            if text.starts_with(b"#!") {
+            let (line, column) = source.offset_to_line_col(start);
+
+            // Skip shebangs (#!) only on the first line of the file.
+            // Non-first-line #! comments (e.g. commented-out code like
+            // `#!self.foo.empty?`) should be flagged.
+            if text.starts_with(b"#!") && line == 1 {
                 continue;
             }
 
-            let (line, column) = source.offset_to_line_col(start);
+            // Skip rackup options (#\) on the first line of config.ru files.
+            if text.starts_with(b"#\\") && line == 1 && is_config_ru(source) {
+                continue;
+            }
             let mut diag =
                 self.diagnostic(source, line, column, "Missing space after `#`.".to_string());
             if let Some(ref mut corr) = corrections {
@@ -74,6 +98,11 @@ impl Cop for LeadingCommentSpace {
             diagnostics.push(diag);
         }
     }
+}
+
+fn is_config_ru(source: &SourceFile) -> bool {
+    let path = std::path::Path::new(source.path_str());
+    path.file_name().and_then(|n| n.to_str()) == Some("config.ru")
 }
 
 fn missing_space_after_hash(text: &[u8]) -> bool {
@@ -128,5 +157,44 @@ mod tests {
             crate::testutil::run_cop_full(&LeadingCommentSpace, b"## section header\n######\n");
 
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn allows_shebang_on_first_line() {
+        let diags =
+            crate::testutil::run_cop_full(&LeadingCommentSpace, b"#!/usr/bin/env ruby\nx = 1\n");
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn flags_shebang_not_on_first_line() {
+        let diags = crate::testutil::run_cop_full(
+            &LeadingCommentSpace,
+            b"# comment\n#!/usr/bin/env ruby\n",
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 2);
+    }
+
+    #[test]
+    fn allows_rackup_options_in_config_ru() {
+        let diags = crate::testutil::run_cop_full_internal(
+            &LeadingCommentSpace,
+            b"#\\ -p 4000\nrun MyApp\n",
+            crate::cop::CopConfig::default(),
+            "config.ru",
+        );
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn flags_backslash_comment_in_non_config_ru() {
+        let diags = crate::testutil::run_cop_full_internal(
+            &LeadingCommentSpace,
+            b"#\\ -p 4000\nrun MyApp\n",
+            crate::cop::CopConfig::default(),
+            "app.rb",
+        );
+        assert_eq!(diags.len(), 1);
     }
 }

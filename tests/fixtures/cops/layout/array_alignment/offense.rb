@@ -11,3 +11,14 @@ y = [:a,
 z = ["x",
          "y"]
          ^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+
+# Rescue exception list misaligned
+begin
+  foo
+rescue ArgumentError,
+  RuntimeError,
+  ^^^^^^^^^^^^^^^^^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+  TypeError => e
+  ^^^^^^^^^^^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+  bar
+end
