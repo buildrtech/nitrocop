@@ -18,14 +18,54 @@ use crate::parse::source::SourceFile;
 /// Previous attempt (2026-03-10) regressed because it did not adjust
 /// `keyword_offset` for backslash continuations simultaneously; this
 /// combined fix resolves both.
+///
+/// FN=5 (2026-03-14): string concatenation with `\` spanning `it`/`describe`
+/// blocks (e.g. `it 'str' \ 'str' do`). The previous `adjusted_keyword_offset`
+/// always walked backward through `\` continuations, landing on the first
+/// continuation line. For `it '...' \ '...' do`, this moved the reference to
+/// the `it` line, making the check look at the continuation string line
+/// (not blank) instead of the line after `do` (blank). Fix: only walk backward
+/// when `do`/`{` is the first non-whitespace token on its line (i.e., `do` is
+/// on a separate continuation line). When `do`/`{` has args before it on the
+/// same line, use the `do` line directly — matching RuboCop's
+/// `send_node.last_line` behavior.
 pub struct EmptyLinesAroundBlockBody;
 
-/// Walk backward from `opening_line` (1-indexed) through lines ending with
-/// `\` (backslash continuation) and return the byte offset of the start of
-/// the earliest continuation line. Returns the original `opening_offset`
-/// unchanged when there is no continuation.
+/// Compute the effective opening offset for empty-line checks.
+///
+/// RuboCop uses `send_node.last_line` as the reference — the last line of
+/// the method call arguments. In Prism we don't have direct parent access,
+/// so we approximate:
+///
+/// - If the `do`/`{` keyword has non-whitespace content before it on its
+///   line (e.g. `'has not passed' do`), the arguments end on the same line
+///   as `do`, so use the `do` line directly.
+/// - If `do`/`{` is the first non-whitespace token on its line AND the
+///   preceding line ends with `\`, then `do` was placed on a separate
+///   continuation line (e.g. `run_command(arg) \ \n  do |x|`). Walk
+///   backward through `\` continuations to find the method-call line and
+///   use that as the reference.
 fn adjusted_keyword_offset(source: &SourceFile, opening_offset: usize) -> usize {
-    let (mut line, _) = source.offset_to_line_col(opening_offset);
+    let (opening_line, opening_col) = source.offset_to_line_col(opening_offset);
+
+    // Check if there is non-whitespace content before `do`/`{` on its line.
+    let has_content_before = if let Some(line_bytes) = util::line_at(source, opening_line) {
+        line_bytes[..opening_col]
+            .iter()
+            .any(|&b| b != b' ' && b != b'\t')
+    } else {
+        false
+    };
+
+    // If args are on the same line as `do`, use the `do` line — this is
+    // `send_node.last_line` in RuboCop terms.
+    if has_content_before {
+        return opening_offset;
+    }
+
+    // `do`/`{` is at the start of its line. Walk backward through `\`
+    // continuations to find the method-call line.
+    let mut line = opening_line;
     loop {
         if line <= 1 {
             break;

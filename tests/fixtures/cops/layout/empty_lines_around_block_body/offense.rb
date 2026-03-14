@@ -36,3 +36,17 @@ handler = -> (opts = {}) {
     memo
   end
 }
+it 'always yields if forced to, even after the initial yield or if the period ' \
+   'has not passed' do
+
+^ Layout/EmptyLinesAroundBlockBody: Extra empty line detected at block body beginning.
+  throttle = ProgressBar::Throttle.new(:throttle_rate => 10)
+end
+describe 'some behavior that requires a very long description to explain ' \
+         'what is being tested' do
+
+^ Layout/EmptyLinesAroundBlockBody: Extra empty line detected at block body beginning.
+  it 'works correctly' do
+    expect(true).to be true
+  end
+end
