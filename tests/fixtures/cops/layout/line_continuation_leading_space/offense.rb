@@ -17,3 +17,15 @@ error = "go: example.com/tool@v1.0.0 requires\n" \
 mixed = "foo #{bar}" \
   ' long'
    ^ Layout/LineContinuationLeadingSpace: Move leading spaces to the end of the previous line.
+
+logger.warn("Downcasing dependency '#{name}' because deb packages " \
+             " don't work so good with uppercase names")
+              ^ Layout/LineContinuationLeadingSpace: Move leading spaces to the end of the previous line.
+
+msg = "expected #{resource} to have " \
+  " the correct value"
+   ^ Layout/LineContinuationLeadingSpace: Move leading spaces to the end of the previous line.
+
+hint = "Use #{method_name} instead of " \
+  "  calling directly"
+   ^^ Layout/LineContinuationLeadingSpace: Move leading spaces to the end of the previous line.

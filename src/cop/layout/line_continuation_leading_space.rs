@@ -26,11 +26,18 @@ use crate::parse::source::SourceFile;
 /// on the corpus: expected 1,174, actual 844, missing 330. The heuristic
 /// suppressed many legitimate offenses beyond the targeted warning patterns.
 ///
-/// Current status: reverted to the pre-investigation logic. A correct fix needs
-/// pair-level node-shape detection that distinguishes the long interpolated
-/// warning/message-chain false-positive family from the genuine receiver-of-`+`
-/// and one-tail false negatives without suppressing unrelated `dstr`
-/// continuations.
+/// ## Fix (2026-03-14)
+///
+/// Root cause: `should_skip_trailing_style` used `parts.len() >= 2` which
+/// skipped ALL implicit-concat dstr nodes with an interpolated head followed by
+/// plain string tails. This suppressed genuine offenses on 2-part cases (one
+/// interpolated head + one plain tail), such as `fpm`'s
+/// `"...dependency '#{name}'...packages " \ " don't work..."` pattern.
+///
+/// Fix: changed threshold from `parts.len() >= 2` to `parts.len() >= 3`.
+/// Two-part cases (the FN pattern) are now checked normally. Three-or-more-part
+/// chains (long interpolated message builders like `chefspec`/`overcommit`) are
+/// still skipped to avoid the FP regression seen in attempted fix 1.
 pub struct LineContinuationLeadingSpace;
 
 impl Cop for LineContinuationLeadingSpace {
@@ -236,7 +243,7 @@ fn should_skip_trailing_style(
     first_line: &[u8],
 ) -> bool {
     node.opening_loc().is_none()
-        && parts.len() >= 2
+        && parts.len() >= 3
         && parts[0].as_interpolated_string_node().is_some()
         && parts[1..]
             .iter()
