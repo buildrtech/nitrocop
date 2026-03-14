@@ -6,3 +6,6 @@ x, y = "hello", "world"
 
 a, b = foo(), bar()
 ^^^^^^^^^^^^^^^^^^^ Style/ParallelAssignment: Do not use parallel assignment.
+
+@name, @config, @bulk, = name, config, bulk
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/ParallelAssignment: Do not use parallel assignment.
