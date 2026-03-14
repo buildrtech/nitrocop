@@ -5,6 +5,20 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/PluckInWhere
+///
+/// ## Investigation (2026-03-14): FP=11, FN=19 (all location mismatches)
+///
+/// The offense was reported at `node.location()` (the start of the `where` call chain,
+/// e.g., line 39 for `Theme.where(...).pluck(...)` starting at `Theme`). RuboCop uses
+/// `RESTRICT_ON_SEND = %i[pluck ids]` and triggers on the `pluck`/`ids` call itself,
+/// reporting at `node.loc.selector` (the `pluck` keyword position).
+///
+/// FP/FN counts were exactly equal per repo (discourse: 2/2, loomio: 2/2, etc.) —
+/// classic location mismatch where the same offenses are found but at different lines.
+///
+/// Fix: changed to report at the `pluck`/`ids` call's message_loc instead of
+/// the surrounding `where` call's start.
 pub struct PluckInWhere;
 
 impl Cop for PluckInWhere {
@@ -52,11 +66,12 @@ impl Cop for PluckInWhere {
             None => return,
         };
 
-        // Look for pluck inside argument values (keyword hash args)
+        // Look for pluck/ids inside argument values and report at the pluck keyword location.
+        // RuboCop uses RESTRICT_ON_SEND = %i[pluck ids] and reports at node.loc.selector
+        // (the pluck method name), NOT at the start of the surrounding where call.
         for arg in args.arguments().iter() {
-            if self.has_pluck_call(&arg, style) {
-                let loc = node.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
+            if let Some(pluck_loc) = self.find_pluck_call(&arg, style) {
+                let (line, column) = source.offset_to_line_col(pluck_loc);
                 diagnostics.push(self.diagnostic(
                     source,
                     line,
@@ -90,31 +105,34 @@ impl PluckInWhere {
         false
     }
 
-    fn check_pluck_node(&self, node: &ruby_prism::Node<'_>, style: &str) -> bool {
+    /// Returns the byte offset of the `pluck`/`ids` keyword if found inside `node`,
+    /// or None if no offense. Reports at the keyword location to match RuboCop.
+    fn find_pluck_call(&self, node: &ruby_prism::Node<'_>, style: &str) -> Option<usize> {
         if let Some(call) = node.as_call_node() {
-            if call.name().as_slice() == b"pluck" {
-                if style == "conservative" {
-                    // Only flag if receiver chain is rooted in a constant (model)
-                    return self.is_const_rooted(node);
+            let name = call.name().as_slice();
+            if name == b"pluck" || name == b"ids" {
+                let is_offense = if style == "conservative" {
+                    name == b"pluck" && self.is_const_rooted(node)
+                        || name == b"ids" && self.is_const_rooted(node)
+                } else {
+                    true
+                };
+                if is_offense {
+                    let loc = call
+                        .message_loc()
+                        .map(|l| l.start_offset())
+                        .unwrap_or_else(|| call.location().start_offset());
+                    return Some(loc);
                 }
-                return true;
             }
-        }
-        false
-    }
-
-    fn has_pluck_call(&self, node: &ruby_prism::Node<'_>, style: &str) -> bool {
-        // Direct pluck call
-        if self.check_pluck_node(node, style) {
-            return true;
         }
         // Check keyword hash values
         if let Some(kw) = node.as_keyword_hash_node() {
             for elem in kw.elements().iter() {
                 if let Some(assoc) = elem.as_assoc_node() {
                     let val = assoc.value();
-                    if self.check_pluck_node(&val, style) {
-                        return true;
+                    if let Some(loc) = self.find_pluck_call(&val, style) {
+                        return Some(loc);
                     }
                 }
             }
@@ -124,13 +142,13 @@ impl PluckInWhere {
             for elem in hash.elements().iter() {
                 if let Some(assoc) = elem.as_assoc_node() {
                     let val = assoc.value();
-                    if self.check_pluck_node(&val, style) {
-                        return true;
+                    if let Some(loc) = self.find_pluck_call(&val, style) {
+                        return Some(loc);
                     }
                 }
             }
         }
-        false
+        None
     }
 }
 
