@@ -3,6 +3,29 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Layout/ArgumentAlignment cop.
+///
+/// ## Investigation findings (2026-03-14)
+///
+/// **FP root cause — `**splat` with aligned continuation kwargs:**
+/// When a KeywordHashNode is expanded for alignment checking, `AssocSplatNode`
+/// elements must be excluded from both the alignment items and the minimum-count
+/// check. RuboCop's `first_arg.pairs` returns only `pair` nodes (not `kwsplat`),
+/// and `multiple_arguments?` checks `pairs.count >= 2`. So `**splat` + 1 keyword
+/// pair → skip (not enough args). `**splat` + 2+ keyword pairs → check pairs only,
+/// using the first pair as the alignment reference (not the splat).
+///
+/// **FN root cause — block args (`&block`, `&handler`):**
+/// In Prism, block arguments (`&block`) are stored on `call_node.block()` as a
+/// `BlockArgumentNode`, NOT in `call_node.arguments()`. The cop was only iterating
+/// `arguments()`, so block args were invisible to alignment checking. Fix: append
+/// the block argument to the effective args list when present.
+///
+/// **FN root cause — keyword hash elements in multi-arg calls:**
+/// When a `KeywordHashNode` appeared alongside other positional args, only the
+/// KeywordHashNode as a whole was checked, not its individual elements. RuboCop's
+/// `arguments_with_last_arg_pairs` expands the last arg's pairs. Fix: always expand
+/// the last arg's KeywordHashNode elements into the effective args list.
 pub struct ArgumentAlignment;
 
 impl Cop for ArgumentAlignment {
@@ -45,19 +68,61 @@ impl Cop for ArgumentAlignment {
             return;
         }
 
-        // Collect effective arguments: if the only argument is a KeywordHashNode,
-        // use its elements as individual alignment targets (RuboCop checks each
-        // key-value pair in a keyword hash for alignment).
-        let effective_args: Vec<ruby_prism::Node<'_>> = if arg_list.len() == 1 {
-            let first = arg_list.iter().next().unwrap();
-            if let Some(kw_hash) = first.as_keyword_hash_node() {
-                kw_hash.elements().iter().collect()
-            } else {
-                arg_list.iter().collect()
+        // Collect effective arguments, matching RuboCop's behavior:
+        //
+        // with_first_argument style (arguments_or_first_arg_pairs):
+        //   - If the first arg is a bare KeywordHashNode (sole arg), expand to
+        //     its .pairs only (excludes AssocSplatNode). Need >= 2 pairs.
+        //   - Otherwise, use node.arguments with the last arg's KeywordHashNode
+        //     expanded to its .pairs.
+        //
+        // with_fixed_indentation style (arguments_with_last_arg_pairs):
+        //   - All args except last, plus last arg's KeywordHashNode .pairs
+        //     (or the last arg itself if not a keyword hash).
+        //
+        // In both cases, block arguments from call_node.block() (BlockArgumentNode)
+        // are included as additional alignment targets.
+        let args_vec: Vec<ruby_prism::Node<'_>> = arg_list.iter().collect();
+        let is_sole_keyword_hash =
+            args_vec.len() == 1 && args_vec[0].as_keyword_hash_node().is_some();
+
+        let mut effective_args: Vec<ruby_prism::Node<'_>> = Vec::new();
+
+        if is_sole_keyword_hash && style != "with_fixed_indentation" {
+            // with_first_argument: expand first (sole) arg's pairs only
+            let kw_hash = args_vec[0].as_keyword_hash_node().unwrap();
+            for elem in kw_hash.elements().iter() {
+                // Only include AssocNode (pair), skip AssocSplatNode
+                if elem.as_assoc_splat_node().is_none() {
+                    effective_args.push(elem);
+                }
             }
         } else {
-            arg_list.iter().collect()
-        };
+            // Expand the last arg if it's a KeywordHashNode
+            let last_idx = args_vec.len() - 1;
+            for (i, arg) in args_vec.into_iter().enumerate() {
+                if i == last_idx {
+                    if let Some(kw_hash) = arg.as_keyword_hash_node() {
+                        for elem in kw_hash.elements().iter() {
+                            // Only include AssocNode (pair), skip AssocSplatNode
+                            if elem.as_assoc_splat_node().is_none() {
+                                effective_args.push(elem);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                effective_args.push(arg);
+            }
+        }
+
+        // Include block argument (&block, &handler, etc.) from call_node.block().
+        // In Prism, BlockArgumentNode is on call_node.block(), not in arguments().
+        if let Some(block) = call_node.block() {
+            if block.as_block_argument_node().is_some() {
+                effective_args.push(block);
+            }
+        }
 
         if effective_args.len() < 2 {
             return;

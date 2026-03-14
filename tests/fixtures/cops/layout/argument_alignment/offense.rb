@@ -23,3 +23,23 @@ Klass[:a => :a, :b => :b,
   ^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
   :d => :d]
   ^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
+
+# Misaligned &block argument
+comm.sudo(command,
+  elevated: config.privileged,
+  ^^^^^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
+  interactive: config.interactive,
+  ^^^^^^^^^^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
+  &handler
+  ^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
+)
+
+# Misaligned &block with keyword args
+builder.send(:collection,
+  attribute_name, collection, value_method, label_method,
+  ^^^^^^^^^^^^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
+  input_options, merged_input_options,
+  ^^^^^^^^^^^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
+  &collection_block
+  ^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
+)
