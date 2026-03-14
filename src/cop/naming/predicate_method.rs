@@ -69,6 +69,26 @@ use crate::parse::source::SourceFile;
 /// YieldNode was classified as Unknown (triggering conservative skip), but
 /// RuboCop's call_type? = send_type? || csend_type? does NOT include :yield.
 /// Fix: classify YieldNode as Opaque instead of Unknown.
+///
+/// ## Corpus investigation (2026-03-14) — batch 3
+///
+/// Corpus oracle reported FP=0, FN=7. All 7 verified fixed.
+///
+/// FN root cause 1 (4 FN): Parenthesized expressions in conditional branch
+/// values (e.g., `if c; (x == y); else; false; end`). RuboCop's `last_value`
+/// unwraps `:begin` (parens) for branch values via `begin_type?` check. Our
+/// IfNode/CaseNode/etc. handlers extracted the last item from StatementsNode
+/// directly, bypassing the ParenthesesNode unwrapping logic.
+/// Fix: extracted `collect_statements_return` helper that processes
+/// StatementsNode with proper single-statement ParenthesesNode unwrapping,
+/// and used it in all conditional branch handlers.
+///
+/// FN root cause 2 (3 FN): Parenthesized expressions in `return` arguments
+/// (e.g., `return (i != 0)`). In Parser gem, `return (expr)` does NOT produce
+/// a `:begin` wrapper — the parens are treated as argument grouping. Prism
+/// preserves the ParenthesesNode. Fix: added `collect_return_arg` helper that
+/// unwraps ParenthesesNode before recursing, used in both ReturnFinder and
+/// the ReturnNode handler in `collect_implicit_return`.
 pub struct PredicateMethod;
 
 const MSG_PREDICATE: &str = "Predicate method names should end with `?`.";
@@ -372,9 +392,10 @@ impl<'pr> Visit<'pr> for ReturnFinder {
                 if arg_list.len() != 1 {
                     self.returns.push(ReturnType::NonBooleanLiteral);
                 } else {
-                    // Use collect_implicit_return to properly recurse into
-                    // compound expressions (AndNode, OrNode, IfNode, etc.)
-                    collect_implicit_return(&arg_list[0], &mut self.returns, &self.wayward);
+                    // Use collect_return_arg to unwrap ParenthesesNode (Parser
+                    // strips :begin for return args) and recurse into compound
+                    // expressions (AndNode, OrNode, IfNode, etc.)
+                    collect_return_arg(&arg_list[0], &mut self.returns, &self.wayward);
                 }
             }
         }
@@ -387,6 +408,56 @@ impl<'pr> Visit<'pr> for ReturnFinder {
     // value analysis. While semantically incorrect (a `return` inside a nested def
     // returns from that def, not the outer method), we match RuboCop's behavior
     // for corpus conformance.
+}
+
+/// Process a StatementsNode to collect branch return types.
+/// Handles ParenthesesNode unwrapping for single-statement bodies, matching
+/// RuboCop's `last_value` which unwraps one level of `:begin`.
+fn collect_statements_return(
+    stmts: &ruby_prism::StatementsNode<'_>,
+    returns: &mut Vec<ReturnType>,
+    wayward: &[String],
+) {
+    let body: Vec<_> = stmts.body().iter().collect();
+    if let Some(last) = body.last() {
+        // When the body has exactly one statement and it's a ParenthesesNode,
+        // unwrap it. This matches Parser gem where single-statement bodies
+        // are NOT wrapped in an outer :begin — the parens-:begin IS the body,
+        // and RuboCop's last_value unwraps it.
+        if body.len() == 1 {
+            if let Some(paren) = last.as_parentheses_node() {
+                if let Some(inner) = paren.body() {
+                    collect_implicit_return(&inner, returns, wayward);
+                } else {
+                    returns.push(ReturnType::NonBooleanLiteral);
+                }
+                return;
+            }
+        }
+        collect_implicit_return(last, returns, wayward);
+    } else {
+        returns.push(ReturnType::NonBooleanLiteral);
+    }
+}
+
+/// Collect return type from a return argument, unwrapping ParenthesesNode.
+/// In Parser gem, `return (expr)` does NOT produce a `:begin` wrapper — the
+/// parens are treated as argument grouping. Prism preserves ParenthesesNode,
+/// so we unwrap it here to match Parser's behavior.
+fn collect_return_arg(
+    node: &ruby_prism::Node<'_>,
+    returns: &mut Vec<ReturnType>,
+    wayward: &[String],
+) {
+    if let Some(paren) = node.as_parentheses_node() {
+        if let Some(inner) = paren.body() {
+            collect_implicit_return(&inner, returns, wayward);
+        } else {
+            returns.push(ReturnType::NonBooleanLiteral);
+        }
+        return;
+    }
+    collect_implicit_return(node, returns, wayward);
 }
 
 /// Collect the implicit return type(s) from a node.
@@ -456,12 +527,7 @@ fn collect_implicit_return(
         while let Some(current_if) = current {
             // Collect from the if/elsif's then-branch
             if let Some(stmts) = current_if.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                if let Some(last) = body.last() {
-                    collect_implicit_return(last, returns, wayward);
-                } else {
-                    returns.push(ReturnType::NonBooleanLiteral);
-                }
+                collect_statements_return(&stmts, returns, wayward);
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
@@ -474,12 +540,7 @@ fn collect_implicit_return(
                     } else if let Some(else_node) = sub.as_else_node() {
                         has_final_else = true;
                         if let Some(stmts) = else_node.statements() {
-                            let body: Vec<_> = stmts.body().iter().collect();
-                            if let Some(last) = body.last() {
-                                collect_implicit_return(last, returns, wayward);
-                            } else {
-                                returns.push(ReturnType::NonBooleanLiteral);
-                            }
+                            collect_statements_return(&stmts, returns, wayward);
                         } else {
                             returns.push(ReturnType::NonBooleanLiteral);
                         }
@@ -506,24 +567,14 @@ fn collect_implicit_return(
     // UnlessNode
     if let Some(unless_node) = node.as_unless_node() {
         if let Some(stmts) = unless_node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            if let Some(last) = body.last() {
-                collect_implicit_return(last, returns, wayward);
-            } else {
-                returns.push(ReturnType::NonBooleanLiteral);
-            }
+            collect_statements_return(&stmts, returns, wayward);
         } else {
             returns.push(ReturnType::NonBooleanLiteral);
         }
 
         if let Some(else_clause) = unless_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                if let Some(last) = body.last() {
-                    collect_implicit_return(last, returns, wayward);
-                } else {
-                    returns.push(ReturnType::NonBooleanLiteral);
-                }
+                collect_statements_return(&stmts, returns, wayward);
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
@@ -539,12 +590,7 @@ fn collect_implicit_return(
         for condition in case_node.conditions().iter() {
             if let Some(when_node) = condition.as_when_node() {
                 if let Some(stmts) = when_node.statements() {
-                    let body: Vec<_> = stmts.body().iter().collect();
-                    if let Some(last) = body.last() {
-                        collect_implicit_return(last, returns, wayward);
-                    } else {
-                        returns.push(ReturnType::NonBooleanLiteral);
-                    }
+                    collect_statements_return(&stmts, returns, wayward);
                 } else {
                     returns.push(ReturnType::NonBooleanLiteral);
                 }
@@ -552,12 +598,7 @@ fn collect_implicit_return(
         }
         if let Some(else_clause) = case_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                if let Some(last) = body.last() {
-                    collect_implicit_return(last, returns, wayward);
-                } else {
-                    returns.push(ReturnType::NonBooleanLiteral);
-                }
+                collect_statements_return(&stmts, returns, wayward);
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
@@ -573,12 +614,7 @@ fn collect_implicit_return(
         for condition in case_match.conditions().iter() {
             if let Some(in_node) = condition.as_in_node() {
                 if let Some(stmts) = in_node.statements() {
-                    let body: Vec<_> = stmts.body().iter().collect();
-                    if let Some(last) = body.last() {
-                        collect_implicit_return(last, returns, wayward);
-                    } else {
-                        returns.push(ReturnType::NonBooleanLiteral);
-                    }
+                    collect_statements_return(&stmts, returns, wayward);
                 } else {
                     returns.push(ReturnType::NonBooleanLiteral);
                 }
@@ -586,12 +622,7 @@ fn collect_implicit_return(
         }
         if let Some(else_clause) = case_match.else_clause() {
             if let Some(stmts) = else_clause.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                if let Some(last) = body.last() {
-                    collect_implicit_return(last, returns, wayward);
-                } else {
-                    returns.push(ReturnType::NonBooleanLiteral);
-                }
+                collect_statements_return(&stmts, returns, wayward);
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
@@ -613,12 +644,7 @@ fn collect_implicit_return(
     // WhileNode / UntilNode
     if let Some(while_node) = node.as_while_node() {
         if let Some(stmts) = while_node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            if let Some(last) = body.last() {
-                collect_implicit_return(last, returns, wayward);
-            } else {
-                returns.push(ReturnType::NonBooleanLiteral);
-            }
+            collect_statements_return(&stmts, returns, wayward);
         } else {
             returns.push(ReturnType::NonBooleanLiteral);
         }
@@ -626,19 +652,14 @@ fn collect_implicit_return(
     }
     if let Some(until_node) = node.as_until_node() {
         if let Some(stmts) = until_node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            if let Some(last) = body.last() {
-                collect_implicit_return(last, returns, wayward);
-            } else {
-                returns.push(ReturnType::NonBooleanLiteral);
-            }
+            collect_statements_return(&stmts, returns, wayward);
         } else {
             returns.push(ReturnType::NonBooleanLiteral);
         }
         return;
     }
 
-    // ReturnNode -- extract its value
+    // ReturnNode -- extract its value, unwrapping ParenthesesNode for return args
     if let Some(ret_node) = node.as_return_node() {
         match ret_node.arguments() {
             None => returns.push(ReturnType::NonBooleanLiteral),
@@ -647,7 +668,7 @@ fn collect_implicit_return(
                 if arg_list.len() != 1 {
                     returns.push(ReturnType::NonBooleanLiteral);
                 } else {
-                    collect_implicit_return(&arg_list[0], returns, wayward);
+                    collect_return_arg(&arg_list[0], returns, wayward);
                 }
             }
         }

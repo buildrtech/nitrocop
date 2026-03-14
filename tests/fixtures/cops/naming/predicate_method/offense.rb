@@ -175,6 +175,45 @@ def unfiltered?
   yield unless s && s.size > 0
 end
 
+# Ternary with parenthesized comparison in branch should flag
+def check_result(response)
+    ^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  response[:status] ? (response[:code] == '0') : false
+end
+
+# If/else with both branches parenthesized boolean expressions
+def matches_status(response)
+    ^^^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  if response['result']
+    (response['status'] == 'ok' && response['result'] == 'ok')
+  else
+    (response['status'] == 'ok' || response['code'] == '1')
+  end
+end
+
+# Explicit return with parenthesized comparison (Parser strips :begin for return args)
+def hang_closing
+    ^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  i = get_value.to_i
+  return (i != 0)
+end
+
+# If/elsif with parenthesized comparison in one branch, all boolean
+def success_from(name, response)
+    ^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  if !response
+    false
+  elsif name == 'refunds'
+    response.include?('status')
+  elsif response.include?('status')
+    (response['status'] == 'succeeded')
+  elsif name == 'cards'
+    !!response['id']
+  else
+    false
+  end
+end
+
 # If/elsif returning booleans but no else — RuboCop's IfNode#branches
 # flattens elsif chains but EXCLUDES nil for missing else on inner elsifs,
 # and extract_conditional_branches only pushes nil if node.else_branch is nil
