@@ -65,3 +65,8 @@ it 'explicit begin sole stmt' do
     expect(result)
   end
 end
+# Block argument style (proc do...end) - not inside an example per RuboCop
+it 'test using block arg style', key: :val, &(proc do
+  (expect foo).to be 1
+  (expect bar).to be_empty
+end)

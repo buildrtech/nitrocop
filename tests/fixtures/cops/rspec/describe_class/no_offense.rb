@@ -92,3 +92,8 @@ end
 # Bare describe without a block is not a spec group — RuboCop skips it
 describe 'not a spec group'
 describe '#method_name'
+# describe with block argument style - not a spec group per RuboCop
+describe 'Some feature', if: condition, &(proc do
+  it 'works' do
+  end
+end)
