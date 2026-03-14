@@ -2,6 +2,7 @@ use crate::cop::node_type::ARRAY_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Layout/MultilineArrayLineBreaks — each item in a multi-line array must start
 /// on a separate line.
@@ -26,7 +27,105 @@ use crate::parse::source::SourceFile;
 ///    vs last.start_line (ignoring the last element's span)
 /// 3. Uses `last_seen_line` tracking algorithm (only updates on non-offending
 ///    elements) matching RuboCop exactly
+///
+/// ## Investigation (2026-03-14)
+///
+/// **Root cause of 69 FNs:** Rescue exception lists (`rescue FooError, BarError`)
+/// are represented as `array` nodes in RuboCop's Parser gem AST, but Prism stores
+/// them as individual exception nodes within `RescueNode.exceptions()` — NOT as
+/// an `ArrayNode`. The cop only listened for `ARRAY_NODE` via `check_node`, so
+/// rescue exception lists were never checked.
+///
+/// Additionally, Prism's `RescueNode` is NOT visited via `visit_branch_node_enter`
+/// or `visit_leaf_node_enter` — it requires a dedicated `visit_rescue_node`
+/// override in the Visit trait. This is the same issue found in
+/// `Layout/ArrayAlignment`.
+///
+/// **Fix:** Added a `check_source` method with a dedicated `RescueVisitor` that
+/// implements `visit_rescue_node` to find rescue exception lists and apply the
+/// same multiline element check (same `all_on_same_line?` guard and
+/// `last_seen_line` algorithm).
 pub struct MultilineArrayLineBreaks;
+
+impl MultilineArrayLineBreaks {
+    /// Shared logic for checking that each element in a multi-line list starts on
+    /// its own line. Used for both array elements and rescue exception lists.
+    fn check_elements(
+        &self,
+        source: &SourceFile,
+        elements: &[ruby_prism::Node<'_>],
+        allow_multiline_final: bool,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if elements.len() < 2 {
+            return;
+        }
+
+        // RuboCop's all_on_same_line? guard — checks elements, not brackets
+        let first_start_line = source
+            .offset_to_line_col(elements[0].location().start_offset())
+            .0;
+        let last = elements.last().unwrap();
+
+        if allow_multiline_final {
+            let last_start_line = source.offset_to_line_col(last.location().start_offset()).0;
+            if first_start_line == last_start_line {
+                return;
+            }
+        } else {
+            let last_end_line = source
+                .offset_to_line_col(last.location().end_offset().saturating_sub(1))
+                .0;
+            if first_start_line == last_end_line {
+                return;
+            }
+        }
+
+        // Track last_line of the most recent non-offending element (matches RuboCop's
+        // last_seen_line algorithm). When an element is flagged, last_seen_line is NOT
+        // updated, so subsequent elements are compared against the last "good" element.
+        let mut last_seen_line: isize = -1;
+        for elem in elements {
+            let (start_line, start_col) = source.offset_to_line_col(elem.location().start_offset());
+            if last_seen_line >= start_line as isize {
+                diagnostics.push(self.diagnostic(
+                    source,
+                    start_line,
+                    start_col,
+                    "Each item in a multi-line array must start on a separate line.".to_string(),
+                ));
+            } else {
+                let end_line = source
+                    .offset_to_line_col(elem.location().end_offset().saturating_sub(1))
+                    .0;
+                last_seen_line = end_line as isize;
+            }
+        }
+    }
+}
+
+/// Dedicated visitor for rescue exception lists. Prism's `RescueNode` is not
+/// dispatched through the generic `visit_branch_node_enter`/`visit_leaf_node_enter`
+/// callbacks, so we need an explicit `visit_rescue_node` override.
+struct RescueVisitor<'a> {
+    cop: &'a MultilineArrayLineBreaks,
+    source: &'a SourceFile,
+    allow_multiline_final: bool,
+    diagnostics: &'a mut Vec<Diagnostic>,
+}
+
+impl<'pr> Visit<'pr> for RescueVisitor<'_> {
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        let exceptions: Vec<ruby_prism::Node<'pr>> = node.exceptions().iter().collect();
+        self.cop.check_elements(
+            self.source,
+            &exceptions,
+            self.allow_multiline_final,
+            self.diagnostics,
+        );
+        ruby_prism::visit_rescue_node(self, node);
+    }
+}
 
 impl Cop for MultilineArrayLineBreaks {
     fn name(&self) -> &'static str {
@@ -63,54 +162,30 @@ impl Cop for MultilineArrayLineBreaks {
         }
 
         let elements: Vec<ruby_prism::Node<'_>> = array.elements().iter().collect();
-        if elements.len() < 2 {
-            return;
-        }
+        self.check_elements(source, &elements, allow_multiline_final, diagnostics);
+    }
 
-        // RuboCop's all_on_same_line? guard — checks elements, not brackets
-        let first_start_line = source
-            .offset_to_line_col(elements[0].location().start_offset())
-            .0;
-        let last = elements.last().unwrap();
+    fn check_source(
+        &self,
+        source: &SourceFile,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        let allow_multiline_final = config.get_bool("AllowMultilineFinalElement", false);
 
-        if allow_multiline_final {
-            // ignore_last: true — check first.first_line == last.first_line
-            // All elements start on the same line; last element may span multiple lines
-            let last_start_line = source.offset_to_line_col(last.location().start_offset()).0;
-            if first_start_line == last_start_line {
-                return;
-            }
-        } else {
-            // Default: check first.first_line == last.last_line
-            // All elements fit entirely on the same line
-            let last_end_line = source
-                .offset_to_line_col(last.location().end_offset().saturating_sub(1))
-                .0;
-            if first_start_line == last_end_line {
-                return;
-            }
-        }
-
-        // Track last_line of the most recent non-offending element (matches RuboCop's
-        // last_seen_line algorithm). When an element is flagged, last_seen_line is NOT
-        // updated, so subsequent elements are compared against the last "good" element.
-        let mut last_seen_line: isize = -1;
-        for elem in &elements {
-            let (start_line, start_col) = source.offset_to_line_col(elem.location().start_offset());
-            if last_seen_line >= start_line as isize {
-                diagnostics.push(self.diagnostic(
-                    source,
-                    start_line,
-                    start_col,
-                    "Each item in a multi-line array must start on a separate line.".to_string(),
-                ));
-            } else {
-                let end_line = source
-                    .offset_to_line_col(elem.location().end_offset().saturating_sub(1))
-                    .0;
-                last_seen_line = end_line as isize;
-            }
-        }
+        // RescueNode is not dispatched through visit_branch_node_enter in Prism,
+        // so we need a dedicated visitor to find rescue nodes for exception list
+        // line break checking.
+        let mut visitor = RescueVisitor {
+            cop: self,
+            source,
+            allow_multiline_final,
+            diagnostics,
+        };
+        visitor.visit(&parse_result.node());
     }
 }
 
@@ -124,6 +199,17 @@ mod tests {
         MultilineArrayLineBreaks,
         "cops/layout/multiline_array_line_breaks"
     );
+
+    #[test]
+    fn rescue_exception_list_multiline() {
+        let diags = run_cop_full_with_config(
+            &MultilineArrayLineBreaks,
+            b"begin\n  something\nrescue FooError, BarError,\n       BazError\n  retry\nend\n",
+            CopConfig::default(),
+        );
+        // BarError is on same line as FooError → 1 offense
+        assert_eq!(diags.len(), 1, "Expected 1 offense, got: {:?}", diags);
+    }
 
     #[test]
     fn allow_multiline_final_element_ignores_multiline_last_hash() {

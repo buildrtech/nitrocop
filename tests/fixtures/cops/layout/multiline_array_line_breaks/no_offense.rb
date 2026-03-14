@@ -21,3 +21,26 @@ w = [
 s = [
   :only_one
 ]
+
+# Rescue with single exception
+begin
+  something
+rescue FooError
+  retry
+end
+
+# Rescue with each exception on its own line
+begin
+  something
+rescue FooError,
+       BarError,
+       BazError
+  retry
+end
+
+# Rescue with all exceptions on same line
+begin
+  something
+rescue FooError, BarError, BazError
+  retry
+end
