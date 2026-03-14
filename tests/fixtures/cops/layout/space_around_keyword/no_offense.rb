@@ -24,3 +24,11 @@ end
 def when(condition, expression = nil)
   condition
 end
+
+# `.when(...)` as a method call on an object (e.g. Arel)
+result = Arel::Nodes::Case.new.
+  when(transition_table[:id].eq(most_recent_id)).then(db_true).
+  else(not_most_recent_value)
+
+# `&.when(...)` safe-navigation method call
+obj&.when(condition)
