@@ -30,3 +30,11 @@ if var = compute_value
     process(var)
   end
 end
+
+# Variable assigned in outer condition inside a comparison - used in inner modifier
+def with_locale_param(url_hash)
+  if (locale = some_method) != default_locale
+    url_hash.update :locale => locale if locale
+  end
+  url_hash
+end

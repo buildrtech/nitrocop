@@ -22,6 +22,17 @@ fn collect_assigned_variables(node: &ruby_prism::Node<'_>, names: &mut Vec<Vec<u
         for stmt in stmts.body().iter() {
             collect_assigned_variables(&stmt, names);
         }
+    } else if let Some(call) = node.as_call_node() {
+        // Descend into call receiver and arguments to find embedded assignments
+        // e.g., (locale = foo) != bar has an assignment in the call's receiver
+        if let Some(recv) = call.receiver() {
+            collect_assigned_variables(&recv, names);
+        }
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                collect_assigned_variables(&arg, names);
+            }
+        }
     }
 }
 
@@ -29,15 +40,17 @@ fn collect_assigned_variables(node: &ruby_prism::Node<'_>, names: &mut Vec<Vec<u
 ///
 /// Corpus oracle reported FP=2, FN=0.
 ///
-/// Attempted fix: replace the narrow assignment collector with a full visitor so
+/// First attempt: replaced the narrow assignment collector with a full visitor so
 /// assignments nested inside comparison calls and multi-write nodes also suppress
-/// the offense.
-/// Acceptance gate before: expected=1952, actual=1908, excess=0, missing=44.
-/// Acceptance gate after: expected=1952, actual=1906, excess=0, missing=46.
-/// Reverted because the broader collector suppressed 2 additional true positives
-/// on the current local corpus rerun. One corpus example in `ruby/rdoc` also
-/// reduced to a case where RuboCop still fires, so not all remaining oracle FPs
-/// are attributable to missing assignment-descendant handling.
+/// the offense. This introduced 2 new FNs (missing=44 -> missing=46). Reverted.
+/// One corpus example in `ruby/rdoc` reduced to a case where RuboCop still fires,
+/// so it is not a real FP.
+///
+/// Second attempt (2026-03-14): targeted fix — added `CallNode` descent to
+/// `collect_assigned_variables` so patterns like `(locale = foo) != bar` are
+/// recognized. This fixes the refinery/refinerycms FP without the broad visitor
+/// that caused the previous FN regression. The rdoc example (multi-write
+/// destructuring) is not a real FP per RuboCop behavior, so left unfixed.
 pub struct SoleNestedConditional;
 
 /// Check if the inner branch's condition references a variable assigned in the outer condition.
