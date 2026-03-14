@@ -11,7 +11,10 @@ use ruby_prism::Visit;
 /// `attr_writer`, `attr_accessor`, `attr`, `def_delegator`, `def_instance_delegator`,
 /// `def_delegators`, and `def_instance_delegators`.
 ///
-/// Root causes of previous FN (1,203):
+/// ## Investigation history
+///
+/// ### Round 1 (initial implementation)
+/// Root causes of FN (1,203):
 /// - Only checked direct `def` children of class/module StatementsNode
 /// - Missed `private def`, `protected def` (CallNode wrapping DefNode)
 /// - Missed `alias_method`, `attr_*`, `def_delegator*` call patterns
@@ -21,9 +24,29 @@ use ruby_prism::Visit;
 /// - Missed `class << self` / `class << expr` singleton class patterns
 /// - Wrong message format (was "Duplicated method definition." instead of RuboCop format)
 ///
-/// Root causes of previous FP (47):
+/// Root causes of FP (47):
 /// - Did not skip definitions inside `if`/`unless`/`case` ancestors
 /// - Did not handle rescue/ensure scope reset
+///
+/// ### Round 2 (FP=16, FN=40)
+/// Root causes of FN:
+/// - `Struct.new do ... end` not recognized as scope-creating (only Class.new/Module.new
+///   were handled). Fixed by adding Struct to scope_creating_call_name and
+///   visit_constant_write_node.
+/// - `def ConstName.method` where ConstName is an outer scope (not innermost). The old
+///   `scope_matches_const` only checked innermost scope. Fixed by implementing
+///   `lookup_constant` that traverses the full scope stack, matching RuboCop behavior.
+///
+/// Root causes of FP:
+/// - rescue/ensure handling used per-block scope (stack of Vecs) instead of global
+///   per-type scope like RuboCop. RuboCop uses `@scopes[:rescue]` and `@scopes[:ensure]`
+///   as global sets — first redefinition across ALL rescue blocks is forgiven, second is
+///   offense. Fixed by replacing `rescue_ensure_stack: Vec<Vec<String>>` with global
+///   `rescue_forgiven` and `ensure_forgiven` sets plus a type stack.
+///
+/// Remaining items not implemented (likely not significant for corpus):
+/// - `delegate :foo, to: :bar` (ActiveSupport) — only active when
+///   ActiveSupportExtensionsEnabled is true, which is off by default in corpus baseline.
 pub struct DuplicateMethods;
 
 impl Cop for DuplicateMethods {
@@ -53,7 +76,10 @@ impl Cop for DuplicateMethods {
             def_stack: Vec::new(),
             if_depth: 0,
             plain_block_depth: 0,
-            rescue_ensure_stack: Vec::new(),
+            in_rescue_or_ensure: false,
+            rescue_forgiven: Vec::new(),
+            ensure_forgiven: Vec::new(),
+            rescue_ensure_type_stack: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -82,10 +108,24 @@ struct DupMethodVisitor<'a, 'src> {
     /// Depth inside non-scope blocks (DSL blocks, describe blocks, etc.)
     /// Methods inside these are ignored per RuboCop (parent_module_name returns nil).
     plain_block_depth: usize,
-    /// Stack of rescue/ensure scope markers. When > 0, the first redefinition of
-    /// a method key is allowed (different execution path). Inner entries track
-    /// which keys have already been "first-seen" in this scope.
-    rescue_ensure_stack: Vec<Vec<String>>,
+    /// Whether we are currently inside a rescue or ensure node (any depth).
+    /// Matches RuboCop's `node.each_ancestor(:rescue, :ensure).first&.type`.
+    in_rescue_or_ensure: bool,
+    /// Global per-type scope for rescue blocks. Keys forgiven in any rescue block
+    /// are tracked here. Matches RuboCop's `@scopes[:rescue]`.
+    rescue_forgiven: Vec<String>,
+    /// Global per-type scope for ensure blocks. Keys forgiven in any ensure block
+    /// are tracked here. Matches RuboCop's `@scopes[:ensure]`.
+    ensure_forgiven: Vec<String>,
+    /// Which scope type the current rescue/ensure ancestors belong to.
+    /// Used to decide which forgiven set to check.
+    rescue_ensure_type_stack: Vec<RescueEnsureType>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RescueEnsureType {
+    Rescue,
+    Ensure,
 }
 
 #[derive(Clone)]
@@ -139,15 +179,27 @@ impl DupMethodVisitor<'_, '_> {
         let qualified = self.qualified_method_name(method_name, is_singleton);
         let key = self.method_key(&qualified);
 
-        // Handle rescue/ensure scope: first occurrence in a rescue/ensure body
-        // is allowed to "redefine" (it's a different execution path).
-        if let Some(scope) = self.rescue_ensure_stack.last_mut() {
-            if self.definitions.contains_key(&key) && !scope.contains(&key) {
-                // First time in this rescue/ensure scope -- allow it
-                self.definitions
-                    .insert(key.clone(), DefLocation { line: def_line });
-                scope.push(key);
-                return;
+        // Handle rescue/ensure scope: first occurrence of a method key inside
+        // ANY rescue (or ensure) body is allowed to "redefine" — it's a different
+        // execution path. RuboCop uses @scopes[:rescue] / @scopes[:ensure] as
+        // global per-type sets (not per-block). So the first redefinition across
+        // ALL rescue blocks is forgiven, but the second is an offense.
+        if self.in_rescue_or_ensure && self.definitions.contains_key(&key) {
+            if let Some(&scope_type) = self.rescue_ensure_type_stack.last() {
+                let forgiven = match scope_type {
+                    RescueEnsureType::Rescue => &self.rescue_forgiven,
+                    RescueEnsureType::Ensure => &self.ensure_forgiven,
+                };
+                if !forgiven.contains(&key) {
+                    // First time this key is redefined in this scope type — forgive it
+                    self.definitions
+                        .insert(key.clone(), DefLocation { line: def_line });
+                    match scope_type {
+                        RescueEnsureType::Rescue => self.rescue_forgiven.push(key),
+                        RescueEnsureType::Ensure => self.ensure_forgiven.push(key),
+                    }
+                    return;
+                }
             }
         }
 
@@ -183,9 +235,17 @@ impl DupMethodVisitor<'_, '_> {
                 self.found_method(name, true, def_line, keyword_offset);
             } else if let Some(const_read) = receiver.as_constant_read_node() {
                 let const_name = std::str::from_utf8(const_read.name().as_slice()).unwrap_or("");
-                if self.scope_matches_const(const_name) {
+                if let Some(qualified_scope) = self.lookup_constant(const_name) {
+                    // Save current scope, temporarily replace with resolved scope
+                    let saved_scopes = self.scope_stack.clone();
+                    self.scope_stack.clear();
+                    self.scope_stack.push(ScopeEntry {
+                        name: qualified_scope,
+                        is_singleton: true,
+                    });
                     let keyword_offset = node.def_keyword_loc().start_offset();
                     self.found_method(name, true, def_line, keyword_offset);
+                    self.scope_stack = saved_scopes;
                 }
             }
         } else {
@@ -201,11 +261,28 @@ impl DupMethodVisitor<'_, '_> {
         self.scope_stack.last().is_some_and(|e| e.is_singleton)
     }
 
-    /// Check if a constant name matches the current scope's innermost name.
-    fn scope_matches_const(&self, const_name: &str) -> bool {
-        self.scope_stack
-            .last()
-            .is_some_and(|e| e.name == const_name)
+    /// Look up a constant name in the scope stack, matching RuboCop's `lookup_constant`.
+    /// Returns the fully qualified scope name if found, or None if not found.
+    fn lookup_constant(&self, const_name: &str) -> Option<String> {
+        // Walk the scope stack from innermost to outermost, looking for a match.
+        // Each scope entry may be a simple name ("A") or a constant path ("A::B").
+        // Check each component of the name.
+        for (i, entry) in self.scope_stack.iter().enumerate().rev() {
+            // Check if this entry's name matches directly or as a component
+            let parts: Vec<&str> = entry.name.split("::").collect();
+            for part in &parts {
+                if *part == const_name {
+                    // Found the matching constant. Build the qualified name
+                    // up to and including this scope entry.
+                    let mut result_parts = Vec::new();
+                    for e in &self.scope_stack[..=i] {
+                        result_parts.push(e.name.as_str());
+                    }
+                    return Some(result_parts.join("::"));
+                }
+            }
+        }
+        None
     }
 
     /// Process an alias node.
@@ -438,7 +515,7 @@ fn scope_creating_call_name(node: &ruby_prism::CallNode<'_>) -> Option<String> {
         if let Some(recv) = node.receiver() {
             if let Some(const_read) = recv.as_constant_read_node() {
                 let name = std::str::from_utf8(const_read.name().as_slice()).unwrap_or("");
-                if name == "Class" || name == "Module" {
+                if name == "Class" || name == "Module" || name == "Struct" {
                     return Some("__dynamic_class_new__".to_string());
                 }
             }
@@ -657,7 +734,7 @@ impl<'pr> Visit<'pr> for DupMethodVisitor<'_, '_> {
                     if let Some(const_read) = recv.as_constant_read_node() {
                         let recv_name =
                             std::str::from_utf8(const_read.name().as_slice()).unwrap_or("");
-                        if recv_name == "Class" || recv_name == "Module" {
+                        if recv_name == "Class" || recv_name == "Module" || recv_name == "Struct" {
                             let const_name =
                                 std::str::from_utf8(node.name().as_slice()).unwrap_or("");
                             self.scope_stack.push(ScopeEntry {
@@ -703,15 +780,21 @@ impl<'pr> Visit<'pr> for DupMethodVisitor<'_, '_> {
     }
 
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
-        self.rescue_ensure_stack.push(Vec::new());
+        let was = self.in_rescue_or_ensure;
+        self.in_rescue_or_ensure = true;
+        self.rescue_ensure_type_stack.push(RescueEnsureType::Rescue);
         ruby_prism::visit_rescue_node(self, node);
-        self.rescue_ensure_stack.pop();
+        self.rescue_ensure_type_stack.pop();
+        self.in_rescue_or_ensure = was;
     }
 
     fn visit_ensure_node(&mut self, node: &ruby_prism::EnsureNode<'pr>) {
-        self.rescue_ensure_stack.push(Vec::new());
+        let was = self.in_rescue_or_ensure;
+        self.in_rescue_or_ensure = true;
+        self.rescue_ensure_type_stack.push(RescueEnsureType::Ensure);
         ruby_prism::visit_ensure_node(self, node);
-        self.rescue_ensure_stack.pop();
+        self.rescue_ensure_type_stack.pop();
+        self.in_rescue_or_ensure = was;
     }
 }
 
@@ -732,4 +815,202 @@ fn class_or_module_name_from_constant(constant_path: ruby_prism::Node<'_>) -> St
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicateMethods, "cops/lint/duplicate_methods");
+
+    use crate::testutil::run_cop_full;
+
+    fn count_offenses(source: &[u8]) -> usize {
+        run_cop_full(&DuplicateMethods, source).len()
+    }
+
+    // Hypothesis tests for identifying FP/FN root causes
+
+    #[test]
+    fn test_rescue_ensure_global_scope() {
+        // RuboCop uses a global per-type scope for rescue/ensure.
+        // Nested defs inside `setup` are scoped as "setup.Foo#bar"
+        // so the two defs inside setup are the same key. Rescue forgives.
+        let n = count_offenses(b"class Foo\n  def bar; 1; end\n\n  def setup\n    def bar; 2; end\n  rescue\n    def bar; 3; end\n  end\nend\n");
+        assert_eq!(n, 0, "rescue should forgive first redefinition");
+    }
+
+    #[test]
+    fn test_struct_new_as_scope() {
+        // Struct.new do ... end assigned to constant should create a scope
+        let n =
+            count_offenses(b"A = Struct.new(:x) do\n  def foo; 1; end\n  def foo; 2; end\nend\n");
+        assert_eq!(n, 1, "Struct.new should create scope and detect duplicates");
+    }
+
+    #[test]
+    fn test_class_eval_with_string() {
+        // class_eval with a string argument (not block) should not create scope
+        let n = count_offenses(
+            b"class Foo\n  def bar; 1; end\nend\nFoo.class_eval(\"def baz; end\")\n",
+        );
+        assert_eq!(n, 0, "class_eval with string should not create scope");
+    }
+
+    #[test]
+    fn test_module_eval_scope() {
+        // module_eval should work same as class_eval
+        let n = count_offenses(b"Foo.module_eval do\n  def bar; 1; end\n  def bar; 2; end\nend\n");
+        assert_eq!(
+            n, 1,
+            "module_eval should create scope and detect duplicates"
+        );
+    }
+
+    #[test]
+    fn test_class_open_constant_path() {
+        // class A::B should be handled
+        let n = count_offenses(b"class A::B\n  def foo; 1; end\n  def foo; 2; end\nend\n");
+        assert_eq!(n, 1, "class with constant path should detect duplicates");
+    }
+
+    #[test]
+    fn test_dup_inside_class_with_block() {
+        // Methods inside `included do` or similar blocks should be ignored
+        let n = count_offenses(
+            b"class Foo\n  included do\n    def bar; 1; end\n    def bar; 2; end\n  end\nend\n",
+        );
+        assert_eq!(n, 0, "methods in DSL blocks should be ignored");
+    }
+
+    #[test]
+    fn test_sclass_inside_sclass() {
+        // class << self inside class has nested class B - different scopes
+        let n = count_offenses(b"class Foo\n  class << self\n    def bar; 1; end\n\n    class B\n      def bar; 2; end\n    end\n  end\nend\n");
+        assert_eq!(n, 0, "different scopes should not conflict");
+    }
+
+    #[test]
+    fn test_rescue_ensure_rubocop_behavior() {
+        // Ensure scope should forgive first redefinition of alias_method :save
+        let n = count_offenses(b"module FooTest\n  def make_save_always_fail\n    Foo.class_eval do\n      def failed_save\n        raise\n      end\n      alias_method :original_save, :save\n      alias_method :save, :failed_save\n    end\n\n    yield\n  ensure\n    Foo.class_eval do\n      alias_method :save, :original_save\n    end\n  end\nend\n");
+        assert_eq!(n, 0, "ensure scope should forgive first redefinition");
+    }
+
+    #[test]
+    fn test_rescue_global_type_scope() {
+        // RuboCop: @scopes[:rescue] is shared across ALL rescue blocks.
+        // Second rescue should NOT forgive a method already forgiven by first rescue.
+        let n = count_offenses(b"class Foo\n  def bar; 1; end\n\n  def test1\n    def bar; 2; end\n  rescue\n    def bar; 3; end\n  end\n\n  def test2\n    x = 1\n  rescue\n    def bar; 4; end\n  end\nend\n");
+        // bar is defined at line 2. In test1: nested bar is "test1.Foo#bar" (different key).
+        // In test2: nested bar is "test2.Foo#bar" (different key). No conflicts.
+        assert_eq!(n, 0, "different enclosing methods create different keys");
+    }
+
+    #[test]
+    fn test_multiple_rescue_same_method() {
+        // In the same enclosing scope (no def wrapper), multiple rescue blocks share type scope
+        // RuboCop uses @scopes[:rescue] globally - first forgiven, second is offense
+        let n = count_offenses(b"class Foo\n  def bar; 1; end\n\n  begin\n    x = 1\n  rescue\n    def bar; 2; end\n  end\n\n  begin\n    y = 1\n  rescue\n    def bar; 3; end\n  end\nend\n");
+        // bar defined at line 2. First rescue: bar redef forgiven. Second rescue: offense.
+        // RuboCop: @scopes[:rescue] = ["Foo#bar"] after first rescue
+        // Second rescue: key "Foo#bar" already in @scopes[:rescue], so offense.
+        assert_eq!(
+            n, 1,
+            "second rescue should report offense (global type scope)"
+        );
+    }
+
+    #[test]
+    fn test_constant_path_class_name() {
+        // class A::B::C should produce scope "A::B::C"
+        let n = count_offenses(b"class A::B::C\n  def foo; 1; end\n  def foo; 2; end\nend\n");
+        assert_eq!(
+            n, 1,
+            "class with deep constant path should detect duplicates"
+        );
+    }
+
+    #[test]
+    fn test_local_var_struct_new_isolated() {
+        // local = Struct.new do ... end should isolate scope (like Class.new)
+        let n = count_offenses(b"a = Struct.new(:x) do\n  def foo; 1; end\nend\nb = Struct.new(:x) do\n  def foo; 2; end\nend\n");
+        assert_eq!(n, 0, "local var Struct.new should isolate scopes");
+    }
+
+    #[test]
+    fn test_constant_write_struct_new_separate() {
+        // Two different constants with Struct.new should have separate scopes
+        let n = count_offenses(b"A = Struct.new(:x) do\n  def foo; 1; end\nend\nB = Struct.new(:y) do\n  def foo; 2; end\nend\n");
+        assert_eq!(n, 0, "separate Struct.new constants have separate scopes");
+    }
+
+    #[test]
+    fn test_reopened_struct_new_detects_dup() {
+        // Same constant Struct.new opened twice should detect dup
+        let n = count_offenses(b"A = Struct.new(:x) do\n  def foo; 1; end\nend\nA = Struct.new(:y) do\n  def foo; 2; end\nend\n");
+        assert_eq!(n, 1, "reopened Struct.new constant should detect dup");
+    }
+
+    #[test]
+    fn test_case_should_suppress() {
+        // Methods inside case/when should be suppressed (like if/unless)
+        let n = count_offenses(b"class Foo\n  case RUBY_VERSION\n  when '3.0'\n    def bar; 1; end\n  when '2.7'\n    def bar; 2; end\n  end\nend\n");
+        assert_eq!(n, 0, "case/when should suppress duplicate detection");
+    }
+
+    #[test]
+    fn test_def_inside_for_loop() {
+        // Methods inside for loops should NOT be suppressed by nitrocop
+        // (RuboCop only suppresses if_type? ancestors, not for loops)
+        let n = count_offenses(
+            b"class Foo\n  def bar; 1; end\n  for x in items\n    def bar; 2; end\n  end\nend\n",
+        );
+        assert_eq!(n, 1, "for loop should not suppress duplicate detection");
+    }
+
+    #[test]
+    fn test_class_eval_constant_path() {
+        // A::B.class_eval do should create scope "A::B"
+        let n = count_offenses(b"A::B.class_eval do\n  def foo; 1; end\n  def foo; 2; end\nend\n");
+        assert_eq!(
+            n, 1,
+            "class_eval with constant path should detect duplicates"
+        );
+    }
+
+    #[test]
+    fn test_constant_write_with_non_new_method() {
+        // A = SomeThing.build do...end should NOT create scope
+        // Only Class.new/Module.new/Struct.new create scopes
+        let n =
+            count_offenses(b"A = SomeThing.build do\n  def foo; 1; end\n  def foo; 2; end\nend\n");
+        // This is a plain block — methods inside should be ignored
+        assert_eq!(n, 0, "non-new method blocks should be ignored");
+    }
+
+    #[test]
+    fn test_class_reopened_with_sclass() {
+        // Reopened class with class << self should detect dups
+        let n = count_offenses(b"class A\n  class << self\n    def foo; 1; end\n  end\nend\nclass A\n  class << self\n    def foo; 2; end\n  end\nend\n");
+        assert_eq!(n, 1, "reopened class with sclass should detect dups");
+    }
+
+    #[test]
+    fn test_mixed_def_self_and_sclass() {
+        // def self.foo and class << self; def foo should be same scope
+        let n = count_offenses(
+            b"class A\n  def self.foo; 1; end\n  class << self\n    def foo; 2; end\n  end\nend\n",
+        );
+        assert_eq!(n, 1, "def self.foo and sclass def foo should be same scope");
+    }
+
+    #[test]
+    fn test_def_const_outer_scope() {
+        // def M.foo inside class A within module M should resolve to M.foo
+        let n = count_offenses(
+            b"module M\n  class A\n    def M.foo; 1; end\n    def M.foo; 2; end\n  end\nend\n",
+        );
+        assert_eq!(n, 1, "def M.foo should resolve M to outer scope");
+    }
+
+    #[test]
+    fn test_def_const_and_self_same_class() {
+        // def A.foo and def self.foo inside class A should be same
+        let n = count_offenses(b"class A\n  def A.foo; 1; end\n  def self.foo; 2; end\nend\n");
+        assert_eq!(n, 1, "def A.foo and def self.foo should be same");
+    }
 }

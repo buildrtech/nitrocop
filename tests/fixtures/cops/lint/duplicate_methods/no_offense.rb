@@ -198,3 +198,29 @@ class WithDelegate
   end
   delegate :process, to: :bar
 end
+
+# Struct.new assigned to different constants are separate scopes
+Alpha = Struct.new(:x) do
+  def call; 1; end
+end
+Beta = Struct.new(:y) do
+  def call; 2; end
+end
+
+# Local Struct.new isolates scope
+a = Struct.new(:x) do
+  def call; 1; end
+end
+b = Struct.new(:y) do
+  def call; 2; end
+end
+
+# case/when method definitions are suppressed
+class CaseVariant
+  case RUBY_VERSION
+  when '3.0'
+    def bar; 1; end
+  when '2.7'
+    def bar; 2; end
+  end
+end
