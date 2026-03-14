@@ -25,6 +25,18 @@ use crate::parse::source::SourceFile;
 /// - `.freeze` on static values (e.g., `"foo".freeze`)
 ///
 /// All added to match RuboCop's `recursive_literal_or_const?` behavior.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// Corpus oracle reported FP=2, FN=86.
+///
+/// FP=2: Both in procore-oss/blueprinter `spec/units/blueprint_validator_spec.rb:26`
+/// and `:35`. Source file not in local corpus. Cannot diagnose without concrete
+/// reproduction. Possible cause: `allow(X).to receive(:y) { complex_value }` where
+/// our `is_static_value` incorrectly returns true for a dynamic expression.
+///
+/// FN=86: Large FN count suggests missing detection patterns. No example locations
+/// available in the current oracle run to diagnose specific patterns.
 pub struct ReturnFromStub;
 impl Cop for ReturnFromStub {
     fn name(&self) -> &'static str {

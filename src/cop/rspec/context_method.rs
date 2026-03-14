@@ -4,6 +4,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-14)
+///
+/// Corpus oracle reported FP=1, FN=9.
+///
+/// FP=1: No example locations available (older corpus run without full example
+/// storage). Cannot diagnose without specific file/line context. The cop
+/// checks for `describe`/`context`/`feature` method name patterns — possible
+/// FP causes: a non-RSpec library using these method names with a string
+/// description, or a receiver-qualified call. No code fix attempted without
+/// concrete reproduction.
+///
+/// FN=9: No example locations available. Root cause unknown.
 pub struct ContextMethod;
 
 impl Cop for ContextMethod {

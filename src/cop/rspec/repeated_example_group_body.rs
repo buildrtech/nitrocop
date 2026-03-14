@@ -26,6 +26,22 @@ use std::hash::{Hash, Hasher};
 ///   list). Example groups inside non-RSpec blocks (e.g. InSpec's `control`)
 ///   were not compared. Fixed by checking siblings inside ANY block body,
 ///   matching RuboCop's on_begin approach.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// Corpus oracle reported FP=2, FN=28.
+///
+/// FP=2: Both in rom-rb/rom `core/spec/unit/rom/commands/pre_and_post_processors_spec.rb`
+/// at lines 100 and 148. Two `context` blocks with bodies containing
+/// `Class.new(ROM::Commands::Create[:memory]) do result :many; before :prepare;
+/// after :finalize; def execute(tuples)... end end`. Both contexts start with identical
+/// `subject(:command) do Class.new(...) do result :many; before :prepare; after :finalize;
+/// def execute(tuples)` but the `def execute` method bodies are cut off in the corpus
+/// context. Source file not in local corpus — cannot inspect full bodies.
+/// Root cause hypothesis: the `def execute` bodies differ in some way that the
+/// AstHashVisitor does not distinguish. Likely a missing hash handler for a node type
+/// that appears in the `execute` body (e.g., multi-assign, splat, or complex literal).
+/// No fix attempted without concrete reproduction.
 pub struct RepeatedExampleGroupBody;
 
 impl Cop for RepeatedExampleGroupBody {
