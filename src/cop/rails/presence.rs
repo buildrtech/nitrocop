@@ -3,6 +3,35 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/Presence checks for code that can use `Object#presence`.
+///
+/// ## Investigation findings (2026-03-14)
+///
+/// **FP root causes (9 FPs):**
+/// 1. `th.present? ? th : (default || other)` — else branch is a `ParenthesesNode`
+///    in Prism (= `begin` node in parser gem). RuboCop's NodePattern `$!begin`
+///    excludes it; we were not checking for this. Fixed by skipping when the
+///    "other" branch is a `ParenthesesNode`.
+/// 2. `value.present? ? value&.url : nil` and `build_cloud&.destroy if build_cloud.present?`
+///    — the chain value call uses safe navigation (`&.`). RuboCop's NodePattern
+///    `$(send _recv ...)` matches only `send` (not `csend`), so it doesn't flag
+///    safe-nav chains. Fixed by skipping in `check_chain_pattern` when the call
+///    uses `&.`.
+/// 3. `response[:reason]&.present? ? response[:reason] : nil` — the `present?` check
+///    itself uses safe navigation. RuboCop's pattern only matches `send` for the
+///    predicate, not `csend`. Fixed by skipping in `extract_presence_check` when
+///    the predicate call uses `&.`.
+/// 4. `Utilities.unparen(str) unless Utilities.blank?(str)` — `blank?` is called
+///    with an argument. RuboCop's pattern `(send $_recv :blank?)` requires NO args.
+///    Fixed by skipping in `extract_presence_check` when `present?`/`blank?` has args.
+///
+/// **FN root causes (5 FNs):**
+/// All were chain-pattern cases (e.g., `a.blank? ? nil : a.sum(&:real_costs)`,
+/// `a.map(&:method) if a.present?`). Our code gated Pattern 2 on
+/// `VersionChanged >= 2.34` from the cop config, but many repos don't have
+/// `VersionChanged` in their rubocop config (it defaults to "" → 0.0), causing
+/// Pattern 2 to be entirely skipped. Fixed by removing the VersionChanged gate —
+/// `VersionChanged` in YAML is informational metadata, not a runtime switch.
 pub struct Presence;
 
 impl Cop for Presence {
@@ -30,7 +59,7 @@ impl Cop for Presence {
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
         _parse_result: &ruby_prism::ParseResult<'_>,
-        config: &CopConfig,
+        _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
@@ -86,7 +115,6 @@ impl Cop for Presence {
                     ElseNodeResult::Single(n) => Some(n),
                     _ => None,
                 },
-                config,
             ));
             return;
         }
@@ -135,7 +163,6 @@ impl Cop for Presence {
                     ElseNodeResult::Single(n) => Some(n),
                     _ => None,
                 },
-                config,
             ));
         }
     }
@@ -220,7 +247,6 @@ fn check_presence_patterns(
     else_is_ignored: bool,
     then_node: Option<&ruby_prism::Node<'_>>,
     else_node: Option<&ruby_prism::Node<'_>>,
-    config: &CopConfig,
 ) -> Vec<Diagnostic> {
     let (value_text, nil_text) = if is_present {
         (then_text, else_text)
@@ -231,6 +257,16 @@ fn check_presence_patterns(
     // Pattern 1: value branch matches receiver exactly
     if value_text == receiver_text {
         if nil_text != "nil" {
+            // RuboCop's NodePattern `$!begin` excludes `begin` nodes (parenthesized
+            // expressions) as the "other" branch. In Prism, `(expr)` is a ParenthesesNode.
+            // Skip when the other node is parenthesized.
+            let other_node = if is_present { else_node } else { then_node };
+            if let Some(other) = other_node {
+                if other.as_parentheses_node().is_some() || other.as_begin_node().is_some() {
+                    return Vec::new();
+                }
+            }
+
             // Check if the "other" branch is an ignored node (if/rescue/while)
             let other_is_ignored = if is_present {
                 // other = else branch
@@ -261,11 +297,9 @@ fn check_presence_patterns(
     // Pattern 2: value branch is a method call on receiver, nil branch is nil/absent.
     // e.g. `a.present? ? a.foo : nil` -> `a.presence&.foo`
     // e.g. `a.foo if a.present?` -> `a.presence&.foo`
-    // This pattern was added in rubocop-rails 2.34. Older versions don't flag it.
-    // We gate on VersionChanged: if the installed gem's config has VersionChanged >= 2.34,
-    // the chain pattern exists; otherwise skip.
-    let version_changed: f64 = config.get_str("VersionChanged", "").parse().unwrap_or(0.0);
-    if nil_text == "nil" && version_changed >= 2.34 {
+    // Note: `VersionChanged: 2.34` in the YAML is informational metadata only;
+    // we always apply Pattern 2 to match the current gem behavior.
+    if nil_text == "nil" {
         let value_node = if is_present { then_node } else { else_node };
         if let Some(vn) = value_node {
             if let Some(diags) = check_chain_pattern(cop, source, node, receiver_text, vn) {
@@ -289,9 +323,19 @@ fn check_chain_pattern(
     if is_ignored_chain_node(&call) {
         return None;
     }
-    // In RuboCop's parser gem, a call with a block is a `block` node (not `send`),
-    // so the NodePattern `$(send _recv ...)` doesn't match it. Skip blocks.
-    if call.block().is_some() {
+    // In RuboCop's parser gem, a call with a literal block (`{ }` / `do..end`) is a
+    // `block` node (not `send`), so the NodePattern `$(send _recv ...)` doesn't match
+    // it. Skip calls with literal blocks. Block-pass arguments (`&:symbol`) are fine
+    // because in the parser gem they remain part of the `send` node.
+    if call
+        .block()
+        .is_some_and(|b| b.as_block_node().is_some() || b.as_lambda_node().is_some())
+    {
+        return None;
+    }
+    // RuboCop's pattern `$(send _recv ...)` matches only regular `send`, not `csend`
+    // (safe navigation `&.`). Skip when the value call itself uses `&.`.
+    if is_safe_nav(&call) {
         return None;
     }
     let call_recv = call.receiver()?;
@@ -301,15 +345,25 @@ fn check_chain_pattern(
     }
     let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("?");
     let mut replacement = format!("{receiver_text}.presence&.{method_name}");
+
+    // Build argument list: regular args from ArgumentsNode + block-pass from block field.
+    // In Prism, `&:sym` is a BlockArgumentNode stored in `call.block()`, not in arguments.
+    // In the parser gem, `&:sym` appears in `chain.arguments`, so it's included in the
+    // replacement. We must handle both to match RuboCop's output.
+    let mut args_parts: Vec<String> = Vec::new();
     if let Some(args) = call.arguments() {
-        let args_text = args
-            .arguments()
-            .iter()
-            .map(|a| node_text(source, &a))
-            .collect::<Vec<_>>()
-            .join(", ");
+        for arg in args.arguments().iter() {
+            args_parts.push(node_text(source, &arg));
+        }
+    }
+    if let Some(block) = call.block() {
+        if let Some(ba) = block.as_block_argument_node() {
+            args_parts.push(node_text(source, &ba.as_node()));
+        }
+    }
+    if !args_parts.is_empty() {
         replacement.push('(');
-        replacement.push_str(&args_text);
+        replacement.push_str(&args_parts.join(", "));
         replacement.push(')');
     }
     Some(emit_offense(cop, source, if_node, &replacement))
@@ -422,6 +476,9 @@ fn is_ignored_chain_node(call: &ruby_prism::CallNode<'_>) -> bool {
 
 /// Extract the receiver text and whether it's a `present?` (true) or `blank?` (false) check.
 /// Also handles negation: `!a.present?` => (a, false), `!a.blank?` => (a, true).
+///
+/// Returns None when the call uses safe navigation (`&.`) or has arguments, because
+/// RuboCop's NodePattern only matches plain `send` (not `csend`) with no arguments.
 fn extract_presence_check(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
@@ -432,6 +489,10 @@ fn extract_presence_check(
     if method == b"!" {
         let inner = call.receiver()?;
         let inner_call = inner.as_call_node()?;
+        // Skip safe-navigation and calls with arguments on the inner call.
+        if is_safe_nav(&inner_call) || inner_call.arguments().is_some() {
+            return None;
+        }
         let inner_method = inner_call.name().as_slice();
         if inner_method == b"present?" {
             let recv = inner_call.receiver()?;
@@ -441,6 +502,12 @@ fn extract_presence_check(
             let recv = inner_call.receiver()?;
             return Some((node_text(source, &recv), true));
         }
+        return None;
+    }
+
+    // Skip safe-navigation (`a&.present?`) and calls with arguments (`blank?(str)`).
+    // RuboCop's pattern only matches `(send $_recv :present?)` — no `csend`, no args.
+    if is_safe_nav(&call) || call.arguments().is_some() {
         return None;
     }
 
@@ -455,6 +522,12 @@ fn extract_presence_check(
     }
 
     None
+}
+
+/// Returns true if the call uses safe navigation (`&.`).
+fn is_safe_nav(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.call_operator_loc()
+        .is_some_and(|loc| loc.as_slice() == b"&.")
 }
 
 #[cfg(test)]

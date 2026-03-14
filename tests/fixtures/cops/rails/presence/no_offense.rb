@@ -31,3 +31,21 @@ a[:key] = value if a.present?
 
 # chain with block should not be flagged (block node in parser gem)
 a.map { |x| x } if a.present?
+
+# else branch is a parenthesized expression — RuboCop $!begin excludes it
+th.present? ? th : (default || other)
+if method.present?
+  method
+else
+  (request.post? ? 'post' : 'get')
+end
+
+# safe navigation on the chain value — RuboCop only matches `send`, not `csend`
+value.present? ? value&.url : nil
+build_cloud&.destroy if build_cloud.present?
+
+# safe navigation on the predicate — RuboCop only matches `send`, not `csend`
+response[:reason]&.present? ? response[:reason] : nil
+
+# blank?/present? with arguments — RuboCop pattern requires no args
+Utilities.unparen(str) unless Utilities.blank?(str)

@@ -14,3 +14,7 @@ reply_to_post.present? ? reply_to_post.post_number : nil
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/Presence: Use `reply_to_post.presence&.post_number` instead of `reply_to_post.present? ? reply_to_post.post_number : nil`.
 !a.blank? ? a.foo : nil
 ^^^^^^^^^^^^^^^^^^^^^^^ Rails/Presence: Use `a.presence&.foo` instead of `!a.blank? ? a.foo : nil`.
+items.blank? ? nil : items.sum(&:cost)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/Presence: Use `items.presence&.sum(&:cost)` instead of `items.blank? ? nil : items.sum(&:cost)`.
+records.map(&:name) if records.present?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/Presence: Use `records.presence&.map(&:name)` instead of `records.map(&:name) if records.present?`.
