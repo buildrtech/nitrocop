@@ -20,6 +20,10 @@ use crate::parse::source::SourceFile;
 /// meaning it checks the second argument regardless of the first argument's type (constant,
 /// string, method call, etc.). Previously we required the first argument to be a constant,
 /// causing 63 FNs on `describe "StringName", "non-method"` and similar patterns.
+///
+/// Prism pitfall: `::RSpec.describe` uses `ConstantPathNode`, not `ConstantReadNode`.
+/// The receiver check must accept both so qualified top-level `RSpec` receivers are
+/// treated the same as bare `RSpec.describe`.
 pub struct DescribeMethod;
 
 impl Cop for DescribeMethod {
@@ -193,13 +197,42 @@ impl DescribeMethod {
 
 /// Check if a call's receiver is `RSpec` (for `RSpec.describe`).
 fn is_rspec_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
-    call.receiver()
-        .and_then(|r| r.as_constant_read_node())
-        .is_some_and(|c| c.name().as_slice() == b"RSpec")
+    call.receiver().is_some_and(|recv| {
+        if let Some(cr) = recv.as_constant_read_node() {
+            cr.name().as_slice() == b"RSpec"
+        } else if let Some(cp) = recv.as_constant_path_node() {
+            cp.name().is_some_and(|n| n.as_slice() == b"RSpec") && cp.parent().is_none()
+        } else {
+            false
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DescribeMethod, "cops/rspec/describe_method");
+
+    #[test]
+    fn qualified_rspec_receiver_offense() {
+        let source = b"::RSpec.describe \"Reports\", \"summary page\" do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeMethod, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected an offense for ::RSpec.describe with a non-method description, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn qualified_rspec_receiver_no_offense_for_method_name() {
+        let source = b"::RSpec.describe \"MyService\", \".run\" do\nend\n";
+        let diags = crate::testutil::run_cop_full(&DescribeMethod, source);
+        assert!(
+            diags.is_empty(),
+            "Expected no offense for ::RSpec.describe with a method-like description, got: {:?}",
+            diags
+        );
+    }
 }
