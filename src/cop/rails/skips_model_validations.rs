@@ -34,6 +34,13 @@ use crate::parse::source::SourceFile;
 /// 6. **FN: `good_touch?` should only match `send`, not `csend`** — RuboCop's pattern uses
 ///    `(send ...)` not `(call ...)`, so `obj&.touch(true)` is NOT exempted. Added check for
 ///    safe navigation operator.
+///
+/// ## Investigation (2026-03-15)
+///
+/// **FP root cause (5 FP):** RuboCop disable comments using `Rails::SkipsModelValidations`
+/// (double-colon separator) were not being honored — nitrocop only recognized `Rails/SkipsModelValidations`
+/// (slash separator). Fixed in `src/parse/directives.rs` by normalizing `::` to `/` when
+/// parsing disable directives. This is a general fix affecting all cops.
 pub struct SkipsModelValidations;
 
 const SKIP_METHODS: &[&[u8]] = &[
