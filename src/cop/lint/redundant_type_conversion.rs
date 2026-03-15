@@ -3,13 +3,25 @@ use crate::cop::node_type::{
     INTERPOLATED_STRING_NODE, INTERPOLATED_SYMBOL_NODE, KEYWORD_HASH_NODE, RATIONAL_NODE,
     STRING_NODE, SYMBOL_NODE,
 };
-use crate::cop::util::constant_name;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 /// Checks for redundant type conversions like `"text".to_s`, `:sym.to_sym`,
 /// `42.to_i`, `[].to_a`, etc.
+///
+/// ## Investigation findings
+///
+/// FP fix: `is_constructor` and `is_kernel_method` used `constant_name()` which
+/// returns the last segment for both `ConstantReadNode` (bare `Array`) and
+/// `ConstantPathNode` (qualified `Native::Array`). This caused false positives
+/// for qualified paths like `Native::Array.new(x).to_a` since `Native::Array`
+/// is not Ruby's `Array`. Fixed by checking `as_constant_read_node()` directly
+/// instead of using `constant_name()`, so only bare constants match.
+///
+/// FN fix: Missing `to_json` as a typed method that always returns a String.
+/// RuboCop's `TYPED_METHODS` maps `to_s` to `[:inspect, :to_json]`, but we
+/// only checked `inspect`. Added `to_json` to the chained typed method check.
 pub struct RedundantTypeConversion;
 
 impl Cop for RedundantTypeConversion {
@@ -77,6 +89,7 @@ impl Cop for RedundantTypeConversion {
                     || is_constructor(&receiver, b"String", b"new")
                     || is_chained_method(&receiver, b"to_s")
                     || is_chained_method(&receiver, b"inspect")
+                    || is_chained_method(&receiver, b"to_json")
             }
             b"to_sym" => {
                 receiver.as_symbol_node().is_some()
@@ -141,8 +154,20 @@ fn is_constructor(node: &ruby_prism::Node<'_>, class_name: &[u8], method: &[u8])
     if let Some(call) = node.as_call_node() {
         if call.name().as_slice() == method {
             if let Some(recv) = call.receiver() {
-                if let Some(name) = constant_name(&recv) {
-                    return name == class_name;
+                // Only match bare constants (ConstantReadNode), not qualified paths
+                // (ConstantPathNode). `Array.new` is redundant with `.to_a`, but
+                // `Native::Array.new` is a different class entirely.
+                // Also match cbase-prefixed constants like `::Array.new`.
+                if let Some(cr) = recv.as_constant_read_node() {
+                    return cr.name().as_slice() == class_name;
+                }
+                if let Some(cp) = recv.as_constant_path_node() {
+                    // Match `::Array` (cbase prefix, no parent namespace)
+                    if cp.parent().is_none() {
+                        if let Some(name) = cp.name() {
+                            return name.as_slice() == class_name;
+                        }
+                    }
                 }
             }
         }
@@ -162,13 +187,22 @@ fn is_kernel_method(node: &ruby_prism::Node<'_>, method: &[u8]) -> bool {
         if call.name().as_slice() != method {
             return false;
         }
-        // Must be receiverless or Kernel.Method
+        // Must be receiverless or Kernel.Method or ::Kernel.Method
         if call.receiver().is_none() {
             return true;
         }
         if let Some(recv) = call.receiver() {
-            if let Some(name) = constant_name(&recv) {
-                return name == b"Kernel";
+            // Match bare `Kernel`
+            if let Some(cr) = recv.as_constant_read_node() {
+                return cr.name().as_slice() == b"Kernel";
+            }
+            // Match `::Kernel` (cbase prefix)
+            if let Some(cp) = recv.as_constant_path_node() {
+                if cp.parent().is_none() {
+                    if let Some(name) = cp.name() {
+                        return name.as_slice() == b"Kernel";
+                    }
+                }
             }
         }
     }
