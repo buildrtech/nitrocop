@@ -3,6 +3,21 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Enforces safe navigation chains length to not exceed the configured maximum.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// **Root cause of 28 FPs:** nitrocop counted `&.` operators across block boundaries,
+/// but RuboCop's Parser gem AST wraps `a&.method { block }` in a `block` node that
+/// breaks the csend ancestor chain. In Prism, blocks are children of CallNode, so
+/// naive receiver-chain walking doesn't see the boundary.
+///
+/// **Fix:** When counting the safe navigation chain downward through receivers,
+/// if a CallNode has a block, count that `&.` but stop recursing into its receiver.
+/// This matches RuboCop's behavior where block nodes break `each_ancestor` traversal.
+///
+/// **Message fix:** Changed from "Do not chain more than N safe navigation operators.
+/// (found M)" to "Avoid safe navigation chains longer than N calls." to match RuboCop.
 pub struct SafeNavigationChainLength;
 
 impl Cop for SafeNavigationChainLength {
@@ -52,10 +67,7 @@ impl Cop for SafeNavigationChainLength {
             source,
             line,
             column,
-            format!(
-                "Do not chain more than {} safe navigation operators. (found {})",
-                max, chain_len
-            ),
+            format!("Avoid safe navigation chains longer than {} calls.", max),
         ));
     }
 }
@@ -79,7 +91,34 @@ fn count_safe_nav_chain(node: &ruby_prism::Node<'_>) -> usize {
     }
 
     let recv_count = match call.receiver() {
-        Some(r) => count_safe_nav_chain(&r),
+        Some(r) => count_safe_nav_chain_receiver(&r),
+        None => 0,
+    };
+
+    1 + recv_count
+}
+
+/// Count safe navigation chain length walking down through receivers.
+/// A block-bearing `&.` call acts as a chain boundary — in RuboCop's Parser AST,
+/// `a&.method { block }` wraps the csend in a block node, which stops the
+/// ancestor traversal. So we don't count it or recurse past it.
+fn count_safe_nav_chain_receiver(node: &ruby_prism::Node<'_>) -> usize {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return 0,
+    };
+
+    if !is_safe_nav(&call) {
+        return 0;
+    }
+
+    // A block on the receiver breaks the chain — stop counting here.
+    if call.block().is_some() {
+        return 0;
+    }
+
+    let recv_count = match call.receiver() {
+        Some(r) => count_safe_nav_chain_receiver(&r),
         None => 0,
     };
 
