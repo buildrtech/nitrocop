@@ -93,3 +93,59 @@ result = foo \
   + bar
 x = a \
     || b
+
+# Compound assignments with proper spacing
+x += 1
+y -= 2
+z *= 3
+a /= 4
+b %= 5
+c ||= 0
+d &&= true
+e **= 2
+f <<= 1
+g >>= 1
+h ^= 0xff
+i |= 0x01
+j &= 0xff
+
+# Match operators with proper spacing
+x =~ /abc/
+y !~ /abc/
+
+# Class inheritance with proper spacing
+class Foo < Bar
+end
+
+# Singleton class with proper spacing
+class << self
+end
+
+# Rescue => with proper spacing
+begin
+rescue Exception => e
+end
+
+# Triple equals with proper spacing
+Hash === z
+
+# Setter call with proper spacing
+x.y = 2
+
+# Ternary operator with proper spacing
+x == 0 ? 1 : 2
+
+# Rational literal (no_space style default for /)
+x = 2/3r
+
+# Ranges should not be flagged
+a, b = (1..2), (1...3)
+
+# Scope operator should not be flagged
+Zlib::GzipWriter
+
+# Operator symbols should not be flagged
+func(:-)
+
+# Tabs around operator are acceptable
+a = 1

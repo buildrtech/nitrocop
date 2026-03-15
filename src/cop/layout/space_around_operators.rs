@@ -6,6 +6,18 @@ use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Layout/SpaceAroundOperators checks that operators have space around them.
+///
+/// Investigation findings (2026-03-15):
+/// - Original implementation had 190 FPs and 4,362 FNs.
+/// - The massive FN count came from missing AST-based detection for:
+///   compound assignments (+=, -=, *=, ||=, &&=, etc.), match operators (=~, !~),
+///   class inheritance (<), singleton class (<<), rescue =>, === operator,
+///   setter methods (x.y = 2), and exponent ** with spaces (no_space default).
+/// - FPs came from the text scanner incorrectly flagging edge cases.
+/// - Fix: expanded AST visitor to cover all operator types that RuboCop checks,
+///   including write nodes (assignments), class/sclass operators, rescue assoc,
+///   pattern matching operators (alternation |, capture =>), and rational literals.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -34,7 +46,19 @@ impl<'pr> Visit<'pr> for ExclusionCollector {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         let name = node.name().as_slice();
         // Check if the method name contains operator characters that this cop checks
-        let is_operator_name = name.contains(&b'=') || name.contains(&b'!') || name.contains(&b'>');
+        let is_operator_name = name.contains(&b'=')
+            || name.contains(&b'!')
+            || name.contains(&b'>')
+            || name.contains(&b'<')
+            || name.contains(&b'+')
+            || name.contains(&b'-')
+            || name.contains(&b'*')
+            || name.contains(&b'/')
+            || name.contains(&b'%')
+            || name.contains(&b'&')
+            || name.contains(&b'|')
+            || name.contains(&b'^')
+            || name.contains(&b'~');
         if is_operator_name {
             let loc = node.name_loc();
             self.def_method_name_ranges
@@ -66,7 +90,7 @@ impl Cop for SpaceAroundOperators {
         let allow_for_alignment = config.get_bool("AllowForAlignment", true);
         let enforced_style_exponent =
             config.get_str("EnforcedStyleForExponentOperator", "no_space");
-        let _enforced_style_rational =
+        let enforced_style_rational =
             config.get_str("EnforcedStyleForRationalLiterals", "no_space");
 
         // Collect default parameter `=` offsets and operator method name ranges
@@ -78,18 +102,23 @@ impl Cop for SpaceAroundOperators {
         let default_param_offsets = collector.default_param_offsets;
         let def_name_ranges = collector.def_method_name_ranges;
 
-        // AST-based check for binary operators (+, -, *, /, %, &, |, ^, <<, >>,
-        // <, >, <=, >=, <=>) and logical operators (&&, ||).
-        let mut op_checker = BinaryOperatorChecker {
+        let exponent_no_space = enforced_style_exponent == "no_space";
+        let rational_no_space = enforced_style_rational == "no_space";
+
+        // AST-based check for binary operators, assignments, and other operator nodes.
+        let mut op_checker = OperatorChecker {
             cop: self,
             source,
             diagnostics: Vec::new(),
             corrections: Vec::new(),
             has_corrections: corrections.is_some(),
-            exponent_no_space: enforced_style_exponent == "no_space",
+            exponent_no_space,
+            rational_no_space,
             allow_for_alignment,
+            reported_offsets: HashSet::new(),
         };
         op_checker.visit(&parse_result.node());
+        let reported_offsets = op_checker.reported_offsets.clone();
         diagnostics.extend(op_checker.diagnostics);
         if let Some(ref mut corr) = corrections {
             corr.extend(op_checker.corrections);
@@ -112,6 +141,11 @@ impl Cop for SpaceAroundOperators {
             if i + 1 < len && code_map.is_code(i + 1) {
                 let two = &bytes[i..i + 2];
                 if two == b"==" || two == b"!=" || two == b"=>" {
+                    // Skip if already reported by AST visitor
+                    if reported_offsets.contains(&i) {
+                        i += 2;
+                        continue;
+                    }
                     // Skip ===
                     if two == b"==" && i + 2 < len && bytes[i + 2] == b'=' {
                         i += 3;
@@ -180,6 +214,11 @@ impl Cop for SpaceAroundOperators {
 
             // Single = (not ==, !=, =>, =~, <=, >=, or part of +=/-=/etc.)
             if bytes[i] == b'=' {
+                // Skip if already reported by AST visitor
+                if reported_offsets.contains(&i) {
+                    i += 1;
+                    continue;
+                }
                 // Skip =~ and =>
                 if i + 1 < len && (bytes[i + 1] == b'~' || bytes[i + 1] == b'>') {
                     i += 2;
@@ -273,17 +312,24 @@ const BINARY_OPERATORS: &[&[u8]] = &[
     b"<=>",
 ];
 
-struct BinaryOperatorChecker<'a> {
+/// Additional operators detected via CallNode (match operators, ===)
+const MATCH_OPERATORS: &[&[u8]] = &[b"=~", b"!~", b"==="];
+
+struct OperatorChecker<'a> {
     cop: &'a SpaceAroundOperators,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
     corrections: Vec<crate::correction::Correction>,
     has_corrections: bool,
     exponent_no_space: bool,
+    rational_no_space: bool,
     allow_for_alignment: bool,
+    /// Track byte offsets where offenses have been reported to avoid duplicates
+    /// between the AST visitor and the text scanner.
+    reported_offsets: HashSet<usize>,
 }
 
-impl BinaryOperatorChecker<'_> {
+impl OperatorChecker<'_> {
     /// Check if the same operator text appears at the same byte column on an
     /// adjacent non-empty, non-comment line. Uses a two-pass approach matching
     /// RuboCop's `PrecedingFollowingAlignment`:
@@ -392,107 +438,50 @@ impl BinaryOperatorChecker<'_> {
         false
     }
 
+    /// Check operator spacing for a "should have space" operator.
+    /// Reports missing space or extra space around the operator.
     fn check_operator_spacing(&mut self, op_loc: &ruby_prism::Location<'_>) {
         let start = op_loc.start_offset();
         let end = op_loc.end_offset();
         let bytes = self.source.as_bytes();
         let op_str = std::str::from_utf8(op_loc.as_slice()).unwrap_or("??");
 
-        // Skip ** when exponent style is no_space
+        // Skip ** when exponent style is no_space — no-space offenses are handled by
+        // check_no_space_operator instead.
         if op_str == "**" && self.exponent_no_space {
             return;
         }
 
-        let space_before = start > 0 && bytes[start - 1] == b' ';
-        let space_after = end < bytes.len() && bytes[end] == b' ';
-        let newline_after = end >= bytes.len() || bytes[end] == b'\n' || bytes[end] == b'\r';
-
-        // Check for multiple spaces (extra whitespace before or after operator)
-        let multi_space_before = start >= 2 && bytes[start - 1] == b' ' && bytes[start - 2] == b' ';
-        let multi_space_after =
-            end + 1 < bytes.len() && bytes[end] == b' ' && bytes[end + 1] == b' ';
-
-        if multi_space_before || multi_space_after {
-            // Skip if operator is at start of line (spaces are indentation, not extra spacing)
-            if multi_space_before {
-                let mut ls = start;
-                while ls > 0 && bytes[ls - 1] != b'\n' {
-                    ls -= 1;
-                }
-                if bytes[ls..start].iter().all(|&b| b == b' ' || b == b'\t') {
-                    return;
-                }
-            }
-
-            // AllowForAlignment: skip if aligned with same operator on adjacent line
-            if self.allow_for_alignment && self.is_aligned_with_adjacent(start, op_loc.as_slice()) {
+        // Skip / for rational literals when rational style is no_space
+        // (rational no-space offenses handled separately)
+        if op_str == "/" && self.rational_no_space {
+            // Check if the right operand is a rational literal (ends with 'r')
+            if self.is_rational_division(end) {
                 return;
             }
+        }
 
-            // Skip if trailing space extends to a comment on the same line
-            // (RuboCop: `return if comment && with_space.last_column == comment.loc.column`)
-            if multi_space_after {
-                let mut p = end;
-                while p < bytes.len() && bytes[p] == b' ' {
-                    p += 1;
-                }
-                if p < bytes.len() && bytes[p] == b'#' {
-                    return;
-                }
-            }
+        let has_space_before = start > 0 && (bytes[start - 1] == b' ' || bytes[start - 1] == b'\t');
+        let has_space_after = end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t');
+        let newline_after = end >= bytes.len() || bytes[end] == b'\n' || bytes[end] == b'\r';
 
-            // Find the extent of extra spaces before the operator
-            let ws_start_before = if multi_space_before {
-                let mut s = start - 1;
-                while s > 0 && bytes[s - 1] == b' ' {
-                    s -= 1;
-                }
-                s
-            } else {
-                start
-            };
-            // Find the extent of extra spaces after the operator
-            let ws_end_after = if multi_space_after {
-                let mut e = end;
-                while e < bytes.len() && bytes[e] == b' ' {
-                    e += 1;
-                }
-                e
-            } else {
-                end
-            };
-            let (line, column) = self.source.offset_to_line_col(start);
-            let mut diag = self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                format!("Operator `{op_str}` should be surrounded by a single space."),
-            );
-            if self.has_corrections {
-                // Replace multi-space before with single space
-                if multi_space_before {
-                    self.corrections.push(crate::correction::Correction {
-                        start: ws_start_before,
-                        end: start,
-                        replacement: " ".to_string(),
-                        cop_name: self.cop.name(),
-                        cop_index: 0,
-                    });
-                }
-                // Replace multi-space after with single space
-                if multi_space_after {
-                    self.corrections.push(crate::correction::Correction {
-                        start: end,
-                        end: ws_end_after,
-                        replacement: " ".to_string(),
-                        cop_name: self.cop.name(),
-                        cop_index: 0,
-                    });
-                }
-                diag.corrected = true;
+        // Accept tabs as spacing (RuboCop: "accepts operator surrounded by tabs")
+        if has_space_before && (has_space_after || newline_after) {
+            // Check for multiple spaces (extra whitespace before or after operator)
+            let multi_space_before =
+                start >= 2 && bytes[start - 1] == b' ' && bytes[start - 2] == b' ';
+            let multi_space_after =
+                end + 1 < bytes.len() && bytes[end] == b' ' && bytes[end + 1] == b' ';
+
+            if multi_space_before || multi_space_after {
+                self.check_extra_space(start, end, op_str, op_loc.as_slice());
             }
-            self.diagnostics.push(diag);
-        } else if !space_before || (!space_after && !newline_after) {
+            return;
+        }
+
+        // Missing space — report offense
+        if !has_space_before || (!has_space_after && !newline_after) {
+            self.reported_offsets.insert(start);
             let (line, column) = self.source.offset_to_line_col(start);
             let mut diag = self.cop.diagnostic(
                 self.source,
@@ -501,7 +490,7 @@ impl BinaryOperatorChecker<'_> {
                 format!("Surrounding space missing for operator `{op_str}`."),
             );
             if self.has_corrections {
-                if !space_before {
+                if !has_space_before {
                     self.corrections.push(crate::correction::Correction {
                         start,
                         end: start,
@@ -510,7 +499,7 @@ impl BinaryOperatorChecker<'_> {
                         cop_index: 0,
                     });
                 }
-                if !space_after && !newline_after {
+                if !has_space_after && !newline_after {
                     self.corrections.push(crate::correction::Correction {
                         start: end,
                         end,
@@ -524,24 +513,205 @@ impl BinaryOperatorChecker<'_> {
             self.diagnostics.push(diag);
         }
     }
-}
 
-impl<'pr> Visit<'pr> for BinaryOperatorChecker<'_> {
-    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        let name = node.name().as_slice();
-        if BINARY_OPERATORS.contains(&name)
-            && node.receiver().is_some()
-            && node.arguments().is_some()
-            && node.call_operator_loc().is_none()
-        // skip x.+ y and x&.+ y
-        {
-            if let Some(msg_loc) = node.message_loc() {
-                self.check_operator_spacing(&msg_loc);
+    /// Check for extra space around an operator (already has at least one space on each side).
+    fn check_extra_space(&mut self, start: usize, end: usize, op_str: &str, op_bytes: &[u8]) {
+        let bytes = self.source.as_bytes();
+        let multi_space_before = start >= 2 && bytes[start - 1] == b' ' && bytes[start - 2] == b' ';
+        let multi_space_after =
+            end + 1 < bytes.len() && bytes[end] == b' ' && bytes[end + 1] == b' ';
+
+        if !multi_space_before && !multi_space_after {
+            return;
+        }
+
+        // Skip if operator is at start of line (spaces are indentation, not extra spacing)
+        if multi_space_before {
+            let mut ls = start;
+            while ls > 0 && bytes[ls - 1] != b'\n' {
+                ls -= 1;
+            }
+            if bytes[ls..start].iter().all(|&b| b == b' ' || b == b'\t') {
+                return;
             }
         }
+
+        // AllowForAlignment: skip if aligned with same operator on adjacent line
+        if self.allow_for_alignment && self.is_aligned_with_adjacent(start, op_bytes) {
+            return;
+        }
+
+        // Skip if trailing space extends to a comment on the same line
+        if multi_space_after {
+            let mut p = end;
+            while p < bytes.len() && bytes[p] == b' ' {
+                p += 1;
+            }
+            if p < bytes.len() && bytes[p] == b'#' {
+                return;
+            }
+        }
+
+        // Find the extent of extra spaces before the operator
+        let ws_start_before = if multi_space_before {
+            let mut s = start - 1;
+            while s > 0 && bytes[s - 1] == b' ' {
+                s -= 1;
+            }
+            s
+        } else {
+            start
+        };
+        // Find the extent of extra spaces after the operator
+        let ws_end_after = if multi_space_after {
+            let mut e = end;
+            while e < bytes.len() && bytes[e] == b' ' {
+                e += 1;
+            }
+            e
+        } else {
+            end
+        };
+        self.reported_offsets.insert(start);
+        let (line, column) = self.source.offset_to_line_col(start);
+        let mut diag = self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            format!("Operator `{op_str}` should be surrounded by a single space."),
+        );
+        if self.has_corrections {
+            if multi_space_before {
+                self.corrections.push(crate::correction::Correction {
+                    start: ws_start_before,
+                    end: start,
+                    replacement: " ".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+            }
+            if multi_space_after {
+                self.corrections.push(crate::correction::Correction {
+                    start: end,
+                    end: ws_end_after,
+                    replacement: " ".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+            }
+            diag.corrected = true;
+        }
+        self.diagnostics.push(diag);
+    }
+
+    /// Check operator that should NOT have surrounding space (e.g., ** with no_space style).
+    /// Reports an offense if space IS present around the operator.
+    fn check_no_space_operator(&mut self, op_loc: &ruby_prism::Location<'_>) {
+        let start = op_loc.start_offset();
+        let end = op_loc.end_offset();
+        let bytes = self.source.as_bytes();
+        let op_str = std::str::from_utf8(op_loc.as_slice()).unwrap_or("??");
+
+        let space_before = start > 0 && bytes[start - 1] == b' ';
+        let space_after = end < bytes.len() && bytes[end] == b' ';
+
+        if space_before || space_after {
+            self.reported_offsets.insert(start);
+            let (line, column) = self.source.offset_to_line_col(start);
+            let mut diag = self.cop.diagnostic(
+                self.source,
+                line,
+                column,
+                format!("Space around operator `{op_str}` detected."),
+            );
+            if self.has_corrections {
+                // Remove space before
+                if space_before {
+                    let mut ws_start = start - 1;
+                    while ws_start > 0 && bytes[ws_start - 1] == b' ' {
+                        ws_start -= 1;
+                    }
+                    self.corrections.push(crate::correction::Correction {
+                        start: ws_start,
+                        end: start,
+                        replacement: String::new(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                }
+                // Remove space after
+                if space_after {
+                    let mut ws_end = end;
+                    while ws_end < bytes.len() && bytes[ws_end] == b' ' {
+                        ws_end += 1;
+                    }
+                    self.corrections.push(crate::correction::Correction {
+                        start: end,
+                        end: ws_end,
+                        replacement: String::new(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                }
+                diag.corrected = true;
+            }
+            self.diagnostics.push(diag);
+        }
+    }
+
+    /// Check if the bytes after a `/` operator indicate a rational literal
+    /// (a number immediately followed by 'r').
+    fn is_rational_division(&self, slash_end: usize) -> bool {
+        let bytes = self.source.as_bytes();
+        let mut i = slash_end;
+        // Skip spaces after /
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        // Look for digits followed by 'r'
+        let digit_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i > digit_start && i < bytes.len() && bytes[i] == b'r' {
+            return true;
+        }
+        false
+    }
+}
+
+impl<'pr> Visit<'pr> for OperatorChecker<'_> {
+    // === Binary operators via CallNode (including match operators and ===) ===
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        let name = node.name().as_slice();
+
+        // Check if this is a regular binary operator call (not via .method syntax)
+        let is_operator = BINARY_OPERATORS.contains(&name) || MATCH_OPERATORS.contains(&name);
+        if node.receiver().is_some()
+            && node.call_operator_loc().is_none()
+            && is_operator
+            && (node.arguments().is_some() || MATCH_OPERATORS.contains(&name))
+        {
+            if let Some(msg_loc) = node.message_loc() {
+                let op_bytes = msg_loc.as_slice();
+                // Handle ** no_space and / rational no_space:
+                // these operators should NOT have space around them
+                let should_have_no_space = (op_bytes == b"**" && self.exponent_no_space)
+                    || (op_bytes == b"/"
+                        && self.rational_no_space
+                        && self.is_rational_division(msg_loc.end_offset()));
+                if should_have_no_space {
+                    self.check_no_space_operator(&msg_loc);
+                } else {
+                    self.check_operator_spacing(&msg_loc);
+                }
+            }
+        }
+
         ruby_prism::visit_call_node(self, node);
     }
 
+    // === Logical operators (&&, ||) ===
     fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
         let op_loc = node.operator_loc();
         // Skip keyword form `and`
@@ -559,6 +729,221 @@ impl<'pr> Visit<'pr> for BinaryOperatorChecker<'_> {
         }
         ruby_prism::visit_or_node(self, node);
     }
+
+    // === Compound assignment operators (+=, -=, *=, /=, %=, **=, <<=, >>=, ^=, |=, &=) ===
+    fn visit_local_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.binary_operator_loc());
+        ruby_prism::visit_local_variable_operator_write_node(self, node);
+    }
+
+    fn visit_instance_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOperatorWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.binary_operator_loc());
+        ruby_prism::visit_instance_variable_operator_write_node(self, node);
+    }
+
+    fn visit_class_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOperatorWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.binary_operator_loc());
+        ruby_prism::visit_class_variable_operator_write_node(self, node);
+    }
+
+    fn visit_global_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOperatorWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.binary_operator_loc());
+        ruby_prism::visit_global_variable_operator_write_node(self, node);
+    }
+
+    fn visit_constant_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantOperatorWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.binary_operator_loc());
+        ruby_prism::visit_constant_operator_write_node(self, node);
+    }
+
+    fn visit_constant_path_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.binary_operator_loc());
+        ruby_prism::visit_constant_path_operator_write_node(self, node);
+    }
+
+    fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'pr>) {
+        self.check_operator_spacing(&node.binary_operator_loc());
+        ruby_prism::visit_call_operator_write_node(self, node);
+    }
+
+    fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'pr>) {
+        self.check_operator_spacing(&node.binary_operator_loc());
+        ruby_prism::visit_index_operator_write_node(self, node);
+    }
+
+    // === ||= and &&= operators ===
+    fn visit_local_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOrWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_local_variable_or_write_node(self, node);
+    }
+
+    fn visit_local_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableAndWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_local_variable_and_write_node(self, node);
+    }
+
+    fn visit_instance_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOrWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_instance_variable_or_write_node(self, node);
+    }
+
+    fn visit_instance_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableAndWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_instance_variable_and_write_node(self, node);
+    }
+
+    fn visit_class_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOrWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_class_variable_or_write_node(self, node);
+    }
+
+    fn visit_class_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableAndWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_class_variable_and_write_node(self, node);
+    }
+
+    fn visit_global_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOrWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_global_variable_or_write_node(self, node);
+    }
+
+    fn visit_global_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableAndWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_global_variable_and_write_node(self, node);
+    }
+
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_constant_or_write_node(self, node);
+    }
+
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_constant_and_write_node(self, node);
+    }
+
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_constant_path_or_write_node(self, node);
+    }
+
+    fn visit_constant_path_and_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathAndWriteNode<'pr>,
+    ) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_constant_path_and_write_node(self, node);
+    }
+
+    fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_call_or_write_node(self, node);
+    }
+
+    fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_call_and_write_node(self, node);
+    }
+
+    fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_index_or_write_node(self, node);
+    }
+
+    fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_index_and_write_node(self, node);
+    }
+
+    // === Class inheritance operator (<) ===
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        if let Some(op_loc) = node.inheritance_operator_loc() {
+            self.check_operator_spacing(&op_loc);
+        }
+        ruby_prism::visit_class_node(self, node);
+    }
+
+    // === Singleton class operator (<<) ===
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        let op_loc = node.operator_loc();
+        self.check_operator_spacing(&op_loc);
+        ruby_prism::visit_singleton_class_node(self, node);
+    }
+
+    // === Rescue => operator ===
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        if let Some(op_loc) = node.operator_loc() {
+            self.check_operator_spacing(&op_loc);
+        }
+        ruby_prism::visit_rescue_node(self, node);
+    }
+
+    // === Pattern matching operators ===
+    // `in pattern => var` (capture pattern)
+    fn visit_capture_pattern_node(&mut self, node: &ruby_prism::CapturePatternNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_capture_pattern_node(self, node);
+    }
+
+    // `in pattern1 | pattern2` (alternation pattern)
+    fn visit_alternation_pattern_node(&mut self, node: &ruby_prism::AlternationPatternNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_alternation_pattern_node(self, node);
+    }
+
+    // `expr => pattern` (match required, Ruby 3.0+)
+    fn visit_match_required_node(&mut self, node: &ruby_prism::MatchRequiredNode<'pr>) {
+        self.check_operator_spacing(&node.operator_loc());
+        ruby_prism::visit_match_required_node(self, node);
+    }
+
+    // `expr in pattern` (match predicate) — uses keyword `in`, not checked here
+    // (Layout/SpaceAroundKeyword handles `in`)
 }
 
 #[cfg(test)]

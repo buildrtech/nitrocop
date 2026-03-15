@@ -20,3 +20,49 @@ x ||y
   ^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `||`.
 x  && y
    ^^ Layout/SpaceAroundOperators: Operator `&&` should be surrounded by a single space.
+
+# Compound assignment operators
+x +=0
+  ^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `+=`.
+y -=0
+  ^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `-=`.
+z *=2
+  ^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `*=`.
+x ||=0
+  ^^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `||=`.
+y &&=0
+  ^^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `&&=`.
+
+# Match operators
+x =~/abc/
+  ^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `=~`.
+y !~/abc/
+  ^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `!~`.
+
+# Class inheritance
+class Foo<Bar
+         ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `<`.
+end
+
+# Singleton class
+class<<self
+     ^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `<<`.
+end
+
+# Rescue =>
+begin
+rescue Exception=>e
+                ^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `=>`.
+end
+
+# Triple equals
+Hash===z
+    ^^^ Layout/SpaceAroundOperators: Surrounding space missing for operator `===`.
+
+# Exponent with spaces (default no_space style should flag)
+x = a * b ** 2
+          ^^ Layout/SpaceAroundOperators: Space around operator `**` detected.
+
+# Setter call without spaces
+x.y =2
+    ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `=`.

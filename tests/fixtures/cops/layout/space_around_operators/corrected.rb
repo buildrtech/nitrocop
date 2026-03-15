@@ -9,3 +9,36 @@ x * y
 x && y
 x || y
 x && y
+
+# Compound assignment operators
+x += 0
+y -= 0
+z *= 2
+x ||= 0
+y &&= 0
+
+# Match operators
+x =~ /abc/
+y !~ /abc/
+
+# Class inheritance
+class Foo < Bar
+end
+
+# Singleton class
+class << self
+end
+
+# Rescue =>
+begin
+rescue Exception => e
+end
+
+# Triple equals
+Hash === z
+
+# Exponent with spaces (default no_space style should flag)
+x = a * b**2
+
+# Setter call without spaces
+x.y = 2
