@@ -4,6 +4,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RSpec/VerifiedDoubleReference: flags string arguments to verified double methods
+/// (instance_double, class_double, etc.) and suggests using constant references instead.
+///
+/// Investigation: 34 FNs were caused by a guard that only flagged strings starting
+/// with an uppercase letter or colon. RuboCop flags ALL string first arguments
+/// regardless of case (e.g., `instance_double('mailer')`). Removed the case guard
+/// to match RuboCop behavior.
 pub struct VerifiedDoubleReference;
 
 const VERIFIED_DOUBLES: &[&[u8]] = &[
@@ -71,19 +78,15 @@ impl Cop for VerifiedDoubleReference {
         }
 
         let first_arg = &arg_list[0];
-        if let Some(str_node) = first_arg.as_string_node() {
-            let content = str_node.unescaped();
-            // Only flag if the content looks like a class name
-            if !content.is_empty() && content[0].is_ascii_uppercase() || content.starts_with(b":") {
-                let loc = first_arg.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use a constant class reference for verified doubles. String references are not verifying unless the class is loaded.".to_string(),
-                ));
-            }
+        if first_arg.as_string_node().is_some() {
+            let loc = first_arg.location();
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Use a constant class reference for verified doubles. String references are not verifying unless the class is loaded.".to_string(),
+            ));
         }
     }
 }
