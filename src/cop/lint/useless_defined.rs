@@ -7,6 +7,18 @@ use crate::parse::source::SourceFile;
 
 /// Checks for calls to `defined?` with strings or symbols as the argument.
 /// Such calls will always return `'expression'`.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=0, FN=2.
+///
+/// FN fix:
+/// - Prism keeps `__FILE__` as `SourceFileNode` inside `defined?`, while
+///   RuboCop's Parser AST exposes it like a string literal for this cop.
+///   Treat `SourceFileNode` as a string-like argument when classifying
+///   useless `defined?` calls.
+///
+/// No false positives were reported in the current corpus run.
 pub struct UselessDefined;
 
 impl Cop for UselessDefined {
@@ -46,6 +58,7 @@ impl Cop for UselessDefined {
 
         let type_name = if value.as_string_node().is_some()
             || value.as_interpolated_string_node().is_some()
+            || value.as_source_file_node().is_some()
         {
             "string"
         } else if value.as_symbol_node().is_some() || value.as_interpolated_symbol_node().is_some()
