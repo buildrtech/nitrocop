@@ -1,8 +1,26 @@
-use crate::cop::node_type::{BLOCK_NODE, CALL_NODE};
+use crate::cop::node_type::{CALL_NODE, LAMBDA_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Checks for methods called on a do...end block.
+///
+/// ## Investigation notes
+///
+/// Root causes of corpus mismatches:
+/// 1. **Location mismatch (FP+FN pairs):** Offense was reported at the chained
+///    method name (`call.message_loc()`), but RuboCop reports at the `end` keyword
+///    of the block (`receiver.loc.end.begin_pos`). When the chained method is on a
+///    different line from `end` (e.g., `end\n  .join`), this produced a paired FP
+///    (wrong line) and FN (missing the correct line). Fixed by reporting at the
+///    block's `closing_loc` (the `end` keyword).
+/// 2. **Lambda do..end blocks (FN):** `-> do ... end.call` was not detected because
+///    the receiver is a `LambdaNode`, not a `CallNode`. RuboCop treats lambdas as
+///    block types. Fixed by also checking for `LambdaNode` receivers.
+/// 3. **Block argument false skip (FN):** `a do b end.c(&blk)` was skipped because
+///    `call.block().is_some()` is true for `BlockArgumentNode`. RuboCop only ignores
+///    literal blocks (where `on_block` fires). Fixed by checking that the outer
+///    call's block is specifically a `BlockNode`, not a `BlockArgumentNode`.
 pub struct MethodCalledOnDoEndBlock;
 
 impl Cop for MethodCalledOnDoEndBlock {
@@ -15,7 +33,7 @@ impl Cop for MethodCalledOnDoEndBlock {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, CALL_NODE]
+        &[CALL_NODE, LAMBDA_NODE]
     }
 
     fn check_node(
@@ -32,41 +50,52 @@ impl Cop for MethodCalledOnDoEndBlock {
             None => return,
         };
 
-        // Skip if this call itself has a block (to avoid double-reporting with MultilineBlockChain)
-        if call.block().is_some() {
-            return;
+        // Skip if this call itself has a literal block (to avoid double-reporting
+        // with MultilineBlockChain). Only skip for BlockNode, not BlockArgumentNode.
+        if let Some(block) = call.block() {
+            if block.as_block_node().is_some() {
+                return;
+            }
         }
 
-        // Check if the receiver is a call with a do...end block
+        // Check if the receiver is a call with a do...end block, or a lambda
         let receiver = match call.receiver() {
             Some(r) => r,
             None => return,
         };
 
-        let recv_call = match receiver.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        // Must have a block
-        let block = match recv_call.block() {
-            Some(b) => b,
-            None => return,
-        };
-
-        let block_node = match block.as_block_node() {
-            Some(b) => b,
-            None => return,
-        };
-
-        // Must be a do...end block (check opening_loc is "do")
-        let opening_loc = block_node.opening_loc();
-        if opening_loc.as_slice() != b"do" {
+        // Try to get a do...end block from the receiver.
+        // The receiver can be:
+        // 1. A CallNode with a BlockNode child (e.g., `items.each do ... end`)
+        // 2. A LambdaNode (e.g., `-> do ... end`)
+        let closing_loc = if let Some(recv_call) = receiver.as_call_node() {
+            let block = match recv_call.block() {
+                Some(b) => b,
+                None => return,
+            };
+            let block_node = match block.as_block_node() {
+                Some(b) => b,
+                None => return,
+            };
+            // Must be a do...end block
+            let opening_loc = block_node.opening_loc();
+            if opening_loc.as_slice() != b"do" {
+                return;
+            }
+            block_node.closing_loc()
+        } else if let Some(lambda_node) = receiver.as_lambda_node() {
+            // Lambda with do...end: -> do ... end.call
+            let opening_loc = lambda_node.opening_loc();
+            if opening_loc.as_slice() != b"do" {
+                return;
+            }
+            lambda_node.closing_loc()
+        } else {
             return;
-        }
+        };
 
-        let msg_loc = call.message_loc().unwrap_or_else(|| call.location());
-        let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
+        // Report at the `end` keyword position (matching RuboCop's behavior)
+        let (line, column) = source.offset_to_line_col(closing_loc.start_offset());
         diagnostics.push(self.diagnostic(
             source,
             line,
