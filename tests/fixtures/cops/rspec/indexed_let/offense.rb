@@ -30,6 +30,20 @@ shared_examples_for 'indexed lets in shared examples for' do
   ^^^^^^^^^^^^^^^^^^^^^^ RSpec/IndexedLet: This `let` statement uses `2` in its name. Please give it a meaningful name.
 end
 
+RSpec.shared_examples 'indexed lets with RSpec receiver' do
+  let(:widget_1) { create(:widget) }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/IndexedLet: This `let` statement uses `1` in its name. Please give it a meaningful name.
+  let(:widget_2) { create(:widget) }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/IndexedLet: This `let` statement uses `2` in its name. Please give it a meaningful name.
+end
+
+RSpec.shared_context 'indexed lets with RSpec.shared_context' do
+  let(:payload_1) { build(:payload) }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/IndexedLet: This `let` statement uses `1` in its name. Please give it a meaningful name.
+  let(:payload_2) { build(:payload) }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/IndexedLet: This `let` statement uses `2` in its name. Please give it a meaningful name.
+end
+
 context 'names with two numbers' do
   let(:user_1_item_1) { create(:item) }
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/IndexedLet: This `let` statement uses `1` in its name. Please give it a meaningful name.

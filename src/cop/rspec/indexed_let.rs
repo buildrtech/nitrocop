@@ -15,6 +15,10 @@ use std::collections::HashMap;
 /// - Message uses the first `/\d+/` match (first digit sequence in the name), matching
 ///   RuboCop's `let_name(let_node)[INDEX_REGEX]`.
 /// - Names without trailing `/_?\d+$/` are still excluded (matching `SUFFIX_INDEX_REGEX`).
+/// - Fixed: `RSpec.shared_examples` and `RSpec.shared_context` (with explicit `RSpec.`
+///   receiver) were not recognized as spec groups. The receiver path only matched
+///   `RSpec.describe` but RuboCop's `spec_group?` matches all ExampleGroups + SharedGroups.
+///   Now uses `is_rspec_example_group()` for the receiver path too (50 FN fix).
 pub struct IndexedLet;
 
 impl Cop for IndexedLet {
@@ -66,7 +70,7 @@ impl Cop for IndexedLet {
         let method_name = call.name().as_slice();
         let is_group = if let Some(recv) = call.receiver() {
             crate::cop::util::constant_name(&recv).is_some_and(|n| n == b"RSpec")
-                && method_name == b"describe"
+                && is_rspec_example_group(method_name)
         } else {
             is_rspec_example_group(method_name)
         };
@@ -280,6 +284,56 @@ mod tests {
         assert!(
             diags.is_empty(),
             "AllowedIdentifiers should skip matching names"
+        );
+    }
+
+    #[test]
+    fn shared_examples_detected() {
+        let source =
+            b"shared_examples 'test' do\n  let(:item_1) { 'x' }\n  let(:item_2) { 'x' }\nend\n";
+        let diags = crate::testutil::run_cop_full(&IndexedLet, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "shared_examples should detect indexed lets, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn shared_context_detected() {
+        let source =
+            b"shared_context 'test' do\n  let(:item_1) { 'x' }\n  let(:item_2) { 'x' }\nend\n";
+        let diags = crate::testutil::run_cop_full(&IndexedLet, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "shared_context should detect indexed lets, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn rspec_shared_examples_detected() {
+        let source = b"RSpec.shared_examples 'test' do\n  let(:item_1) { 'x' }\n  let(:item_2) { 'x' }\nend\n";
+        let diags = crate::testutil::run_cop_full(&IndexedLet, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "RSpec.shared_examples should detect indexed lets, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn rspec_shared_context_detected() {
+        let source = b"RSpec.shared_context 'test' do\n  let(:item_1) { 'x' }\n  let(:item_2) { 'x' }\nend\n";
+        let diags = crate::testutil::run_cop_full(&IndexedLet, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "RSpec.shared_context should detect indexed lets, got: {:?}",
+            diags
         );
     }
 
