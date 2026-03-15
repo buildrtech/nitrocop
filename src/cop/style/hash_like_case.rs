@@ -3,6 +3,23 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Corpus investigation (FP=24, FN=2):
+///
+/// Root causes of 24 FPs:
+/// 1. Accepted integer conditions (`when 32`), but RuboCop only allows str/sym.
+/// 2. Accepted nil bodies (`when :x; nil`), but RuboCop's `!nil?` excludes them.
+/// 3. Did not enforce same-type constraint on conditions and bodies. Mixed
+///    true/false, int/float, or string/symbol conditions caused false positives.
+///
+/// Root cause of 2 FNs:
+/// - Bodies were restricted to scalar literals. RuboCop's `recursive_basic_literal?`
+///   also matches arrays and hashes of literals (e.g., `["#BackupSuccess"]`).
+///
+/// Fixes applied:
+/// - Removed integer_node from `is_simple_when` (only str/sym allowed).
+/// - Removed nil_node from `when_body_is_simple_value`.
+/// - Added `is_recursive_basic_literal` to handle array/hash bodies.
+/// - Added same-type check for all condition nodes and all body nodes.
 pub struct HashLikeCase;
 
 impl Cop for HashLikeCase {
@@ -45,28 +62,80 @@ impl HashLikeCaseVisitor<'_, '_> {
         if conditions.len() != 1 {
             return false;
         }
-        // Condition should be a literal (string, symbol, integer)
+        // Condition must be a string or symbol literal (RuboCop: str_type? | sym_type?)
         let cond = &conditions[0];
-        cond.as_string_node().is_some()
-            || cond.as_symbol_node().is_some()
-            || cond.as_integer_node().is_some()
+        cond.as_string_node().is_some() || cond.as_symbol_node().is_some()
+    }
+
+    /// Matches RuboCop's `[!nil? recursive_basic_literal?]`:
+    /// a basic literal (string, symbol, integer, float, true, false) but NOT nil,
+    /// or an array/hash whose elements are all recursive basic literals.
+    fn is_recursive_basic_literal(node: &ruby_prism::Node<'_>) -> bool {
+        // Scalar literals (excluding nil — RuboCop's !nil? constraint)
+        if node.as_string_node().is_some()
+            || node.as_symbol_node().is_some()
+            || node.as_integer_node().is_some()
+            || node.as_float_node().is_some()
+            || node.as_true_node().is_some()
+            || node.as_false_node().is_some()
+        {
+            return true;
+        }
+        // Array of literals
+        if let Some(arr) = node.as_array_node() {
+            return arr
+                .elements()
+                .iter()
+                .all(|el| Self::is_recursive_basic_literal(&el));
+        }
+        // Hash of literals
+        if let Some(hash) = node.as_hash_node() {
+            return hash.elements().iter().all(|el| {
+                if let Some(assoc) = el.as_assoc_node() {
+                    Self::is_recursive_basic_literal(&assoc.key())
+                        && Self::is_recursive_basic_literal(&assoc.value())
+                } else {
+                    false
+                }
+            });
+        }
+        false
     }
 
     fn when_body_is_simple_value(when_node: &ruby_prism::WhenNode<'_>) -> bool {
         if let Some(stmts) = when_node.statements() {
             let body: Vec<_> = stmts.body().iter().collect();
             if body.len() == 1 {
-                let expr = &body[0];
-                return expr.as_string_node().is_some()
-                    || expr.as_symbol_node().is_some()
-                    || expr.as_integer_node().is_some()
-                    || expr.as_float_node().is_some()
-                    || expr.as_nil_node().is_some()
-                    || expr.as_true_node().is_some()
-                    || expr.as_false_node().is_some();
+                return Self::is_recursive_basic_literal(&body[0]);
             }
         }
         false
+    }
+
+    /// Returns a simple type tag for a node, used to check that all conditions
+    /// (or all bodies) share the same AST node type.
+    fn node_type_tag(node: &ruby_prism::Node<'_>) -> u8 {
+        if node.as_string_node().is_some() {
+            1
+        } else if node.as_symbol_node().is_some() {
+            2
+        } else if node.as_integer_node().is_some() {
+            3
+        } else if node.as_float_node().is_some() {
+            4
+        } else if node.as_true_node().is_some() {
+            5
+        } else if node.as_false_node().is_some() {
+            6
+        } else if node.as_nil_node().is_some() {
+            7
+        } else if node.as_array_node().is_some() {
+            8
+        } else if node.as_hash_node().is_some() {
+            9
+        } else {
+            0
+        }
     }
 }
 
@@ -103,7 +172,31 @@ impl<'pr> Visit<'pr> for HashLikeCaseVisitor<'_, '_> {
             }
         });
 
-        if all_simple {
+        if !all_simple {
+            ruby_prism::visit_case_node(self, node);
+            return;
+        }
+
+        // RuboCop's nodes_of_same_type?: all condition nodes must share the same
+        // AST type, and all body nodes must share the same AST type.
+        let mut cond_tags = Vec::new();
+        let mut body_tags = Vec::new();
+        for c in &conditions {
+            if let Some(when_node) = c.as_when_node() {
+                for cond in when_node.conditions().iter() {
+                    cond_tags.push(Self::node_type_tag(&cond));
+                }
+                if let Some(stmts) = when_node.statements() {
+                    for body_node in stmts.body().iter() {
+                        body_tags.push(Self::node_type_tag(&body_node));
+                    }
+                }
+            }
+        }
+        let same_cond_type = cond_tags.windows(2).all(|w| w[0] == w[1]);
+        let same_body_type = body_tags.windows(2).all(|w| w[0] == w[1]);
+
+        if same_cond_type && same_body_type {
             let loc = node.case_keyword_loc();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
             self.diagnostics.push(self.cop.diagnostic(

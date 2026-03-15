@@ -16,12 +16,14 @@ when :baz
 when :quux
   'corge'
 end
-case z
+
+# Array literal bodies of same type (recursive_basic_literal)
+case status
 ^^^^ Style/HashLikeCase: Consider replacing `case-when` with a hash lookup.
-when 1
-  :one
-when 2
-  :two
-when 3
-  :three
+when :success
+  ["#BackupSuccess"]
+when :failure
+  ["#BackupFailure"]
+when :pending
+  ["#BackupPending"]
 end
