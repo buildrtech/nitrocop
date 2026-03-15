@@ -16,6 +16,18 @@ use crate::parse::source::SourceFile;
 /// **FNs fixed (21):** All 21 FNs used `Rails.public_path` instead of `Rails.root`. RuboCop
 /// checks both `{:root :public_path}` in its `rails_root?` matcher. Added `public_path`
 /// support to `rails_root_method_from_node`.
+///
+/// **Corpus investigation (2026-03-15, round 2):**
+///
+/// **FP fixed (1):** `obj.attr = File.open(Rails.root.join(...))` — setter assignment context.
+/// RuboCop skips because `node.parent` is a send (`attr=`). Fixed by also checking the byte
+/// before the node for `=` (but not `==`).
+///
+/// **FNs fixed (127):** Nearly all were `File.open(Rails.root.join(...))` inside hash literals,
+/// e.g. `{io: File.open(Rails.root.join("public", "photo.png")), ...}`. The old after-node
+/// heuristic checked for `,` and `)` which incorrectly skipped these (hash commas, not call
+/// args). Refined to only check `.` after the node (chain receiver) and `(`/`,`/`=` before
+/// the node (argument to call / setter).
 pub struct RootPathnameMethods;
 
 const FILE_METHODS: &[&[u8]] = &[
@@ -177,21 +189,48 @@ impl Cop for RootPathnameMethods {
         }
 
         // RuboCop skips `File.open(...)` / `IO.open(...)` when the parent is a send node.
-        // This handles cases like `File.open(Rails.root.join(...)).read` (receiver of chain)
-        // or `YAML.safe_load(File.open(Rails.root.join(...)))` (argument to another call).
+        // This handles cases like `File.open(Rails.root.join(...)).read` (receiver of chain),
+        // `YAML.safe_load(File.open(Rails.root.join(...)))` (argument to another call),
+        // or `obj.attr = File.open(Rails.root.join(...))` (argument to setter method).
         // These are handled by Style/FileRead and Style/FileWrite instead.
-        // Since Prism doesn't provide parent pointers, we check the source bytes after the
-        // node's end to detect if it's part of a larger expression.
+        // Since Prism doesn't provide parent pointers, we check the source bytes around
+        // the node to detect if it's part of a larger expression (i.e., has a send parent).
         if method_name == b"open" {
-            let end_offset = node.location().end_offset();
             let src = source.as_bytes();
+            let start_offset = node.location().start_offset();
+            let end_offset = node.location().end_offset();
+
+            // Check after the node: `.` means receiver of method chain
+            // e.g., File.open(Rails.root.join(...)).read
+            // We intentionally do NOT check for `)` or `,` after the node, because
+            // those often indicate hash entry separators (e.g., `io: File.open(...),`)
+            // where the parent is a `pair` node, not a send, and RuboCop flags those.
             let after = &src[end_offset..];
             let next_meaningful = after.iter().find(|&&b| b != b' ' && b != b'\t');
-            // `.` means receiver of method chain: File.open(...).read
-            // `)` means argument to another call: YAML.safe_load(File.open(...))
-            // `,` means argument in a multi-arg call: IO.copy_stream(File.open(...), x)
-            if let Some(b'.' | b')' | b',') = next_meaningful {
+            if next_meaningful == Some(&b'.') {
                 return;
+            }
+
+            // Check before the node for nesting indicators
+            // `(` means argument to a call: YAML.safe_load(File.open(...))
+            // `,` means second+ arg: foo(x, File.open(...))
+            // `=` means RHS of setter method: obj.attr = File.open(...)
+            //   (but NOT `==` comparison, which would be `== File.open(...)`)
+            if start_offset > 0 {
+                let before = &src[..start_offset];
+                let prev_meaningful_pos = before.iter().rposition(|&b| b != b' ' && b != b'\t');
+                if let Some(pos) = prev_meaningful_pos {
+                    match before[pos] {
+                        b'(' | b',' => return,
+                        b'=' => {
+                            // Skip `=` (setter assignment) but not `==` (comparison)
+                            if pos == 0 || before[pos - 1] != b'=' {
+                                return;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 

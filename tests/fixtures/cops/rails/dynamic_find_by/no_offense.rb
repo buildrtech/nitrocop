@@ -17,3 +17,17 @@ User.find_by_foo_and_bar(arg, *args)
 GithubPullRequest.find_by_github_identifiers(id: 123, url: "http://example.com")
 # Multiple keyword arguments with hash
 Post.find_by_title_and_id("foo", limit: 1)
+# Explicit hash literal argument (not a dynamic finder column lookup)
+service.find_by_ids({ "category" => [1, 2] })
+# Receiverless find_by_* outside of ActiveRecord class (no offense)
+class Service
+  def lookup
+    find_by_name("foo")
+  end
+end
+# Receiverless find_by_* in class not inheriting AR
+class Utility < BaseService
+  def lookup
+    find_by_name("foo")
+  end
+end

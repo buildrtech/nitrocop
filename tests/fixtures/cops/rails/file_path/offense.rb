@@ -9,3 +9,30 @@ Rails.root.join("db", "migrate")
 
 File.join(Rails.root, "config", "initializers", "action_mailer.rb")
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+File.join(Rails.root, ["app", "models"])
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+File.join(Rails.root, %w[app models])
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+File.join(Rails.root, "app", ["models", "goober"])
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+::File.join(Rails.root, "app", "models")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+::Rails.root.join("app", "models", "user.rb")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to')`.
+
+File.join(Rails.root, "/app/models", "/user.rb")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+"#{Rails.root}/app/models/goober"
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to')`.
+
+"#{Rails.root.join('tmp', user.id, 'icon')}.png"
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to')`.
+
+system "rm -rf #{Rails.root}/foo/bar"
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to')`.

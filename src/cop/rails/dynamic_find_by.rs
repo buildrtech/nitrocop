@@ -1,9 +1,71 @@
 use crate::cop::node_type::CALL_NODE;
+use crate::cop::util::parent_class_name;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
+/// Checks dynamic `find_by_*` methods and suggests using `find_by` instead.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// **FP root cause (1 FP):** Hash literal arguments (`{ "key" => value }`) were not
+/// filtered out. Only `KeywordHashNode` (bare keyword args) was checked, but Prism
+/// represents explicit `{ ... }` hash literals as `HashNode`. RuboCop's
+/// `IGNORED_ARGUMENT_TYPES = %i[hash splat]` covers both. Fixed by also checking
+/// `as_hash_node()`.
+///
+/// **FN root cause (50 FN):** Receiverless `find_by_*` calls inside classes inheriting
+/// from `ApplicationRecord` or `ActiveRecord::Base` were unconditionally skipped.
+/// RuboCop uses `ActiveRecordHelper#inherit_active_record_base?` to walk up class
+/// ancestors. Fixed by walking the AST to find the enclosing class and checking its
+/// superclass against known AR base class patterns.
 pub struct DynamicFindBy;
+
+/// Check if a superclass name indicates ActiveRecord inheritance.
+fn is_active_record_parent(parent: &[u8]) -> bool {
+    parent == b"ApplicationRecord"
+        || parent == b"ActiveRecord::Base"
+        || parent == b"::ApplicationRecord"
+        || parent == b"::ActiveRecord::Base"
+}
+
+/// Walk the AST to find the enclosing class of a given byte offset,
+/// and check if it inherits from an ActiveRecord base class.
+fn is_inside_active_record_class(
+    source: &SourceFile,
+    node_offset: usize,
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> bool {
+    let mut finder = ArClassFinder {
+        source,
+        target_offset: node_offset,
+        result: false,
+    };
+    finder.visit(&parse_result.node());
+    finder.result
+}
+
+struct ArClassFinder<'a> {
+    source: &'a SourceFile,
+    target_offset: usize,
+    result: bool,
+}
+
+impl<'a> Visit<'a> for ArClassFinder<'a> {
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'a>) {
+        let loc = node.location();
+        if self.target_offset >= loc.start_offset() && self.target_offset < loc.end_offset() {
+            if let Some(parent) = parent_class_name(self.source, node) {
+                if is_active_record_parent(parent) {
+                    self.result = true;
+                }
+            }
+            // Continue walking in case of nested classes
+            ruby_prism::visit_class_node(self, node);
+        }
+    }
+}
 
 impl Cop for DynamicFindBy {
     fn name(&self) -> &'static str {
@@ -22,7 +84,7 @@ impl Cop for DynamicFindBy {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -40,7 +102,11 @@ impl Cop for DynamicFindBy {
         if !name.starts_with(b"find_by_") {
             return;
         }
-        if call.receiver().is_none() {
+
+        // For receiverless calls, only flag inside AR model classes
+        if call.receiver().is_none()
+            && !is_inside_active_record_class(source, node.location().start_offset(), parse_result)
+        {
             return;
         }
 
@@ -84,11 +150,12 @@ impl Cop for DynamicFindBy {
             if arg_list.len() != expected_arg_count {
                 return;
             }
-            // Skip if any argument is a hash (keyword args) or splat
-            if arg_list
-                .iter()
-                .any(|arg| arg.as_keyword_hash_node().is_some() || arg.as_splat_node().is_some())
-            {
+            // Skip if any argument is a hash (keyword args, hash literal) or splat
+            if arg_list.iter().any(|arg| {
+                arg.as_keyword_hash_node().is_some()
+                    || arg.as_hash_node().is_some()
+                    || arg.as_splat_node().is_some()
+            }) {
                 return;
             }
         } else {
