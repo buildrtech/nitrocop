@@ -99,20 +99,10 @@ fn collect_corpus_check_results(
     // Initialize schema once (same config for all repos)
     schema::init(config.config_dir());
 
-    // External non-dotfile configs (for example the shared corpus baseline)
-    // need nested `.rubocop.yml` discovery rooted at each repo, not the cwd
-    // where the external config was loaded.
-    let retarget_nested_overrides = args
-        .config
-        .as_deref()
-        .and_then(std::path::Path::file_name)
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| !name.starts_with(".rubocop"));
-
-    // Precompute shared filters/configs for the non-retargeted path.
-    let shared_cop_filters = config.build_cop_filters(registry, tier_map, args.preview);
-    let shared_base_configs = config.precompute_cop_configs(registry);
-    let shared_has_dir_overrides = config.has_dir_overrides();
+    // Precompute cop filters and configs once
+    let cop_filters = config.build_cop_filters(registry, tier_map, args.preview);
+    let base_configs = config.precompute_cop_configs(registry);
+    let has_dir_overrides = config.has_dir_overrides();
 
     // List subdirectories (each is a corpus repo)
     let mut repos: Vec<_> = std::fs::read_dir(corpus_dir)?
@@ -135,26 +125,8 @@ fn collect_corpus_check_results(
                 .to_string_lossy()
                 .to_string();
 
-            let repo_config_storage =
-                retarget_nested_overrides.then(|| config.retarget_dir_overrides(repo_path, None));
-            let repo_config = repo_config_storage.as_ref().unwrap_or(config);
-            let repo_cop_filters_storage = retarget_nested_overrides
-                .then(|| repo_config.build_cop_filters(registry, tier_map, args.preview));
-            let repo_base_configs_storage =
-                retarget_nested_overrides.then(|| repo_config.precompute_cop_configs(registry));
-            let cop_filters = repo_cop_filters_storage
-                .as_ref()
-                .unwrap_or(&shared_cop_filters);
-            let base_configs = repo_base_configs_storage
-                .as_deref()
-                .unwrap_or(shared_base_configs.as_slice());
-            let has_dir_overrides = repo_config_storage
-                .as_ref()
-                .map_or(shared_has_dir_overrides, |cfg| cfg.has_dir_overrides());
-
             // Discover .rb files in this repo
-            let discovered = match fs::discover_files(std::slice::from_ref(repo_path), repo_config)
-            {
+            let discovered = match fs::discover_files(std::slice::from_ref(repo_path), config) {
                 Ok(d) => d,
                 Err(_) => return (repo_id, 0),
             };
@@ -179,12 +151,12 @@ fn collect_corpus_check_results(
                 };
                 let (diags, _, _) = linter::lint_source_inner(
                     &source,
-                    repo_config,
+                    config,
                     registry,
                     args,
                     tier_map,
-                    cop_filters,
-                    base_configs,
+                    &cop_filters,
+                    &base_configs,
                     has_dir_overrides,
                     None,
                     allowlist,
@@ -539,118 +511,5 @@ pub fn run(args: Args) -> Result<i32> {
         Ok(2)
     } else {
         Ok(0)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
-    use tempfile::tempdir;
-
-    use super::*;
-    use crate::cop::autocorrect_allowlist::AutocorrectAllowlist;
-
-    fn write_file(root: &Path, relative: &str, contents: &[u8]) -> PathBuf {
-        let path = root.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&path, contents).unwrap();
-        path
-    }
-
-    fn default_args() -> Args {
-        Args {
-            paths: vec![],
-            config: None,
-            format: "json".to_string(),
-            only: vec![],
-            except: vec![],
-            no_color: false,
-            debug: false,
-            rubocop_only: false,
-            list_cops: false,
-            list_autocorrectable_cops: false,
-            migrate: false,
-            doctor: false,
-            rules: false,
-            tier: None,
-            stdin: None,
-            init: false,
-            no_cache: false,
-            cache: "true".to_string(),
-            cache_clear: false,
-            fail_level: "convention".to_string(),
-            fail_fast: false,
-            force_exclusion: false,
-            list_target_files: false,
-            display_cop_names: false,
-            parallel: false,
-            require_libs: vec![],
-            ignore_disable_comments: false,
-            force_default_config: false,
-            autocorrect: false,
-            autocorrect_all: false,
-            preview: true,
-            quiet_skips: false,
-            strict: None,
-            verify: false,
-            rubocop_cmd: "bundle exec rubocop".to_string(),
-            corpus_check: None,
-        }
-    }
-
-    #[test]
-    fn corpus_check_external_config_retargets_nested_repo_configs() {
-        let temp = tempdir().unwrap();
-        let corpus_dir = temp.path().join("corpus");
-        let repo_dir = corpus_dir.join("sample_repo");
-        let baseline = write_file(
-            temp.path(),
-            "baseline/baseline_rubocop.yml",
-            b"# external\n",
-        );
-        write_file(
-            &repo_dir,
-            "spec/ruby/.rubocop.yml",
-            b"AllCops:\n  DisabledByDefault: true\nStyle/BlockComments:\n  Enabled: true\n",
-        );
-        write_file(
-            &repo_dir,
-            "spec/ruby/fixture.rb",
-            b"# frozen_string_literal: true\n\nmodule Example\n  extend self\nend\n\n=begin\ncomment\n=end\n",
-        );
-
-        let config = load_config(Some(&baseline), None, None).unwrap();
-        let registry = CopRegistry::default_registry();
-        let tier_map = TierMap::load();
-        let allowlist = AutocorrectAllowlist::load();
-        let args = Args {
-            config: Some(baseline),
-            only: vec![
-                "Style/BlockComments".to_string(),
-                "Style/ModuleFunction".to_string(),
-            ],
-            corpus_check: Some(corpus_dir.clone()),
-            ..default_args()
-        };
-
-        let counts = collect_corpus_check_results(
-            &corpus_dir,
-            &config,
-            &registry,
-            &args,
-            &tier_map,
-            &allowlist,
-        )
-        .unwrap();
-
-        assert_eq!(
-            counts.get("sample_repo"),
-            Some(&1),
-            "Nested DisabledByDefault should still suppress unmentioned cops during batch corpus checks",
-        );
     }
 }
