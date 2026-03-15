@@ -2564,6 +2564,169 @@ fn prism_pitfalls() {
     );
 }
 
+// ---------- File discovery sync ----------
+
+/// Zero-tolerance test: RUBY_EXTENSIONS and RUBY_FILENAMES in fs.rs must match
+/// AllCops.Include from vendor/rubocop/config/default.yml.
+///
+/// Prevents regressions like removing "spec" from extensions (which caused 89 cops
+/// to lose exact-match status across the corpus).
+#[test]
+fn file_discovery_sync() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let default_yml = manifest.join("vendor/rubocop/config/default.yml");
+    let fs_rs = manifest.join("src/fs.rs");
+
+    let yml_content = fs::read_to_string(&default_yml)
+        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", default_yml.display()));
+    let fs_source = fs::read_to_string(&fs_rs)
+        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", fs_rs.display()));
+
+    // --- Parse AllCops.Include from YAML ---
+    // Patterns are like: '**/*.rb', '**/.irbrc', '**/Gemfile', '**/*Fastfile'
+    let mut yaml_extensions: Vec<String> = Vec::new();
+    let mut yaml_filenames: Vec<String> = Vec::new();
+    let mut yaml_dynamic: Vec<String> = Vec::new();
+
+    let mut in_include = false;
+    for line in yml_content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Include:" {
+            in_include = true;
+            continue;
+        }
+        if in_include {
+            if !trimmed.starts_with("- ") {
+                break; // End of Include list
+            }
+            // Strip `- '...'` wrapper
+            let pattern = trimmed
+                .trim_start_matches("- ")
+                .trim_matches('\'')
+                .trim_matches('"');
+
+            if let Some(ext) = pattern.strip_prefix("**/*.") {
+                yaml_extensions.push(ext.to_string());
+            } else if let Some(name) = pattern.strip_prefix("**/") {
+                if name.contains('*') {
+                    yaml_dynamic.push(pattern.to_string());
+                } else {
+                    yaml_filenames.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    // --- Parse RUBY_EXTENSIONS from fs.rs ---
+    let rust_extensions: Vec<String> = fs_source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('"') && trimmed.ends_with("\",") {
+                Some(
+                    trimmed
+                        .trim_matches('"')
+                        .trim_end_matches(',')
+                        .trim_matches('"')
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // Extract just the extensions section (between RUBY_EXTENSIONS and the next const)
+    let ext_section_start = fs_source
+        .find("const RUBY_EXTENSIONS")
+        .expect("RUBY_EXTENSIONS not found in fs.rs");
+    let ext_section_end = fs_source[ext_section_start..].find("];").unwrap() + ext_section_start;
+    let ext_section = &fs_source[ext_section_start..ext_section_end];
+    let rust_extensions: Vec<String> = ext_section
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim().trim_end_matches(',');
+            if trimmed.starts_with('"') && trimmed.ends_with('"') {
+                Some(trimmed.trim_matches('"').to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // --- Parse RUBY_FILENAMES from fs.rs ---
+    let fn_section_start = fs_source
+        .find("const RUBY_FILENAMES")
+        .expect("RUBY_FILENAMES not found in fs.rs");
+    let fn_section_end = fs_source[fn_section_start..].find("];").unwrap() + fn_section_start;
+    let fn_section = &fs_source[fn_section_start..fn_section_end];
+    let rust_filenames: Vec<String> = fn_section
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim().trim_end_matches(',');
+            if trimmed.starts_with('"') && trimmed.ends_with('"') {
+                Some(trimmed.trim_matches('"').to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // --- Compare ---
+    let mut gaps: Vec<String> = Vec::new();
+
+    // Extensions in YAML but missing from Rust
+    for ext in &yaml_extensions {
+        if !rust_extensions.iter().any(|r| r.eq_ignore_ascii_case(ext)) {
+            gaps.push(format!(
+                "RUBY_EXTENSIONS missing '**/*.{ext}' from AllCops.Include"
+            ));
+        }
+    }
+    // Extensions in Rust but not in YAML (extra is less critical but worth flagging)
+    for ext in &rust_extensions {
+        if !yaml_extensions.iter().any(|y| y.eq_ignore_ascii_case(ext)) {
+            gaps.push(format!(
+                "RUBY_EXTENSIONS has '{ext}' not in AllCops.Include"
+            ));
+        }
+    }
+
+    // Filenames in YAML but missing from Rust (skip dynamic patterns like *Fastfile)
+    for name in &yaml_filenames {
+        if !rust_filenames.contains(name) {
+            // Check if it's covered by the dynamic *Fastfile pattern in code
+            if name.ends_with("Fastfile") || name.ends_with("fastfile") {
+                continue;
+            }
+            gaps.push(format!(
+                "RUBY_FILENAMES missing '**/{}' from AllCops.Include",
+                name
+            ));
+        }
+    }
+    // Filenames in Rust but not in YAML
+    for name in &rust_filenames {
+        if !yaml_filenames.contains(name) {
+            gaps.push(format!(
+                "RUBY_FILENAMES has '{name}' not in AllCops.Include"
+            ));
+        }
+    }
+
+    gaps.sort();
+
+    assert!(
+        gaps.is_empty(),
+        "\n[file_discovery_sync] {} gap(s) between fs.rs and vendor/rubocop/config/default.yml AllCops.Include:\n{}\n",
+        gaps.len(),
+        gaps.iter()
+            .map(|g| format!("  {g}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 // ---------- Ruby version gates ----------
 
 /// Convert a snake_case string to CamelCase (e.g. "it_block_parameter" -> "ItBlockParameter").

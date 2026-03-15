@@ -66,5 +66,43 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: cargo test --profile ci prism_pitfalls -- --nocapture
 
+      - name: File discovery sync
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo test --profile ci file_discovery_sync -- --nocapture
+
       - name: Test
         run: cargo test --profile ci
+
+  # Corpus smoke test: run nitrocop + rubocop on 3 small repos to catch
+  # systemic regressions (file discovery, config, directives) before they
+  # reach the full 1000-repo corpus oracle.
+  corpus-smoke-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - uses: ruby/setup-ruby@v1
+
+      - name: Cache corpus bundle
+        uses: actions/cache@v4
+        with:
+          path: bench/corpus/vendor/bundle
+          key: corpus-smoke-bundle-${{ hashFiles('bench/corpus/Gemfile.lock') }}
+
+      - name: Install corpus gems
+        run: |
+          cd bench/corpus
+          bundle config set --local path vendor/bundle
+          bundle install --jobs 4 --retry 3
+
+      - name: Run smoke test
+        run: python3 scripts/corpus_smoke_test.py --binary target/release/nitrocop
