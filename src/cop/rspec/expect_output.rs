@@ -1,12 +1,14 @@
-use crate::cop::node_type::{
-    BEGIN_NODE, BLOCK_NODE, CALL_NODE, DEF_NODE, ELSE_NODE, GLOBAL_VARIABLE_WRITE_NODE, IF_NODE,
-    PROGRAM_NODE, STATEMENTS_NODE, SYMBOL_NODE,
-};
+use ruby_prism::Visit;
+
 use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example, is_rspec_hook};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RSpec/ExpectOutput flags `$stdout` and `$stderr` assignments inside RSpec
+/// example blocks and per-example hooks. Uses Prism `Visit` trait for generic
+/// AST traversal so all intermediate node types (rescue, case, loops, etc.)
+/// are automatically handled without explicit enumeration.
 pub struct ExpectOutput;
 
 impl Cop for ExpectOutput {
@@ -23,18 +25,7 @@ impl Cop for ExpectOutput {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            BEGIN_NODE,
-            BLOCK_NODE,
-            CALL_NODE,
-            DEF_NODE,
-            ELSE_NODE,
-            GLOBAL_VARIABLE_WRITE_NODE,
-            IF_NODE,
-            PROGRAM_NODE,
-            STATEMENTS_NODE,
-            SYMBOL_NODE,
-        ]
+        &[crate::cop::node_type::PROGRAM_NODE]
     }
 
     fn check_node(
@@ -46,7 +37,6 @@ impl Cop for ExpectOutput {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Only process at program level to walk the full AST with context
         let program = match node.as_program_node() {
             Some(p) => p,
             None => return,
@@ -57,7 +47,7 @@ impl Cop for ExpectOutput {
             diagnostics: Vec::new(),
             in_example_scope: false,
         };
-        visitor.visit(&program.statements().body().iter().collect::<Vec<_>>()[..]);
+        visitor.visit(&program.as_node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
@@ -68,124 +58,62 @@ struct ExpectOutputVisitor<'a> {
     in_example_scope: bool,
 }
 
-impl<'a> ExpectOutputVisitor<'a> {
-    fn visit(&mut self, nodes: &[ruby_prism::Node<'_>]) {
-        for node in nodes {
-            self.visit_node(node);
+impl<'pr> Visit<'pr> for ExpectOutputVisitor<'_> {
+    fn visit_global_variable_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableWriteNode<'pr>,
+    ) {
+        if self.in_example_scope {
+            let name = node.name().as_slice();
+            let stream = if name == b"$stdout" {
+                Some("stdout")
+            } else if name == b"$stderr" {
+                Some("stderr")
+            } else {
+                None
+            };
+            if let Some(stream) = stream {
+                let loc = node.location();
+                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                self.diagnostics.push(Diagnostic {
+                    path: self.source.path_str().to_string(),
+                    location: crate::diagnostic::Location { line, column },
+                    severity: Severity::Convention,
+                    cop_name: "RSpec/ExpectOutput".to_string(),
+                    message: format!(
+                        "Use `expect {{ ... }}.to output(...).to_{stream}` instead of mutating ${stream}."
+                    ),
+                    corrected: false,
+                });
+            }
         }
+        // Don't recurse into value (no need, and default would)
     }
 
-    fn visit_node(&mut self, node: &ruby_prism::Node<'_>) {
-        // Check for $stdout/$stderr assignments only when inside example scope
-        if let Some(gvw) = node.as_global_variable_write_node() {
-            if self.in_example_scope {
-                let name = gvw.name().as_slice();
-                let stream = if name == b"$stdout" {
-                    Some("stdout")
-                } else if name == b"$stderr" {
-                    Some("stderr")
-                } else {
-                    None
-                };
-                if let Some(stream) = stream {
-                    let loc = gvw.location();
-                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(Diagnostic {
-                        path: self.source.path_str().to_string(),
-                        location: crate::diagnostic::Location { line, column },
-                        severity: Severity::Convention,
-                        cop_name: "RSpec/ExpectOutput".to_string(),
-                        message: format!(
-                            "Use `expect {{ ... }}.to output(...).to_{stream}` instead of mutating ${stream}."
-                        ),
-                        corrected: false,
-                    });
-                }
-            }
-            return;
-        }
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        let name = node.name().as_slice();
 
-        // Track example scope: it/specify blocks set in_example_scope
-        if let Some(call) = node.as_call_node() {
-            let name = call.name().as_slice();
-            if call.receiver().is_none() && (is_rspec_example(name) || is_per_example_hook(&call)) {
-                if let Some(block) = call.block() {
-                    if let Some(block_node) = block.as_block_node() {
-                        let old = self.in_example_scope;
-                        self.in_example_scope = true;
-                        if let Some(body) = block_node.body() {
-                            self.visit_node(&body);
-                        }
-                        self.in_example_scope = old;
-                        return;
-                    }
-                }
-            }
-
-            // Don't enter def nodes — method definitions are not example scopes
-            // (this handles spec/support/helpers.rb utility methods)
-        }
-
-        // Skip def nodes — assignments in method definitions are not in example scope
-        if node.as_def_node().is_some() {
-            return;
-        }
-
-        // Recurse into child nodes
-        if let Some(stmts) = node.as_statements_node() {
-            for stmt in stmts.body().iter() {
-                self.visit_node(&stmt);
-            }
-            return;
-        }
-
-        if let Some(call) = node.as_call_node() {
-            if let Some(recv) = call.receiver() {
-                self.visit_node(&recv);
-            }
-            if let Some(args) = call.arguments() {
-                for arg in args.arguments().iter() {
-                    self.visit_node(&arg);
-                }
-            }
-            if let Some(block) = call.block() {
+        // Check if this is an example or per-example hook with a block
+        if node.receiver().is_none() && (is_rspec_example(name) || is_per_example_hook(node)) {
+            if let Some(block) = node.block() {
                 if let Some(block_node) = block.as_block_node() {
+                    let old = self.in_example_scope;
+                    self.in_example_scope = true;
                     if let Some(body) = block_node.body() {
-                        self.visit_node(&body);
+                        self.visit(&body);
                     }
+                    self.in_example_scope = old;
+                    return;
                 }
             }
-            return;
         }
 
-        if let Some(begin) = node.as_begin_node() {
-            if let Some(stmts) = begin.statements() {
-                for stmt in stmts.body().iter() {
-                    self.visit_node(&stmt);
-                }
-            }
-            return;
-        }
+        // For all other calls, continue default traversal
+        ruby_prism::visit_call_node(self, node);
+    }
 
-        if let Some(if_node) = node.as_if_node() {
-            if let Some(stmts) = if_node.statements() {
-                for stmt in stmts.body().iter() {
-                    self.visit_node(&stmt);
-                }
-            }
-            if let Some(subsequent) = if_node.subsequent() {
-                self.visit_node(&subsequent);
-            }
-            return;
-        }
-
-        if let Some(else_node) = node.as_else_node() {
-            if let Some(stmts) = else_node.statements() {
-                for stmt in stmts.body().iter() {
-                    self.visit_node(&stmt);
-                }
-            }
-        }
+    fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {
+        // Skip method definitions — assignments inside defs are not in example scope
     }
 }
 
