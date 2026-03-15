@@ -6,26 +6,29 @@ use crate::parse::source::SourceFile;
 
 /// Style/DoubleNegation: Avoid the use of double negation (`!!`).
 ///
-/// Corpus investigation: 158 FPs, 84 FNs. Root causes:
+/// Corpus investigation (round 3): 70 FPs, 40 FNs.
 ///
-/// FPs: The original text-based heuristic for `allowed_in_returns` only checked if
-/// the next non-blank line started with `end`. This missed many valid return positions:
-/// - `!!` inside if/elsif/else/unless/case/when branches at end of method
-/// - `!!` inside rescue/ensure bodies at end of method
-/// - `!!` in define_method/define_singleton_method blocks
-/// - `!!` with explicit `return` keyword
-/// - `!!` as part of a larger expression (e.g., `!!foo || bar`) at end of method
+/// Root cause of FPs: nitrocop used byte-range matching for return positions and
+/// unconditionally excluded `!!` inside hash/array/keyword_hash nodes. RuboCop uses
+/// a much looser line-based check: if `!!` is on or after the first line of the def
+/// body's last statement, it's allowed — regardless of whether it's inside a hash
+/// value, method argument, XOR expression, etc. RuboCop only excludes hash/array
+/// when the last_child of the def body itself is a pair/hash node or the parent is
+/// an array type (i.e., the method returns a literal hash or array).
 ///
-/// FNs: The text heuristic wrongly suppressed offenses when `end` followed on the
-/// next line but the `!!` was actually inside a hash/array value (always an offense),
-/// or when `!!` was not the last expression in the method body.
+/// Root cause of FNs: nitrocop recursively marked all branch endpoints in nested
+/// conditionals as return positions. RuboCop uses a stricter check for nested
+/// conditionals: it finds the innermost conditional ancestor and checks if that
+/// conditional's last line >= the def body's last child's last line. Additionally,
+/// when the `!!` node's parent is a statement sequence (begin_type?), RuboCop checks
+/// that `!!` is on the last line of that sequence — otherwise it's not a return value
+/// even if it's inside a return-position conditional.
 ///
-/// Fix: Replaced text-based heuristic with AST-based analysis using a custom visitor.
-/// The visitor tracks whether each `!!` node is in a "return position" by walking
-/// the AST with a set of byte offsets marking last-expression positions within the
-/// current method body. Handles rescue/ensure, conditionals (if/unless/case), and
-/// define_method/define_singleton_method blocks. Hash/array values containing `!!`
-/// are always flagged as offenses regardless of return position.
+/// Fix: Replaced byte-range approach with line-based checks matching RuboCop's
+/// `end_of_method_definition?` / `double_negative_condition_return_value?` logic.
+/// Tracks def body info (last child first/last line, hash/array type) and conditional
+/// ancestor last lines on stacks. Also tracks the last line of the enclosing
+/// statements node to handle the "begin_type?" parent check.
 pub struct DoubleNegation;
 
 impl Cop for DoubleNegation {
@@ -48,13 +51,26 @@ impl Cop for DoubleNegation {
             source,
             diagnostics: Vec::new(),
             enforced_style,
-            return_position_ranges: Vec::new(),
-            hash_array_depth: 0,
-            in_def: false,
+            def_info_stack: Vec::new(),
+            conditional_last_line_stack: Vec::new(),
+            statements_last_line_stack: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
+}
+
+/// Info about the enclosing method definition's body.
+#[derive(Clone)]
+struct DefBodyInfo {
+    /// First line of the last child of the def body (1-indexed).
+    last_child_first_line: usize,
+    /// Last line of the last child of the def body (1-indexed).
+    last_child_last_line: usize,
+    /// Whether the last child is a hash/pair node (literal hash return).
+    last_child_is_hash_or_pair: bool,
+    /// Whether the last child is an array or its parent is an array.
+    last_child_parent_is_array: bool,
 }
 
 struct DoubleNegationVisitor<'a> {
@@ -62,24 +78,24 @@ struct DoubleNegationVisitor<'a> {
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
     enforced_style: &'a str,
-    /// Stack of byte-offset ranges that represent "return positions".
-    /// Each range is (start_offset, end_offset) of an expression that is in return position.
-    return_position_ranges: Vec<(usize, usize)>,
-    /// Nesting depth inside hash/array nodes.
-    hash_array_depth: u32,
-    /// Whether we're inside a def/define_method body (at any depth).
-    in_def: bool,
+    /// Stack of def body info (innermost at top).
+    def_info_stack: Vec<DefBodyInfo>,
+    /// Stack of conditional ancestor last lines (innermost at top).
+    conditional_last_line_stack: Vec<usize>,
+    /// Stack of enclosing statements-node last lines. Used for the
+    /// `begin_type?` parent check in `double_negative_condition_return_value?`.
+    statements_last_line_stack: Vec<usize>,
 }
 
 impl DoubleNegationVisitor<'_> {
-    /// Check if a given offset is in a return position.
-    fn is_in_return_position(&self, offset: usize) -> bool {
-        for &(start, end) in &self.return_position_ranges {
-            if offset >= start && offset < end {
-                return true;
-            }
-        }
-        false
+    fn line_of_offset(&self, offset: usize) -> usize {
+        let (line, _) = self.source.offset_to_line_col(offset);
+        line
+    }
+
+    fn last_line_of_node(&self, start: usize, end: usize) -> usize {
+        let adjusted = if end > start { end - 1 } else { start };
+        self.line_of_offset(adjusted)
     }
 
     /// Check if the !! call is preceded by the `return` keyword.
@@ -90,7 +106,6 @@ impl DoubleNegationVisitor<'_> {
             let prefix = &src[..start];
             let trimmed = prefix.trim_ascii_end();
             if trimmed.ends_with(b"return") {
-                // Make sure 'return' is a keyword, not part of another identifier
                 let before_return = trimmed.len() - 6;
                 if before_return == 0 {
                     return true;
@@ -146,11 +161,8 @@ impl DoubleNegationVisitor<'_> {
                 return;
             }
 
-            // Check if in return position AND not inside a hash/array
-            if self.in_def
-                && self.hash_array_depth == 0
-                && self.is_in_return_position(node.location().start_offset())
-            {
+            // Check if in return position using line-based logic matching RuboCop
+            if self.is_end_of_method_definition(node) {
                 return;
             }
         }
@@ -165,175 +177,147 @@ impl DoubleNegationVisitor<'_> {
         ));
     }
 
-    /// Collect return-position ranges from a body node (the body of a def, block, etc).
-    fn collect_return_ranges(&self, body: &ruby_prism::Node<'_>) -> Vec<(usize, usize)> {
-        let mut ranges = Vec::new();
-        self.collect_return_ranges_from_node(body, &mut ranges);
-        ranges
+    /// RuboCop-compatible `end_of_method_definition?` check.
+    fn is_end_of_method_definition(&self, node: &ruby_prism::CallNode<'_>) -> bool {
+        let def_info = match self.def_info_stack.last() {
+            Some(info) => info,
+            None => return false,
+        };
+
+        let node_line = self.line_of_offset(node.location().start_offset());
+
+        // If inside a conditional ancestor, use RuboCop's
+        // double_negative_condition_return_value? logic
+        if let Some(&cond_last_line) = self.conditional_last_line_stack.last() {
+            // RuboCop: find_parent_not_enumerable → if parent.begin_type?
+            // In our case, statements_last_line_stack tracks the enclosing StatementsNode.
+            if let Some(&stmts_last_line) = self.statements_last_line_stack.last() {
+                // The "parent" of the !! node in RuboCop terms:
+                // If the parent is a begin node (statement sequence), check if !! is
+                // on the last line of that sequence. This prevents treating `!!foo`
+                // followed by `bar` as a return value even if inside a return-position
+                // conditional.
+                if stmts_last_line != node_line {
+                    // !! is not on the last line of its enclosing statements → not a return
+                    return false;
+                }
+            }
+            // Check if the conditional covers the def body's last child
+            return def_info.last_child_last_line <= cond_last_line;
+        }
+
+        // Not inside a conditional — use the simple line-based check
+        // RuboCop: if last_child is pair/hash or parent is array → always offense
+        if def_info.last_child_is_hash_or_pair || def_info.last_child_parent_is_array {
+            return false;
+        }
+
+        // RuboCop: last_child.first_line <= node.first_line
+        def_info.last_child_first_line <= node_line
     }
 
-    fn collect_return_ranges_from_node(
-        &self,
-        node: &ruby_prism::Node<'_>,
-        ranges: &mut Vec<(usize, usize)>,
-    ) {
-        // Handle StatementsNode: last statement is the return value
+    /// Find the "last child" of a body node, recursing through rescue/ensure.
+    fn find_last_child_info(&self, node: &ruby_prism::Node<'_>) -> Option<DefBodyInfo> {
+        // Handle StatementsNode: get last child
         if let Some(stmts) = node.as_statements_node() {
-            self.collect_from_statements(&stmts, ranges);
-            return;
+            return self.find_last_child_of_stmts(&stmts);
         }
 
         // Handle BeginNode: may have rescue/ensure
+        // RuboCop recurses: rescue → body, ensure → first child
+        // In Prism, BeginNode wraps the whole structure; main body is in statements()
         if let Some(begin) = node.as_begin_node() {
-            if begin.rescue_clause().is_some() || begin.ensure_clause().is_some() {
-                if let Some(stmts) = begin.statements() {
-                    self.collect_from_statements(&stmts, ranges);
-                }
-            } else if let Some(stmts) = begin.statements() {
-                self.collect_from_statements(&stmts, ranges);
+            if let Some(stmts) = begin.statements() {
+                return self.find_last_child_of_stmts(&stmts);
             }
-            return;
+            return None;
         }
 
-        // Handle RescueNode (inside def body with rescue)
-        if let Some(rescue) = node.as_rescue_node() {
-            if let Some(stmts) = rescue.statements() {
-                self.collect_from_statements(&stmts, ranges);
-            }
-            return;
-        }
-
-        // Single expression body - the expression itself is a return value
-        self.add_return_range_for_expr(node, ranges);
+        // Default: this node itself is the "last child"
+        Some(self.node_to_def_body_info(node))
     }
 
-    /// Extract the last statement from a StatementsNode and add its return ranges.
-    fn collect_from_statements(
+    fn find_last_child_of_stmts(
         &self,
         stmts: &ruby_prism::StatementsNode<'_>,
-        ranges: &mut Vec<(usize, usize)>,
-    ) {
+    ) -> Option<DefBodyInfo> {
         let body: Vec<_> = stmts.body().iter().collect();
-        if let Some(last) = body.last() {
-            self.add_return_range_for_expr(last, ranges);
-        }
-    }
+        let last = body.last()?;
 
-    /// Add return position ranges for a single expression.
-    /// If the expression is a conditional, recursively find the last expr in each branch.
-    fn add_return_range_for_expr(
-        &self,
-        node: &ruby_prism::Node<'_>,
-        ranges: &mut Vec<(usize, usize)>,
-    ) {
-        // If it's a conditional, each branch's last expression is a return position
-        if let Some(if_node) = node.as_if_node() {
-            self.add_return_ranges_from_if(&if_node, ranges);
-            return;
-        }
-        if let Some(unless_node) = node.as_unless_node() {
-            if let Some(stmts) = unless_node.statements() {
-                self.collect_from_statements(&stmts, ranges);
-            }
-            if let Some(else_clause) = unless_node.else_clause() {
-                if let Some(stmts) = else_clause.statements() {
-                    self.collect_from_statements(&stmts, ranges);
+        // In RuboCop's Parser AST, a single-expression def body doesn't get a
+        // `begin` wrapper, so `find_last_child` calls `child_nodes.last` directly
+        // on the expression (hash → last pair, array → last element). With multiple
+        // statements there IS a `begin` wrapper and `child_nodes.last` returns the
+        // last statement without digging in.
+        //
+        // Prism always wraps in StatementsNode. To match RuboCop, when there's
+        // exactly one statement that's a hash or array, dig into it.
+        if body.len() == 1 {
+            if let Some(hash) = last.as_hash_node() {
+                let elements: Vec<_> = hash.elements().iter().collect();
+                if let Some(last_pair) = elements.last() {
+                    return Some(self.node_to_def_body_info(last_pair));
                 }
+                // Empty hash — treat the hash itself as last child
+                return Some(self.node_to_def_body_info(last));
             }
-            return;
-        }
-        if let Some(case_node) = node.as_case_node() {
-            self.add_return_ranges_from_case(&case_node, ranges);
-            return;
-        }
-        if let Some(case_match) = node.as_case_match_node() {
-            self.add_return_ranges_from_case_match(&case_match, ranges);
-            return;
-        }
-
-        // For a plain expression, the entire expression range is a return position
-        let start = node.location().start_offset();
-        let end = node.location().end_offset();
-        ranges.push((start, end));
-    }
-
-    fn add_return_ranges_from_if(
-        &self,
-        if_node: &ruby_prism::IfNode<'_>,
-        ranges: &mut Vec<(usize, usize)>,
-    ) {
-        // "then" branch
-        if let Some(stmts) = if_node.statements() {
-            self.collect_from_statements(&stmts, ranges);
-        }
-        // "else" branch (may be another if for elsif)
-        if let Some(subsequent) = if_node.subsequent() {
-            if let Some(nested_if) = subsequent.as_if_node() {
-                self.add_return_ranges_from_if(&nested_if, ranges);
-            } else if let Some(else_node) = subsequent.as_else_node() {
-                if let Some(stmts) = else_node.statements() {
-                    self.collect_from_statements(&stmts, ranges);
+            if let Some(array) = last.as_array_node() {
+                let elements: Vec<_> = array.elements().iter().collect();
+                if let Some(last_elem) = elements.last() {
+                    // Set parent_is_array = true since we dug into the array
+                    let mut info = self.node_to_def_body_info(last_elem);
+                    info.last_child_parent_is_array = true;
+                    return Some(info);
                 }
+                return Some(self.node_to_def_body_info(last));
             }
+        }
+
+        Some(self.node_to_def_body_info(last))
+    }
+
+    fn node_to_def_body_info(&self, node: &ruby_prism::Node<'_>) -> DefBodyInfo {
+        let first_line = self.line_of_offset(node.location().start_offset());
+        let last_line =
+            self.last_line_of_node(node.location().start_offset(), node.location().end_offset());
+
+        let is_hash_or_pair = node.as_hash_node().is_some()
+            || node.as_keyword_hash_node().is_some()
+            || node.as_assoc_node().is_some()
+            || node.as_assoc_splat_node().is_some();
+
+        // parent_is_array is set by the caller when digging into an array;
+        // by default it's false
+        DefBodyInfo {
+            last_child_first_line: first_line,
+            last_child_last_line: last_line,
+            last_child_is_hash_or_pair: is_hash_or_pair,
+            last_child_parent_is_array: false,
         }
     }
 
-    fn add_return_ranges_from_case(
-        &self,
-        case_node: &ruby_prism::CaseNode<'_>,
-        ranges: &mut Vec<(usize, usize)>,
-    ) {
-        for condition in case_node.conditions().iter() {
-            if let Some(when_node) = condition.as_when_node() {
-                if let Some(stmts) = when_node.statements() {
-                    self.collect_from_statements(&stmts, ranges);
-                }
-            }
-        }
-        if let Some(else_clause) = case_node.else_clause() {
-            if let Some(stmts) = else_clause.statements() {
-                self.collect_from_statements(&stmts, ranges);
-            }
-        }
-    }
-
-    fn add_return_ranges_from_case_match(
-        &self,
-        case_match: &ruby_prism::CaseMatchNode<'_>,
-        ranges: &mut Vec<(usize, usize)>,
-    ) {
-        for condition in case_match.conditions().iter() {
-            if let Some(in_node) = condition.as_in_node() {
-                if let Some(stmts) = in_node.statements() {
-                    self.collect_from_statements(&stmts, ranges);
-                }
-            }
-        }
-        if let Some(else_clause) = case_match.else_clause() {
-            if let Some(stmts) = else_clause.statements() {
-                self.collect_from_statements(&stmts, ranges);
-            }
-        }
-    }
-
-    /// Enter a method body: compute return ranges, push them, visit body, pop them.
+    /// Enter a method body: compute last-child info, push to stack, visit body, pop.
     fn with_def_body<F>(&mut self, body: Option<ruby_prism::Node<'_>>, visit_fn: F)
     where
         F: FnOnce(&mut Self),
     {
-        let prev_ranges_len = self.return_position_ranges.len();
-        let prev_in_def = self.in_def;
+        let prev_def_len = self.def_info_stack.len();
 
         if let Some(ref body_node) = body {
-            let new_ranges = self.collect_return_ranges(body_node);
-            self.return_position_ranges.extend(new_ranges);
+            if let Some(info) = self.find_last_child_info(body_node) {
+                self.def_info_stack.push(info);
+            }
         }
-        self.in_def = true;
+
+        // Save and clear conditional/statements stacks — these don't cross def boundaries
+        let saved_cond = std::mem::take(&mut self.conditional_last_line_stack);
+        let saved_stmts = std::mem::take(&mut self.statements_last_line_stack);
 
         visit_fn(self);
 
-        self.return_position_ranges.truncate(prev_ranges_len);
-        self.in_def = prev_in_def;
+        self.def_info_stack.truncate(prev_def_len);
+        self.conditional_last_line_stack = saved_cond;
+        self.statements_last_line_stack = saved_stmts;
     }
 }
 
@@ -367,22 +351,75 @@ impl<'pr> Visit<'pr> for DoubleNegationVisitor<'_> {
         });
     }
 
-    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
-        self.hash_array_depth += 1;
-        ruby_prism::visit_hash_node(self, node);
-        self.hash_array_depth -= 1;
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        if !self.def_info_stack.is_empty() {
+            let last_line = self
+                .last_line_of_node(node.location().start_offset(), node.location().end_offset());
+            self.conditional_last_line_stack.push(last_line);
+            // Clear statements stack: the condition is not inside a StatementsNode
+            // within this conditional, so the begin_type? check should not apply.
+            // StatementsNodes inside branches will re-push as they're visited.
+            let saved_stmts = std::mem::take(&mut self.statements_last_line_stack);
+            ruby_prism::visit_if_node(self, node);
+            self.statements_last_line_stack = saved_stmts;
+            self.conditional_last_line_stack.pop();
+        } else {
+            ruby_prism::visit_if_node(self, node);
+        }
     }
 
-    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
-        self.hash_array_depth += 1;
-        ruby_prism::visit_keyword_hash_node(self, node);
-        self.hash_array_depth -= 1;
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        if !self.def_info_stack.is_empty() {
+            let last_line = self
+                .last_line_of_node(node.location().start_offset(), node.location().end_offset());
+            self.conditional_last_line_stack.push(last_line);
+            let saved_stmts = std::mem::take(&mut self.statements_last_line_stack);
+            ruby_prism::visit_unless_node(self, node);
+            self.statements_last_line_stack = saved_stmts;
+            self.conditional_last_line_stack.pop();
+        } else {
+            ruby_prism::visit_unless_node(self, node);
+        }
     }
 
-    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
-        self.hash_array_depth += 1;
-        ruby_prism::visit_array_node(self, node);
-        self.hash_array_depth -= 1;
+    fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
+        if !self.def_info_stack.is_empty() {
+            let last_line = self
+                .last_line_of_node(node.location().start_offset(), node.location().end_offset());
+            self.conditional_last_line_stack.push(last_line);
+            let saved_stmts = std::mem::take(&mut self.statements_last_line_stack);
+            ruby_prism::visit_case_node(self, node);
+            self.statements_last_line_stack = saved_stmts;
+            self.conditional_last_line_stack.pop();
+        } else {
+            ruby_prism::visit_case_node(self, node);
+        }
+    }
+
+    fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
+        if !self.def_info_stack.is_empty() {
+            let last_line = self
+                .last_line_of_node(node.location().start_offset(), node.location().end_offset());
+            self.conditional_last_line_stack.push(last_line);
+            let saved_stmts = std::mem::take(&mut self.statements_last_line_stack);
+            ruby_prism::visit_case_match_node(self, node);
+            self.statements_last_line_stack = saved_stmts;
+            self.conditional_last_line_stack.pop();
+        } else {
+            ruby_prism::visit_case_match_node(self, node);
+        }
+    }
+
+    fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
+        if !self.def_info_stack.is_empty() {
+            let last_line = self
+                .last_line_of_node(node.location().start_offset(), node.location().end_offset());
+            self.statements_last_line_stack.push(last_line);
+            ruby_prism::visit_statements_node(self, node);
+            self.statements_last_line_stack.pop();
+        } else {
+            ruby_prism::visit_statements_node(self, node);
+        }
     }
 }
 

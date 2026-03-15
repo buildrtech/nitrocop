@@ -73,3 +73,30 @@ def foo?
     do_something
   end
 end
+
+# !! inside nested conditional where inner if ends before outer if/elsif
+# RuboCop does NOT consider this return position because the inner conditional
+# ends before the def body's last expression
+def invite(username, invited_by, guardian)
+  if condition_a
+    if condition_b
+      !!call_one(invited_by, guardian)
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+    else
+      !!call_two(invited_by, guardian)
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+    end
+  elsif condition_c
+    !!generate_record(
+    ^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+      invited_by,
+      topic: self,
+    )
+  end
+end
+
+# !! in block body (not define_method) — not a return position
+items.select do |item|
+  !!item.active
+  ^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+end
