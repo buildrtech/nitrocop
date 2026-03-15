@@ -4,6 +4,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03-15):
+///
+/// **FPs fixed (4):** All 4 FPs were `File.open(Rails.root.join(...))` used as part of a larger
+/// expression (argument to another method or receiver of a chain like `.read`). RuboCop skips
+/// `File.open(...)` when `node.parent&.send_type?` because these patterns are handled by
+/// `Style/FileRead` / `Style/FileWrite` instead. Since Prism lacks parent pointers, we detect
+/// this by checking the source byte after the node's end offset (`.`, `)`, `,` indicate the
+/// node is part of a larger expression).
+///
+/// **FNs fixed (21):** All 21 FNs used `Rails.public_path` instead of `Rails.root`. RuboCop
+/// checks both `{:root :public_path}` in its `rails_root?` matcher. Added `public_path`
+/// support to `rails_root_method_from_node`.
 pub struct RootPathnameMethods;
 
 const FILE_METHODS: &[&[u8]] = &[
@@ -164,6 +176,25 @@ impl Cop for RootPathnameMethods {
             return;
         }
 
+        // RuboCop skips `File.open(...)` / `IO.open(...)` when the parent is a send node.
+        // This handles cases like `File.open(Rails.root.join(...)).read` (receiver of chain)
+        // or `YAML.safe_load(File.open(Rails.root.join(...)))` (argument to another call).
+        // These are handled by Style/FileRead and Style/FileWrite instead.
+        // Since Prism doesn't provide parent pointers, we check the source bytes after the
+        // node's end to detect if it's part of a larger expression.
+        if method_name == b"open" {
+            let end_offset = node.location().end_offset();
+            let src = source.as_bytes();
+            let after = &src[end_offset..];
+            let next_meaningful = after.iter().find(|&&b| b != b' ' && b != b'\t');
+            // `.` means receiver of method chain: File.open(...).read
+            // `)` means argument to another call: YAML.safe_load(File.open(...))
+            // `,` means argument in a multi-arg call: IO.copy_stream(File.open(...), x)
+            if let Some(b'.' | b')' | b',') = next_meaningful {
+                return;
+            }
+        }
+
         // First argument should be a Rails.root pathname:
         // Either `Rails.root.join(...)` or `Rails.root` directly
         let args = match call.arguments() {
@@ -177,8 +208,8 @@ impl Cop for RootPathnameMethods {
 
         let first_arg = &arg_list[0];
 
-        // Check if first arg is Rails.root directly
-        if is_rails_root_node(first_arg) {
+        // Check if first arg is Rails.root or Rails.public_path directly
+        if let Some(rails_label) = rails_root_method_from_node(first_arg) {
             let method_str = std::str::from_utf8(method_name).unwrap_or("method");
             let recv_str = std::str::from_utf8(recv_name.unwrap_or(b"File")).unwrap_or("File");
             let loc = node.location();
@@ -187,49 +218,49 @@ impl Cop for RootPathnameMethods {
                 source,
                 line,
                 column,
-                format!("`Rails.root` is a `Pathname`, so you can use `Rails.root.{method_str}` instead of `{recv_str}.{method_str}(Rails.root, ...)`.",),
+                format!("`{rails_label}` is a `Pathname`, so you can use `{rails_label}.{method_str}` instead of `{recv_str}.{method_str}({rails_label}, ...)`.",),
             ));
         }
 
-        // Check if first arg is Rails.root.join(...)
+        // Check if first arg is Rails.root.join(...) or Rails.public_path.join(...)
         if let Some(arg_call) = first_arg.as_call_node() {
-            if arg_call.name().as_slice() == b"join" && is_rails_root(arg_call.receiver()) {
-                let method_str = std::str::from_utf8(method_name).unwrap_or("method");
-                let loc = node.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("`Rails.root` is a `Pathname`, so you can use `Rails.root.join(...).{method_str}` instead.",),
-                ));
+            if arg_call.name().as_slice() == b"join" {
+                if let Some(rails_label) = rails_root_method(arg_call.receiver()) {
+                    let method_str = std::str::from_utf8(method_name).unwrap_or("method");
+                    let loc = node.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        format!("`{rails_label}` is a `Pathname`, so you can use `{rails_label}.join(...).{method_str}` instead.",),
+                    ));
+                }
             }
         }
     }
 }
 
-/// Check if a node is `Rails.root`
-fn is_rails_root(node: Option<ruby_prism::Node<'_>>) -> bool {
-    let node = match node {
-        Some(n) => n,
-        None => return false,
-    };
-    is_rails_root_node(&node)
+/// Check if a node is `Rails.root` or `Rails.public_path`, returning the method name.
+fn rails_root_method(node: Option<ruby_prism::Node<'_>>) -> Option<&'static str> {
+    let node = node?;
+    rails_root_method_from_node(&node)
 }
 
-fn is_rails_root_node(node: &ruby_prism::Node<'_>) -> bool {
-    let call = match node.as_call_node() {
-        Some(c) => c,
-        None => return false,
+fn rails_root_method_from_node(node: &ruby_prism::Node<'_>) -> Option<&'static str> {
+    let call = node.as_call_node()?;
+    let method = call.name().as_slice();
+    let label = match method {
+        b"root" => "Rails.root",
+        b"public_path" => "Rails.public_path",
+        _ => return None,
     };
-    if call.name().as_slice() != b"root" {
-        return false;
+    let recv = call.receiver()?;
+    if util::constant_name(&recv) == Some(b"Rails") {
+        Some(label)
+    } else {
+        None
     }
-    let recv = match call.receiver() {
-        Some(r) => r,
-        None => return false,
-    };
-    util::constant_name(&recv) == Some(b"Rails")
 }
 
 #[cfg(test)]

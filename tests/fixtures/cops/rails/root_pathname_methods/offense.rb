@@ -12,3 +12,12 @@ File.join(Rails.root, "config", "initializers", "action_mailer.rb")
 
 Dir.glob(Rails.root.join("db", "**", "*.rb"))
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/RootPathnameMethods: `Rails.root` is a `Pathname`, so you can use `Rails.root.join(...).glob` instead.
+
+File.join(Rails.public_path, "uploads", "photo.jpg")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/RootPathnameMethods: `Rails.public_path` is a `Pathname`, so you can use `Rails.public_path.join` instead of `File.join(Rails.public_path, ...)`.
+
+File.exist?(Rails.public_path.join("assets", "app.css"))
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/RootPathnameMethods: `Rails.public_path` is a `Pathname`, so you can use `Rails.public_path.join(...).exist?` instead.
+
+File.read(Rails.public_path.join("robots.txt"))
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/RootPathnameMethods: `Rails.public_path` is a `Pathname`, so you can use `Rails.public_path.join(...).read` instead.
