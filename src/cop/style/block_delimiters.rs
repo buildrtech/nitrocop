@@ -98,10 +98,13 @@ impl<'a> BlockDelimitersVisitor<'a> {
             .any(|&(s, e)| s <= start && end <= e)
     }
 
-    /// Add a block's byte range to the suppressed set.
-    fn suppress_block(&mut self, block_node: &ruby_prism::BlockNode<'_>) {
-        let start = block_node.opening_loc().start_offset();
-        let end = block_node.closing_loc().end_offset();
+    /// Add a byte range to the suppressed set.
+    ///
+    /// Callers should pass the **call node's** range (not just the block node's)
+    /// so that chained blocks are properly suppressed. In Prism, chained calls
+    /// like `a.select { }.reject { }` have the outermost CallNode covering the
+    /// entire chain, while BlockNode ranges only cover their own `{...}`.
+    fn suppress_range(&mut self, start: usize, end: usize) {
         self.suppressed_ranges.push((start, end));
     }
 
@@ -192,7 +195,16 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             && method_name != b">="
             && method_name != b"===";
 
-        if !is_parenthesized && !is_assignment {
+        // Skip operator methods with a single block-bearing argument.
+        // RuboCop's `single_argument_operator_method?` check: for `a + b { }`,
+        // the `+` call should NOT mark `b`'s block as ignored, because the
+        // block is genuinely part of `b`'s call, not an ambiguous binding case.
+        let is_single_arg_operator = is_operator_method(method_name)
+            && node
+                .arguments()
+                .map_or(false, |args| args.arguments().len() == 1);
+
+        if !is_parenthesized && !is_assignment && !is_single_arg_operator {
             if let Some(args) = node.arguments() {
                 for arg in args.arguments().iter() {
                     collect_ignored_blocks(&arg, &mut self.ignored_blocks);
@@ -206,16 +218,24 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
                 let offset = block_node.opening_loc().start_offset();
                 let block_end = block_node.closing_loc().end_offset();
 
+                // Use the call node's full range for suppression. In Prism,
+                // chained calls like `a.select { }.reject { }` have the outer
+                // CallNode covering the entire chain [0..end], while BlockNode
+                // ranges only cover `{...}`. Using the call node's range ensures
+                // inner blocks in a chain are contained within the suppressed range.
+                let call_start = node.location().start_offset();
+                let call_end = node.location().end_offset();
+
                 if self.ignored_blocks.contains(&offset) {
                     // Block is in non-parenthesized arg position — suppress it
                     // and all nested blocks (RuboCop's part_of_ignored_node? behavior)
-                    self.suppress_block(&block_node);
+                    self.suppress_range(call_start, call_end);
                 } else if !self.is_suppressed(offset, block_end) {
                     // Block is not inside a suppressed range — check it
                     let flagged = self.check_block(&block_node, method_name);
                     if flagged {
                         // Suppress nested blocks (RuboCop's ignore_node in add_offense)
-                        self.suppress_block(&block_node);
+                        self.suppress_range(call_start, call_end);
                     }
                 }
             }
@@ -224,6 +244,43 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         // Recurse into children
         ruby_prism::visit_call_node(self, node);
     }
+}
+
+/// Check if a method name is a Ruby operator method.
+/// Matches RuboCop's `OPERATOR_METHODS` from `MethodIdentifierPredicates`.
+fn is_operator_method(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"|" | b"^"
+            | b"&"
+            | b"<=>"
+            | b"=="
+            | b"==="
+            | b"=~"
+            | b">"
+            | b">="
+            | b"<"
+            | b"<="
+            | b"<<"
+            | b">>"
+            | b"+"
+            | b"-"
+            | b"*"
+            | b"/"
+            | b"%"
+            | b"**"
+            | b"~"
+            | b"+@"
+            | b"-@"
+            | b"!@"
+            | b"~@"
+            | b"[]"
+            | b"[]="
+            | b"!"
+            | b"!="
+            | b"!~"
+            | b"`"
+    )
 }
 
 /// Check if a block's body contains rescue or ensure clauses.
@@ -379,6 +436,53 @@ mod tests {
             diags
         );
         assert_eq!(diags[0].location.line, 1);
+    }
+
+    #[test]
+    fn offense_only_outermost_in_chain() {
+        // Chained blocks: a.select { ... }.reject { ... }.each { ... }
+        // RuboCop flags only the outermost (last in chain) in Parser AST.
+        // In Prism, the outermost CallNode covers the entire chain, so
+        // suppressing via the call node's range suppresses inner blocks.
+        let source = b"items.select {\n  x.valid?\n}.reject {\n  x.empty?\n}.each {\n  puts x\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag only the outermost chained block, got: {:?}",
+            diags
+        );
+        // The outermost block in Prism is the top-level CallNode (.each)
+        assert_eq!(diags[0].location.line, 5, "Should flag .each at line 5");
+    }
+
+    #[test]
+    fn offense_two_block_chain() {
+        // a.select { ... }.reject { ... } — only outermost flagged
+        let source = b"items.select {\n  x.valid?\n}.reject {\n  x.empty?\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag only outermost in two-block chain, got: {:?}",
+            diags
+        );
+        assert_eq!(diags[0].location.line, 3, "Should flag .reject at line 3");
+    }
+
+    #[test]
+    fn offense_block_in_operator_arg() {
+        // `a + b { ... }` — operator method with single block-bearing arg.
+        // RuboCop does NOT ignore the block (single_argument_operator_method? skips
+        // the ignore logic), so the multi-line brace block should be flagged.
+        let source = b"a + b {\n  c\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag multi-line brace block in operator arg, got: {:?}",
+            diags
+        );
     }
 
     #[test]
