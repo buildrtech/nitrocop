@@ -3,6 +3,16 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/OperatorMethodCall — flags redundant dot before binary operator methods.
+///
+/// Investigation (2026-03-15): 61 FPs, mostly from xiki repo patterns like `Tree.<<(result)`
+/// and `Image.>> dest`. Root cause: RuboCop's `on_send` returns early when the receiver is
+/// a constant (`node.receiver.const_type?`), because removing the dot before an operator
+/// on a constant creates parsing ambiguity (e.g., `Tree << result` could be a heredoc).
+/// Also excludes splat/kwsplat/forwarded args (`INVALID_SYNTAX_ARG_TYPES`), since removing
+/// the dot would produce invalid syntax.
+///
+/// Fix: Added constant-receiver check and invalid-argument-type check to match RuboCop behavior.
 pub struct OperatorMethodCall;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -41,8 +51,14 @@ impl Cop for OperatorMethodCall {
             return;
         }
 
-        // Must have a receiver
-        if call.receiver().is_none() {
+        // Must have a receiver, and receiver must not be a constant
+        // RuboCop skips const_type? receivers (e.g., `Tree.<<(result)`)
+        let receiver = match call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
+        if receiver.as_constant_read_node().is_some() || receiver.as_constant_path_node().is_some()
+        {
             return;
         }
 
@@ -61,6 +77,22 @@ impl Cop for OperatorMethodCall {
             let arg_list: Vec<_> = args.arguments().iter().collect();
             if arg_list.len() != 1 {
                 return;
+            }
+            // Skip splat, kwsplat, forwarded args — removing dot would be
+            // invalid syntax (RuboCop's INVALID_SYNTAX_ARG_TYPES)
+            let arg = &arg_list[0];
+            if arg.as_splat_node().is_some() || arg.as_assoc_splat_node().is_some() {
+                return;
+            }
+            // kwsplat may also appear inside a keyword_hash_node wrapper
+            if let Some(kh) = arg.as_keyword_hash_node() {
+                if kh
+                    .elements()
+                    .iter()
+                    .any(|e| e.as_assoc_splat_node().is_some())
+                {
+                    return;
+                }
             }
         } else {
             // Unary operator with dot is also wrong but less common
