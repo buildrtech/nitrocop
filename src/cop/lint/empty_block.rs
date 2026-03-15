@@ -1,18 +1,23 @@
-use crate::cop::node_type::CALL_NODE;
+use crate::cop::node_type::{CALL_NODE, SUPER_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 /// Lint/EmptyBlock — checks for blocks without a body.
 ///
-/// ## Investigation (2026-03-08)
-/// Root cause of 197 FPs: AllowEmptyLambdas handling only checked for bare `lambda`/`proc`
-/// method calls (no receiver), but missed `Proc.new {}` and `::Proc.new {}` which RuboCop's
-/// `lambda_or_proc?` also covers. Many corpus repos (jruby, natalie, pakyow) have extensive
-/// proc-related specs with `Proc.new {}` patterns.
+/// ## Corpus investigation (2026-03-15)
 ///
-/// Fix: Added receiver checks for `Proc.new` and `::Proc.new` (ConstantReadNode and
-/// ConstantPathNode with no parent) to the AllowEmptyLambdas guard.
+/// Previous fixes closed the large `Proc.new {}` false-positive cluster by
+/// matching RuboCop's `lambda_or_proc?` handling for `Proc.new` and
+/// `::Proc.new`.
+///
+/// Remaining corpus oracle mismatches were:
+/// - FP=1: chained calls like `create_table ... end.define_model do end` were
+///   reported at the start of the receiver chain because diagnostics used the
+///   enclosing call span instead of the empty block span. RuboCop anchors the
+///   offense on the empty trailing block itself.
+/// - FN=1: `super(... ) {}` was ignored because the cop only visited `CallNode`
+///   blocks. Prism stores block-taking `super` sends on `SuperNode`.
 pub struct EmptyBlock;
 
 /// Check if a comment is a rubocop:disable directive for a specific cop.
@@ -56,7 +61,7 @@ impl Cop for EmptyBlock {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[CALL_NODE, SUPER_NODE]
     }
 
     fn check_node(
@@ -68,17 +73,20 @@ impl Cop for EmptyBlock {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let call_node = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        let block_node = match call_node.block() {
-            Some(b) => match b.as_block_node() {
+        let (call_node, super_node, block_node) = if let Some(call_node) = node.as_call_node() {
+            let block_node = match call_node.block().and_then(|b| b.as_block_node()) {
                 Some(bn) => bn,
                 None => return, // BlockArgumentNode — not a literal block
-            },
-            None => return,
+            };
+            (Some(call_node), None, block_node)
+        } else if let Some(super_node) = node.as_super_node() {
+            let block_node = match super_node.block().and_then(|b| b.as_block_node()) {
+                Some(bn) => bn,
+                None => return,
+            };
+            (None, Some(super_node), block_node)
+        } else {
+            return;
         };
 
         let body_empty = match block_node.body() {
@@ -100,22 +108,24 @@ impl Cop for EmptyBlock {
         // RuboCop's lambda_or_proc? covers: lambda {}, proc {}, Proc.new {}, ::Proc.new {}
         let allow_empty_lambdas = config.get_bool("AllowEmptyLambdas", true);
         if allow_empty_lambdas {
-            let name = call_node.name().as_slice();
-            if (name == b"lambda" || name == b"proc") && call_node.receiver().is_none() {
-                return;
-            }
-            // Proc.new {} and ::Proc.new {}
-            if name == b"new" {
-                if let Some(receiver) = call_node.receiver() {
-                    let is_proc_const = receiver
-                        .as_constant_read_node()
-                        .is_some_and(|c| c.name().as_slice() == b"Proc")
-                        || receiver.as_constant_path_node().is_some_and(|cp| {
-                            cp.parent().is_none()
-                                && cp.name().is_some_and(|n| n.as_slice() == b"Proc")
-                        });
-                    if is_proc_const {
-                        return;
+            if let Some(call_node) = call_node.as_ref() {
+                let name = call_node.name().as_slice();
+                if (name == b"lambda" || name == b"proc") && call_node.receiver().is_none() {
+                    return;
+                }
+                // Proc.new {} and ::Proc.new {}
+                if name == b"new" {
+                    if let Some(receiver) = call_node.receiver() {
+                        let is_proc_const = receiver
+                            .as_constant_read_node()
+                            .is_some_and(|c| c.name().as_slice() == b"Proc")
+                            || receiver.as_constant_path_node().is_some_and(|cp| {
+                                cp.parent().is_none()
+                                    && cp.name().is_some_and(|n| n.as_slice() == b"Proc")
+                            });
+                        if is_proc_const {
+                            return;
+                        }
                     }
                 }
             }
@@ -145,10 +155,26 @@ impl Cop for EmptyBlock {
             }
         }
 
-        // Use the call node's location for the diagnostic (matches RuboCop's block node
-        // which in Parser AST spans the entire expression including the receiver).
-        let loc = call_node.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let diagnostic_offset = if let Some(call_node) = call_node.as_ref() {
+            if call_node.receiver().is_some_and(|receiver| {
+                receiver
+                    .as_call_node()
+                    .is_some_and(|call| call.block().is_some())
+            }) {
+                call_node
+                    .message_loc()
+                    .map(|loc| loc.start_offset())
+                    .unwrap_or_else(|| call_node.location().start_offset())
+            } else {
+                call_node.location().start_offset()
+            }
+        } else if let Some(super_node) = super_node {
+            super_node.location().start_offset()
+        } else {
+            block_node.location().start_offset()
+        };
+
+        let (line, column) = source.offset_to_line_col(diagnostic_offset);
         diagnostics.push(self.diagnostic(
             source,
             line,
