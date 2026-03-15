@@ -38,6 +38,14 @@ use crate::parse::source::SourceFile;
 /// was incorrectly flagged — but `errors.messages` returns a plain Hash and
 /// calling `.keys` on it is perfectly valid. Fixed by using `is_errors_call`
 /// (direct `errors` only) in Pattern 4.
+///
+/// ## Investigation findings (2026-03-14, second pass)
+///
+/// **FP root cause (8 FPs):** `is_errors_call` matched `errors(args)` calls
+/// (e.g., `result.errors(locale: :de).to_h`, `result.errors(full: true).to_h`
+/// in dry-rb and OpenProject code). ActiveModel's `errors` method takes no
+/// arguments; calls with arguments are custom methods on non-ActiveModel objects.
+/// Fixed by adding `call.arguments().is_none()` check in `is_errors_call`.
 pub struct DeprecatedActiveModelErrorsMethods;
 
 const MSG: &str = "Avoid manipulating ActiveModel errors as hash directly.";
@@ -208,9 +216,13 @@ fn is_valid_errors_call(call: &ruby_prism::CallNode<'_>, model_file: bool) -> bo
 }
 
 /// Check if a node is `x.errors` or bare `errors` (with receiver validation).
+///
+/// ActiveModel's `errors` method takes no arguments. Calls with arguments
+/// (e.g., `errors(locale: :de)`, `errors(full: true)`) are NOT ActiveModel errors
+/// and should NOT be flagged.
 fn is_errors_call(node: &ruby_prism::Node<'_>, model_file: bool) -> bool {
     if let Some(call) = node.as_call_node() {
-        if call.name().as_slice() == b"errors" {
+        if call.name().as_slice() == b"errors" && call.arguments().is_none() {
             return is_valid_errors_call(&call, model_file);
         }
     }

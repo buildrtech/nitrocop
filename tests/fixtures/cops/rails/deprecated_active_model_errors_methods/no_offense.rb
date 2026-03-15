@@ -13,6 +13,11 @@ user.errors.messages.size
 user.errors.details.keys
 user.errors.details.values
 
+# errors called with arguments is not ActiveModel errors — do NOT flag
+result.errors(locale: :de).to_h
+result.errors(full: true).to_h
+contract.call(attrs).errors(full: true).to_h.each_value { |v| v }
+
 # Bare `errors` (no explicit receiver) should NOT be flagged outside model files
 errors.keys
 errors.values
