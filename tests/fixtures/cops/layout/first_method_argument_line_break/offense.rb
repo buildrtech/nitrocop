@@ -29,3 +29,8 @@ process(data,
 execute(cmd, env, opts,
         ^^^ Layout/FirstMethodArgumentLineBreak: Add a line break before the first argument of a multi-line method call.
         &callback)
+
+# Super with block argument on a separate line
+super(arg,
+      ^^^ Layout/FirstMethodArgumentLineBreak: Add a line break before the first argument of a multi-line method call.
+      &block)

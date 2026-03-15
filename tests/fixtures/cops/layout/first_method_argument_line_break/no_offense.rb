@@ -30,3 +30,6 @@ raise_error(SomeError, %r(some message)
 # Block argument on same line as other args
 process(data, &handler)
 client.send(request_method, :post, &@callback)
+
+# Super with block argument on same line
+super(arg, &block)

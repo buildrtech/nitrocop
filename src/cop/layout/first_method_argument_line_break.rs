@@ -31,6 +31,14 @@ use crate::parse::source::SourceFile;
 /// included it. The `last_line` check saw all regular args on the same line
 /// and returned early (no offense). Fix: include `call.block()` when it is a
 /// `BlockArgumentNode` in the arg_locs vector.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// CI baseline: FP=0, FN=5. The remaining FNs were `super(arg, &block)` calls
+/// where `&block` was on a different line. The `SuperNode` branch was missing
+/// the same `block()` handling that was added for `CallNode` in the previous
+/// fix. Fix: include `super_node.block()` when it is a `BlockArgumentNode`
+/// in the arg_locs vector, mirroring the `CallNode` logic.
 pub struct FirstMethodArgumentLineBreak;
 
 impl Cop for FirstMethodArgumentLineBreak {
@@ -100,10 +108,18 @@ impl Cop for FirstMethodArgumentLineBreak {
                 return;
             };
 
-            (
-                super_node.location().start_offset(),
-                collect_arg_locs(args.arguments().iter().collect()),
-            )
+            let mut arg_locs = collect_arg_locs(args.arguments().iter().collect());
+
+            // In Prism, BlockArgumentNode (&block) is on super_node.block(), not in arguments().
+            // Include it so multiline detection accounts for block args on different lines.
+            if let Some(block) = super_node.block() {
+                if block.as_block_argument_node().is_some() {
+                    let loc = block.location();
+                    arg_locs.push((loc.start_offset(), loc.end_offset()));
+                }
+            }
+
+            (super_node.location().start_offset(), arg_locs)
         } else {
             return;
         };
