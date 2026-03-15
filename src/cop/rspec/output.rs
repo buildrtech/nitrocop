@@ -18,6 +18,16 @@ use ruby_prism::Visit;
 /// Fix (110 FN): Added missing kernel methods `ap` and `pretty_print`, missing IO
 /// method `write_nonblock`, and applied hash/block_pass argument skip to ALL kernel
 /// methods (was previously only applied to `p`).
+///
+/// Fix (105 FN): The `parent_is_call` flag was not being reset when entering
+/// scope-introducing nodes (LambdaNode, DefNode, block bodies). This caused
+/// output calls like `p x` inside `-> { p x }.should(...)` or `Proc.new { puts "x" }.call`
+/// to be suppressed because the lambda/block was the receiver of a call, and the
+/// `parent_is_call = true` flag propagated through intermediate non-CallNode visitors
+/// into the nested output call. Fixed by: (1) resetting `parent_is_call = false` when
+/// visiting block bodies of CallNodes, (2) overriding `visit_lambda_node` and
+/// `visit_def_node` to reset the flag. This matches RuboCop's `node.parent&.call_type?`
+/// which only checks the immediate parent, not transitive ancestors.
 pub struct Output;
 
 /// Output methods without a receiver (Kernel print methods)
@@ -147,10 +157,36 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
         }
         self.parent_is_call = was;
 
-        // Visit block normally (block body is not "inside a call argument")
+        // Visit block with parent_is_call = false: a block body is a new
+        // statement scope, not a call argument. Without this reset,
+        // `Proc.new { puts "x" }.call` would suppress the offense because
+        // the Proc.new block inherits parent_is_call from `.call`'s receiver.
         if let Some(block) = node.block() {
+            let was_block = self.parent_is_call;
+            self.parent_is_call = false;
             self.visit(&block);
+            self.parent_is_call = was_block;
         }
+    }
+
+    // Lambda bodies are new statement scopes — reset parent_is_call so that
+    // output calls inside `-> { p(o) }.should(...)` are not suppressed by the
+    // outer `.should` call treating the lambda as its receiver.
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_lambda_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    // Method definition bodies are new scopes — reset parent_is_call so that
+    // output calls inside `def foo; puts "x"; end` are detected even when the
+    // def node is nested inside a call's receiver/arguments.
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_def_node(self, node);
+        self.parent_is_call = was;
     }
 }
 
