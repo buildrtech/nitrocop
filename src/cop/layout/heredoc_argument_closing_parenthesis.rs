@@ -54,7 +54,17 @@ use ruby_prism::Visit;
 /// and `end_keyword_before_closing_parenthesis?` suppresses it. In Prism, the block is a
 /// child of the CallNode (via `call.block()`), so the `end_depth` tracking doesn't see it.
 /// Fix: explicitly check `call.block()` for a `do..end` BlockNode before firing.
-/// Remaining: 2 FNs in ruby-formatter/rufo (no corpus access to investigate exact patterns).
+/// Investigation findings (2026-03-15):
+/// Root cause of 2 FNs in ruby-formatter/rufo: heredocs nested inside keyword hash arguments
+/// (e.g., `foo(content: <<-EOF, ...\nEOF\n another_arg: 4,\n)`) were incorrectly suppressed
+/// by the "arguments between heredoc end and closing paren" check. The check was using
+/// `max_heredoc_body_end` from ALL heredocs including hash-nested ones. Since `another_arg: 4`
+/// appears between the heredoc body end and `)`, the cop saw non-whitespace content and skipped.
+/// RuboCop's `find_most_bottom_of_heredoc_end` only checks `argument.loc?(:heredoc_end)` on
+/// direct top-level arguments — hash nodes don't have `heredoc_end` locations, so hash-nested
+/// heredocs don't participate in that check. Fix: split tracking into `max_direct_heredoc_body_end`
+/// (for the between-args check) vs `max_any_body_end` (for opener line tracking), and added
+/// `direct_arg_heredoc_info()` that doesn't recurse into hash/keyword_hash arguments.
 pub struct HeredocArgumentClosingParenthesis;
 
 impl Cop for HeredocArgumentClosingParenthesis {
@@ -196,16 +206,28 @@ impl HeredocParenVisitor<'_> {
 
         // Collect heredoc info
         let mut has_heredoc = false;
-        let mut max_heredoc_body_end: usize = 0;
+        let mut max_any_body_end: usize = 0;
+        // max_direct_heredoc_body_end tracks only DIRECT (top-level) heredoc arguments,
+        // not heredocs nested inside keyword hash arguments. This matches RuboCop's
+        // find_most_bottom_of_heredoc_end which only checks argument.loc?(:heredoc_end)
+        // on direct arguments — hash nodes don't have heredoc_end locations.
+        let mut max_direct_heredoc_body_end: usize = 0;
         let mut last_heredoc_opener_line: usize = 0;
 
         for arg in args.arguments().iter() {
             if let Some((opener_offset, body_end)) = heredoc_info(bytes, &arg) {
                 has_heredoc = true;
-                if body_end > max_heredoc_body_end {
-                    max_heredoc_body_end = body_end;
+                if body_end > max_any_body_end {
+                    max_any_body_end = body_end;
                     let (line, _) = self.source.offset_to_line_col(opener_offset);
                     last_heredoc_opener_line = line;
+                }
+                // Only track body end for direct heredocs (not hash-nested)
+                // for the "arguments between heredoc end and close paren" check.
+                if direct_arg_heredoc_info(bytes, &arg).is_some()
+                    && body_end > max_direct_heredoc_body_end
+                {
+                    max_direct_heredoc_body_end = body_end;
                 }
             }
         }
@@ -221,11 +243,14 @@ impl HeredocParenVisitor<'_> {
             return;
         }
 
-        // Check if there's non-whitespace content between the last heredoc body end
-        // and the closing paren. If so, there are non-heredoc arguments after the
+        // Check if there's non-whitespace content between the last DIRECT heredoc body
+        // end and the closing paren. If so, there are non-heredoc arguments after the
         // heredoc body and the closing paren correctly goes with those args.
-        if max_heredoc_body_end > 0 && max_heredoc_body_end < close_loc.start_offset() {
-            let between = &bytes[max_heredoc_body_end..close_loc.start_offset()];
+        // Only direct (top-level) heredocs count here — heredocs nested inside hash
+        // arguments don't suppress the cop, matching RuboCop's behavior.
+        if max_direct_heredoc_body_end > 0 && max_direct_heredoc_body_end < close_loc.start_offset()
+        {
+            let between = &bytes[max_direct_heredoc_body_end..close_loc.start_offset()];
             let has_content = between.iter().any(|&b| !b.is_ascii_whitespace());
             if has_content {
                 return;
@@ -286,6 +311,26 @@ impl Visit<'_> for HeredocParenVisitor<'_> {
         self.check_call(node);
         ruby_prism::visit_call_node(self, node);
     }
+}
+
+/// Returns heredoc info for a DIRECT (top-level) heredoc argument only.
+/// Does not recurse into hash/keyword_hash arguments.
+/// This matches RuboCop's `find_most_bottom_of_heredoc_end` which only checks
+/// `argument.loc?(:heredoc_end)` on direct arguments.
+fn direct_arg_heredoc_info(bytes: &[u8], node: &ruby_prism::Node<'_>) -> Option<(usize, usize)> {
+    // Direct heredoc
+    if let Some(info) = direct_heredoc_info(bytes, node) {
+        return Some(info);
+    }
+    // Heredoc as receiver of a method call (e.g., `<<-SQL.tr(...)`)
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            if let Some(info) = direct_heredoc_info(bytes, &recv) {
+                return Some(info);
+            }
+        }
+    }
+    None
 }
 
 /// Returns (opener_start_offset, body_end_offset) for a heredoc argument.
