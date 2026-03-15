@@ -20,6 +20,12 @@ use crate::parse::source::SourceFile;
 ///   `predicate.as_call_node()` returned None for the ParenthesesNode wrapper
 /// - FPs/FNs: modifier-form location was reported at `if` keyword instead of
 ///   at the start of the full expression, causing line mismatches vs RuboCop
+/// - FPs (4 in danbooru): pattern match guards `in :pattern if !condition` were
+///   flagged, but `unless` is invalid syntax in guard clauses. Fixed by detecting
+///   modifier IfNodes preceded by `in ` in the source bytes.
+/// - FPs (1): safe-navigation chains ending in `&.!` (e.g. `obj&.empty?&.!`)
+///   were flagged. Rewriting to `unless` with safe-nav is problematic. Fixed by
+///   checking `call_operator_loc` on the `!` CallNode.
 pub struct NegatedIf;
 
 /// Unwrap parentheses from a node, returning the inner expression.
@@ -46,6 +52,10 @@ fn unwrap_parentheses<'a>(node: ruby_prism::Node<'a>) -> ruby_prism::Node<'a> {
 fn is_single_negation(node: &ruby_prism::Node<'_>) -> bool {
     if let Some(call) = node.as_call_node() {
         if call.name().as_slice() == b"!" {
+            // Skip safe-navigation `&.!` — rewriting to `unless` with safe-nav is problematic
+            if call.call_operator_loc().is_some() {
+                return false;
+            }
             // Check for double negation: `!!expr`
             if let Some(recv) = call.receiver() {
                 if let Some(inner_call) = recv.as_call_node() {
@@ -102,6 +112,30 @@ impl Cop for NegatedIf {
 
         // Detect modifier (postfix) form: `do_something if condition`
         let is_modifier = if_node.end_keyword_loc().is_none();
+
+        // Skip pattern match guards: `in :pattern if !condition`
+        // Prism wraps pattern guards as modifier IfNodes inside InNode conditions.
+        // These cannot use `unless` — the syntax `in :x unless cond` is invalid Ruby.
+        // Detect by checking if the source bytes before the IfNode start with `in `.
+        if is_modifier {
+            let start = node.location().start_offset();
+            let bytes = source.as_bytes();
+            // Walk backwards from the IfNode start past whitespace to find `in`
+            let mut pos = start;
+            while pos > 0 && (bytes[pos - 1] == b' ' || bytes[pos - 1] == b'\t') {
+                pos -= 1;
+            }
+            if pos >= 2 && bytes[pos - 2..pos] == *b"in" {
+                // Verify it's a word boundary (start of line or preceded by whitespace/newline)
+                if pos == 2
+                    || bytes[pos - 3] == b'\n'
+                    || bytes[pos - 3] == b' '
+                    || bytes[pos - 3] == b'\t'
+                {
+                    return;
+                }
+            }
+        }
 
         // EnforcedStyle filtering
         match enforced_style {
@@ -224,6 +258,32 @@ mod tests {
         assert_eq!(
             diags[0].location.line, 1,
             "Should report at line 1 (start of return), not at 'if' keyword line"
+        );
+    }
+
+    #[test]
+    fn pattern_guard_not_flagged() {
+        use crate::testutil::run_cop_full;
+        let source = b"case x\nin :foo if !bar\n  nil\nend\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Should NOT flag pattern guard if: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn safe_nav_chain_negation_not_flagged() {
+        use crate::testutil::run_cop_full;
+        let source = b"if obj&.empty?&.!\n  do_something\nend\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Should NOT flag safe-nav chain ending in &.!: {:?}",
+            diags
         );
     }
 

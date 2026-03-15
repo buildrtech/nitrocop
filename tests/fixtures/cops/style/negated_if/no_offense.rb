@@ -40,3 +40,19 @@ if not a_condition
 elsif other_condition
   something_else
 end
+
+# Pattern match guard — `unless` is invalid syntax in guard clauses
+case node
+in :property if !allowed?(value)
+  nil
+end
+
+case x
+in :foo if !bar
+  nil
+end
+
+# Safe-navigation chain ending in &.! — rewriting to unless is problematic
+if @options&.empty?&.!
+  process_options
+end
