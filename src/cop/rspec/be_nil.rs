@@ -1,4 +1,13 @@
-use crate::cop::node_type::{CALL_NODE, NIL_NODE};
+/// RSpec/BeNil — ensures consistent style when matching `nil`.
+///
+/// Matches RuboCop's approach: triggers directly on `be`/`be_nil` send nodes
+/// (RESTRICT_ON_SEND) rather than on the parent `to`/`should` call. This
+/// correctly handles compound matchers like `all(be nil)` and `.or be(nil)`
+/// where `be(nil)` is not a direct argument to `to`/`should`.
+///
+/// Pattern `(send nil? :be nil)` matches `be(nil)` and `be nil` (with or
+/// without parentheses). Pattern `(send nil? :be_nil)` matches `be_nil`.
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::util::RSPEC_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -20,7 +29,7 @@ impl Cop for BeNil {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, NIL_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -32,53 +41,36 @@ impl Cop for BeNil {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let enforced_style = config.get_str("EnforcedStyle", "be_nil");
-
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
         };
 
+        // Match RuboCop's RESTRICT_ON_SEND = %i[be be_nil]
+        // Trigger directly on `be` or `be_nil` calls, not on the parent `to`/`should`.
         let method_name = call.name().as_slice();
-        if method_name != b"to" && method_name != b"not_to" && method_name != b"to_not" {
+
+        // Both patterns require `nil?` receiver (no explicit receiver)
+        if call.receiver().is_some() {
             return;
         }
 
-        let args = match call.arguments() {
-            Some(a) => a,
-            None => return,
-        };
-
-        let arg_list: Vec<_> = args.arguments().iter().collect();
-        if arg_list.is_empty() {
-            return;
-        }
-
-        let matcher_call = match arg_list[0].as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        if matcher_call.receiver().is_some() {
-            return;
-        }
-
-        let matcher_name = matcher_call.name().as_slice();
+        let enforced_style = config.get_str("EnforcedStyle", "be_nil");
 
         if enforced_style == "be_nil" {
-            // Flag `be(nil)` — prefer `be_nil`
-            if matcher_name != b"be" {
+            // Flag `be(nil)` / `be nil` — prefer `be_nil`
+            if method_name != b"be" {
                 return;
             }
-            let matcher_args = match matcher_call.arguments() {
+            let args = match call.arguments() {
                 Some(a) => a,
                 None => return,
             };
-            let matcher_arg_list: Vec<_> = matcher_args.arguments().iter().collect();
-            if matcher_arg_list.len() != 1 || matcher_arg_list[0].as_nil_node().is_none() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() != 1 || arg_list[0].as_nil_node().is_none() {
                 return;
             }
-            let loc = matcher_call.location();
+            let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             diagnostics.push(self.diagnostic(
                 source,
@@ -88,13 +80,13 @@ impl Cop for BeNil {
             ));
         } else {
             // Flag `be_nil` — prefer `be(nil)`
-            if matcher_name != b"be_nil" {
+            if method_name != b"be_nil" {
                 return;
             }
-            if matcher_call.arguments().is_some() {
+            if call.arguments().is_some() {
                 return;
             }
-            let loc = matcher_call.location();
+            let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             diagnostics.push(self.diagnostic(
                 source,
