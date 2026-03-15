@@ -62,6 +62,10 @@ format('\\%06<hex>x', hex: 10)
 "%1$*2$s" % ["a", 8]
 "%1$*10$s" % ["a",0,0,0,0,0,0,0,0,8]
 
+# Positional width and precision stars with numbered value argument
+"%*1$.*2$3$d" % [10, 5, 1]
+"%-*1$.*2$3$d" % [-10, 5, 1]
+
 # Custom DSL method named format with block (not Kernel#format)
 format 'text/latex' do |obj|
   obj.to_s

@@ -87,8 +87,18 @@ use crate::parse::source::SourceFile;
 /// but RuboCop's Parser gem only counts `&blk` in `arguments.size`, not
 /// `do...end` blocks. Fixed by checking `as_block_argument_node()` specifically.
 ///
-/// Remaining FP=13, FN=6: Not investigated in this batch — likely config/exclude
-/// issues or edge cases in format string parsing.
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=13, FN=6.
+///
+/// FP=12: fully-numbered width/precision formats like `%*1$.*2$3$d` and
+/// `%-*1$.*2$3$d` were still parsed as having only 2 fields. The parser handled
+/// `*N$` width/precision references but missed the trailing numbered value
+/// reference (`3$`) that appears after those parts and before the conversion
+/// type. This caused valid numbered formats to be over-reported as mismatches.
+///
+/// Remaining FP/FN after this fix are still under investigation and may be
+/// config/version-specific format parsing differences.
 pub struct FormatParameterMismatch;
 
 impl Cop for FormatParameterMismatch {
@@ -721,6 +731,27 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
                 has_named = true;
                 continue;
             }
+        }
+
+        // Trailing numbered value reference after width/precision stars,
+        // e.g. %*1$.*2$3$d or %-*1$.*2$3$d.
+        let numbered_start = i;
+        while i < len && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i > numbered_start && i < len && bytes[i] == b'$' {
+            if let Ok(n) = std::str::from_utf8(&bytes[numbered_start..i])
+                .unwrap_or("")
+                .parse::<usize>()
+            {
+                has_numbered = true;
+                if n > max_numbered {
+                    max_numbered = n;
+                }
+            }
+            i += 1;
+        } else {
+            i = numbered_start;
         }
 
         // Conversion specifier — must be a valid Ruby format type.
