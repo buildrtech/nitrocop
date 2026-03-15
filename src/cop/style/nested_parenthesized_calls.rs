@@ -3,7 +3,21 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Checks for nested method calls without parentheses inside a parenthesized outer call.
+///
+/// ## Investigation notes (2026-03-15)
+/// - 147 FPs caused by `!=` and `!~` operators not being recognized as operators.
+///   The old character-based check (`!b.is_ascii_alphanumeric() && *b != b'!' ...`) excluded `!`
+///   from the "operator character" set (because `!` also appears at the end of method names like
+///   `save!`), which meant `!=` and `!~` were not skipped as operators.
+/// - Fixed by replacing the character-based heuristic with an explicit operator method name list,
+///   matching RuboCop's `operator_method?` behavior.
 pub struct NestedParenthesizedCalls;
+
+const OPERATOR_METHODS: &[&[u8]] = &[
+    b"+", b"-", b"*", b"/", b"%", b"**", b"==", b"!=", b"<", b">", b"<=", b">=", b"<=>", b"<<",
+    b">>", b"|", b"&", b"^", b"~", b"!", b"=~", b"!~", b"[]", b"[]=", b"+@", b"-@",
+];
 
 impl Cop for NestedParenthesizedCalls {
     fn name(&self) -> &'static str {
@@ -66,11 +80,8 @@ impl Cop for NestedParenthesizedCalls {
             let inner_name = inner_call.name();
             let inner_bytes = inner_name.as_slice();
 
-            // Skip operators
-            if inner_bytes
-                .iter()
-                .all(|b| !b.is_ascii_alphanumeric() && *b != b'_' && *b != b'?' && *b != b'!')
-            {
+            // Skip operator methods (e.g. +, !=, !~, ==, <=>, etc.)
+            if OPERATOR_METHODS.contains(&inner_bytes) {
                 continue;
             }
 

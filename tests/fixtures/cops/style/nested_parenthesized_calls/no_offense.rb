@@ -11,3 +11,14 @@ method(obj.attr = value)
 # Bracket indexer calls are not parenthesized calls
 json[:key] = Routes.url_for self
 hash[:a] = some_method arg1, arg2
+
+# Operator methods inside parenthesized calls are not nested method calls
+assert(cdir1 != cdir3)
+assert(a == b)
+expect(x >= y)
+method1(a + b)
+method1(a <=> b)
+method1(a =~ b)
+method1(a !~ b)
+method1(a << b)
+method1(a ** b)
