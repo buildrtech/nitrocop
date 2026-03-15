@@ -37,17 +37,21 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Corpus investigation (2026-03-15)
 ///
-/// FP=2, FN=1. All file-discovery issues, not cop logic.
+/// CI now reports FP=2, FN=0 on `#~# ORIGINAL` / `#~# EXPECTED` lines in
+/// rufo's `.rb.spec` formatter fixtures.
 ///
-/// FP: 2 FPs from `#~# ORIGINAL`/`#~# EXPECTED` in `.rb.spec` files
-/// (rufo). The `spec` extension was incorrectly in `RUBY_EXTENSIONS`
-/// but is not in RuboCop's `AllCops.Include` list. Removed `spec`
-/// from `RUBY_EXTENSIONS` in `fs.rs`.
+/// Local investigation found two important constraints:
 ///
-/// FN: 1 FN from `bin/browsercms` starting with `##!/usr/bin/env ruby`
-/// (malformed double-hash shebang). `has_ruby_shebang` in `fs.rs`
-/// only matched `#!` at position 0; fixed to skip leading `#` chars
-/// before the `!` so `##!` lines are also detected as Ruby shebangs.
+/// 1. The corpus scripts run with `--config bench/corpus/baseline_rubocop.yml`,
+///    so repo-local settings like rufo's `Layout: Enabled: false` and
+///    `AllCops: Exclude: spec/**/*` are intentionally ignored here.
+/// 2. Replaying the cited CI FP examples locally via `reduce-mismatch.py`
+///    reports `rubocop also fires` under that same baseline config, so the
+///    current local corpus bundle does not reproduce them as nitrocop-only FPs.
+///
+/// No cop or file-discovery change was accepted in this round. A future fix
+/// should start by reconciling CI/local corpus oracle drift before changing
+/// `missing_space_after_hash` or file discovery again.
 pub struct LeadingCommentSpace;
 
 impl Cop for LeadingCommentSpace {

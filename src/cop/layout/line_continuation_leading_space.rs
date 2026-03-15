@@ -53,6 +53,24 @@ use crate::parse::source::SourceFile;
 /// with trailing whitespace) still prevents FPs on long message builder chains.
 /// Moved the former no_offense `+`-receiver test case to offense since RuboCop
 /// does flag leading spaces in dstr nodes even when they're `+` receivers.
+///
+/// ## Corpus investigation (2026-03-15, round 2)
+///
+/// CI still reports FP=3 in chefspec
+/// (`resource_matcher.rb:77/78/80`), but local repro no longer supports
+/// treating them as real cop FPs.
+///
+/// `reduce-mismatch.py` replays those exact locations under
+/// `bench/corpus/baseline_rubocop.yml`. With the current local corpus bundle,
+/// it reports `rubocop also fires` on the chefspec sample before reduction.
+/// That means the cited CI FP examples are not reproducible locally as
+/// nitrocop-only offenses.
+///
+/// No additional cop change was accepted in this round. The current logic
+/// already matches vendored RuboCop's simple `on_dstr` implementation more
+/// closely than the earlier heuristic variants, and another speculative change
+/// would risk regressing the FN fixes above. Revisit after a fresh corpus
+/// oracle rerun or if CI/local RuboCop environment drift is confirmed.
 pub struct LineContinuationLeadingSpace;
 
 impl Cop for LineContinuationLeadingSpace {
