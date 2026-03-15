@@ -1,12 +1,37 @@
-x = if condition
-^^^^^^^^^^^^^^^^^^^^ Style/RedundantSelfAssignmentBranch: Redundant self-assignment branch. The variable `x` is assigned to itself in one of the branches.
-  do_something
-else
-  x
-end
+# Self-assigning else branch in ternary
+foo = condition ? bar : foo
+                        ^^^ Style/RedundantSelfAssignmentBranch: Remove the self-assignment branch.
 
-x = condition ? do_something : x
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantSelfAssignmentBranch: Redundant self-assignment branch. The variable `x` is assigned to itself in one of the branches.
+# Self-assigning if branch in ternary
+foo = condition ? foo : bar
+                  ^^^ Style/RedundantSelfAssignmentBranch: Remove the self-assignment branch.
 
-x = condition ? x : do_something
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantSelfAssignmentBranch: Redundant self-assignment branch. The variable `x` is assigned to itself in one of the branches.
+# Self-assigning else branch in if/else
+foo = if condition
+        bar
+      else
+        foo
+        ^^^ Style/RedundantSelfAssignmentBranch: Remove the self-assignment branch.
+      end
+
+# Self-assigning if branch in if/else
+foo = if condition
+        foo
+        ^^^ Style/RedundantSelfAssignmentBranch: Remove the self-assignment branch.
+      else
+        bar
+      end
+
+# Self-assigning else branch with empty if branch
+foo = if condition
+      else
+        foo
+        ^^^ Style/RedundantSelfAssignmentBranch: Remove the self-assignment branch.
+      end
+
+# Self-assigning if branch with empty else branch
+foo = if condition
+        foo
+        ^^^ Style/RedundantSelfAssignmentBranch: Remove the self-assignment branch.
+      else
+      end
