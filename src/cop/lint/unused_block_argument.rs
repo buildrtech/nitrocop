@@ -36,10 +36,14 @@ use ruby_prism::Visit;
 /// that shadow outer names are pushed to a `shadowed` list, and reads of
 /// those names inside the nested scope are excluded from collection.
 ///
-/// FP=27: Likely remaining edge cases from config differences or variable
-/// tracking gaps. The fundamental VariableForce sophistication gap means
-/// some FPs may persist where RuboCop's scope tracking differs from our
-/// simple approach.
+/// FP=27→24: Operator-assign nodes (`x += 1`, `x ||= val`, `x &&= val`)
+/// were not counted as references. Prism represents these as
+/// `LocalVariableOperatorWriteNode`, `LocalVariableOrWriteNode`, and
+/// `LocalVariableAndWriteNode` — none of which contain a child
+/// `LocalVariableReadNode`, so the implicit read was missed. Fixed by
+/// adding visit handlers for all three operator-write node types in
+/// `VarRefFinder`. Remaining FPs may be from VariableForce sophistication
+/// gaps (e.g., scope tracking differences).
 pub struct UnusedBlockArgument;
 
 impl Cop for UnusedBlockArgument {
