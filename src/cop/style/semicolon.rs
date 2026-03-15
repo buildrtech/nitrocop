@@ -7,6 +7,13 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// Style/Semicolon — flags unnecessary semicolons used as expression separators
+/// or statement terminators.
+///
+/// Investigation findings:
+/// - 49 FPs were caused by `$;` (Ruby's `$FIELD_SEPARATOR` global variable) being
+///   misidentified as a statement-terminating semicolon. Fixed by checking if the
+///   preceding byte is `$` in the byte scanner and skipping if so.
 pub struct Semicolon;
 
 impl Cop for Semicolon {
@@ -47,6 +54,11 @@ impl Cop for Semicolon {
         // Phase 2: Scan for code semicolons and classify each.
         for (i, &byte) in bytes.iter().enumerate() {
             if byte != b';' || !code_map.is_code(i) {
+                continue;
+            }
+
+            // Skip $; — Ruby's $FIELD_SEPARATOR global variable, not a semicolon
+            if i > 0 && bytes[i - 1] == b'$' {
                 continue;
             }
 

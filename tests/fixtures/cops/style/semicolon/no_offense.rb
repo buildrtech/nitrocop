@@ -42,3 +42,9 @@ for x in list; process(x) end
 
 # begin/rescue/ensure structural semicolons
 begin; action; rescue; fallback; end
+
+# $; is a global variable (Ruby's $FIELD_SEPARATOR), not a semicolon
+alias $FS $;
+old_fs = $;
+$FS.should == $;
+result = items.join($;)
