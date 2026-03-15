@@ -16,6 +16,13 @@ use crate::parse::source::SourceFile;
 /// over quoted (`'`/`"`) and bracket (`[...]`) sections, then detecting
 /// `--` anywhere in the unquoted content. Matches RuboCop's
 /// `singleline_comments_present?` / `SQL_IDENTIFIER_MARKERS` logic.
+///
+/// ## Investigation (2026-03-15)
+///
+/// **FN root cause (2 FN):** Quoted heredoc tags were not matched. `<<~'SQL'` and `<<-'SQL'`
+/// use single-quoted delimiters (common for heredocs that should not interpolate). The tag
+/// extraction only matched `SQL` literally but not `'SQL'` or `"SQL"`.
+/// Fix: strip surrounding quotes from the tag before comparing.
 pub struct SquishedSQLHeredocs;
 
 /// Check if heredoc content contains SQL single-line comments (`--`).
@@ -139,6 +146,13 @@ impl Cop for SquishedSQLHeredocs {
         };
         let tag = &opening_text[tag_start..];
 
+        // Strip optional quotes around tag: <<~'SQL' or <<~"SQL" -> SQL
+        let tag = match tag {
+            [b'\'', rest @ .., b'\''] => rest,
+            [b'"', rest @ .., b'"'] => rest,
+            other => other,
+        };
+
         // Must be SQL heredoc
         if tag != b"SQL" {
             return;
@@ -172,12 +186,24 @@ impl Cop for SquishedSQLHeredocs {
             return;
         }
 
-        let heredoc_style = if opening_text.starts_with(b"<<~") {
-            "<<~SQL"
-        } else if opening_text.starts_with(b"<<-") {
-            "<<-SQL"
-        } else {
-            "<<SQL"
+        // Build the heredoc style string for the message, preserving quotes if present
+        let heredoc_style = {
+            let prefix = if opening_text.starts_with(b"<<~") {
+                "<<~"
+            } else if opening_text.starts_with(b"<<-") {
+                "<<-"
+            } else {
+                "<<"
+            };
+            // Check if the tag was originally quoted
+            let raw_tag = &opening_text[prefix.len()..];
+            if raw_tag.starts_with(b"'") {
+                format!("{prefix}'SQL'")
+            } else if raw_tag.starts_with(b"\"") {
+                format!("{prefix}\"SQL\"")
+            } else {
+                format!("{prefix}SQL")
+            }
         };
 
         let (line, column) = source.offset_to_line_col(opening_loc.start_offset());

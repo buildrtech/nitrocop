@@ -34,3 +34,12 @@ SQL
   SELECT "col--name" FROM posts
   WHERE status = 1 -- inline comment
 SQL
+
+# Quoted tags with squish are fine
+<<~'SQL'.squish
+  SELECT * FROM records
+SQL
+
+<<-'SQL'.squish
+  SELECT id FROM items
+SQL
