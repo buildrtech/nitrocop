@@ -33,6 +33,15 @@ use crate::parse::source::SourceFile;
 /// individual arguments (RuboCop's `check_each_arg`), which was missing
 /// entirely — this detects extra whitespace before non-first args like
 /// `|x,   y|`.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// Remaining FN=18 from missing recursive descent into destructured (mlhs)
+/// parameter groups. RuboCop's `check_arg` recurses into `mlhs_type?` nodes
+/// to check extra space inside patterns like `(x,  y)`. nitrocop's
+/// `collect_param_locations` only collected top-level params, so inner params
+/// of `MultiTargetNode` groups were never checked. Fix: recurse into
+/// `MultiTargetNode` children via `collect_multi_target_locations`.
 pub struct SpaceAroundBlockParameters;
 
 /// Extracted info about a block or lambda's parameters and body.
@@ -410,6 +419,8 @@ fn extract_lambda_info(lambda: &ruby_prism::LambdaNode<'_>) -> Option<BlockInfo>
 }
 
 /// Collect (start_offset, end_offset) for each parameter in the block_params.
+/// Recursively descends into destructured (MultiTargetNode) parameters to check
+/// inner args too, matching RuboCop's `check_arg` which recurses into `mlhs_type?`.
 fn collect_param_locations(
     block_params: &ruby_prism::BlockParametersNode<'_>,
 ) -> Vec<(usize, usize)> {
@@ -422,6 +433,10 @@ fn collect_param_locations(
     // Collect all required, optional, rest, keyword, etc. parameters
     for p in params_node.requireds().iter() {
         locations.push((p.location().start_offset(), p.location().end_offset()));
+        // Recurse into destructured params like (x, y)
+        if let Some(mt) = p.as_multi_target_node() {
+            collect_multi_target_locations(&mt, &mut locations);
+        }
     }
     for p in params_node.optionals().iter() {
         locations.push((p.location().start_offset(), p.location().end_offset()));
@@ -431,6 +446,9 @@ fn collect_param_locations(
     }
     for p in params_node.posts().iter() {
         locations.push((p.location().start_offset(), p.location().end_offset()));
+        if let Some(mt) = p.as_multi_target_node() {
+            collect_multi_target_locations(&mt, &mut locations);
+        }
     }
     for p in params_node.keywords().iter() {
         locations.push((p.location().start_offset(), p.location().end_offset()));
@@ -451,6 +469,35 @@ fn collect_param_locations(
     // Sort by start offset so we process them in order
     locations.sort_by_key(|&(start, _)| start);
     locations
+}
+
+/// Recursively collect inner param locations from a destructured (MultiTargetNode) group.
+/// E.g., for `(x, y)` this adds locations of `x` and `y` so extra-space checks apply.
+fn collect_multi_target_locations(
+    mt: &ruby_prism::MultiTargetNode<'_>,
+    locations: &mut Vec<(usize, usize)>,
+) {
+    for target in mt.lefts().iter() {
+        locations.push((
+            target.location().start_offset(),
+            target.location().end_offset(),
+        ));
+        if let Some(inner_mt) = target.as_multi_target_node() {
+            collect_multi_target_locations(&inner_mt, locations);
+        }
+    }
+    if let Some(rest) = mt.rest() {
+        locations.push((rest.location().start_offset(), rest.location().end_offset()));
+    }
+    for target in mt.rights().iter() {
+        locations.push((
+            target.location().start_offset(),
+            target.location().end_offset(),
+        ));
+        if let Some(inner_mt) = target.as_multi_target_node() {
+            collect_multi_target_locations(&inner_mt, locations);
+        }
+    }
 }
 
 fn first_non_whitespace(bytes: &[u8], start: usize, end: usize) -> Option<usize> {

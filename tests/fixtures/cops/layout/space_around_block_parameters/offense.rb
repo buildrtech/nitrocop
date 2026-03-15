@@ -26,3 +26,11 @@ result = ->(  a,  b, c) { puts a }
 
 items.each { |x,   y| puts x }
                  ^^ Layout/SpaceAroundBlockParameters: Extra space before block parameter detected.
+
+items.each { |a, (x,  y), z| puts x }
+                     ^ Layout/SpaceAroundBlockParameters: Extra space before block parameter detected.
+
+items.each { |a,  (x,  y),  z| puts x }
+                 ^ Layout/SpaceAroundBlockParameters: Extra space before block parameter detected.
+                      ^ Layout/SpaceAroundBlockParameters: Extra space before block parameter detected.
+                           ^ Layout/SpaceAroundBlockParameters: Extra space before block parameter detected.
