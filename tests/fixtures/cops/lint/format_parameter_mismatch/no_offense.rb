@@ -66,6 +66,9 @@ format('\\%06<hex>x', hex: 10)
 "%*1$.*2$3$d" % [10, 5, 1]
 "%-*1$.*2$3$d" % [-10, 5, 1]
 
+# Invalid numbered width/precision references are ignored like RuboCop
+"%*1$.*0$1$s" % [1, 2, 3]
+
 # Custom DSL method named format with block (not Kernel#format)
 format 'text/latex' do |obj|
   obj.to_s
@@ -73,3 +76,8 @@ end
 format 'text/html' do |obj|
   obj.to_s
 end
+
+# Adjacent string literals with line continuation are not treated as a single
+# format string by RuboCop.
+super << format("See https://hexapdf.example/one " \
+                "for the full manual page with examples.", indent: 0)

@@ -91,14 +91,24 @@ use crate::parse::source::SourceFile;
 ///
 /// Corpus oracle reported FP=13, FN=6.
 ///
-/// FP=12: fully-numbered width/precision formats like `%*1$.*2$3$d` and
-/// `%-*1$.*2$3$d` were still parsed as having only 2 fields. The parser handled
-/// `*N$` width/precision references but missed the trailing numbered value
-/// reference (`3$`) that appears after those parts and before the conversion
-/// type. This caused valid numbered formats to be over-reported as mismatches.
+/// Additional investigation after the previous numbering fix showed two
+/// RuboCop-1.84.2 behaviors that are easy to misread from the syntax alone:
+/// 1. Width/precision interpolations are parsed from the source text, not from
+///    the runtime string value. That means `#{1 * 3}` contributes an extra
+///    argument because RuboCop's `arity` implementation literally counts `*`
+///    characters inside the interpolation source, while `#{padding}` does not.
+/// 2. Trailing numbered value refs after width/precision stars (for example
+///    `%*1$.*2$3$d`) are not matched by RuboCop's `FormatString::SEQUENCE`
+///    regex at all. The no-offense outcome for `String#%` comes from the
+///    zero-fields + array-RHS short-circuit, not from true numbered parsing.
 ///
-/// Remaining FP/FN after this fix are still under investigation and may be
-/// config/version-specific format parsing differences.
+/// FP=3/FN=6 root causes fixed here:
+/// - Preserve interpolation source in width/precision parsing so complex
+///   interpolations like `%.#{1 * 3}s` and `%0#{size * 2}X` match RuboCop.
+/// - Stop treating line-continued adjacent string literals as a plain format
+///   string source; RuboCop does not lint those as a single literal.
+/// - Remove the unsupported trailing-`N$` numbered-value parsing so invalid
+///   sequences like `%*1$.*0$1$s` fall back to RuboCop's zero-field behavior.
 pub struct FormatParameterMismatch;
 
 impl Cop for FormatParameterMismatch {
@@ -206,15 +216,6 @@ fn check_format_sprintf(
         None => return Vec::new(), // Variable or non-literal — can't check
     };
 
-    // If the format string contains interpolation that could affect format sequences, bail
-    if fmt_str.contains_interpolation {
-        // Still try to count sequences that don't depend on interpolation
-        // but if we can't determine the count reliably, bail
-        if fmt_str.has_format_affecting_interpolation {
-            return Vec::new();
-        }
-    }
-
     // Count remaining args (excluding the format string)
     let remaining_args = &arg_list[1..];
 
@@ -310,10 +311,6 @@ fn check_string_percent(
         Some(s) => s,
         None => return Vec::new(),
     };
-
-    if fmt_str.contains_interpolation && fmt_str.has_format_affecting_interpolation {
-        return Vec::new();
-    }
 
     let args = match call.arguments() {
         Some(a) => a,
@@ -431,54 +428,46 @@ fn is_heredoc_node(node: &ruby_prism::Node<'_>) -> bool {
 struct FormatString {
     value: String,
     contains_interpolation: bool,
-    has_format_affecting_interpolation: bool,
 }
 
 fn extract_format_string(node: &ruby_prism::Node<'_>) -> Option<FormatString> {
+    if has_line_continued_adjacent_literal(node) {
+        return None;
+    }
+
     if let Some(s) = node.as_string_node() {
         let val = s.unescaped();
         return Some(FormatString {
             value: String::from_utf8_lossy(val).to_string(),
             contains_interpolation: false,
-            has_format_affecting_interpolation: false,
         });
     }
 
     if let Some(interp) = node.as_interpolated_string_node() {
         let mut result = String::new();
         let mut has_interp = false;
-        let mut format_affecting = false;
         for part in interp.parts().iter() {
             if let Some(s) = part.as_string_node() {
                 let val = s.unescaped();
                 result.push_str(&String::from_utf8_lossy(val));
             } else {
                 has_interp = true;
-                // Check if the interpolation could affect format parsing
-                // If the string part right before this ends with `%` or `%-` etc.,
-                // the interpolation could be part of a format specifier
-                // Check if the string part before interpolation ends with a
-                // partial format specifier. Covers all flag chars: - + space 0 #
-                if result.ends_with('%')
-                    || result.ends_with("%-")
-                    || result.ends_with("%+")
-                    || result.ends_with("%0")
-                    || result.ends_with("%.")
-                    || result.ends_with("%#")
-                    || result.ends_with("% ")
-                {
-                    format_affecting = true;
-                }
+                result.push_str(&String::from_utf8_lossy(part.location().as_slice()));
             }
         }
         return Some(FormatString {
             value: result,
             contains_interpolation: has_interp,
-            has_format_affecting_interpolation: format_affecting,
         });
     }
 
     None
+}
+
+fn has_line_continued_adjacent_literal(node: &ruby_prism::Node<'_>) -> bool {
+    std::str::from_utf8(node.location().as_slice())
+        .unwrap_or("")
+        .contains("\\\n")
 }
 
 struct FieldCount {
@@ -541,6 +530,31 @@ fn parse_star_with_optional_dollar(bytes: &[u8], pos: usize) -> (usize, Option<u
     }
 }
 
+/// Parse a `#{...}` interpolation in the source text and return the byte
+/// position after the closing `}` plus the number of `*` characters inside the
+/// interpolation. RuboCop's `FormatSequence#arity` literally counts `*`
+/// characters in the matched source, so `#{1 * 3}` contributes one extra arg
+/// while `#{padding}` does not.
+fn parse_interpolation(bytes: &[u8], pos: usize) -> Option<(usize, usize)> {
+    if pos + 1 >= bytes.len() || bytes[pos] != b'#' || bytes[pos + 1] != b'{' {
+        return None;
+    }
+
+    let mut i = pos + 2;
+    let mut stars = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'*' {
+            stars += 1;
+        }
+        if bytes[i] == b'}' {
+            return Some((i + 1, stars));
+        }
+        i += 1;
+    }
+
+    None
+}
+
 fn parse_format_string(fmt: &str) -> FormatParseResult {
     let bytes = fmt.as_bytes();
     let len = bytes.len();
@@ -593,7 +607,9 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
         // Parse flags: [ #0+-] and also digit_dollar (N$) which RuboCop treats as a flag
         let start = i;
         // Skip standard flags
-        while i < len && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') {
+        while i < len && matches!(bytes[i], b'-' | b'+' | b' ' | b'0')
+            || (i < len && bytes[i] == b'#' && (i + 1 >= len || bytes[i + 1] != b'{'))
+        {
             i += 1;
         }
 
@@ -602,21 +618,22 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
         // Track whether this sequence has any numbered (*N$) or unnumbered (*) star refs
         let mut seq_has_numbered_star = false;
         let mut seq_has_unnumbered_star = false;
+        let mut seq_max_numbered = 0;
         if i < len && bytes[i] == b'*' {
             let (new_i, numbered_ref) = parse_star_with_optional_dollar(bytes, i);
             i = new_i;
             if let Some(n) = numbered_ref {
                 // *N$ — numbered width reference
                 seq_has_numbered_star = true;
-                has_numbered = true;
-                if n > max_numbered {
-                    max_numbered = n;
-                }
+                seq_max_numbered = seq_max_numbered.max(n);
             } else {
                 // Plain * — unnumbered extra arg
                 seq_has_unnumbered_star = true;
                 extra_args += 1;
             }
+        } else if let Some((new_i, interp_stars)) = parse_interpolation(bytes, i) {
+            i = new_i;
+            extra_args += interp_stars;
         } else {
             // Skip width digits
             while i < len && bytes[i].is_ascii_digit() {
@@ -646,13 +663,12 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
                 i = new_i;
                 if let Some(n) = numbered_ref {
                     // *N$ width reference in numbered format
-                    has_numbered = true;
-                    if n > max_numbered {
-                        max_numbered = n;
-                    }
+                    seq_max_numbered = seq_max_numbered.max(n);
                 }
                 // Plain * in numbered format — still an unnumbered reference,
                 // which means mixing (will be caught by mix_count check)
+            } else if let Some((new_i, _interp_stars)) = parse_interpolation(bytes, i) {
+                i = new_i;
             } else {
                 while i < len && bytes[i].is_ascii_digit() {
                     i += 1;
@@ -666,11 +682,10 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
                     let (new_i, numbered_ref) = parse_star_with_optional_dollar(bytes, i);
                     i = new_i;
                     if let Some(n) = numbered_ref {
-                        has_numbered = true;
-                        if n > max_numbered {
-                            max_numbered = n;
-                        }
+                        seq_max_numbered = seq_max_numbered.max(n);
                     }
+                } else if let Some((new_i, _interp_stars)) = parse_interpolation(bytes, i) {
+                    i = new_i;
                 } else {
                     while i < len && bytes[i].is_ascii_digit() {
                         i += 1;
@@ -682,9 +697,7 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
             if i < len && is_format_type(bytes[i]) {
                 if let Some(n) = parsed_num {
                     has_numbered = true;
-                    if n > max_numbered {
-                        max_numbered = n;
-                    }
+                    max_numbered = max_numbered.max(seq_max_numbered.max(n));
                 }
                 i += 1;
             }
@@ -709,14 +722,14 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
                 i = new_i;
                 if let Some(n) = numbered_ref {
                     seq_has_numbered_star = true;
-                    has_numbered = true;
-                    if n > max_numbered {
-                        max_numbered = n;
-                    }
+                    seq_max_numbered = seq_max_numbered.max(n);
                 } else {
                     seq_has_unnumbered_star = true;
                     extra_args += 1;
                 }
+            } else if let Some((new_i, interp_stars)) = parse_interpolation(bytes, i) {
+                i = new_i;
+                extra_args += interp_stars;
             } else {
                 while i < len && bytes[i].is_ascii_digit() {
                     i += 1;
@@ -733,36 +746,17 @@ fn parse_format_string(fmt: &str) -> FormatParseResult {
             }
         }
 
-        // Trailing numbered value reference after width/precision stars,
-        // e.g. %*1$.*2$3$d or %-*1$.*2$3$d.
-        let numbered_start = i;
-        while i < len && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i > numbered_start && i < len && bytes[i] == b'$' {
-            if let Ok(n) = std::str::from_utf8(&bytes[numbered_start..i])
-                .unwrap_or("")
-                .parse::<usize>()
-            {
-                has_numbered = true;
-                if n > max_numbered {
-                    max_numbered = n;
-                }
-            }
-            i += 1;
-        } else {
-            i = numbered_start;
-        }
-
         // Conversion specifier — must be a valid Ruby format type.
         if i < len && is_format_type(bytes[i]) {
             // A sequence can contribute to both numbered and unnumbered if it
             // mixes *N$ with plain * (e.g., %*.*2$s). Track each contribution.
-            if seq_has_unnumbered_star {
+            if seq_has_unnumbered_star || extra_args > 0 {
                 has_unnumbered = true;
                 count += 1 + extra_args;
             } else if seq_has_numbered_star {
                 // Entirely numbered (all stars are *N$), don't count as unnumbered
+                has_numbered = true;
+                max_numbered = max_numbered.max(seq_max_numbered);
             } else {
                 // No stars at all — regular unnumbered format
                 has_unnumbered = true;
