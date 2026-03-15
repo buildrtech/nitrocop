@@ -4,6 +4,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/WhereNotWithMultipleConditions
+///
+/// ## Investigation (2026-03-15): FP=2, FN=2
+///
+/// Location mismatch: nitrocop was reporting at `node.location()` (start of the entire
+/// chain expression), while RuboCop reports at `node.receiver.loc.selector` (the `where`
+/// keyword in `.where.not`). For multiline chains, the `where.not` call appears on a
+/// different line than the chain start, causing FP at the chain start line and FN at
+/// the `where` keyword line.
+///
+/// Fix: Report at `chain.inner_call.message_loc()` (the `where` keyword location).
 pub struct WhereNotWithMultipleConditions;
 
 fn hash_has_multiple_pairs(node: &ruby_prism::Node<'_>) -> bool {
@@ -90,7 +101,12 @@ impl Cop for WhereNotWithMultipleConditions {
             return;
         }
 
-        let loc = node.location();
+        // RuboCop reports offense starting at the `where` keyword (node.receiver.loc.selector),
+        // not at the start of the entire chain expression.
+        let where_call = &chain.inner_call;
+        let loc = where_call
+            .message_loc()
+            .unwrap_or_else(|| where_call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(
             source,
