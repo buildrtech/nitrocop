@@ -1,5 +1,3 @@
-use ruby_prism::Visit;
-
 use crate::cop::node_type::{AND_NODE, OR_NODE, UNLESS_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -73,29 +71,85 @@ fn contains_logical_operator(node: &ruby_prism::Node<'_>) -> bool {
     node.as_and_node().is_some() || node.as_or_node().is_some()
 }
 
+/// Check if the condition has mixed logical operators at the same structural level.
+/// Matches RuboCop's `or_with_and?` and `and_with_or?` node patterns which only
+/// check direct children, plus `mixed_precedence_and?`/`mixed_precedence_or?` which
+/// check for mixing `&&` with `and` or `||` with `or`.
 fn contains_mixed_logical_operators(node: &ruby_prism::Node<'_>) -> bool {
-    let mut finder = LogicalOpFinder {
-        has_and: false,
-        has_or: false,
-    };
-    finder.visit(node);
-    finder.has_and && finder.has_or
+    or_with_and(node)
+        || and_with_or(node)
+        || mixed_precedence_and(node)
+        || mixed_precedence_or(node)
 }
 
-struct LogicalOpFinder {
-    has_and: bool,
-    has_or: bool,
-}
-
-impl<'pr> Visit<'pr> for LogicalOpFinder {
-    fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
-        self.has_and = true;
-        ruby_prism::visit_and_node(self, node);
+/// An OR node whose direct left or right child is an AND node.
+/// e.g. `a && b || c` parses as `(or (and a b) c)`.
+fn or_with_and(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(or_node) = node.as_or_node() {
+        let left = or_node.left();
+        let right = or_node.right();
+        if left.as_and_node().is_some() || right.as_and_node().is_some() {
+            return true;
+        }
+        // Recurse into OR children that are also OR nodes (chained ||)
+        or_with_and(&left) || or_with_and(&right)
+    } else {
+        false
     }
+}
 
-    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
-        self.has_or = true;
-        ruby_prism::visit_or_node(self, node);
+/// An AND node whose direct left or right child is an OR node.
+/// e.g. `a || b && c` parses as `(and (or a b) c)`.
+fn and_with_or(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(and_node) = node.as_and_node() {
+        let left = and_node.left();
+        let right = and_node.right();
+        if left.as_or_node().is_some() || right.as_or_node().is_some() {
+            return true;
+        }
+        // Recurse into AND children that are also AND nodes (chained &&)
+        and_with_or(&left) || and_with_or(&right)
+    } else {
+        false
+    }
+}
+
+/// Check for mixing `&&` with `and` operators.
+fn mixed_precedence_and(node: &ruby_prism::Node<'_>) -> bool {
+    let mut ops = Vec::new();
+    collect_and_operators(node, &mut ops);
+    if ops.len() < 2 {
+        return false;
+    }
+    // Mixed if not all symbolic (&&) and not all keyword (and)
+    !(ops.iter().all(|&s| s) || ops.iter().all(|&s| !s))
+}
+
+/// Check for mixing `||` with `or` operators.
+fn mixed_precedence_or(node: &ruby_prism::Node<'_>) -> bool {
+    let mut ops = Vec::new();
+    collect_or_operators(node, &mut ops);
+    if ops.len() < 2 {
+        return false;
+    }
+    !(ops.iter().all(|&s| s) || ops.iter().all(|&s| !s))
+}
+
+fn collect_and_operators(node: &ruby_prism::Node<'_>, ops: &mut Vec<bool>) {
+    if let Some(and_node) = node.as_and_node() {
+        let is_symbolic = and_node.operator_loc().as_slice() == b"&&";
+        ops.push(is_symbolic);
+        collect_and_operators(&and_node.left(), ops);
+        collect_and_operators(&and_node.right(), ops);
+    }
+}
+
+fn collect_or_operators(node: &ruby_prism::Node<'_>, ops: &mut Vec<bool>) {
+    if let Some(or_node) = node.as_or_node() {
+        let is_symbolic = or_node.operator_loc().as_slice() == b"||";
+        ops.push(is_symbolic);
+        collect_or_operators(&or_node.left(), ops);
+        collect_or_operators(&or_node.right(), ops);
     }
 }
 
