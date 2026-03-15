@@ -60,6 +60,28 @@ use std::collections::HashSet;
 /// Root cause of 14 FNs: `super(...)` with blocks uses `SuperNode` / `ForwardingSuperNode`
 /// in Prism, not `CallNode`. The visitor only had `visit_call_node`. Fix: added
 /// `visit_super_node` and `visit_forwarding_super_node` handlers.
+///
+/// ## Investigation findings (2026-03-15, third pass)
+///
+/// Root cause of 6 FPs in three patterns:
+///
+/// 1. Blocks inside lambda bodies with assignment (4 FPs in pakyow): lambda body
+///    recursion via `collect_ignored_blocks_from_body` only handled `CallNode` and
+///    `StatementsNode`, missing assignment nodes like `LocalVariableWriteNode`. When
+///    a block appeared as the RHS of an assignment inside a lambda body in a keyword
+///    arg, it wasn't collected and suppressed. Fix: added handling for all assignment
+///    node types in `collect_ignored_blocks_from_body`.
+///
+/// 2. Hash[] constructor arguments (2 FPs): `Hash[list.map { }]` uses `[]` method,
+///    which in Prism has `opening_loc() = Some` (pointing to `[`), making it appear
+///    parenthesized. RuboCop treats `[]` calls as non-parenthesized for block-binding.
+///    Fix: exclude `[]` method name from the `is_parenthesized` check.
+///
+/// 3. Multi-line braces with return value used (chained/assigned): In `line_count_based`
+///    mode, RuboCop's `functional_block?` / `return_value_used?` allows multi-line braces
+///    when the block's return value is used (parent is a call or assignment). nitrocop was
+///    missing this check. Fix: added `return_value_used_blocks` tracking via chained
+///    receiver detection in `visit_call_node` and assignment visitor methods.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -100,6 +122,7 @@ impl Cop for BlockDelimiters {
             diagnostics: Vec::new(),
             ignored_blocks: HashSet::new(),
             suppressed_ranges: Vec::new(),
+            return_value_used_blocks: HashSet::new(),
             allowed_methods: allowed,
             allowed_patterns: patterns,
             braces_required_methods: braces_required,
@@ -118,6 +141,10 @@ struct BlockDelimitersVisitor<'a> {
     /// Includes: (1) blocks in non-parenthesized arg positions (binding change),
     /// (2) blocks that already received an offense (RuboCop `ignore_node` behavior).
     suppressed_ranges: Vec<(usize, usize)>,
+    /// Block opening offsets where the block's return value is used (chained or assigned).
+    /// In line_count_based, multi-line braces are allowed when the return value is used,
+    /// matching RuboCop's `functional_block?` / `return_value_used?` check.
+    return_value_used_blocks: HashSet<usize>,
     allowed_methods: Vec<String>,
     allowed_patterns: Vec<String>,
     braces_required_methods: Vec<String>,
@@ -141,7 +168,12 @@ impl<'a> BlockDelimitersVisitor<'a> {
         self.suppressed_ranges.push((start, end));
     }
 
-    fn check_block(&mut self, block_node: &ruby_prism::BlockNode<'_>, method_name: &[u8]) -> bool {
+    fn check_block(
+        &mut self,
+        block_node: &ruby_prism::BlockNode<'_>,
+        method_name: &[u8],
+        block_opening_offset: usize,
+    ) -> bool {
         let method_str = std::str::from_utf8(method_name).unwrap_or("");
 
         // Skip AllowedMethods (default: lambda, proc, it)
@@ -190,6 +222,18 @@ impl<'a> BlockDelimitersVisitor<'a> {
             return false;
         }
 
+        // line_count_based: multi-line braces are allowed when the return value is used
+        // (chained or assigned). This matches RuboCop's `functional_block?` /
+        // `return_value_used?` check in `line_count_based_block_style?`.
+        if !is_single_line
+            && opening == b"{"
+            && self
+                .return_value_used_blocks
+                .contains(&block_opening_offset)
+        {
+            return false;
+        }
+
         // line_count_based style
         if is_single_line && opening == b"do" {
             let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
@@ -216,11 +260,28 @@ impl<'a> BlockDelimitersVisitor<'a> {
 
 impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'_>) {
+        // Phase 0: Mark receiver's block as return-value-used (chaining).
+        // In `items.map { }.join(", ")`, the `.join` call has `.map { }` as receiver.
+        // The `.map` block's return value is used, so multi-line braces are allowed.
+        if let Some(receiver) = node.receiver() {
+            if let Some(recv_call) = receiver.as_call_node() {
+                if let Some(block) = recv_call.block() {
+                    if let Some(block_node) = block.as_block_node() {
+                        self.return_value_used_blocks
+                            .insert(block_node.opening_loc().start_offset());
+                    }
+                }
+            }
+        }
+
         // Phase 1: For non-parenthesized calls with arguments, mark argument blocks
         // as ignored. Changing delimiters on these blocks would change binding
         // semantics (braces bind tighter than do..end).
-        let is_parenthesized = node.opening_loc().is_some();
+        // `[]` method calls (e.g., `Hash[x]`) use square brackets, not parens.
+        // In Prism, `opening_loc()` returns `Some` for `[`, but RuboCop treats
+        // `[]` calls as non-parenthesized for block-binding purposes.
         let method_name = node.name().as_slice();
+        let is_parenthesized = node.opening_loc().is_some() && method_name != b"[]";
         let is_assignment = method_name.ends_with(b"=")
             && method_name != b"=="
             && method_name != b"!="
@@ -275,7 +336,7 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
                     self.suppress_range(call_start, call_end);
                 } else if !self.is_suppressed(offset, block_end) {
                     // Block is not inside a suppressed range — check it
-                    let flagged = self.check_block(&block_node, method_name);
+                    let flagged = self.check_block(&block_node, method_name, offset);
                     if flagged {
                         // Suppress nested blocks (RuboCop's ignore_node in add_offense)
                         self.suppress_range(call_start, call_end);
@@ -298,7 +359,7 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
                 let call_end = node.location().end_offset();
 
                 if !self.is_suppressed(offset, block_end) {
-                    let flagged = self.check_block(&block_node, b"super");
+                    let flagged = self.check_block(&block_node, b"super", offset);
                     if flagged {
                         self.suppress_range(call_start, call_end);
                     }
@@ -317,13 +378,106 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             let call_end = node.location().end_offset();
 
             if !self.is_suppressed(offset, block_end) {
-                let flagged = self.check_block(&block_node, b"super");
+                let flagged = self.check_block(&block_node, b"super", offset);
                 if flagged {
                     self.suppress_range(call_start, call_end);
                 }
             }
         }
         ruby_prism::visit_forwarding_super_node(self, node);
+    }
+
+    // Assignment visitors: mark blocks in the value expression as return-value-used.
+    // `result = items.map { }` — the .map block's return value is assigned.
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'_>) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+
+    fn visit_instance_variable_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableWriteNode<'_>,
+    ) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_instance_variable_write_node(self, node);
+    }
+
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'_>) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_class_variable_write_node(self, node);
+    }
+
+    fn visit_global_variable_write_node(&mut self, node: &ruby_prism::GlobalVariableWriteNode<'_>) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_global_variable_write_node(self, node);
+    }
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'_>) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_constant_write_node(self, node);
+    }
+
+    fn visit_local_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOperatorWriteNode<'_>,
+    ) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_local_variable_operator_write_node(self, node);
+    }
+
+    fn visit_instance_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOperatorWriteNode<'_>,
+    ) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_instance_variable_operator_write_node(self, node);
+    }
+
+    fn visit_local_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOrWriteNode<'_>,
+    ) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_local_variable_or_write_node(self, node);
+    }
+
+    fn visit_instance_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOrWriteNode<'_>,
+    ) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_instance_variable_or_write_node(self, node);
+    }
+
+    fn visit_local_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableAndWriteNode<'_>,
+    ) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_local_variable_and_write_node(self, node);
+    }
+
+    fn visit_instance_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableAndWriteNode<'_>,
+    ) {
+        mark_block_in_value_as_return_value_used(&node.value(), &mut self.return_value_used_blocks);
+        ruby_prism::visit_instance_variable_and_write_node(self, node);
+    }
+}
+
+/// Mark a block in an assignment value expression as return-value-used.
+/// If the value is a CallNode with a block, mark the block's opening offset.
+fn mark_block_in_value_as_return_value_used(
+    value: &ruby_prism::Node<'_>,
+    set: &mut HashSet<usize>,
+) {
+    if let Some(call) = value.as_call_node() {
+        if let Some(block) = call.block() {
+            if let Some(block_node) = block.as_block_node() {
+                set.insert(block_node.opening_loc().start_offset());
+            }
+        }
     }
 }
 
@@ -467,10 +621,56 @@ fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut H
         for stmt in stmts.body().iter() {
             collect_ignored_blocks_from_body(&stmt, ignored);
         }
+        return;
     }
 
-    // For other node types, recurse through children generically isn't needed
-    // because we only care about call nodes with blocks.
+    // Assignment nodes — recurse into the value expression
+    // e.g., `result = items.find { |item| ... }` inside a lambda body
+    if let Some(write) = node.as_local_variable_write_node() {
+        collect_ignored_blocks_from_body(&write.value(), ignored);
+        return;
+    }
+    if let Some(write) = node.as_instance_variable_write_node() {
+        collect_ignored_blocks_from_body(&write.value(), ignored);
+        return;
+    }
+    if let Some(write) = node.as_class_variable_write_node() {
+        collect_ignored_blocks_from_body(&write.value(), ignored);
+        return;
+    }
+    if let Some(write) = node.as_global_variable_write_node() {
+        collect_ignored_blocks_from_body(&write.value(), ignored);
+        return;
+    }
+    if let Some(write) = node.as_constant_write_node() {
+        collect_ignored_blocks_from_body(&write.value(), ignored);
+        return;
+    }
+    if let Some(write) = node.as_local_variable_operator_write_node() {
+        collect_ignored_blocks_from_body(&write.value(), ignored);
+        return;
+    }
+    if let Some(write) = node.as_instance_variable_operator_write_node() {
+        collect_ignored_blocks_from_body(&write.value(), ignored);
+        return;
+    }
+    // Multi-write: a, b = expr
+    if let Some(write) = node.as_multi_write_node() {
+        collect_ignored_blocks_from_body(&write.value(), ignored);
+        return;
+    }
+
+    // IfNode, UnlessNode, etc. — recurse into their bodies for completeness
+    if let Some(if_node) = node.as_if_node() {
+        if let Some(stmts) = if_node.statements() {
+            for stmt in stmts.body().iter() {
+                collect_ignored_blocks_from_body(&stmt, ignored);
+            }
+        }
+        if let Some(subsequent) = if_node.subsequent() {
+            collect_ignored_blocks_from_body(&subsequent, ignored);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -729,6 +929,54 @@ mod tests {
             diags.len(),
             1,
             "Should flag multi-line brace block in parenthesized arg, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_hash_bracket_with_block() {
+        // Hash[list.map { ... }] — `[]` is a non-parenthesized method call
+        let source = b"Hash[list.map { |k, v|\n  [k, v.to_s]\n}.sort_by(&:first)]\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag block inside Hash[] argument, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_return_value_used_chained() {
+        // items.map { ... }.join(", ") — return value used via chaining
+        let source = b"items.map { |x|\n  x.to_s\n}.join(\", \")\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag multi-line brace block when return value is used (chained), got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_return_value_used_assigned() {
+        // result = items.map { ... } — return value used via assignment
+        let source = b"result = items.map { |x|\n  x.to_s\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag multi-line brace block when return value is assigned, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_lambda_body_assignment_with_block() {
+        // Block inside assignment inside lambda body in keyword arg
+        let source = b"render node: -> {\n  result = items.find { |item|\n    item.name == \"test\"\n  }\n} do\n  puts \"rendered\"\nend\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag block inside assignment in lambda body in keyword arg, got: {:?}",
             diags
         );
     }

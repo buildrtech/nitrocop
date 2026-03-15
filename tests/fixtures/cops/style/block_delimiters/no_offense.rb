@@ -97,3 +97,30 @@ super do
   yield if block_given?
   process
 end
+
+# Block inside assignment inside lambda body in keyword arg — suppressed
+render node: -> {
+  result = items.find { |item|
+    item.name == "test"
+  }
+  unless result.nil?
+    process(result)
+  end
+} do
+  puts "rendered"
+end
+
+# Multi-line brace block with chained return value — allowed
+items.map { |x|
+  x.to_s
+}.join(", ")
+
+# Hash[] with multi-line chained block — allowed
+Hash[list.map { |k, v|
+  [k, v.to_s]
+}.sort_by(&:first)]
+
+# Multi-line brace block chained with compact
+Hash[info.map { |k, v|
+  [k, v]
+}.compact]
