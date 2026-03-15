@@ -25,6 +25,12 @@ assert(a.+(b))
 foo(x.-(y))
 bar(x.*(y), z)
 
+# Parenthesized operator call as last arg of non-parenthesized method call
+# The `,` before receiver indicates nesting even when `)` is at end of line
+assert_equal 0, a.<=>(b)
+assert_equal 1, c.<=>(@item)
+be_close(6543.21.%(137), tolerance)
+
 # Splat, block_pass, kwsplat arguments — removing dot would be invalid syntax
 foo.+(*args)
 foo.-(**kwargs)

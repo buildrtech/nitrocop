@@ -15,13 +15,21 @@ use crate::parse::source::SourceFile;
 /// Fix: Added constant-receiver check and invalid-argument-type check to match RuboCop behavior.
 ///
 /// Investigation (2026-03-15): 18 remaining FPs from parenthesized operator calls nested
-/// inside other method calls, e.g. `expect(one.==(two))`. RuboCop's
-/// `method_call_with_parenthesized_arg?` skips when the operator call is parenthesized AND
-/// its parent is another send node. Without parent pointers in Prism, we detect this by
-/// checking what follows the closing paren: `)` or `,` means the call is nested inside
-/// another call's argument list.
+/// inside other method calls, e.g. `expect(one.==(two))`, `assert_equal 0, @c2.<=>(@c2)`.
+/// RuboCop's `method_call_with_parenthesized_arg?` skips when the operator call is
+/// parenthesized AND its parent is another send node. Without parent pointers in Prism,
+/// we use two text-based heuristics:
+/// A. After closing paren: `)` or `,` means nested in another call's argument list
+/// B. Before receiver: `(` or `,` means the operator call is inside another call's args
+/// This catches both parenthesized (`expect(foo.==(bar))`) and non-parenthesized
+/// (`assert_equal 0, foo.<=>(bar)`) outer calls.
 ///
-/// Fix: Extended the post-closing-paren check to also skip when followed by `)` or `,`.
+/// Fix: Extended post-closing-paren check to also skip `)` or `,`, and added pre-receiver
+/// check scanning backwards for `(` or `,`.
+///
+/// Remaining FPs (~3): cases where the operator call is an argument to another operator
+/// (e.g., `should == bd.%(x)`) or a no-paren unary call (e.g., `assert_nil @c2.<=>(x)`).
+/// These are rare and would require AST parent pointers to fix.
 pub struct OperatorMethodCall;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -113,14 +121,16 @@ impl Cop for OperatorMethodCall {
         // RuboCop's `method_call_with_parenthesized_arg?` skips when:
         // 1. The operator call is parenthesized AND chained (used as receiver), OR
         // 2. The operator call is parenthesized AND nested inside another method call's arguments
-        // Without parent pointers, we detect these by checking what follows the closing paren:
-        // - `.` or `&.` → chaining (case 1)
-        // - `)` or `,` → nested inside another call's argument list (case 2)
+        // Without parent pointers, we detect nesting two ways:
+        // A. Check AFTER the closing paren: `.`/`&.` (chain), `)` or `,` (nested in call args)
+        // B. Check BEFORE the receiver: `(` or `,` means we're inside another call's argument list
+        //    This catches cases like `assert_equal 0, @c2.<=>(@c2)` where `)` is at end of line
         if call.opening_loc().is_some() {
             if let Some(close) = call.closing_loc() {
-                let end_off = close.start_offset() + close.as_slice().len();
                 let src = source.as_bytes();
-                // Skip whitespace after closing paren
+
+                // Check A: what follows the closing paren
+                let end_off = close.start_offset() + close.as_slice().len();
                 let mut pos = end_off;
                 while pos < src.len()
                     && (src[pos] == b' '
@@ -138,6 +148,25 @@ impl Cop for OperatorMethodCall {
                     }
                     // Closing paren or comma → nested in another call: `expect(foo.==(bar))`
                     if ch == b')' || ch == b',' {
+                        return;
+                    }
+                }
+
+                // Check B: what precedes the receiver (scan backwards, skip whitespace)
+                // Catches `assert_equal 0, @c2.<=>(@c2)` where `,` is before receiver
+                let recv_start = receiver.location().start_offset();
+                if recv_start > 0 {
+                    let mut rpos = recv_start - 1;
+                    while rpos > 0
+                        && (src[rpos] == b' '
+                            || src[rpos] == b'\t'
+                            || src[rpos] == b'\n'
+                            || src[rpos] == b'\r')
+                    {
+                        rpos -= 1;
+                    }
+                    let prev_ch = src[rpos];
+                    if prev_ch == b'(' || prev_ch == b',' {
                         return;
                     }
                 }
