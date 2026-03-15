@@ -1,0 +1,30 @@
+{
+  "bkeepers__dotenv__34156bf": {
+    "fn": 33,
+    "fp": 9,
+    "matches": 1900,
+    "nc_files": 35,
+    "rc_files": 35
+  },
+  "doorkeeper__doorkeeper__b305358": {
+    "fn": 360,
+    "fp": 24,
+    "matches": 13366,
+    "nc_files": 258,
+    "rc_files": 260
+  },
+  "multi_json__multi_json__c5fa9fc": {
+    "fn": 18,
+    "fp": 6,
+    "matches": 5810,
+    "nc_files": 121,
+    "rc_files": 121
+  },
+  "ruby-formatter__rufo__a90e654": {
+    "fn": 855,
+    "fp": 72,
+    "matches": 9892,
+    "nc_files": 150,
+    "rc_files": 158
+  }
+}
