@@ -40,10 +40,7 @@ impl IpAddresses {
         if s.len() > 1 && s.starts_with('0') {
             return false;
         }
-        match s.parse::<u16>() {
-            Ok(n) if n <= 255 => true,
-            _ => false,
-        }
+        matches!(s.parse::<u16>(), Ok(n) if n <= 255)
     }
 
     fn is_ipv4(s: &str) -> bool {
