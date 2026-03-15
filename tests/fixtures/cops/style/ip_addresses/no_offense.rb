@@ -4,3 +4,14 @@
 "2001:db8::1xyz"
 "::"
 'hello world'
+# IPv4 with leading zeros (not valid per Ruby's Resolv::IPv4::Regex)
+'01.02.03.04'
+'001.002.003.004'
+'1.2.3.04'
+'192.168.001.001'
+'10.0.0.01'
+# IP inside interpolated string segments (no opening delimiter)
+"before #{x} 127.0.0.1"
+"#{prefix}10.0.0.1#{suffix}"
+# Escape sequences that expand to IP-like content
+"\x31.2.3.4"

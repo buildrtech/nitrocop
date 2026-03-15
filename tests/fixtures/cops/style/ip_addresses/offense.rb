@@ -6,3 +6,9 @@
 ^^^^^^^^^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
 '::1'
 ^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
+'1::'
+^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
+'2001:db8:85a3::8a2e:370:7334'
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
+'::ffff:192.168.1.1'
+^^^^^^^^^^^^^^^^^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
