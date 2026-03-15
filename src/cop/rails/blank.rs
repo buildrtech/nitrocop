@@ -42,6 +42,21 @@ use ruby_prism::Visit;
 /// use `present?` as a class method with an argument — RuboCop skips these.
 ///
 /// Fix: Added argument count check in `check_not_present` and `check_unless_present`.
+///
+/// ## Investigation (2026-03-15)
+///
+/// **FP root cause (6 FP remaining):** Safe navigation calls were flagged.
+/// - `unless response&.strip&.present?` → `check_unless_present` was matching `&.present?`
+///   but RuboCop's `(send $_ :present?)` only matches `send` not `csend`.
+/// - `foo.nil? || foo&.empty?` → `check_nil_or_empty` was matching `&.empty?` right side
+///   but RuboCop's `(send $_ :empty?)` only matches `send` not `csend`.
+///
+/// Fix: Added `call_operator_loc() == &.` check to skip safe navigation calls in
+/// `check_unless_present` and `check_nil_or_empty`.
+///
+/// Remaining FP=2 (danbooru): Pattern match guards `in "div" unless element.at("div").present?`
+/// — these are UnlessNodes inside InNode guards, visited by the cop but apparently not by
+/// RuboCop's `on_if` handler. Deferred (low impact, complex to fix).
 pub struct Blank;
 
 /// Extract the receiver source text from a CallNode, returning None if absent.
@@ -143,9 +158,13 @@ impl<'pr> BlankVisitor<'_, '_> {
         let right = or_node.right();
 
         if let Some((nil_recv, left_src)) = nil_check_receiver(&left) {
-            // Right side must be `<same>.empty?`
+            // Right side must be `<same>.empty?` — NOT safe navigation (`&.empty?`)
+            // RuboCop's NodePattern `(send $_ :empty?)` only matches send, not csend.
             if let Some(right_call) = right.as_call_node() {
-                if right_call.name().as_slice() == b"empty?" {
+                let is_safe_nav = right_call
+                    .call_operator_loc()
+                    .is_some_and(|loc| loc.as_slice() == b"&.");
+                if right_call.name().as_slice() == b"empty?" && !is_safe_nav {
                     if let Some(empty_recv) = receiver_source(&right_call) {
                         if nil_recv == empty_recv {
                             let loc = or_node.location();
@@ -228,6 +247,15 @@ impl<'pr> BlankVisitor<'_, '_> {
         };
 
         if pred_call.name().as_slice() != b"present?" {
+            return;
+        }
+
+        // RuboCop's NodePattern `(send $_ :present?)` only matches send (not csend).
+        // `unless obj&.present?` uses safe navigation and must NOT be flagged.
+        if pred_call
+            .call_operator_loc()
+            .is_some_and(|loc| loc.as_slice() == b"&.")
+        {
             return;
         }
 

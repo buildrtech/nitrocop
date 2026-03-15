@@ -29,3 +29,11 @@ end
 unless Helpers.present?(value)
   do_something
 end
+
+# safe navigation on present?/empty? — RuboCop's NodePattern matches send not csend
+# so &.present? and &.empty? should NOT be flagged
+return [] unless response&.strip&.present?
+unless object&.present?
+  do_something
+end
+foo.nil? || foo&.empty?
