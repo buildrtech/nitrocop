@@ -31,6 +31,19 @@ use crate::parse::source::SourceFile;
 ///
 /// **Fix:** Simplified `has_dependencies()` to return `true` for anything except an
 /// empty array, matching RuboCop's logic exactly.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// **62 FN:** The cop's `else` branch returned early (skipping the offense) when the
+/// first argument was not a SymbolNode, StringNode, or KeywordHashNode. This missed
+/// task definitions where the task name is a local variable (`task name do`), method
+/// call (`task(a.to_sym) {}`), or other expression. RuboCop's `task_name` returns
+/// `nil` for these cases, which is != `:default`, so it proceeds to check
+/// dependencies and flags the offense.
+///
+/// **Fix:** Changed the `else` branch to set `task_name_is_default = false` and
+/// `hash_first_arg = false`, allowing the cop to continue checking for dependencies
+/// and flag the offense when appropriate.
 pub struct RakeEnvironment;
 
 impl Cop for RakeEnvironment {
@@ -127,7 +140,10 @@ impl Cop for RakeEnvironment {
                 return;
             }
         } else {
-            return;
+            // Any other expression as task name (local variable, method call, constant, etc.)
+            // — can't be :default, treat as non-default and check for dependencies.
+            task_name_is_default = false;
+            hash_first_arg = false;
         }
 
         // Skip :default task

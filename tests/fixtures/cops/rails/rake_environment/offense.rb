@@ -30,3 +30,16 @@ task refresh: [] do
 ^^^^^^^^^^^^^^^ Rails/RakeEnvironment: Add `:environment` dependency to the rake task.
   Cache.clear
 end
+
+task name do
+^^^^^^^^^^^ Rails/RakeEnvironment: Add `:environment` dependency to the rake task.
+  puts "local variable task name"
+end
+
+task(a.to_sym) { puts "method call task name" }
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/RakeEnvironment: Add `:environment` dependency to the rake task.
+
+task short_name do
+^^^^^^^^^^^^^^^^^^ Rails/RakeEnvironment: Add `:environment` dependency to the rake task.
+  run_command
+end

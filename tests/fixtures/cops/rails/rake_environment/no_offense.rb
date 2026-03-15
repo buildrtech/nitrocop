@@ -31,3 +31,6 @@ end
 task :generate => [:environment] do
   puts "hash rocket with array"
 end
+task name => new_name do
+  puts "local variable with hash rocket dependency"
+end
