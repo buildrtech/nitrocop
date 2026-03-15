@@ -64,6 +64,16 @@ included {
   end
 }
 
+# Receiverless DSL blocks in class scope are macro scopes
+class Host
+  included do
+    private
+
+    def helper
+    end
+  end
+end
+
 # Top-level access modifier at the beginning of the file needs a blank line after
 public
 

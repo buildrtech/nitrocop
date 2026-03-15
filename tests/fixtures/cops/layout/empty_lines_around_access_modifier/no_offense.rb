@@ -189,6 +189,18 @@ DidYouMean::JaroWinkler.module_eval do
   end if RUBY_ENGINE != "jruby"
 end
 
+# A receiverful nested block inside a receiverless class-scope DSL block is not a macro scope
+class ExampleGroup
+  example do
+    Builder.new do
+      private
+      def hidden; end
+      public
+      def visible; end
+    end
+  end
+end
+
 # A comment before a top-level access modifier counts as a separator
 # comment
 private

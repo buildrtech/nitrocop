@@ -60,6 +60,16 @@ included {
   end
 }
 
+# Receiverless DSL blocks in class scope are macro scopes
+class Host
+  included do
+    private
+    ^^^^^^^ Layout/EmptyLinesAroundAccessModifier: Keep a blank line after `private`.
+    def helper
+    end
+  end
+end
+
 # Top-level access modifier at the beginning of the file needs a blank line after
 public
 ^^^^^^ Layout/EmptyLinesAroundAccessModifier: Keep a blank line after `public`.

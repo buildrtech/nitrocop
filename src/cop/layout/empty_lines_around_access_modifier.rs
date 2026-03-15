@@ -26,10 +26,12 @@ use crate::parse::source::SourceFile;
 /// 1. Access modifiers with trailing comments (`private # comment`) were rejected by
 ///    the line-content check which required `end_trimmed == method_name`.
 ///    Fix: allow trailing `# comment` after the modifier.
-/// 2. Access modifiers inside blocks (`included do ... end`) were excluded by the
-///    visitor (pushed as non-class scope), but RuboCop treats them as valid scopes.
-///    Fix: treat blocks in class/module scope (or top-level) as class-like scopes,
-///    while blocks inside method bodies remain excluded (2026-03-14).
+/// 2. Access modifiers inside macro blocks (`included do ... end`) were excluded by the
+///    visitor (pushed as non-class scope), but RuboCop treats receiverless macro
+///    blocks and class-constructor blocks as valid scopes.
+///    Fix: treat receiverless calls in macro scope and `Class.new` / `Module.new`
+///    style constructors as scope openers, while generic nested blocks inside
+///    method bodies remain excluded (2026-03-14, refined 2026-03-15).
 /// 3. Bare top-level access modifiers were never collected because the visitor
 ///    treated an empty scope stack as "outside a macro scope". RuboCop's
 ///    `in_macro_scope?` explicitly includes the file root, so `public`/`private`
@@ -40,10 +42,12 @@ use crate::parse::source::SourceFile;
 ///    `private`/`protected`. Not yet fixed.
 ///
 /// Remaining gaps (2026-03-15):
-/// - `sinatra__sinatra__9e5c4ec:test/settings_test.rb:457,459` still verify as
-///   FPs, but the isolated reducer no longer reproduces them as current
-///   nitrocop-only offenses, which suggests line-drift or repo-context
-///   sensitivity rather than a stable standalone bug.
+/// - Refining block traversal so only the owning call opens macro scope improved
+///   the aggregate rerun (`actual 4635 -> 4630`, excess `17 -> 12`) and fixed
+///   the local class-scoped nested receiverful-block reproducer, but the known
+///   Sinatra FP pair at `test/settings_test.rb:457,459` still verifies. A future
+///   fix should model RuboCop's `in_macro_scope?` parent-chain wrappers
+///   directly instead of relying on call-local heuristics.
 /// - `jruby__jruby__0303464:test/jruby/test_proc_visibility.rb:30,33` and the
 ///   JRuby/Natalie `module_function` examples still verify as FNs, but local
 ///   reduction currently shows nitrocop also firing somewhere in those files, so
@@ -196,13 +200,6 @@ impl AccessModifierCollector {
             .unwrap_or(false)
     }
 
-    fn in_propagating_class_scope(&self) -> bool {
-        self.scope_stack
-            .last()
-            .map(|(kind, _, _)| *kind == ScopeKind::ClassLike)
-            .unwrap_or(false)
-    }
-
     fn current_scope(&self) -> (usize, usize) {
         self.scope_stack
             .last()
@@ -325,17 +322,7 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
-        if self.in_propagating_class_scope() {
-            let opening = node.location().start_offset();
-            let closing = node.location().end_offset();
-            self.push_class_scope(opening, closing);
-            ruby_prism::visit_block_node(self, node);
-            self.pop_scope();
-        } else {
-            self.push_non_class_scope();
-            ruby_prism::visit_block_node(self, node);
-            self.pop_scope();
-        }
+        ruby_prism::visit_block_node(self, node);
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
@@ -345,6 +332,15 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        self.check_call(node);
+
+        if let Some(receiver) = node.receiver() {
+            self.visit(&receiver);
+        }
+        if let Some(arguments) = node.arguments() {
+            self.visit_arguments_node(&arguments);
+        }
+
         if let Some(block_node) = node.block().and_then(|b| b.as_block_node()) {
             let opening = block_node.location().start_offset();
             let closing = block_node.location().end_offset();
@@ -356,16 +352,22 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
                 return;
             }
 
-            if self.scope_stack.is_empty() && node.receiver().is_none() {
+            if node.receiver().is_none() && self.in_access_modifier_scope() {
                 self.push_dsl_block_scope(opening, closing);
                 ruby_prism::visit_block_node(self, &block_node);
                 self.pop_scope();
                 return;
             }
+
+            self.push_non_class_scope();
+            ruby_prism::visit_block_node(self, &block_node);
+            self.pop_scope();
+            return;
         }
 
-        self.check_call(node);
-        ruby_prism::visit_call_node(self, node);
+        if let Some(block_arg) = node.block().and_then(|b| b.as_block_argument_node()) {
+            self.visit_block_argument_node(&block_arg);
+        }
     }
 }
 
