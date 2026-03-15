@@ -13,6 +13,12 @@ use crate::parse::source::SourceFile;
 ///
 /// Previous fix (FP=778): Emacs-style magic comments like
 /// `# -*- encoding: utf-8; frozen_string_literal: true -*-` were not recognized.
+///
+/// FP=10 root causes: Files with invalid encoding (invalid UTF-8 bytes, null bytes from UTF-16,
+/// ISO-8859 encoding) and files starting with `__END__` (data-only, no code tokens). RuboCop
+/// returns early via `processed_source.tokens.empty?` for these. Fixed by checking UTF-8 validity,
+/// null byte presence, and `__END__`-only files. Remaining FPs (4 of 10) are config-related
+/// (vendor/ dir exclusion, non-.rb extensions) not cop logic issues.
 pub struct FrozenStringLiteralComment;
 
 impl Cop for FrozenStringLiteralComment {
@@ -32,6 +38,14 @@ impl Cop for FrozenStringLiteralComment {
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "always");
+
+        // Skip files with non-UTF-8 content — RuboCop's tokenizer produces no tokens
+        // for files with encoding errors (e.g., invalid UTF-8, UTF-16, ISO-8859),
+        // so it returns early via `processed_source.tokens.empty?`.
+        if std::str::from_utf8(source.as_bytes()).is_err() || source.as_bytes().contains(&0x00) {
+            return;
+        }
+
         let lines: Vec<&[u8]> = source.lines().collect();
 
         if enforced_style == "never" {
@@ -72,6 +86,13 @@ impl Cop for FrozenStringLiteralComment {
             .iter()
             .any(|l| !l.iter().all(|&b| b == b' ' || b == b'\t' || b == b'\r'));
         if !has_content {
+            return;
+        }
+
+        // Skip files where the only non-blank/non-comment content is `__END__`.
+        // These files contain only data (no code tokens), so RuboCop's
+        // `processed_source.tokens.empty?` check returns true and it skips them.
+        if first_code_line_is_end(&lines) {
             return;
         }
 
@@ -168,6 +189,29 @@ impl Cop for FrozenStringLiteralComment {
         }
         diagnostics.push(diag);
     }
+}
+
+/// Returns true if the first non-blank, non-comment line is `__END__`,
+/// meaning the file has no real code tokens.
+fn first_code_line_is_end(lines: &[&[u8]]) -> bool {
+    for line in lines {
+        if is_blank_line(line) {
+            continue;
+        }
+        let trimmed: &[u8] = {
+            let start = line
+                .iter()
+                .position(|&b| b != b' ' && b != b'\t')
+                .unwrap_or(line.len());
+            &line[start..]
+        };
+        if trimmed.starts_with(b"#") {
+            continue;
+        }
+        // First non-blank, non-comment line
+        return trimmed.starts_with(b"__END__");
+    }
+    false
 }
 
 fn is_comment_line(line: &[u8]) -> bool {
@@ -666,6 +710,47 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should find frozen_string_literal after shebang + blank + encoding"
+        );
+    }
+
+    #[test]
+    fn skip_file_with_invalid_utf8() {
+        // Files with invalid UTF-8 bytes should not be flagged — RuboCop's tokenizer
+        // produces no tokens for these, so it returns early.
+        let mut content = b"# @!method foo()\n# \treturn [String] ".to_vec();
+        content.push(0xFF); // invalid UTF-8 byte
+        content.push(b'\n');
+        let source = SourceFile::from_bytes("test.rb", content);
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should not flag files with invalid UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn skip_file_with_null_bytes() {
+        // UTF-16 encoded files have null bytes — should not be flagged
+        let content = vec![0x00, b'#', 0x00, b' ', 0x00, b'e', 0x00, b'\n'];
+        let source = SourceFile::from_bytes("test.rb", content);
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should not flag files with null bytes (e.g., UTF-16)"
+        );
+    }
+
+    #[test]
+    fn skip_file_starting_with_end_only() {
+        // Files that start with __END__ and have no code should not be flagged
+        let source = SourceFile::from_bytes("test.rb", b"__END__\ndata only\n".to_vec());
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should not flag files starting with __END__"
         );
     }
 
