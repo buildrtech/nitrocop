@@ -3,6 +3,19 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Detects `.where()` and `.where.not()` calls with SQL strings that could be
+/// replaced with hash syntax.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// Root cause of 198 FNs:
+/// 1. **Array argument form not handled** — RuboCop accepts both `where("col = ?", val)`
+///    and `where(["col = ?", val])`. nitrocop only handled the non-array form. The array
+///    form wraps the SQL template and bind values in a single Array argument.
+/// 2. **Receiverless `where` rejected** — `where('col = ?', val)` without an explicit
+///    receiver (common in scopes, class methods, and blocks) was rejected by the
+///    `receiver().is_none()` guard. RuboCop flags these. The `not` method still requires
+///    a `where` receiver (`where.not(...)`).
 pub struct WhereEquals;
 
 impl Cop for WhereEquals {
@@ -52,11 +65,6 @@ impl Cop for WhereEquals {
             }
         }
 
-        // Must have a receiver
-        if call.receiver().is_none() {
-            return;
-        }
-
         let args = match call.arguments() {
             Some(a) => a,
             None => return,
@@ -66,13 +74,28 @@ impl Cop for WhereEquals {
             return;
         }
 
-        // First argument must be a string literal with a simple comparison pattern
-        let str_node = match arg_list[0].as_string_node() {
-            Some(s) => s,
-            None => return,
+        // Extract the SQL template string. It can appear in two forms:
+        // 1. Direct: where("col = ?", val)  — first arg is a StringNode
+        // 2. Array:  where(["col = ?", val]) — first arg is an ArrayNode containing a StringNode
+        let template = if let Some(str_node) = arg_list[0].as_string_node() {
+            std::str::from_utf8(str_node.unescaped())
+                .unwrap_or("")
+                .to_string()
+        } else if let Some(array_node) = arg_list[0].as_array_node() {
+            let elements: Vec<_> = array_node.elements().iter().collect();
+            if elements.is_empty() {
+                return;
+            }
+            if let Some(str_node) = elements[0].as_string_node() {
+                std::str::from_utf8(str_node.unescaped())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                return;
+            }
+        } else {
+            return;
         };
-
-        let template = std::str::from_utf8(str_node.unescaped()).unwrap_or("");
 
         // Check patterns:
         // column = ?
@@ -84,13 +107,23 @@ impl Cop for WhereEquals {
         let eq_named = regex::Regex::new(r"^[\w.]+\s+=\s+:\w+$").unwrap();
         let in_named = regex::Regex::new(r"(?i)^[\w.]+\s+IN\s+\(:\w+\)$").unwrap();
 
-        let is_simple_sql = eq_anon.is_match(template)
-            || in_anon.is_match(template)
-            || is_null.is_match(template)
-            || eq_named.is_match(template)
-            || in_named.is_match(template);
+        let is_simple_sql = eq_anon.is_match(&template)
+            || in_anon.is_match(&template)
+            || is_null.is_match(&template)
+            || eq_named.is_match(&template)
+            || in_named.is_match(&template);
 
         if !is_simple_sql {
+            return;
+        }
+
+        // Reject database-qualified columns (e.g., "database.table.column") — only
+        // table.column (one dot) or plain column (zero dots) are replaceable.
+        let column_part = template
+            .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+            .next()
+            .unwrap_or("");
+        if column_part.chars().filter(|&c| c == '.').count() > 1 {
             return;
         }
 
@@ -110,4 +143,68 @@ impl Cop for WhereEquals {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(WhereEquals, "cops/rails/where_equals");
+
+    #[test]
+    fn test_array_argument_form() {
+        let cop = WhereEquals;
+        let source = b"User.where(['name = ?', 'Gabe'])\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(diags.len(), 1, "should detect array argument form");
+    }
+
+    #[test]
+    fn test_array_is_null_form() {
+        let cop = WhereEquals;
+        let source = b"User.where(['name IS NULL'])\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(diags.len(), 1, "should detect array IS NULL form");
+    }
+
+    #[test]
+    fn test_array_named_placeholder() {
+        let cop = WhereEquals;
+        let source = b"User.where(['name = :name', { name: 'Gabe' }])\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(diags.len(), 1, "should detect array named placeholder form");
+    }
+
+    #[test]
+    fn test_array_in_form() {
+        let cop = WhereEquals;
+        let source = b"User.where([\"name IN (?)\", ['john', 'jane']])\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(diags.len(), 1, "should detect array IN form");
+    }
+
+    #[test]
+    fn test_array_namespaced_column() {
+        let cop = WhereEquals;
+        let source = b"Course.where(['enrollments.student_id = ?', student.id])\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(diags.len(), 1, "should detect array namespaced column form");
+    }
+
+    #[test]
+    fn test_where_not_regular_form() {
+        let cop = WhereEquals;
+        let source = b"User.where.not('name = ?', 'Gabe')\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(diags.len(), 1, "should detect where.not form");
+    }
+
+    #[test]
+    fn test_scope_where() {
+        let cop = WhereEquals;
+        let source = b"scope :active, -> { where('active = ?', true) }\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(diags.len(), 1, "should detect where inside scope lambda");
+    }
+
+    #[test]
+    fn test_chained_where() {
+        let cop = WhereEquals;
+        let source = b"User.active.where('name = ?', 'Gabe')\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(diags.len(), 1, "should detect chained where");
+    }
 }
