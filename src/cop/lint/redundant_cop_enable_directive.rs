@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -8,25 +9,45 @@ use crate::parse::source::SourceFile;
 /// Checks for `# rubocop:enable` comments that can be removed because
 /// the cop was not previously disabled.
 ///
-/// ## Investigation findings (2026-03-14)
+/// ## Corpus investigation (2026-03-15)
 ///
-/// Root causes of false positives:
-/// 1. The cop's inline directive parser (`parse_all_directives`) did not strip
-///    trailing free-text comments after cop names (e.g.,
-///    `# rubocop:disable Foo/Bar # reason` would insert `"Foo/Bar # reason"`
-///    into the disabled set instead of `"Foo/Bar"`). Fixed by stopping cop list
-///    parsing at ` #` (standalone hash starting a trailing comment) and stripping
-///    text after spaces within each cop name token.
-/// 2. Trailing non-identifier characters on cop names (e.g., `Foo/Bar.` or
-///    `Foo/Bar?`) were not stripped, causing mismatches between disable and
-///    enable entries. Fixed by applying `trim_end_matches` to strip trailing
-///    punctuation, matching the behavior in `src/parse/directives.rs`.
-/// 3. Some remaining FPs relate to RuboCop's config-aware behavior: when a cop
-///    is `Enabled: false` in the project's config, RuboCop treats `# rubocop:enable`
-///    as re-enabling a config-disabled cop (not redundant). Our cop lacks access
-///    to per-cop config state and cannot replicate this. These FPs are config
-///    resolution issues, not cop logic bugs.
+/// Corpus oracle reported FP=4, FN=9.
+///
+/// FP=4/FN=9 came from three directive-state bugs:
+/// 1. `# rubocop: enable` / `# rubocop: disable` were ignored because the
+///    parser only accepted `rubocop:enable` with no whitespace after the colon.
+///    That missed real redundant enables and also failed to record matching
+///    disables, producing both FN and FP.
+/// 2. Inline disables like `def foo # rubocop:disable MethodLength` were treated
+///    as block disables, so later `# rubocop:enable MethodLength` directives
+///    looked necessary even though the inline disable only applied to that line.
+/// 3. Nested examples inside comments such as `#   # rubocop:enable Foo` were
+///    treated as real directives, mutating the disabled set in documentation and
+///    causing false positives in RuboCop's own source and similar files.
+///
+/// Earlier rounds already fixed trailing free-text comments and punctuation on
+/// cop names. Any remaining divergence after this point would be config-aware:
+/// RuboCop knows whether a target cop is disabled in project config, while this
+/// cop only sees inline directives.
+///
+/// All known CI FP/FN locations are fixed locally, and the current rerun has
+/// exact aggregate offense-count parity with RuboCop for this cop.
 pub struct RedundantCopEnableDirective;
+
+static SHORT_NAME_TO_QUALIFIED: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
+    let registry = crate::cop::registry::CopRegistry::default_registry();
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+
+    for name in registry.names() {
+        if let Some((_, short)) = name.split_once('/') {
+            map.entry(short.to_string())
+                .or_default()
+                .push(name.to_string());
+        }
+    }
+
+    map
+});
 
 impl Cop for RedundantCopEnableDirective {
     fn name(&self) -> &'static str {
@@ -46,8 +67,7 @@ impl Cop for RedundantCopEnableDirective {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Track which cops/departments are currently disabled
-        let mut disabled: HashSet<String> = HashSet::new();
+        let mut disabled: HashMap<String, usize> = HashMap::new();
 
         let mut byte_offset = 0usize;
         for (i, line) in source.lines().enumerate() {
@@ -59,65 +79,66 @@ impl Cop for RedundantCopEnableDirective {
                 }
             };
 
-            let directives = parse_all_directives(line_str);
-            if directives.is_empty() {
+            let first_comment_hash = first_comment_hash(line_str, byte_offset, code_map);
+            let Some(hash_pos) = find_directive_start(line_str, first_comment_hash) else {
+                byte_offset += line.len() + 1;
+                continue;
+            };
+
+            if !code_map.is_not_string(byte_offset + hash_pos) {
                 byte_offset += line.len() + 1;
                 continue;
             }
 
-            for (action, cops, hash_pos) in directives {
-                // Skip directives inside strings/heredocs by checking
-                // the specific `#` that starts this directive
-                if !code_map.is_not_string(byte_offset + hash_pos) {
-                    continue;
-                }
-                match action {
-                    "disable" | "todo" => {
-                        for cop in &cops {
-                            disabled.insert(cop.to_string());
+            let Some((action, cops)) = parse_directive(&line_str[hash_pos..]) else {
+                byte_offset += line.len() + 1;
+                continue;
+            };
+
+            let is_inline = first_comment_hash.is_some_and(|first_hash| {
+                first_hash == hash_pos && !line_str[..hash_pos].trim().is_empty()
+            });
+
+            match action {
+                "disable" | "todo" => {
+                    // Inline disables apply only to the current line.
+                    if !is_inline {
+                        for cop in cops {
+                            *disabled.entry(cop).or_insert(0) += 1;
                         }
                     }
-                    "enable" => {
-                        for cop in &cops {
-                            if cop == "all" {
-                                // `enable all` is redundant only if nothing was disabled
-                                if disabled.is_empty() {
-                                    let col = find_cop_column(line_str, cop);
-                                    diagnostics.push(self.diagnostic(
-                                        source,
-                                        i + 1,
-                                        col,
-                                        "Unnecessary enabling of all cops.".to_string(),
-                                    ));
-                                } else {
-                                    disabled.clear();
-                                }
-                                continue;
-                            }
-
-                            let was_disabled = disabled.remove(cop.as_str());
-
-                            // Also check if a department enable covers this cop
-                            let dept = cop.split('/').next().unwrap_or(cop);
-                            let dept_was_disabled = if dept != cop.as_str() {
-                                disabled.contains(dept)
-                            } else {
-                                false
-                            };
-
-                            if !was_disabled && !dept_was_disabled {
-                                let col = find_cop_column(line_str, cop);
+                }
+                "enable" => {
+                    for cop in cops {
+                        if cop == "all" {
+                            if !decrement_all(&mut disabled) {
+                                let col = find_cop_column(line_str, cop.as_str());
                                 diagnostics.push(self.diagnostic(
                                     source,
                                     i + 1,
                                     col,
-                                    format!("Unnecessary enabling of {}.", cop),
+                                    "Unnecessary enabling of all cops.".to_string(),
                                 ));
                             }
+                            continue;
+                        }
+
+                        let was_disabled = decrement_matching_disable(&mut disabled, cop.as_str());
+                        let dept_was_disabled =
+                            !was_disabled && department_disable_matches(&disabled, cop.as_str());
+
+                        if !was_disabled && !dept_was_disabled {
+                            let col = find_cop_column(line_str, cop.as_str());
+                            diagnostics.push(self.diagnostic(
+                                source,
+                                i + 1,
+                                col,
+                                format!("Unnecessary enabling of {}.", cop),
+                            ));
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
 
             byte_offset += line.len() + 1;
@@ -126,122 +147,216 @@ impl Cop for RedundantCopEnableDirective {
 }
 
 fn find_cop_column(line: &str, cop: &str) -> usize {
-    // Find the position of the cop name in the enable directive
-    if let Some(enable_pos) = line.find("rubocop:enable") {
-        let after_enable = &line[enable_pos + "rubocop:enable".len()..];
-        if let Some(cop_pos) = after_enable.find(cop) {
-            return enable_pos + "rubocop:enable".len() + cop_pos;
-        }
-    }
-    0
+    line.rfind(cop)
+        .unwrap_or_else(|| line.find(cop).unwrap_or(0))
 }
 
-/// Parse all rubocop directives in a line. A line may contain multiple
-/// directives (e.g., in doc comments with embedded examples).
-/// Returns a list of (action, cops, col) tuples.
-fn parse_all_directives(line: &str) -> Vec<(&str, Vec<String>, usize)> {
-    let mut results = Vec::new();
-    let mut search_from = 0;
+fn parse_directive(comment: &str) -> Option<(&str, Vec<String>)> {
+    let after_hash = comment.strip_prefix('#')?.trim_start();
+    let after_prefix = strip_rubocop_prefix(after_hash)?.trim_start();
 
-    while search_from < line.len() {
-        let remaining = &line[search_from..];
-        let Some(rubocop_pos) = remaining.find("rubocop:") else {
-            break;
-        };
+    let action_end = after_prefix
+        .find(|c: char| c.is_ascii_whitespace())
+        .unwrap_or(after_prefix.len());
+    let action = &after_prefix[..action_end];
 
-        let abs_pos = search_from + rubocop_pos;
-
-        // A real rubocop directive has the form `# rubocop:action` where
-        // the `#` is the Ruby comment marker (possibly preceded only by code
-        // or whitespace), not part of documentation text. We require the `#`
-        // immediately before `rubocop:` (with only whitespace between) AND
-        // that `#` must be either at the start of the line (after whitespace)
-        // or preceded by code (inline comment). Documentation examples like
-        // `` `# rubocop:enable` `` inside comments are excluded because the
-        // `#` before `rubocop:` is preceded by a backtick character.
-        let before = &line[..abs_pos];
-        let before_trimmed = before.trim_end();
-        if !before_trimmed.ends_with('#') {
-            search_from = abs_pos + "rubocop:".len();
-            continue;
-        }
-        // The `#` must be the comment-starting hash, not an example in backticks.
-        // Check that the character before `#` is whitespace, start-of-line, or a
-        // code character (not a backtick which indicates an embedded example).
-        let hash_pos = before_trimmed.len() - 1;
-        if hash_pos > 0 {
-            let char_before_hash = before_trimmed.as_bytes()[hash_pos - 1];
-            if char_before_hash == b'`' {
-                search_from = abs_pos + "rubocop:".len();
-                continue;
-            }
-        }
-
-        let after_prefix = &remaining[rubocop_pos + "rubocop:".len()..];
-
-        let action_end = after_prefix
-            .find(|c: char| c.is_ascii_whitespace())
-            .unwrap_or(after_prefix.len());
-        let action = &after_prefix[..action_end];
-
-        if !matches!(action, "disable" | "enable" | "todo") {
-            search_from = abs_pos + "rubocop:".len();
-            continue;
-        }
-
-        let cops_str = after_prefix[action_end..].trim();
-        // Stop at next # rubocop: directive or end of string
-        let cops_str = match cops_str.find(" -- ") {
-            Some(idx) => &cops_str[..idx],
-            None => cops_str,
-        };
-        // Also stop at next # rubocop: sequence
-        let cops_str = match cops_str.find("# rubocop:") {
-            Some(idx) => &cops_str[..idx],
-            None => cops_str,
-        };
-
-        // Also stop at a standalone `#` that starts a trailing comment
-        // (e.g., `# rubocop:disable Foo/Bar # reason here`)
-        let cops_str = match cops_str.find(" #") {
-            Some(idx) => &cops_str[..idx],
-            None => cops_str,
-        };
-
-        let cops: Vec<String> = cops_str
-            .split(',')
-            .map(|s| {
-                let s = s.trim();
-                // Strip trailing text after a space (free-text comments).
-                // Cop names are: "all", "Department", or "Department/CopName".
-                let s = match s.find(' ') {
-                    Some(idx) => &s[..idx],
-                    None => s,
-                };
-                // Strip trailing non-identifier chars (e.g., trailing `.` or `?`).
-                s.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '/')
-                    .to_string()
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let action_str = match action {
-            "disable" => "disable",
-            "enable" => "enable",
-            "todo" => "todo",
-            _ => {
-                search_from = abs_pos + "rubocop:".len();
-                continue;
-            }
-        };
-
-        results.push((action_str, cops, hash_pos));
-
-        // Move past this directive
-        search_from = abs_pos + "rubocop:".len() + action_end + cops_str.len();
+    if !matches!(action, "disable" | "enable" | "todo") {
+        return None;
     }
 
-    results
+    let cops_str = after_prefix[action_end..].trim_start();
+    let cops_str = cops_str.split("--").next().unwrap_or(cops_str);
+    let cops: Vec<String> = cops_str.split(',').filter_map(parse_cop_token).collect();
+    if cops.is_empty() {
+        return None;
+    }
+
+    let action_str = match action {
+        "disable" => "disable",
+        "enable" => "enable",
+        "todo" => "todo",
+        _ => return None,
+    };
+
+    Some((action_str, cops))
+}
+
+fn parse_cop_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_start();
+    let first = *trimmed.as_bytes().first()?;
+    if !first.is_ascii_alphanumeric() {
+        return None;
+    }
+
+    let end = trimmed
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '/' || c == '_'))
+        .unwrap_or(trimmed.len());
+    let token = trimmed[..end].trim_end_matches('.');
+    if token.is_empty() || token.ends_with('/') {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+fn decrement_matching_disable(disabled: &mut HashMap<String, usize>, cop: &str) -> bool {
+    if decrement_case_insensitive(disabled, cop) {
+        return true;
+    }
+
+    if let Some(short) = short_cop_name(cop) {
+        if decrement_case_insensitive(disabled, short) {
+            return true;
+        }
+        return false;
+    }
+
+    let dept_prefix = format!("{cop}/");
+    let matching_department_keys: Vec<String> = disabled
+        .iter()
+        .filter(|(name, count)| {
+            **count > 0 && starts_with_case_insensitive(name.as_str(), dept_prefix.as_str())
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    if !matching_department_keys.is_empty() {
+        for key in matching_department_keys {
+            decrement_exact(disabled, key.as_str());
+        }
+        return true;
+    }
+
+    let matching_short_key = disabled
+        .iter()
+        .find(|(name, count)| {
+            **count > 0
+                && short_cop_name(name.as_str())
+                    .is_some_and(|short| short.eq_ignore_ascii_case(cop))
+        })
+        .map(|(name, _)| name.clone());
+    if let Some(key) = matching_short_key {
+        decrement_exact(disabled, key.as_str());
+        return true;
+    }
+
+    false
+}
+
+fn decrement_all(disabled: &mut HashMap<String, usize>) -> bool {
+    let keys: Vec<String> = disabled
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(name, _)| name.clone())
+        .collect();
+    if keys.is_empty() {
+        return false;
+    }
+
+    for key in keys {
+        decrement_exact(disabled, key.as_str());
+    }
+
+    true
+}
+
+fn department_disable_matches(disabled: &HashMap<String, usize>, cop: &str) -> bool {
+    if let Some((dept, _)) = cop.split_once('/') {
+        return contains_case_insensitive(disabled, dept);
+    }
+
+    SHORT_NAME_TO_QUALIFIED
+        .get(cop)
+        .into_iter()
+        .flatten()
+        .filter_map(|qualified| qualified.split_once('/').map(|(dept, _)| dept))
+        .any(|dept| contains_case_insensitive(disabled, dept))
+}
+
+fn decrement_case_insensitive(disabled: &mut HashMap<String, usize>, key: &str) -> bool {
+    let actual = disabled
+        .iter()
+        .find(|(name, count)| **count > 0 && name.eq_ignore_ascii_case(key))
+        .map(|(name, _)| name.clone());
+    let Some(actual) = actual else {
+        return false;
+    };
+    decrement_exact(disabled, actual.as_str());
+    true
+}
+
+fn decrement_exact(disabled: &mut HashMap<String, usize>, key: &str) {
+    let mut remove_key = false;
+    if let Some(count) = disabled.get_mut(key) {
+        *count -= 1;
+        remove_key = *count == 0;
+    }
+    if remove_key {
+        disabled.remove(key);
+    }
+}
+
+fn contains_case_insensitive(disabled: &HashMap<String, usize>, key: &str) -> bool {
+    disabled
+        .iter()
+        .any(|(name, count)| *count > 0 && name.eq_ignore_ascii_case(key))
+}
+
+fn short_cop_name(cop: &str) -> Option<&str> {
+    cop.split_once('/').map(|(_, short)| short)
+}
+
+fn starts_with_case_insensitive(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn first_comment_hash(line: &str, byte_offset: usize, code_map: &CodeMap) -> Option<usize> {
+    line.char_indices()
+        .find(|(idx, ch)| *ch == '#' && code_map.is_not_string(byte_offset + idx))
+        .map(|(idx, _)| idx)
+}
+
+fn find_directive_start(line: &str, first_comment_hash: Option<usize>) -> Option<usize> {
+    let mut search_from = 0;
+    let first_hash = first_comment_hash?;
+
+    loop {
+        let rest = &line[search_from..];
+        let hash_pos = rest.find('#')?;
+        let abs_pos = search_from + hash_pos;
+        let after_hash = rest[hash_pos + 1..].trim_start();
+
+        if strip_rubocop_prefix(after_hash).is_some() {
+            let before = &line[..abs_pos];
+            let before_trimmed = before.trim_end();
+            if before_trimmed.ends_with('"')
+                || before_trimmed.ends_with('\'')
+                || before_trimmed.ends_with('`')
+            {
+                search_from = abs_pos + 1;
+                continue;
+            }
+
+            if abs_pos != first_hash {
+                let between_hashes = &line[first_hash + 1..abs_pos];
+                if between_hashes.trim().is_empty() {
+                    search_from = abs_pos + 1;
+                    continue;
+                }
+            }
+
+            return Some(abs_pos);
+        }
+
+        search_from = abs_pos + 1;
+    }
+}
+
+fn strip_rubocop_prefix(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix("rubocop")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':')?;
+    Some(rest)
 }
 
 #[cfg(test)]
@@ -251,4 +366,20 @@ mod tests {
         RedundantCopEnableDirective,
         "cops/lint/redundant_cop_enable_directive"
     );
+
+    #[test]
+    fn finds_only_real_directive_start() {
+        assert_eq!(
+            find_directive_start("# rubocop: enable Metrics/MethodLength", Some(0)),
+            Some(0)
+        );
+        assert_eq!(
+            find_directive_start("value # rubocop:disable MethodLength", Some(6)),
+            Some(6)
+        );
+        assert_eq!(
+            find_directive_start("#   # rubocop:enable Layout/LineLength", Some(0)),
+            None
+        );
+    }
 }

@@ -8,3 +8,23 @@ bar
 baz
 # rubocop:enable all
                  ^^^ Lint/RedundantCopEnableDirective: Unnecessary enabling of all cops.
+
+alpha
+# rubocop: enable Metrics/CyclomaticComplexity
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/RedundantCopEnableDirective: Unnecessary enabling of Metrics/CyclomaticComplexity.
+
+beta
+# rubocop:enable MethodLength
+                 ^^^^^^^^^^^^ Lint/RedundantCopEnableDirective: Unnecessary enabling of MethodLength.
+
+def help # rubocop:disable MethodLength
+  <<~TEXT
+    body
+  TEXT
+end
+# rubocop:enable MethodLength
+                 ^^^^^^^^^^^^ Lint/RedundantCopEnableDirective: Unnecessary enabling of MethodLength.
+
+foo('#') # rubocop:disable Style/StringLiterals
+bar('#') # rubocop:enable Style/StringLiterals
+                          ^^^^^^^^^^^^^^^^^^^^ Lint/RedundantCopEnableDirective: Unnecessary enabling of Style/StringLiterals.

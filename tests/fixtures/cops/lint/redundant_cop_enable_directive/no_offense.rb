@@ -32,10 +32,6 @@ puts code
 # removed. This is done in order to find rubocop:enable directives that
 # have now become useless.
 
-# Inline disable/enable after code with # in a string
-foo('#') # rubocop:disable Style/StringLiterals
-bar('#') # rubocop:enable Style/StringLiterals
-
 # Disable with trailing comment after cop name (not using -- separator)
 # rubocop:disable Rails/FindEach # .each returns an array, .find_each returns nil
 records.each do |record|
@@ -49,6 +45,30 @@ def long_method
   x = 1
 end
 # rubocop:enable Metrics/MethodLength.
+
+# Disable using the spaced directive form
+# rubocop: disable Metrics/MethodLength
+def medium_method
+  value = 1
+end
+# rubocop:enable Metrics/MethodLength
+
+# Nested disables require matching nested enables
+# rubocop:disable Metrics/MethodLength
+# rubocop:disable Metrics/MethodLength
+def counted_method
+  result = 1
+end
+# rubocop:enable Metrics/MethodLength
+# rubocop:enable Metrics/MethodLength
+
+# Nested examples in comments should not count as real directives
+# rubocop:disable Lint/RedundantCopEnableDirective
+# rubocop:disable Lint/RedundantCopDisableDirective
+#   # rubocop:enable Layout/LineLength
+#   # rubocop:disable Style/StringLiterals
+# rubocop:enable Lint/RedundantCopDisableDirective
+# rubocop:enable Lint/RedundantCopEnableDirective
 
 # Disable/enable for custom cop not in registry
 # rubocop:disable Development/NoEvalCop
