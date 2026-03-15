@@ -70,6 +70,26 @@ use ruby_prism::Visit;
 /// calls, but this caused 55 FPs (puppet: 36, openproject: 13, dragonfly: 3, omnibus: 2,
 /// ifme: 1) because nitrocop overcounted relative to RuboCop. Reverted to match RuboCop's
 /// nil-dedup behavior.
+///
+/// ## Root cause of FNs (fixed, round 5)
+///
+/// **Missing helper inheritance from non-spec-group ancestor blocks**: RuboCop's
+/// `all_helpers` uses `node.each_ancestor(:block)` which walks ALL ancestor block nodes,
+/// not just spec groups. It calls `helpers(ancestor)` on each, which finds `let/subject`
+/// calls via `ExampleGroup.new(ancestor).lets`. This means helpers defined in custom
+/// wrapper methods (like karafka's `RSpec.describe_current`) propagate to nested spec
+/// groups even though the wrapper itself is not a recognized example group.
+///
+/// nitrocop's `MemoizedHelperVisitor` only pushed helpers onto the ancestor stack for
+/// recognized spec groups (`is_example_group_call`). Non-spec-group blocks like
+/// `describe_current do...end` or `my_helper do...end` were visited via pass-through
+/// recursion, so their `let` calls were never added to the ancestor context. This caused
+/// 722 FNs across 3 corpus repos (karafka: 522, openproject: 139,
+/// rspec_api_documentation: 61).
+///
+/// Fix: the visitor now collects helpers and pushes them onto the ancestor stack for ALL
+/// call nodes with blocks, not just spec groups. Only spec groups emit diagnostics.
+/// The push/pop ensures helpers are scoped to descendants only (no sibling leakage).
 pub struct MultipleMemoizedHelpers;
 
 impl Cop for MultipleMemoizedHelpers {
@@ -288,57 +308,59 @@ impl<'a> MemoizedHelperVisitor<'a> {
 
 impl<'pr> Visit<'pr> for MemoizedHelperVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        if !self.is_example_group_call(node) {
-            // Not an example group — just continue visiting children
-            ruby_prism::visit_call_node(self, node);
-            return;
-        }
+        let is_spec_group = self.is_example_group_call(node);
 
         let block = match node.block() {
-            Some(b) => match b.as_block_node() {
-                Some(bn) => bn,
-                None => {
-                    ruby_prism::visit_call_node(self, node);
-                    return;
-                }
-            },
-            None => {
-                ruby_prism::visit_call_node(self, node);
-                return;
-            }
+            Some(b) => b.as_block_node(),
+            None => None,
         };
 
-        // Collect helper names in this group's scope (recursive walk)
+        // If there's no block, just recurse into children
+        let Some(block) = block else {
+            ruby_prism::visit_call_node(self, node);
+            return;
+        };
+
+        // Collect helper names in this block's scope (recursive walk).
+        // This is done for ALL blocks, not just spec groups, matching RuboCop's
+        // `each_ancestor(:block)` behavior: helpers from non-spec-group ancestor
+        // blocks (e.g., `RSpec.describe_current`, custom wrappers) are included
+        // when counting a nested spec group's total helpers.
         let direct_names = self.collect_helper_names_in_scope(&block);
 
-        // Total = union of all ancestor names + this group's names
-        // Overrides (same name in child) don't increase the count.
-        let mut all_names: HashSet<Vec<u8>> = HashSet::new();
-        for ancestor_set in &self.ancestor_names {
-            for name in ancestor_set {
+        // Only report offenses on spec groups (example groups / shared groups)
+        if is_spec_group {
+            // Total = union of all ancestor names + this group's names
+            // Overrides (same name in child) don't increase the count.
+            let mut all_names: HashSet<Vec<u8>> = HashSet::new();
+            for ancestor_set in &self.ancestor_names {
+                for name in ancestor_set {
+                    all_names.insert(name.clone());
+                }
+            }
+            for name in &direct_names {
                 all_names.insert(name.clone());
             }
-        }
-        for name in &direct_names {
-            all_names.insert(name.clone());
-        }
-        let total = all_names.len();
+            let total = all_names.len();
 
-        if total > self.max {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                format!(
-                    "Example group has too many memoized helpers [{total}/{}]",
-                    self.max
-                ),
-            ));
+            if total > self.max {
+                let loc = node.location();
+                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                self.diagnostics.push(self.cop.diagnostic(
+                    self.source,
+                    line,
+                    column,
+                    format!(
+                        "Example group has too many memoized helpers [{total}/{}]",
+                        self.max
+                    ),
+                ));
+            }
         }
 
-        // Push this group's direct names onto the ancestor stack and recurse
+        // Push this block's direct names onto the ancestor stack and recurse.
+        // Done for ALL blocks so nested spec groups inherit helpers from
+        // non-spec-group ancestor blocks.
         self.ancestor_names.push(direct_names);
         ruby_prism::visit_call_node(self, node);
         self.ancestor_names.pop();
@@ -569,5 +591,47 @@ mod tests {
             diags
         );
         assert!(diags[0].message.contains("[6/5]"));
+    }
+
+    #[test]
+    fn helpers_in_non_spec_group_ancestor_block_are_inherited() {
+        // Custom wrapper method (like `describe_current`) is not a recognized spec group,
+        // but its `let` calls should still count toward nested spec groups.
+        // RuboCop's `each_ancestor(:block)` walks ALL ancestor blocks, not just spec groups.
+        // Here: outer wrapper has 3 lets, inner context has 3 lets = 6 total > 5.
+        let source = b"RSpec.describe_current do\n  let(:a) { 1 }\n  let(:b) { 2 }\n  let(:c) { 3 }\n\n  context 'nested' do\n    let(:d) { 4 }\n    let(:e) { 5 }\n    let(:f) { 6 }\n    it { expect(true).to be true }\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&MultipleMemoizedHelpers, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should fire on nested context inheriting from non-spec-group ancestor: {:?}",
+            diags
+        );
+        assert!(diags[0].message.contains("[6/5]"));
+    }
+
+    #[test]
+    fn non_spec_group_ancestor_does_not_fire_itself() {
+        // The non-spec-group wrapper should NOT report an offense itself,
+        // only spec groups inside it should.
+        let source = b"custom_wrapper do\n  let(:a) { 1 }\n  let(:b) { 2 }\n  let(:c) { 3 }\n  let(:d) { 4 }\n  let(:e) { 5 }\n  let(:f) { 6 }\n  it { expect(true).to be true }\nend\n";
+        let diags = crate::testutil::run_cop_full(&MultipleMemoizedHelpers, source);
+        assert!(
+            diags.is_empty(),
+            "Non-spec-group wrapper should not fire: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn helpers_from_sibling_blocks_do_not_leak() {
+        // Helpers from sibling blocks should NOT leak to each other.
+        let source = b"custom_wrapper do\n  let(:a) { 1 }\n  let(:b) { 2 }\n  let(:c) { 3 }\nend\n\ndescribe Bar do\n  let(:d) { 4 }\n  let(:e) { 5 }\n  it { expect(true).to be true }\nend\n";
+        let diags = crate::testutil::run_cop_full(&MultipleMemoizedHelpers, source);
+        assert!(
+            diags.is_empty(),
+            "Sibling block helpers should not leak: {:?}",
+            diags
+        );
     }
 }
