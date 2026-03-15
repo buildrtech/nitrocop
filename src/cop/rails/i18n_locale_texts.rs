@@ -1,11 +1,28 @@
-use crate::cop::node_type::{
-    ASSOC_NODE, CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE, LOCAL_VARIABLE_READ_NODE, STRING_NODE,
-    SYMBOL_NODE,
-};
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/I18nLocaleTexts: Enforces use of I18n and locale files instead of locale-specific strings.
+///
+/// ## Investigation (2026-03-15)
+///
+/// **FP root cause (3 FPs):** All from `flash[:error] = "string"` in the Autolab repo where
+/// `flash` is a local variable (assigned earlier in the method). RuboCop's pattern only matches
+/// `(send nil? :flash)` (method call), NOT `(lvar :flash)` (local variable read). Nitrocop was
+/// incorrectly matching local variable reads of `flash` in `is_flash_receiver`.
+/// **Fix:** Remove local variable `flash` handling from `is_flash_receiver`.
+///
+/// **FN root cause (8 FNs):** RuboCop uses `def_node_search` which recursively searches the
+/// entire AST subtree of call arguments for matching pairs. Nitrocop only searched at specific
+/// nesting depths. Missed patterns:
+/// - `validates :title, message: "text"` (top-level `:message` keyword, not nested in hash)
+/// - `redirect_to url(notice: "text")` (`:notice`/`:alert` nested inside URL helper call args)
+/// - `redirect_to path, flash: { notice: "text" }` (`:notice`/`:alert` inside `flash:` hash)
+/// - `mail({ subject: "text" }.merge!(hash))` (`:subject` in hash literal arg, not keyword arg)
+///
+/// **Fix:** Implement recursive AST search for `(pair (sym :key) str)` patterns,
+/// matching RuboCop's `def_node_search` behavior.
 pub struct I18nLocaleTexts;
 
 const MSG: &str = "Move locale texts to the locale files in the `config/locales` directory.";
@@ -15,89 +32,61 @@ fn is_string_literal(node: &ruby_prism::Node<'_>) -> bool {
     node.as_string_node().is_some()
 }
 
-/// Extract string value from keyword argument in a KeywordHashNode or HashNode.
-fn find_keyword_string_value<'a>(
-    call: &ruby_prism::CallNode<'a>,
+/// Recursively search a node's subtree for `(pair (sym :key) str)` patterns.
+/// Mirrors RuboCop's `def_node_search` which walks the entire AST subtree.
+fn find_pairs_recursive<'a>(
+    node: &ruby_prism::Node<'a>,
     key: &[u8],
-) -> Option<ruby_prism::Node<'a>> {
-    let args = call.arguments()?;
-    for arg in args.arguments().iter() {
-        // Check KeywordHashNode
-        if let Some(kw) = arg.as_keyword_hash_node() {
-            for elem in kw.elements().iter() {
-                if let Some(assoc) = elem.as_assoc_node() {
-                    if let Some(sym) = assoc.key().as_symbol_node() {
-                        if sym.unescaped() == key {
-                            return Some(assoc.value());
-                        }
-                    }
-                }
+    results: &mut Vec<ruby_prism::Node<'a>>,
+) {
+    // Check if this node is an assoc (pair) with matching key and string value
+    if let Some(assoc) = node.as_assoc_node() {
+        if let Some(sym) = assoc.key().as_symbol_node() {
+            if sym.unescaped() == key && is_string_literal(&assoc.value()) {
+                results.push(assoc.value());
+                return; // Don't recurse further into this pair
             }
         }
-        // Check HashNode
-        if let Some(hash) = arg.as_hash_node() {
-            for elem in hash.elements().iter() {
-                if let Some(assoc) = elem.as_assoc_node() {
-                    if let Some(sym) = assoc.key().as_symbol_node() {
-                        if sym.unescaped() == key {
-                            return Some(assoc.value());
-                        }
-                    }
-                }
-            }
-        }
+        // Recurse into assoc value (could contain nested hashes)
+        find_pairs_recursive(&assoc.value(), key, results);
+        return;
     }
-    None
-}
 
-/// Search inside nested hash values for `:message` keys with string literal values.
-/// Used for `validates :email, presence: { message: "text" }`.
-fn find_message_strings_in_validation_args(
-    call: &ruby_prism::CallNode<'_>,
-    source: &SourceFile,
-    cop: &I18nLocaleTexts,
-) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-    let args = match call.arguments() {
-        Some(a) => a,
-        None => return diagnostics,
-    };
-
-    for arg in args.arguments().iter() {
-        let kw = match arg.as_keyword_hash_node() {
-            Some(k) => k,
-            None => continue,
-        };
+    // KeywordHashNode: recurse into elements
+    if let Some(kw) = node.as_keyword_hash_node() {
         for elem in kw.elements().iter() {
-            let assoc = match elem.as_assoc_node() {
-                Some(a) => a,
-                None => continue,
-            };
-            // The value might be a hash with a :message key
-            let value = assoc.value();
-            if let Some(hash) = value.as_hash_node() {
-                for inner_elem in hash.elements().iter() {
-                    if let Some(inner_assoc) = inner_elem.as_assoc_node() {
-                        if let Some(sym) = inner_assoc.key().as_symbol_node() {
-                            if sym.unescaped() == b"message"
-                                && is_string_literal(&inner_assoc.value())
-                            {
-                                let loc = inner_assoc.value().location();
-                                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                                diagnostics.push(cop.diagnostic(
-                                    source,
-                                    line,
-                                    column,
-                                    MSG.to_string(),
-                                ));
-                            }
-                        }
-                    }
-                }
+            find_pairs_recursive(&elem, key, results);
+        }
+        return;
+    }
+
+    // HashNode: recurse into elements
+    if let Some(hash) = node.as_hash_node() {
+        for elem in hash.elements().iter() {
+            find_pairs_recursive(&elem, key, results);
+        }
+        return;
+    }
+
+    // CallNode: recurse into receiver and arguments
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            find_pairs_recursive(&recv, key, results);
+        }
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                find_pairs_recursive(&arg, key, results);
             }
         }
+        return;
     }
-    diagnostics
+
+    // ArgumentsNode: recurse into each argument
+    if let Some(args) = node.as_arguments_node() {
+        for arg in args.arguments().iter() {
+            find_pairs_recursive(&arg, key, results);
+        }
+    }
 }
 
 impl Cop for I18nLocaleTexts {
@@ -110,15 +99,7 @@ impl Cop for I18nLocaleTexts {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            ASSOC_NODE,
-            CALL_NODE,
-            HASH_NODE,
-            KEYWORD_HASH_NODE,
-            LOCAL_VARIABLE_READ_NODE,
-            STRING_NODE,
-            SYMBOL_NODE,
-        ]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -139,36 +120,37 @@ impl Cop for I18nLocaleTexts {
 
         match method_name {
             b"validates" => {
-                // Check for string message values in nested hashes
-                diagnostics.extend(find_message_strings_in_validation_args(&call, source, self));
+                // Recursively search for (pair (sym :message) str) anywhere in args
+                let mut results = Vec::new();
+                find_pairs_recursive(node, b"message", &mut results);
+                for val in results {
+                    let loc = val.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+                }
                 return;
             }
             b"redirect_to" | b"redirect_back" => {
-                // Check :notice and :alert keyword args for string literals
+                // Recursively search for (pair (sym :notice/:alert) str) anywhere in args
                 for key in &[b"notice" as &[u8], b"alert"] {
-                    if let Some(val) = find_keyword_string_value(&call, key) {
-                        if is_string_literal(&val) {
-                            let loc = val.location();
-                            let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                MSG.to_string(),
-                            ));
-                        }
+                    let mut results = Vec::new();
+                    find_pairs_recursive(node, key, &mut results);
+                    for val in results {
+                        let loc = val.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
                     }
                 }
                 return;
             }
             b"mail" => {
-                // Check :subject keyword arg for string literal
-                if let Some(val) = find_keyword_string_value(&call, b"subject") {
-                    if is_string_literal(&val) {
-                        let loc = val.location();
-                        let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
-                    }
+                // Recursively search for (pair (sym :subject) str) anywhere in args
+                let mut results = Vec::new();
+                find_pairs_recursive(node, b"subject", &mut results);
+                for val in results {
+                    let loc = val.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
                 }
             }
             _ => {}
@@ -200,7 +182,10 @@ impl Cop for I18nLocaleTexts {
     }
 }
 
-/// Check if a node is `flash` or `flash.now`.
+/// Check if a node is `flash` or `flash.now` (method call only, not local variable).
+/// RuboCop's pattern matches `(send nil? :flash)` and `(send (send nil? :flash) :now)`,
+/// which only matches `flash` as a method call (implicit receiver). When `flash` is
+/// assigned as a local variable, RuboCop does not flag it.
 fn is_flash_receiver(node: &ruby_prism::Node<'_>) -> bool {
     // Direct `flash` call
     if let Some(call) = node.as_call_node() {
@@ -217,10 +202,6 @@ fn is_flash_receiver(node: &ruby_prism::Node<'_>) -> bool {
                 }
             }
         }
-    }
-    // Also handle local variable `flash`
-    if let Some(lvar) = node.as_local_variable_read_node() {
-        return lvar.name().as_slice() == b"flash";
     }
     false
 }
