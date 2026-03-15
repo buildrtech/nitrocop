@@ -86,3 +86,27 @@ rescue Timeout::Error, StandardError => e
 ^^^^^^ Lint/ShadowedException: Do not shadow rescued Exceptions.
   handle_error(e)
 end
+
+# Leading :: still refers to the same built-in exception constant
+begin
+  do_work
+rescue ::Exception, Timeout::Error => ex
+^^^^^^ Lint/ShadowedException: Do not shadow rescued Exceptions.
+  warn ex.message
+end
+
+# Leading :: on nested constants should still participate in hierarchy checks
+begin
+  parse_config
+rescue StandardError, ::Psych::SyntaxError => error
+^^^^^^ Lint/ShadowedException: Do not shadow rescued Exceptions.
+  warn error.message
+end
+
+# OpenSSL::PKey error constants are aliases of the same underlying class
+begin
+  load_key
+rescue OpenSSL::PKey::RSAError, OpenSSL::PKey::DSAError => e
+^^^^^^ Lint/ShadowedException: Do not shadow rescued Exceptions.
+  warn e.message
+end

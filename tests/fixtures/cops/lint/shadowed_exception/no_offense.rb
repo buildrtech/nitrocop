@@ -46,3 +46,20 @@ rescue SocketError, Timeout::Error, Errno::EINVAL, Errno::ECONNRESET,
        Net::ProtocolError, RestClient::ResourceNotFound => e
   handle_error(e)
 end
+
+# Psych subclasses are siblings under Psych::Exception, not nested under SyntaxError
+begin
+  parse_config
+rescue Psych::SyntaxError, Psych::DisallowedClass, Psych::BadAlias => e
+  warn e.message
+end
+
+begin
+  parse_config
+rescue Errno::ENOENT
+  warn "missing"
+rescue Psych::SyntaxError => e
+  warn e.message
+rescue Psych::BadAlias => e
+  warn e.message
+end

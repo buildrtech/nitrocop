@@ -6,30 +6,25 @@ use crate::parse::source::SourceFile;
 /// Lint/ShadowedException — detects rescue clauses where a more specific exception
 /// is shadowed by a less specific ancestor in the same or earlier rescue clause.
 ///
-/// ## Investigation findings (corpus: 1 FP, 34 FN)
+/// ## Corpus investigation (2026-03-15)
 ///
-/// RuboCop uses Ruby's live class hierarchy via `Kernel.const_get` and the `<=>`
-/// operator on exception classes. It does NOT have a hardcoded tree — it resolves
-/// classes at runtime. This means the set of known relationships depends on which
-/// gems are loaded in the RuboCop process.
+/// Corpus oracle reported FP=5, FN=3.
 ///
-/// **FP root cause:** Our hierarchy included `Net::ProtocolError` as parent of
-/// `Net::HTTPBadResponse`/`Net::HTTPHeaderSyntaxError`, but RuboCop's runtime
-/// environment doesn't necessarily have these net/http classes loaded, so it
-/// doesn't detect this relationship. Removed these entries.
+/// FP=5: the previous Psych mapping treated `Psych::BadAlias` as a subclass of
+/// `Psych::SyntaxError`. On Ruby 3.4, both `Psych::BadAlias` and
+/// `Psych::DisallowedClass` are siblings under `Psych::Exception`, so rescue
+/// groups like `Psych::SyntaxError, Psych::DisallowedClass, Psych::BadAlias`
+/// are valid and should not be flagged.
 ///
-/// **FN root causes:** Missing many stdlib/gem exception hierarchies that Ruby's
-/// runtime knows about:
-/// - `Timeout::Error < StandardError` (and `Net::OpenTimeout`/`Net::ReadTimeout` < `Timeout::Error`)
-/// - `SystemCallError < StandardError` (and all `Errno::*` < `SystemCallError`)
-/// - `OpenSSL::PKey::PKeyError` > `RSAError`/`DSAError`/`ECError`
-/// - `Zlib::Error` > `Zlib::GzipFile::Error`
-/// - `Date::Error < ArgumentError`
-/// - `Psych::SyntaxError` < `RuntimeError` (via `Psych::Exception` in Ruby 3.1+)
-/// - `Gem::LoadError` > `Gem::MissingSpecError` > `Gem::MissingSpecVersionError`
-/// - `Net::HTTPError` > `Net::HTTPServerException`
-/// - `IO::EWOULDBLOCKWaitReadable` < `Errno::EAGAIN`
-/// - `IPAddr::InvalidAddressError` < `ArgumentError` (in addition to `IPAddr::Error`)
+/// FN=3: three gaps remained after the earlier hierarchy expansion:
+/// - Leading `::` prefixes (`::Exception`, `::Psych::SyntaxError`) were compared
+///   literally instead of being normalized to their constant names.
+/// - `OpenSSL::PKey::RSAError` and `OpenSSL::PKey::DSAError` are aliases of the
+///   same underlying `OpenSSL::PKey::PKeyError` class, so rescuing both should
+///   count as shadowing even though the source strings differ.
+/// - The older comment below remains directionally correct: RuboCop uses Ruby's
+///   live class hierarchy rather than a pure hardcoded tree, so this cop needs
+///   conservative static approximations of the runtime relationships RuboCop sees.
 pub struct ShadowedException;
 
 // Known Ruby exception hierarchy — matches relationships that RuboCop's runtime
@@ -119,7 +114,6 @@ const EXCEPTION_HIERARCHY: &[(&str, &[&str])] = &[
         ],
     ),
     ("Zlib::Error", &["Zlib::GzipFile::Error"]),
-    ("Psych::SyntaxError", &["Psych::BadAlias"]),
     (
         "Gem::Exception",
         &[
@@ -134,7 +128,34 @@ const EXCEPTION_HIERARCHY: &[(&str, &[&str])] = &[
     ("Gem::MissingSpecError", &["Gem::MissingSpecVersionError"]),
 ];
 
+const EQUIVALENT_EXCEPTION_GROUPS: &[&[&str]] = &[&[
+    "OpenSSL::PKey::PKeyError",
+    "OpenSSL::PKey::RSAError",
+    "OpenSSL::PKey::DSAError",
+    "OpenSSL::PKey::ECError",
+]];
+
+fn normalize_exception_name(name: &str) -> &str {
+    name.trim().trim_start_matches("::")
+}
+
+fn equivalent_exception_classes(a: &str, b: &str) -> bool {
+    let a = normalize_exception_name(a);
+    let b = normalize_exception_name(b);
+
+    if a == b {
+        return true;
+    }
+
+    EQUIVALENT_EXCEPTION_GROUPS
+        .iter()
+        .any(|group| group.contains(&a) && group.contains(&b))
+}
+
 fn is_ancestor_of(ancestor: &str, descendant: &str) -> bool {
+    let ancestor = normalize_exception_name(ancestor);
+    let descendant = normalize_exception_name(descendant);
+
     if ancestor == descendant {
         return false;
     }
@@ -167,12 +188,18 @@ fn contains_multiple_levels(group: &[String]) -> bool {
         return false;
     }
     // If group includes Exception and anything else, it has multiple levels
-    if group.iter().any(|e| e == "Exception") {
+    if group
+        .iter()
+        .any(|e| normalize_exception_name(e) == "Exception")
+    {
         return true;
     }
     for i in 0..group.len() {
         for j in (i + 1)..group.len() {
-            if is_ancestor_of(&group[i], &group[j]) || is_ancestor_of(&group[j], &group[i]) {
+            if equivalent_exception_classes(&group[i], &group[j])
+                || is_ancestor_of(&group[i], &group[j])
+                || is_ancestor_of(&group[j], &group[i])
+            {
                 return true;
             }
         }
@@ -183,17 +210,25 @@ fn contains_multiple_levels(group: &[String]) -> bool {
 /// Check if two consecutive groups are in sorted order (more specific first).
 fn groups_sorted(earlier: &[String], later: &[String]) -> bool {
     // If earlier group includes Exception, it's always wrong order
-    if earlier.iter().any(|e| e == "Exception") {
+    if earlier
+        .iter()
+        .any(|e| normalize_exception_name(e) == "Exception")
+    {
         return false;
     }
     // If later includes Exception or either group is empty, consider sorted
-    if later.iter().any(|e| e == "Exception") || earlier.is_empty() || later.is_empty() {
+    if later
+        .iter()
+        .any(|e| normalize_exception_name(e) == "Exception")
+        || earlier.is_empty()
+        || later.is_empty()
+    {
         return true;
     }
     // Check that no earlier exception is an ancestor of a later one
     for e in earlier {
         for l in later {
-            if is_ancestor_of(e, l) {
+            if equivalent_exception_classes(e, l) || is_ancestor_of(e, l) {
                 return false;
             }
         }
@@ -238,7 +273,7 @@ impl Cop for ShadowedException {
                 .filter_map(|e| {
                     std::str::from_utf8(e.location().as_slice())
                         .ok()
-                        .map(|s| s.to_string())
+                        .map(|s| normalize_exception_name(s).to_string())
                 })
                 .collect();
 
