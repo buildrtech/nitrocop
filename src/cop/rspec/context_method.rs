@@ -1,4 +1,4 @@
-use crate::cop::node_type::{CALL_NODE, STRING_NODE};
+use crate::cop::node_type::{CALL_NODE, INTERPOLATED_STRING_NODE, STRING_NODE};
 use crate::cop::util::RSPEC_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -15,7 +15,14 @@ use crate::parse::source::SourceFile;
 /// description, or a receiver-qualified call. No code fix attempted without
 /// concrete reproduction.
 ///
-/// FN=9: No example locations available. Root cause unknown.
+/// ## Corpus investigation (2026-03-15)
+///
+/// FN=10: The cop only checked `as_string_node()` for the first argument, missing
+/// `InterpolatedStringNode`. When the context description uses string interpolation
+/// (e.g., `context "#to_boolean for #{value.inspect}" do`), Prism parses it as an
+/// `InterpolatedStringNode`. Fix: also check `as_interpolated_string_node()` and
+/// extract the leading text from the first `StringNode` part to determine if it
+/// starts with `#` or `.`.
 pub struct ContextMethod;
 
 impl Cop for ContextMethod {
@@ -32,7 +39,7 @@ impl Cop for ContextMethod {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, STRING_NODE]
+        &[CALL_NODE, INTERPOLATED_STRING_NODE, STRING_NODE]
     }
 
     fn check_node(
@@ -63,15 +70,31 @@ impl Cop for ContextMethod {
             return;
         }
 
-        let string_node = match arg_list[0].as_string_node() {
-            Some(s) => s,
-            None => return,
-        };
-
-        let content = string_node.unescaped();
-        let content_str = match std::str::from_utf8(content) {
-            Ok(s) => s,
-            Err(_) => return,
+        // Extract description text from StringNode or InterpolatedStringNode
+        let content_str: String;
+        if let Some(s) = arg_list[0].as_string_node() {
+            let content = s.unescaped();
+            content_str = match std::str::from_utf8(content) {
+                Ok(s) => s.to_string(),
+                Err(_) => return,
+            };
+        } else if let Some(interp) = arg_list[0].as_interpolated_string_node() {
+            // For interpolated strings, extract leading text before first interpolation.
+            let parts: Vec<_> = interp.parts().iter().collect();
+            content_str = if let Some(first) = parts.first() {
+                if let Some(s) = first.as_string_node() {
+                    let text = s.unescaped();
+                    std::str::from_utf8(text)
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            };
+        } else {
+            return;
         };
 
         // Flag if starts with '#' or '.'
