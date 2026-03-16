@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Allow importing corpus_download from the same directory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,6 +31,67 @@ def find_project_root() -> Path:
         capture_output=True, text=True,
     )
     return Path(result.stdout.strip()) if result.returncode == 0 else Path(".")
+
+
+def rust_build_inputs(project_root: Path) -> list[Path]:
+    """Return files whose mtimes determine whether the release binary is stale."""
+    paths = [
+        project_root / "Cargo.toml",
+        project_root / "Cargo.lock",
+        project_root / "build.rs",
+    ]
+    src_dir = project_root / "src"
+    if src_dir.is_dir():
+        paths.extend(src_dir.rglob("*.rs"))
+    return [path for path in paths if path.is_file()]
+
+
+def stale_binary_reason(project_root: Path, nitrocop_bin: Path) -> Optional[str]:
+    """Return why the release binary is stale, or None when it is fresh."""
+    if not nitrocop_bin.is_file():
+        return f"nitrocop binary not found at {nitrocop_bin}"
+
+    newest_input = max(
+        rust_build_inputs(project_root),
+        key=lambda path: path.stat().st_mtime_ns,
+        default=None,
+    )
+    if newest_input is None:
+        return None
+
+    binary_mtime = nitrocop_bin.stat().st_mtime_ns
+    input_mtime = newest_input.stat().st_mtime_ns
+    if binary_mtime >= input_mtime:
+        return None
+
+    try:
+        input_label = newest_input.relative_to(project_root)
+    except ValueError:
+        input_label = newest_input
+    return f"binary is older than {input_label}"
+
+
+def ensure_fresh_release_binary(project_root: Path, nitrocop_bin: Path):
+    """Build or rebuild the default release binary when missing or stale."""
+    reason = stale_binary_reason(project_root, nitrocop_bin)
+    if reason is None:
+        return
+
+    action = "Building" if not nitrocop_bin.exists() else "Detected stale binary"
+    if nitrocop_bin.exists():
+        print(f"{action} ({reason}); rebuilding with cargo build --release...", file=sys.stderr)
+    else:
+        print("Building nitrocop (release)...", file=sys.stderr)
+
+    subprocess.run(
+        ["cargo", "build", "--release"],
+        cwd=project_root,
+        check=True,
+    )
+
+    rebuilt_reason = stale_binary_reason(project_root, nitrocop_bin)
+    if rebuilt_reason is not None:
+        sys.exit(f"ERROR: rebuilt binary is still stale: {rebuilt_reason}")
 
 
 def parse_loc(loc_str: str) -> tuple[str, str, int]:
@@ -108,12 +170,7 @@ def main():
     config_path = project_root / "bench" / "corpus" / "baseline_rubocop.yml"
     nitrocop_bin = project_root / os.environ.get("CARGO_TARGET_DIR", "target") / "release" / "nitrocop"
 
-    if not nitrocop_bin.exists():
-        print("Building nitrocop (release)...", file=sys.stderr)
-        subprocess.run(
-            ["cargo", "build", "--release"],
-            cwd=project_root, check=True,
-        )
+    ensure_fresh_release_binary(project_root, nitrocop_bin)
 
     # Check corpus bundle is installed
     bundle_dir = project_root / "bench" / "corpus" / "vendor" / "bundle"
