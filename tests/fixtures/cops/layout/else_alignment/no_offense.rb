@@ -36,3 +36,8 @@ y = if condition
     else
       value_b
     end
+
+# Single-line if/then/else/end — no alignment check needed
+if val then puts "true" else puts "false" end
+x = if cond then 'a' else 'b' end
+result = defined?(if x then 'x' else '' end)

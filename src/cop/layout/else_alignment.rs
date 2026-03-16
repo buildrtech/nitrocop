@@ -4,6 +4,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Layout/ElseAlignment — checks that `else`/`elsif` aligns with the
+/// corresponding `if`/`unless` keyword.
+///
+/// **Investigation (2026-03):** 110 FPs on single-line if/then/else/end
+/// expressions (e.g., `if val then 'a' else 'b' end`).  RuboCop skips
+/// alignment checks when the `else` is on the same line as the opening
+/// keyword — alignment is inherently satisfied on a single line.  Fixed by
+/// comparing the line numbers: if `else`/`elsif` shares a line with the
+/// opening `if`/`unless`, skip the check.
 pub struct ElseAlignment;
 
 impl Cop for ElseAlignment {
@@ -41,7 +50,7 @@ impl Cop for ElseAlignment {
             return;
         }
 
-        let (_, if_col) = source.offset_to_line_col(if_kw_loc.start_offset());
+        let (if_line, if_col) = source.offset_to_line_col(if_kw_loc.start_offset());
 
         // Determine expected alignment column for else/elsif.
         // When `if` is the RHS of an assignment (e.g., `x = if cond`) and
@@ -64,6 +73,11 @@ impl Cop for ElseAlignment {
             if let Some(else_node) = subsequent.as_else_node() {
                 let else_kw_loc = else_node.else_keyword_loc();
                 let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
+                // Single-line if/else — alignment is inherently satisfied
+                if else_line == if_line {
+                    current = None;
+                    continue;
+                }
                 if else_col != expected_col {
                     diagnostics.push(self.diagnostic(
                         source,
@@ -80,6 +94,11 @@ impl Cop for ElseAlignment {
                 };
                 let (elsif_line, elsif_col) =
                     source.offset_to_line_col(elsif_kw_loc.start_offset());
+                // Single-line elsif — skip alignment check
+                if elsif_line == if_line {
+                    current = elsif_node.subsequent();
+                    continue;
+                }
                 if elsif_col != expected_col {
                     diagnostics.push(self.diagnostic(
                         source,
