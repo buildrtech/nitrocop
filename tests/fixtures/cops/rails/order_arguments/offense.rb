@@ -6,3 +6,5 @@ User.order('email ASC')
            ^^^^^^^^^^^ Rails/OrderArguments: Prefer `:email` instead.
 order('created_at desc')
       ^^^^^^^^^^^^^^^^^^^ Rails/OrderArguments: Prefer `created_at: :desc` instead.
+Post.includes(:comments).order("")
+                               ^^ Rails/OrderArguments: Prefer `` instead.

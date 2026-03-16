@@ -3,6 +3,10 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// FN fix: `.order("")` (empty string argument) was not flagged because the regex
+/// `(\w+)\s*(asc|desc)?` doesn't match empty strings, causing `all_convertible = false`.
+/// RuboCop flags this with "Prefer `` instead." (empty preference). Fixed by detecting
+/// empty/whitespace-only string args as a special case that produces an empty preferred string.
 pub struct OrderArguments;
 
 impl Cop for OrderArguments {
@@ -51,11 +55,17 @@ impl Cop for OrderArguments {
         let re = regex::Regex::new(r"(?i)^(\w+)\s*(asc|desc)?$").unwrap();
         let mut all_strings = true;
         let mut all_convertible = true;
+        let mut all_empty = true;
 
         for arg in &arg_list {
             if let Some(str_node) = arg.as_string_node() {
                 let value = str_node.unescaped();
                 let text = std::str::from_utf8(value).unwrap_or("");
+                // Empty or whitespace-only strings are flaggable (prefer no args)
+                if text.trim().is_empty() {
+                    continue;
+                }
+                all_empty = false;
                 // Check each comma-separated part
                 for part in text.split(',') {
                     let trimmed = part.trim();
@@ -81,30 +91,38 @@ impl Cop for OrderArguments {
         }
 
         // Build the preferred representation
-        let mut preferred_parts = Vec::new();
-        let mut use_hash = false;
+        let prefer = if all_empty {
+            // All arguments are empty/whitespace strings — prefer no args
+            String::new()
+        } else {
+            let mut preferred_parts = Vec::new();
+            let mut use_hash = false;
 
-        for arg in &arg_list {
-            if let Some(str_node) = arg.as_string_node() {
-                let value = str_node.unescaped();
-                let text = std::str::from_utf8(value).unwrap_or("");
-                for part in text.split(',') {
-                    let trimmed = part.trim();
-                    let caps = re.captures(trimmed).unwrap();
-                    let col = caps.get(1).unwrap().as_str().to_lowercase();
-                    let dir = caps.get(2).map(|m| m.as_str().to_lowercase());
-                    let direction = dir.as_deref().unwrap_or("asc");
-                    if direction == "asc" && !use_hash {
-                        preferred_parts.push(format!(":{col}"));
-                    } else {
-                        use_hash = true;
-                        preferred_parts.push(format!("{col}: :{direction}"));
+            for arg in &arg_list {
+                if let Some(str_node) = arg.as_string_node() {
+                    let value = str_node.unescaped();
+                    let text = std::str::from_utf8(value).unwrap_or("");
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    for part in text.split(',') {
+                        let trimmed = part.trim();
+                        let caps = re.captures(trimmed).unwrap();
+                        let col = caps.get(1).unwrap().as_str().to_lowercase();
+                        let dir = caps.get(2).map(|m| m.as_str().to_lowercase());
+                        let direction = dir.as_deref().unwrap_or("asc");
+                        if direction == "asc" && !use_hash {
+                            preferred_parts.push(format!(":{col}"));
+                        } else {
+                            use_hash = true;
+                            preferred_parts.push(format!("{col}: :{direction}"));
+                        }
                     }
                 }
             }
-        }
 
-        let prefer = preferred_parts.join(", ");
+            preferred_parts.join(", ")
+        };
 
         let first_arg_loc = arg_list[0].location();
         let (line, column) = source.offset_to_line_col(first_arg_loc.start_offset());
