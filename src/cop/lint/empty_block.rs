@@ -22,6 +22,17 @@ use crate::parse::source::SourceFile;
 /// of `message_loc()` for chained calls. All 28 mismatches (concentrated in
 /// gregnavis/active_record_doctor) were paired FP+FN from this single location
 /// bug.
+///
+/// ## Corpus investigation (2026-03-16, follow-up)
+///
+/// Fixed 1 remaining FP in gregnavis/active_record_doctor. The pattern:
+/// `create_table(...) do |t| # comment ... end.define_model do end` — the
+/// `define_model` block is empty, but comments exist in the earlier `create_table`
+/// block. RuboCop's `allow_comment?` checks the full block expression source range
+/// (which includes the receiver chain and its block), so comments inside the
+/// `create_table` block suppress the offense. Fix: expanded the AllowComments
+/// comment search range from `block_node.location()` (just `do...end`) to the
+/// full expression range (call_node start through block_node end).
 pub struct EmptyBlock;
 
 /// Check if a comment is a rubocop:disable directive for a specific cop.
@@ -140,9 +151,20 @@ impl Cop for EmptyBlock {
         // UNLESS the comment is a rubocop:disable directive for this specific cop.
         let allow_comments = config.get_bool("AllowComments", true);
         if allow_comments {
-            let loc = block_node.location();
-            let (start_line, _) = source.offset_to_line_col(loc.start_offset());
-            let (end_line, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
+            // RuboCop checks the full block expression range (including receiver)
+            // for comments. For chained calls like `create_table(...) do...end.define_model do end`,
+            // the outer BlockNode in RuboCop spans the entire expression. We replicate this by
+            // using the call_node/super_node start through block_node end.
+            let start_offset = if let Some(cn) = call_node.as_ref() {
+                cn.location().start_offset()
+            } else if let Some(ref sn) = super_node {
+                sn.location().start_offset()
+            } else {
+                block_node.location().start_offset()
+            };
+            let end_offset = block_node.location().end_offset();
+            let (start_line, _) = source.offset_to_line_col(start_offset);
+            let (end_line, _) = source.offset_to_line_col(end_offset.saturating_sub(1));
 
             for comment in parse_result.comments() {
                 let comment_offset = comment.location().start_offset();

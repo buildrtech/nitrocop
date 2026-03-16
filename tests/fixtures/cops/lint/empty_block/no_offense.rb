@@ -30,3 +30,11 @@ end
 ::Proc.new {}
 ::Proc.new do
 end
+
+# Chained empty block where comments exist in earlier block of the expression
+# RuboCop checks the full block expression range for comments (AllowComments)
+Context.create_table(:users) do |t|
+  # Create timestamps.
+  t.timestamps null: false
+end.define_model do
+end
