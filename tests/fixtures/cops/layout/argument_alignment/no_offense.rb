@@ -51,3 +51,17 @@ tag.public_send tag_element,
                 data: { controller: "pagination" },
                 **properties,
                 &block
+
+# Multi-arg call with keyword hash continuation — not expanded in with_first_argument.
+# The kwHash starts on the same line as the first arg, so its continuation lines
+# are not individually checked.
+gem "select2-rails", github: "org/select2-rails",
+                     branch: "v349"
+
+# Multiple kwargs on same line as first positional arg
+redirect_to root_path, notice: "Success",
+                       status: :moved_permanently
+
+# Multi-arg with trailing keyword hash starting on same line
+create :user, :admin, name: "Admin",
+                      role: "superuser"

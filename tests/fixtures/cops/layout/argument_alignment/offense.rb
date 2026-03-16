@@ -24,12 +24,11 @@ Klass[:a => :a, :b => :b,
   :d => :d]
   ^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
 
-# Misaligned &block argument
+# Misaligned &block argument (keyword hash kept as single item in with_first_argument)
 comm.sudo(command,
   elevated: config.privileged,
   ^^^^^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
   interactive: config.interactive,
-  ^^^^^^^^^^^^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
   &handler
   ^ Layout/ArgumentAlignment: Align the arguments of a method call if they span more than one line.
 )

@@ -21,11 +21,26 @@ use crate::parse::source::SourceFile;
 /// `arguments()`, so block args were invisible to alignment checking. Fix: append
 /// the block argument to the effective args list when present.
 ///
-/// **FN root cause — keyword hash elements in multi-arg calls:**
-/// When a `KeywordHashNode` appeared alongside other positional args, only the
-/// KeywordHashNode as a whole was checked, not its individual elements. RuboCop's
-/// `arguments_with_last_arg_pairs` expands the last arg's pairs. Fix: always expand
-/// the last arg's KeywordHashNode elements into the effective args list.
+/// ## Investigation findings (2026-03-16)
+///
+/// **FP root cause — incorrect keyword hash expansion in `with_first_argument` mode:**
+/// When multiple arguments exist and the last one is a `KeywordHashNode`, nitrocop
+/// was ALWAYS expanding the hash's elements into the effective_args list. But
+/// RuboCop's `arguments_or_first_arg_pairs` (used for `with_first_argument` style)
+/// only expands when the FIRST argument is a bare keyword hash (sole arg case).
+/// For multi-arg calls, it returns `node.arguments` as-is, keeping the
+/// KeywordHashNode as a single item. This caused ~19k false positives because
+/// continuation keyword pairs (e.g., `branch: "v349"` on line 2 of a `gem` call)
+/// were individually checked against the first positional arg's column.
+///
+/// Fix: only expand the last KeywordHashNode for `with_fixed_indentation` style
+/// (which uses `arguments_with_last_arg_pairs`). For `with_first_argument`, keep
+/// the kwHash as a single item so its internal pairs aren't individually checked.
+///
+/// **Previous FN note (2026-03-14) revised:** The earlier finding about expanding
+/// keyword hash elements in multi-arg calls was only correct for
+/// `with_fixed_indentation` style. For `with_first_argument` (default), expansion
+/// was causing massive FPs. The fix keeps expansion only for fixed indentation.
 pub struct ArgumentAlignment;
 
 impl Cop for ArgumentAlignment {
@@ -98,10 +113,18 @@ impl Cop for ArgumentAlignment {
                 }
             }
         } else {
-            // Expand the last arg if it's a KeywordHashNode
+            // Expand the last arg if it's a KeywordHashNode.
+            //
+            // RuboCop behavior differs by style:
+            // - with_first_argument uses `arguments_or_first_arg_pairs` which only
+            //   expands the FIRST arg when it's a sole keyword hash (handled above).
+            //   For multi-arg calls, it returns `node.arguments` as-is, keeping the
+            //   KeywordHashNode as a single item.
+            // - with_fixed_indentation uses `arguments_with_last_arg_pairs` which
+            //   always expands the last arg's keyword hash elements.
             let last_idx = args_vec.len() - 1;
             for (i, arg) in args_vec.into_iter().enumerate() {
-                if i == last_idx {
+                if i == last_idx && style == "with_fixed_indentation" {
                     if let Some(kw_hash) = arg.as_keyword_hash_node() {
                         for elem in kw_hash.elements().iter() {
                             // Only include AssocNode (pair), skip AssocSplatNode
