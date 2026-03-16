@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+
+use ruby_prism::Visit;
+
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
@@ -22,6 +26,14 @@ use crate::parse::source::SourceFile;
 /// - `end[0]`, `end.method` — chaining after `end`. RuboCop never checks
 ///   "space after" for `end`, only "space before". Fixed by skipping
 ///   space-after check for `end` keyword.
+///
+/// **Round 3 (FP=16):** FPs from camping's minified Ruby, e.g.
+/// `def app_name;"Camping"end`. RuboCop is AST-based and only checks
+/// "space before `end`" for specific node types: begin..end, do..end blocks,
+/// if/unless/case, and while/until/for with `do`. It does NOT check `end`
+/// for def/class/module/singleton-class nodes. Fixed by walking the AST
+/// with `EndSkipCollector` to collect `end` positions from those node types
+/// and skipping them during text-based scanning.
 pub struct SpaceAroundKeyword;
 
 /// Keywords that accept `(` immediately after them (no space required).
@@ -117,12 +129,20 @@ impl Cop for SpaceAroundKeyword {
     fn check_source(
         &self,
         source: &SourceFile,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Collect `end` keyword positions that RuboCop does not check
+        // (def, class, module, singleton class).
+        let mut collector = EndSkipCollector {
+            skip_positions: HashSet::new(),
+        };
+        collector.visit(&parse_result.node());
+        let skip_end_positions = collector.skip_positions;
+
         let bytes = source.as_bytes();
         let len = bytes.len();
         let mut i = 0;
@@ -203,6 +223,11 @@ impl Cop for SpaceAroundKeyword {
                 let kw_str = std::str::from_utf8(kw).unwrap_or("");
 
                 // --- Check "space before missing" ---
+                // Skip `end` keywords from def/class/module — RuboCop doesn't check those.
+                if kw == b"end" && skip_end_positions.contains(&i) {
+                    // Still need to skip past the keyword to avoid re-matching
+                    break;
+                }
                 if i > 0 && !accepted_before(bytes[i - 1]) {
                     let (line, column) = source.offset_to_line_col(i);
                     let mut diag = self.diagnostic(
@@ -333,6 +358,42 @@ fn is_accept_left_paren(kw: &[u8]) -> bool {
 /// Returns true if this keyword accepts `[` immediately after it.
 fn is_accept_left_bracket(kw: &[u8]) -> bool {
     ACCEPT_LEFT_SQUARE_BRACKET.contains(&kw)
+}
+
+/// Collects byte offsets of `end` keywords that RuboCop does NOT check for
+/// "space before". RuboCop only checks `end` for: begin..end, do..end blocks,
+/// if/unless/case (with 'then' begin_keyword), while/until/for with `do`.
+/// It does NOT check `end` for: def, class, module, singleton class.
+struct EndSkipCollector {
+    skip_positions: HashSet<usize>,
+}
+
+impl<'pr> Visit<'pr> for EndSkipCollector {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        if let Some(end_loc) = node.end_keyword_loc() {
+            self.skip_positions.insert(end_loc.start_offset());
+        }
+        // Continue visiting children (nested defs, etc.)
+        ruby_prism::visit_def_node(self, node);
+    }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        self.skip_positions
+            .insert(node.end_keyword_loc().start_offset());
+        ruby_prism::visit_class_node(self, node);
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        self.skip_positions
+            .insert(node.end_keyword_loc().start_offset());
+        ruby_prism::visit_module_node(self, node);
+    }
+
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        self.skip_positions
+            .insert(node.end_keyword_loc().start_offset());
+        ruby_prism::visit_singleton_class_node(self, node);
+    }
 }
 
 #[cfg(test)]

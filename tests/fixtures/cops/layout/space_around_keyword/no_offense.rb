@@ -148,3 +148,12 @@ yield[1]
 { do: 1, then: 2, else: 3 }
 { ensure: 1, elsif: 2, unless: 3 }
 { until: 1, while: 2, when: 3 }
+
+# RuboCop does not check "space before end" for def/class/module — only for
+# begin..end, do..end blocks, if/unless/case, and while/until/for with do.
+# Minified code (e.g. camping) packs end right after string/paren/brace.
+def app_name;"Camping"end
+def mab(&b)extend Mab;mab(&b)end
+def r404(p);p.to_s end
+class Foo;end
+module Bar;end
