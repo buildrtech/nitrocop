@@ -7,10 +7,17 @@ use ruby_prism::Visit;
 ///
 /// ## Investigation findings
 ///
-/// FP root causes (16 FPs):
+/// FP root causes (16 → 8 FPs):
 /// - `has_method_definition_in_subtree` only recursed into `if`/`unless` nodes, missing
 ///   `define_method` calls inside `.each` blocks, `begin..end` blocks, and other containers.
 ///   RuboCop's `check_child_nodes` recurses into ALL non-scope, non-defs child nodes.
+/// - `recurse_children` did not handle `LambdaNode` (`-> { def foo; end }`) or recurse
+///   into `CallNode` receivers (e.g., `-> { def foo; end }.call`), causing FPs when
+///   `private` preceded a lambda/proc containing a `def`.
+///
+/// FN root causes (73 FNs):
+/// - `private_class_method` without arguments was not detected at all. RuboCop always
+///   flags bare `private_class_method` as useless (it doesn't affect subsequent `def self.`).
 ///
 /// Fixes applied:
 /// - Rewrote `has_method_definition_in_subtree` to recursively traverse all relevant
@@ -19,6 +26,9 @@ use ruby_prism::Visit;
 ///   Class/Module/Struct.new blocks).
 /// - Added `is_new_scope` helper matching RuboCop's `start_of_new_scope?`.
 /// - Added `visit_singleton_class_node` to handle `class << self` scopes.
+/// - Added `LambdaNode` handling in `recurse_children`.
+/// - Added `CallNode` receiver recursion in `recurse_children`.
+/// - Added `is_bare_private_class_method` detection in `check_scope`.
 pub struct UselessAccessModifier;
 
 impl Cop for UselessAccessModifier {
@@ -82,6 +92,13 @@ fn get_access_modifier(call: &ruby_prism::CallNode<'_>) -> Option<AccessKind> {
         b"protected" => Some(AccessKind::Protected),
         _ => None,
     }
+}
+
+/// Check if a call node is `private_class_method` without arguments (standalone statement).
+fn is_bare_private_class_method(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.receiver().is_none()
+        && call.arguments().is_none()
+        && call.name().as_slice() == b"private_class_method"
 }
 
 fn is_method_definition(node: &ruby_prism::Node<'_>) -> bool {
@@ -215,8 +232,14 @@ fn recurse_children(node: &ruby_prism::Node<'_>, method_creating_methods: &[Stri
         }
         return false;
     }
-    // CallNode — may have arguments and a block
+    // CallNode — may have receiver, arguments, and a block
     if let Some(call) = node.as_call_node() {
+        // Check receiver (e.g., `-> { def foo; end }.call`)
+        if let Some(recv) = call.receiver() {
+            if has_method_definition_in_subtree(&recv, method_creating_methods) {
+                return true;
+            }
+        }
         // Check arguments (e.g., `helper_method def foo; end`)
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
@@ -305,6 +328,15 @@ fn recurse_children(node: &ruby_prism::Node<'_>, method_creating_methods: &[Stri
         }
         return false;
     }
+    // LambdaNode — `-> { def foo; end }` or `proc { def foo; end }`
+    if let Some(lambda) = node.as_lambda_node() {
+        if let Some(body) = lambda.body() {
+            if has_method_definition_in_subtree(&body, method_creating_methods) {
+                return true;
+            }
+        }
+        return false;
+    }
     false
 }
 
@@ -322,6 +354,19 @@ fn check_scope(
 
     for stmt in &body {
         if let Some(call) = stmt.as_call_node() {
+            // Standalone private_class_method (no args) is always useless
+            if is_bare_private_class_method(&call) {
+                let loc = call.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                diagnostics.push(cop.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Useless `private_class_method` access modifier.".to_string(),
+                ));
+                continue;
+            }
+
             if let Some(modifier_kind) = get_access_modifier(&call) {
                 if modifier_kind == current_vis {
                     // Repeated modifier - always useless

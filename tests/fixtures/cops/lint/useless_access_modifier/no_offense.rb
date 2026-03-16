@@ -55,3 +55,28 @@ class WithBeginBlock
     end
   end
 end
+
+# private before lambda containing a def — not useless
+class WithLambdaDef
+  private
+
+  -> {
+    def some_method; end
+  }.call
+end
+
+# private before proc containing a def — not useless
+class WithProcDef
+  private
+
+  proc {
+    def another_method; end
+  }.call
+end
+
+# private_class_method with arguments is not useless
+class WithPrivateClassMethodArgs
+  private_class_method def self.secret
+    42
+  end
+end
