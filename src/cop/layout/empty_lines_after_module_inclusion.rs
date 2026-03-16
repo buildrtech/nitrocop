@@ -56,7 +56,10 @@ fn trim_leading(line: &[u8]) -> &[u8] {
 }
 
 fn is_enable_directive_comment(trimmed: &[u8]) -> bool {
-    trimmed.starts_with(b"# rubocop:enable") || trimmed.starts_with(b"#rubocop:enable")
+    trimmed.starts_with(b"# rubocop:enable")
+        || trimmed.starts_with(b"#rubocop:enable")
+        || trimmed.starts_with(b"# rubocop: enable")
+        || trimmed.starts_with(b"#rubocop: enable")
 }
 
 fn starts_with_keyword(trimmed: &[u8], keyword: &[u8]) -> bool {
@@ -65,8 +68,35 @@ fn starts_with_keyword(trimmed: &[u8], keyword: &[u8]) -> bool {
             || !matches!(trimmed[keyword.len()], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
 }
 
+/// Check if a line contains a call to include/extend/prepend, even with a receiver.
+/// This matches RuboCop's `allowed_method?` which checks `node.method_name` regardless
+/// of receiver (e.g., `singleton_class.extend(ClassMethods)` has method_name `:extend`).
+fn line_has_inclusion_method_call(trimmed: &[u8]) -> bool {
+    for &method in MODULE_INCLUSION_METHODS {
+        // Check for `.method(` or `.method ` patterns (receiver-qualified calls)
+        let dot_method = {
+            let mut v = Vec::with_capacity(1 + method.len());
+            v.push(b'.');
+            v.extend_from_slice(method);
+            v
+        };
+        if let Some(pos) = trimmed
+            .windows(dot_method.len())
+            .position(|w| w == dot_method.as_slice())
+        {
+            let after_pos = pos + dot_method.len();
+            let after = trimmed.get(after_pos);
+            if after.is_none() || matches!(after, Some(b' ') | Some(b'(')) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn is_allowed_following_line(trimmed: &[u8]) -> bool {
     is_module_inclusion_line(trimmed)
+        || line_has_inclusion_method_call(trimmed)
         || starts_with_keyword(trimmed, b"end")
         || starts_with_keyword(trimmed, b"else")
         || starts_with_keyword(trimmed, b"elsif")
@@ -261,9 +291,14 @@ impl<'pr> Visit<'pr> for InclusionVisitor<'_> {
             self.in_block_or_send = was;
         }
 
-        // Visit receiver normally
+        // Visit receiver in "send" context — include/extend/prepend used as a
+        // receiver (e.g., `include(x).and(y)`) should not be flagged. This matches
+        // RuboCop's `node.parent&.type?(:send)` check.
         if let Some(recv) = node.receiver() {
+            let was = self.in_block_or_send;
+            self.in_block_or_send = true;
             self.visit(&recv);
+            self.in_block_or_send = was;
         }
 
         // Visit block argument if any (this IS a block context)

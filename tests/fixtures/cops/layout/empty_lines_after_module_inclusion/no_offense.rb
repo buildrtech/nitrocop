@@ -124,7 +124,40 @@ end
 # extend followed by whitespace-only line
 module WithTabs
   extend ActiveSupport::Concern
-	
+
   def setup
   end
+end
+
+# extend inside block followed by receiver.extend (not a module inclusion line)
+def make_class
+  Class.new do
+    extend ClassMethods
+    singleton_class.extend(ClassMethods)
+    singleton_class.send(:define_method, :run) { true }
+  end
+end
+
+# prepend followed by singleton_class.prepend
+class Util
+  prepend CoreExt::PrivateHelpers
+  singleton_class.prepend CoreExt::PublicHelpers
+
+  def compute
+  end
+end
+
+# include followed by rubocop enable directive (with space) then blank line
+# rubocop: disable Style/MixinUsage
+include Protocol
+include Protocol::Header
+include Protocol::Error
+# rubocop: enable Style/MixinUsage
+
+records = build_records
+
+# include used as receiver in method chain (RSpec matcher)
+def expected_items
+  include(first_item.uri, second_item.uri)
+    .and(not_include(excluded_item.uri))
 end
