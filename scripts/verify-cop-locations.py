@@ -105,14 +105,20 @@ def parse_loc(loc_str: str) -> tuple[str, str, int]:
     return repo_id, filepath, line
 
 
-def run_nitrocop_on_file(
+def run_nitrocop_on_repo(
     nitrocop_bin: Path, corpus_dir: Path, config_path: Path,
-    repo_id: str, filepath: str, cop_name: str,
-) -> set[int]:
-    """Run nitrocop on a single file, return set of offense line numbers for the cop."""
-    full_path = corpus_dir / repo_id / filepath
-    if not full_path.exists():
-        return set()
+    repo_id: str, filepaths: list[str], cop_name: str,
+) -> dict[str, set[int]]:
+    """Run nitrocop once on all files in a repo, return {filepath: set of offense lines}."""
+    repo_dir = corpus_dir / repo_id
+    existing = []
+    for fp in filepaths:
+        if (repo_dir / fp).exists():
+            existing.append(fp)
+
+    result_map: dict[str, set[int]] = {fp: set() for fp in filepaths}
+    if not existing:
+        return result_map
 
     # Build env that points bundle resolution at the corpus bundle
     env = os.environ.copy()
@@ -127,34 +133,34 @@ def run_nitrocop_on_file(
         "--cache", "false",
         "--config", str(config_path),
         "--preview",
-        str(full_path),
-    ]
+    ] + [str(repo_dir / fp) for fp in existing]
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30, env=env,
+            cmd, capture_output=True, text=True, timeout=120, env=env,
         )
     except subprocess.TimeoutExpired:
-        print(f"    TIMEOUT: {filepath}", file=sys.stderr)
-        return set()
+        print(f"    TIMEOUT: {repo_id} ({len(existing)} files)", file=sys.stderr)
+        return result_map
 
-    if result.returncode not in (0, 1):  # 1 = offenses found
-        # Try to parse anyway, some errors still produce valid JSON
-        pass
-
-    lines = set()
     try:
         data = json.loads(result.stdout)
         for o in data.get("offenses", []):
-            if o.get("cop_name") == cop_name:
-                # nitrocop uses flat "line" key, not RuboCop's "location.start_line"
-                line_num = o.get("line") or o.get("location", {}).get("start_line")
-                if line_num is not None:
-                    lines.add(line_num)
+            if o.get("cop_name") != cop_name:
+                continue
+            line_num = o.get("line") or o.get("location", {}).get("start_line")
+            offense_path = o.get("path", "")
+            if line_num is None:
+                continue
+            # Match offense path back to the relative filepath
+            for fp in existing:
+                if offense_path.endswith(fp) or offense_path == str(repo_dir / fp):
+                    result_map[fp].add(line_num)
+                    break
     except (json.JSONDecodeError, KeyError):
         pass
 
-    return lines
+    return result_map
 
 
 def main():
@@ -230,17 +236,37 @@ def main():
         print(f"{cop_name}  (CI: FP={cop_data['fp']}, FN={cop_data['fn']})")
         print(f"{'='*70}")
 
-        # Cache nitrocop results per (repo_id, filepath)
-        nitrocop_cache: dict[tuple[str, str], set[int]] = {}
+        # Collect all (repo_id, filepath) pairs we need to check
+        all_examples = []
+        if not args.fn_only:
+            all_examples.extend(fp_examples)
+        if not args.fp_only:
+            all_examples.extend(fn_examples)
 
-        def get_nitrocop_lines(repo_id: str, filepath: str) -> set[int]:
-            key = (repo_id, filepath)
-            if key not in nitrocop_cache:
-                nitrocop_cache[key] = run_nitrocop_on_file(
-                    nitrocop_bin, corpus_dir, config_path,
-                    repo_id, filepath, cop_name,
-                )
-            return nitrocop_cache[key]
+        # Group files by repo
+        repo_files: dict[str, set[str]] = {}
+        for ex in all_examples:
+            loc = ex["loc"] if isinstance(ex, dict) else ex
+            try:
+                repo_id, filepath, _line = parse_loc(loc)
+                repo_files.setdefault(repo_id, set()).add(filepath)
+            except (ValueError, IndexError):
+                pass
+
+        # Batch run nitrocop per repo
+        nitrocop_cache: dict[tuple[str, str], set[int]] = {}
+        total_repos = len(repo_files)
+        for i, (repo_id, files) in enumerate(sorted(repo_files.items()), 1):
+            print(f"\r  Scanning repo {i}/{total_repos}: {repo_id[:50]}...  ",
+                  end="", file=sys.stderr, flush=True)
+            result_map = run_nitrocop_on_repo(
+                nitrocop_bin, corpus_dir, config_path,
+                repo_id, sorted(files), cop_name,
+            )
+            for fp, lines in result_map.items():
+                nitrocop_cache[(repo_id, fp)] = lines
+        if total_repos:
+            print(file=sys.stderr)  # clear progress line
 
         # Check FPs
         if not args.fn_only and fp_examples:
@@ -256,7 +282,7 @@ def main():
                     print(f"  ? SKIP (can't parse): {loc}")
                     continue
 
-                nitro_lines = get_nitrocop_lines(repo_id, filepath)
+                nitro_lines = nitrocop_cache.get((repo_id, filepath), set())
                 if line in nitro_lines:
                     print(f"  REMAIN  {loc}")
                     if msg:
@@ -284,7 +310,7 @@ def main():
                     print(f"  ? SKIP (can't parse): {loc}")
                     continue
 
-                nitro_lines = get_nitrocop_lines(repo_id, filepath)
+                nitro_lines = nitrocop_cache.get((repo_id, filepath), set())
                 if line in nitro_lines:
                     print(f"  FIXED   {loc}")
                     fn_fixed += 1
@@ -312,5 +338,19 @@ def main():
     sys.exit(0 if total_remain == 0 else 1)
 
 
+def _run_tests():
+    """Self-tests for pure functions. Run with: python3 scripts/verify-cop-locations.py --test"""
+    # parse_loc
+    assert parse_loc("repo__id__abc123: path/to/file.rb:42") == ("repo__id__abc123", "path/to/file.rb", 42)
+    assert parse_loc("r: a.rb:1") == ("r", "a.rb", 1)
+    # Path with colon (Windows-style or special chars)
+    assert parse_loc("repo: dir/sub:file.rb:99") == ("repo", "dir/sub:file.rb", 99)
+
+    print("All tests passed.")
+
+
 if __name__ == "__main__":
-    main()
+    if "--test" in sys.argv:
+        _run_tests()
+    else:
+        main()
