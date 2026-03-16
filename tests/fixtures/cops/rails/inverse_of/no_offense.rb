@@ -44,3 +44,11 @@ end
 class Record < ApplicationRecord
   has_many :items, foreign_key: nil
 end
+
+# with_options providing through: should suppress offense
+class Poll < ApplicationRecord
+  with_options class_name: 'Account', source: :account, through: :votes do
+    has_many :voters, -> { group('accounts.id') }
+    has_many :local_voters, -> { group('accounts.id').merge(Account.local) }
+  end
+end

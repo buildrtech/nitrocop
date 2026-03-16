@@ -1,4 +1,4 @@
-use crate::cop::util::{is_dsl_call, keyword_arg_value};
+use crate::cop::util::keyword_arg_value;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::codemap::CodeMap;
@@ -47,6 +47,20 @@ const NIL_MSG: &str =
 /// 6. **`foreign_key: nil` treated as requiring inverse_of (FP)** -- RuboCop's
 ///    `!nil` pattern means `foreign_key: nil` does not trigger the requirement.
 ///    Fixed by checking the value node is not nil.
+///
+/// ## Round 3 fixes (2 FP, 1 FN):
+///
+/// 7. **`with_options` providing `through:` or `polymorphic:` not tracked (FP)** --
+///    `WithOptionsContext` only tracked `inverse_of`, `foreign_key`, and `conditions`.
+///    When `through:` was in the enclosing `with_options` block (e.g., mastodon's
+///    `has_many :voters` inside `with_options through: :votes`), the cop missed it
+///    and flagged the association. Fixed by adding `has_through` and `has_polymorphic`
+///    to `WithOptionsContext` and merging them in `check_association`.
+///
+/// 8. **Association calls with explicit receiver not matched (FN)** -- the visitor
+///    required `node.receiver().is_none()`, excluding `base.has_many` calls in
+///    concern `self.included(base)` patterns. RuboCop's `on_send` + NodePattern
+///    matches any receiver. Fixed by matching on method name alone.
 pub struct InverseOf;
 
 impl Cop for InverseOf {
@@ -88,6 +102,8 @@ struct WithOptionsContext {
     has_inverse_of: bool,
     has_foreign_key: bool,
     has_conditions: bool,
+    has_through: bool,
+    has_polymorphic: bool,
 }
 
 struct InverseOfVisitor<'a> {
@@ -146,6 +162,8 @@ impl InverseOfVisitor<'_> {
             has_inverse_of: Self::has_keyword_arg_not_nil(call, b"inverse_of"),
             has_foreign_key: Self::has_keyword_arg_not_nil(call, b"foreign_key"),
             has_conditions: Self::has_keyword_arg_not_nil(call, b"conditions"),
+            has_through: Self::has_keyword_arg_not_nil(call, b"through"),
+            has_polymorphic: Self::has_keyword_arg_not_nil(call, b"polymorphic"),
         }
     }
 
@@ -160,8 +178,13 @@ impl InverseOfVisitor<'_> {
         });
 
         // Gather options from the call itself AND from enclosing with_options blocks
-        let has_through = Self::has_keyword_arg_not_nil(call, b"through");
-        let has_polymorphic = Self::has_keyword_arg_not_nil(call, b"polymorphic");
+        let has_through = Self::has_keyword_arg_not_nil(call, b"through")
+            || self.with_options_stack.iter().any(|ctx| ctx.has_through);
+        let has_polymorphic = Self::has_keyword_arg_not_nil(call, b"polymorphic")
+            || self
+                .with_options_stack
+                .iter()
+                .any(|ctx| ctx.has_polymorphic);
 
         // Skip associations with :through or :polymorphic
         if has_through || has_polymorphic {
@@ -234,11 +257,13 @@ impl<'pr> Visit<'pr> for InverseOfVisitor<'_> {
             return;
         }
 
-        // Check if this is an association call
-        let is_assoc = node.receiver().is_none()
-            && (is_dsl_call(node, b"has_many")
-                || is_dsl_call(node, b"has_one")
-                || is_dsl_call(node, b"belongs_to"));
+        // Check if this is an association call.
+        // RuboCop matches any receiver (including none), e.g. `base.has_many` in
+        // `self.included(base)` concern modules.
+        let method = node.name();
+        let is_assoc = method.as_slice() == b"has_many"
+            || method.as_slice() == b"has_one"
+            || method.as_slice() == b"belongs_to";
 
         if is_assoc {
             self.check_association(node);

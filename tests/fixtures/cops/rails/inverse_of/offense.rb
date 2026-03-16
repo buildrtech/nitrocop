@@ -41,3 +41,11 @@ class Account < ApplicationRecord
   has_many :entries, -> { order(:date) }, inverse_of: nil
   ^^^^^^^^ Rails/InverseOf: You specified `inverse_of: nil`, you probably meant to use `inverse_of: false`.
 end
+
+# Association calls with explicit receiver (e.g., base.has_many in concerns)
+module Reactable
+  def self.included(base)
+    base.has_many :reactions, -> { joins(:user).where("users.deactivated_at": nil) }, dependent: :destroy, as: :reactable
+         ^^^^^^^^ Rails/InverseOf: Specify an `:inverse_of` option.
+  end
+end
