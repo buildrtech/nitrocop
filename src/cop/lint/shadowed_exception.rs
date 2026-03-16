@@ -36,6 +36,7 @@ use crate::parse::source::SourceFile;
 /// - Unknown exception classes (e.g., `ActiveRecord::RecordInvalid` appearing in
 ///   both an earlier and later rescue clause) were flagged via the same
 ///   `equivalent_exception_classes` check in `groups_sorted`.
+///
 /// Fix: removed `equivalent_exception_classes` from `groups_sorted` so cross-clause
 /// ordering only checks `is_ancestor_of` (true ancestor/descendant relationships).
 /// The `equivalent_exception_classes` check remains in `contains_multiple_levels`
