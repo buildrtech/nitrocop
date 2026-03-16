@@ -6,3 +6,8 @@ end
 
 class PostsController < ApplicationController
 end
+
+ApplicationController = Class.new(ActionController::Base)
+
+class SomeModel < ActiveRecord::Base
+end
