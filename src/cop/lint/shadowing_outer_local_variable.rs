@@ -97,10 +97,15 @@ impl Cop for ShadowingOuterLocalVariable {
 #[derive(Clone, Debug)]
 struct VarInfo {
     /// If the variable was declared inside a `when`/`if`/`else` branch,
-    /// this is the (case_node_offset, branch_offset) pair. Used to skip
-    /// shadowing when block and outer var are in different branches of the
-    /// same conditional.
+    /// this is the (cond_node_offset, branch_offset) pair for the NEAREST
+    /// conditional. Used to skip shadowing when block and outer var are in
+    /// different branches of the same conditional.
     conditional_branch: Option<(usize, usize)>,
+    /// The offset of the nearest conditional's subsequent/else clause.
+    /// Used to check adjacent elsif suppression: if a block's nearest
+    /// conditional starts at this offset, the block is in the immediate
+    /// else/elsif of the variable's conditional → suppress.
+    cond_subsequent_offset: Option<usize>,
     /// If the variable was assigned inside a `when` condition (not body),
     /// this is the case node offset. Used to suppress shadowing when a
     /// block in the same `when` body reuses the variable name — matching
@@ -115,8 +120,10 @@ struct ShadowVisitor<'a, 'src> {
     diagnostics: Vec<Diagnostic>,
     /// Stack of maps of local variable names -> declaration info.
     scopes: Vec<HashMap<String, VarInfo>>,
-    /// Stack of (case_node_offset, branch_offset) for current when/if/else branch.
-    conditional_branch_stack: Vec<(usize, usize)>,
+    /// Stack of (cond_node_offset, branch_offset, subsequent_offset) for current
+    /// when/if/else branch. The subsequent_offset is the start of the conditional's
+    /// else/elsif clause (if any), used for adjacent-branch suppression.
+    conditional_branch_stack: Vec<(usize, usize, Option<usize>)>,
     /// When visiting a `when` condition, the case node offset.
     /// Variables assigned while this is Some are marked as when-condition vars.
     when_condition_case_offset: Option<usize>,
@@ -137,8 +144,10 @@ impl ShadowVisitor<'_, '_> {
 
     fn add_local(&mut self, name: &str) {
         if let Some(scope) = self.scopes.last_mut() {
+            let last = self.conditional_branch_stack.last();
             let info = VarInfo {
-                conditional_branch: self.conditional_branch_stack.last().copied(),
+                conditional_branch: last.map(|&(c, b, _)| (c, b)),
+                cond_subsequent_offset: last.and_then(|&(_, _, s)| s),
                 when_condition_of_case: self.when_condition_case_offset,
             };
             scope.insert(name.to_string(), info);
@@ -146,35 +155,62 @@ impl ShadowVisitor<'_, '_> {
     }
 
     fn current_conditional_branch(&self) -> Option<(usize, usize)> {
-        self.conditional_branch_stack.last().copied()
+        self.conditional_branch_stack
+            .last()
+            .map(|&(c, b, _)| (c, b))
     }
 
-    /// Visit an if/elsif/else chain using a consistent top-level offset.
-    /// This ensures all branches of an if/elsif/else chain share the same
-    /// conditional identity for the `is_different_conditional_branch` check.
-    fn visit_if_node_with_offset(&mut self, node: &ruby_prism::IfNode<'_>, if_offset: usize) {
-        // Visit predicate normally
-        self.visit(&node.predicate());
+    /// Visit an if/elsif/else node. Each IfNode uses its own offset as the
+    /// conditional identity. The then-body and else/subsequent share this offset
+    /// but with different branch_offsets. This matches RuboCop's Parser-gem
+    /// behavior where each elsif is a nested if node.
+    ///
+    /// Adjacent elsif suppression is handled via `cond_subsequent_offset`:
+    /// variables in the then-body record the subsequent's offset so that
+    /// blocks in the immediate next elsif can be recognized as "adjacent."
+    fn visit_if_node_impl(&mut self, node: &ruby_prism::IfNode<'_>) {
+        let if_offset = node.location().start_offset();
+        let subsequent_offset = node.subsequent().map(|s| s.location().start_offset());
 
-        // Visit then-body with branch tracking
+        // Compute then-body branch offset for predicate context.
+        // Variables assigned in `if x = expr` are treated as belonging to
+        // the then-body branch. This ensures:
+        //   - block in same if-body → same branch → offense reported
+        //   - block in else/elsif  → different branch → suppressed
+        let then_branch_offset = node
+            .statements()
+            .map(|s| s.location().start_offset())
+            .unwrap_or(if_offset);
+
+        // Visit predicate with the then-body's conditional context.
+        self.conditional_branch_stack
+            .push((if_offset, then_branch_offset, subsequent_offset));
+        self.visit(&node.predicate());
+        self.conditional_branch_stack.pop();
+
+        // Visit then-body with the same branch tracking
         if let Some(stmts) = node.statements() {
-            let branch_offset = stmts.location().start_offset();
             self.conditional_branch_stack
-                .push((if_offset, branch_offset));
+                .push((if_offset, then_branch_offset, subsequent_offset));
             self.visit_statements_node(&stmts);
             self.conditional_branch_stack.pop();
         }
 
-        // Visit else/elsif with branch tracking, using the SAME if_offset
+        // Visit else/elsif
         if let Some(subsequent) = node.subsequent() {
             if let Some(elsif_node) = subsequent.as_if_node() {
-                // elsif — recurse with same top-level if_offset
-                self.visit_if_node_with_offset(&elsif_node, if_offset);
+                // elsif — push this if's else context, then visit the elsif
+                // which will push its own context on top
+                let branch_offset = subsequent.location().start_offset();
+                self.conditional_branch_stack
+                    .push((if_offset, branch_offset, None));
+                self.visit_if_node_impl(&elsif_node);
+                self.conditional_branch_stack.pop();
             } else {
                 // else clause
                 let branch_offset = subsequent.location().start_offset();
                 self.conditional_branch_stack
-                    .push((if_offset, branch_offset));
+                    .push((if_offset, branch_offset, None));
                 self.visit(&subsequent);
                 self.conditional_branch_stack.pop();
             }
@@ -486,8 +522,8 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
 
         // Push a new scope for the block body that includes the block parameters.
         // This ensures inner blocks can see outer block params for shadowing detection.
-        // Do NOT merge back into the outer scope — RuboCop's VariableForce treats
-        // block-internal variables as local to the block, not visible to sibling blocks.
+        // Do NOT merge back into the outer scope — block-internal variables are
+        // local to the block, not visible to sibling blocks.
         let mut body_scope = HashMap::new();
         if let Some(params_node) = node.parameters() {
             if let Some(block_params) = params_node.as_block_parameters_node() {
@@ -519,14 +555,14 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
             }
         }
 
+        // Lambda creates an isolated scope — params do NOT persist to the
+        // enclosing scope (unlike blocks). Lambda parameters are method-like.
         let mut body_scope = HashMap::new();
         if let Some(params_node) = node.parameters() {
             if let Some(block_params) = params_node.as_block_parameters_node() {
                 body_scope = build_block_body_scope(&block_params);
             }
         }
-
-        // Lambda creates an isolated scope — do NOT merge back.
         self.scopes.push(body_scope);
         ruby_prism::visit_lambda_node(self, node);
         self.scopes.pop();
@@ -542,6 +578,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
     // Track unless/else branches for the same_conditions_node_different_branch check.
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         let unless_offset = node.location().start_offset();
+        let else_offset = node.else_clause().map(|e| e.location().start_offset());
 
         // Visit predicate normally
         self.visit(&node.predicate());
@@ -550,7 +587,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         if let Some(stmts) = node.statements() {
             let branch_offset = stmts.location().start_offset();
             self.conditional_branch_stack
-                .push((unless_offset, branch_offset));
+                .push((unless_offset, branch_offset, else_offset));
             self.visit_statements_node(&stmts);
             self.conditional_branch_stack.pop();
         }
@@ -559,7 +596,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         if let Some(else_clause) = node.else_clause() {
             let branch_offset = else_clause.location().start_offset();
             self.conditional_branch_stack
-                .push((unless_offset, branch_offset));
+                .push((unless_offset, branch_offset, None));
             self.visit_else_node(&else_clause);
             self.conditional_branch_stack.pop();
         }
@@ -571,27 +608,48 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+        // While loops are conditionals in RuboCop's model. Variables assigned
+        // inside a while condition (e.g., `while part = io.read(...)`) have the
+        // while as their nearest conditional ancestor. This prevents false
+        // different-branch suppression with outer if/else.
+        let while_offset = node.location().start_offset();
+        let pred_offset = node.predicate().location().start_offset();
+        self.conditional_branch_stack
+            .push((while_offset, pred_offset, None));
         ruby_prism::visit_while_node(self, node);
+        self.conditional_branch_stack.pop();
     }
 
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+        let until_offset = node.location().start_offset();
+        let pred_offset = node.predicate().location().start_offset();
+        self.conditional_branch_stack
+            .push((until_offset, pred_offset, None));
         ruby_prism::visit_until_node(self, node);
+        self.conditional_branch_stack.pop();
     }
 
     // Track case/when branches for the same_conditions_node_different_branch check.
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
         let case_offset = node.location().start_offset();
 
-        // Visit the predicate (the expression after `case`)
+        // Visit the predicate (expression after `case`) with its own branch context.
+        // Variables assigned in `case val = expr` get a unique branch_offset
+        // (the predicate's own offset) that differs from all when/else branches,
+        // so blocks in when/else bodies are suppressed as "different branch."
         if let Some(pred) = node.predicate() {
+            let pred_offset = pred.location().start_offset();
+            self.conditional_branch_stack
+                .push((case_offset, pred_offset, None));
             self.visit(&pred);
+            self.conditional_branch_stack.pop();
         }
 
         // Visit each when clause with branch tracking
         for condition in node.conditions().iter() {
             let branch_offset = condition.location().start_offset();
             self.conditional_branch_stack
-                .push((case_offset, branch_offset));
+                .push((case_offset, branch_offset, None));
             // Visit the when node — our visit_when_node handles
             // condition vs body tracking for when-condition assignments.
             if let Some(when_node) = condition.as_when_node() {
@@ -606,7 +664,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         if let Some(else_clause) = node.else_clause() {
             let branch_offset = else_clause.location().start_offset();
             self.conditional_branch_stack
-                .push((case_offset, branch_offset));
+                .push((case_offset, branch_offset, None));
             self.visit_else_node(&else_clause);
             self.conditional_branch_stack.pop();
         }
@@ -614,34 +672,41 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
 
     // Track if/unless branches for the same_conditions_node_different_branch check.
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        // Find the top-level if offset — for elsif chains, we want the
-        // outermost if so all branches share the same conditional identity.
-        let if_offset = top_level_if_offset(node);
-        self.visit_if_node_with_offset(node, if_offset);
+        self.visit_if_node_impl(node);
     }
 }
 
-/// Get the offset for an if node — just uses the node's own offset.
-/// This is the entry point; elsif chains use `visit_if_node_with_offset`
-/// to propagate the top-level offset.
-fn top_level_if_offset(node: &ruby_prism::IfNode<'_>) -> usize {
-    node.location().start_offset()
-}
-
-/// Check if two conditional branch contexts are in different branches of the
-/// same conditional node. Returns true if they should be treated as non-overlapping.
+/// Check if the outer variable and block are in different branches of the same
+/// conditional, meaning they can never both be in scope. Returns true if
+/// shadowing should be suppressed.
+///
+/// This matches RuboCop's `same_conditions_node_different_branch?` logic:
+/// 1. Same conditional node, different branches → suppress (handles if/else, case/when)
+/// 2. Adjacent elsif: the block's nearest conditional IS the outer variable's
+///    conditional's direct subsequent → suppress (handles if A / elsif B)
 fn is_different_conditional_branch(
-    outer_branch: Option<(usize, usize)>,
+    outer_info: &VarInfo,
     block_branch: Option<(usize, usize)>,
 ) -> bool {
-    match (outer_branch, block_branch) {
-        (Some((case1, branch1)), Some((case2, branch2))) => {
-            // Same conditional node but different branch — suppress shadowing
-            // because the two variables can never both be in scope.
-            case1 == case2 && branch1 != branch2
+    let Some(block_branch) = block_branch else {
+        return false;
+    };
+    // Check 1: same conditional node, different branch
+    if let Some((outer_cond, outer_branch)) = outer_info.conditional_branch {
+        if outer_cond == block_branch.0 && outer_branch != block_branch.1 {
+            return true;
         }
-        _ => false,
     }
+    // Check 2: adjacent elsif suppression.
+    // If the outer variable's conditional has a subsequent (else/elsif) and
+    // the block's nearest conditional starts AT that subsequent, the block
+    // is in the immediate next elsif/else → suppress.
+    if let Some(subsequent_offset) = outer_info.cond_subsequent_offset {
+        if block_branch.0 == subsequent_offset {
+            return true;
+        }
+    }
+    false
 }
 
 /// Check if a CallNode is `Ractor.new(...)` or `::Ractor.new(...)`.
@@ -968,6 +1033,7 @@ fn build_block_body_scope(
                 name,
                 VarInfo {
                     conditional_branch: None,
+                    cond_subsequent_offset: None,
                     when_condition_of_case: None,
                 },
             );
@@ -984,6 +1050,7 @@ fn build_block_body_scope(
                 name.to_string(),
                 VarInfo {
                     conditional_branch: None,
+                    cond_subsequent_offset: None,
                     when_condition_of_case: None,
                 },
             );
@@ -1010,7 +1077,7 @@ fn check_shadow(
     if let Some(info) = outer_locals.get(name) {
         // Skip if the outer variable and block are in different branches
         // of the same conditional (case/when, if/else).
-        if is_different_conditional_branch(info.conditional_branch, block_cond_branch) {
+        if is_different_conditional_branch(info, block_cond_branch) {
             return;
         }
         // Skip if the outer variable was assigned in a `when` condition and
@@ -1081,6 +1148,7 @@ fn collect_multi_target_names_from_params(
                     VarInfo {
                         conditional_branch: None,
                         when_condition_of_case: None,
+                        cond_subsequent_offset: None,
                     },
                 );
             }
@@ -1097,6 +1165,7 @@ fn collect_multi_target_names_from_params(
                     VarInfo {
                         conditional_branch: None,
                         when_condition_of_case: None,
+                        cond_subsequent_offset: None,
                     },
                 );
             }

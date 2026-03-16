@@ -191,3 +191,46 @@ def process(env)
   end
 end
 
+# FP fix: variable assigned in elsif condition, block in different elsif body
+def parse_input(params)
+  if msgpack = params['msgpack']
+    parse_msgpack(msgpack)
+  elsif js = params['json']
+    parse_json(js)
+  elsif ndjson = params['ndjson']
+    ndjson.split(/\r?\n/).each do |js|
+      parse_json(js)
+    end
+  end
+end
+
+# FP fix: variable assigned in if condition, block in else branch
+def find_account(email)
+  if a = lookup(email)
+    a
+  else
+    regexen.argfind { |re, a| re =~ email && a }
+  end
+end
+
+# FP fix: variable assigned in case predicate, block in when body
+def format_value(key, opts)
+  case value = send(key)
+  when String then "#{opt_key(key, opts)}=#{value.inspect}"
+  when Array  then value.map { |value| "#{opt_key(key, opts)}=#{value.inspect}" }
+  else opt_key(key, opts)
+  end
+end
+
+# FP fix: variable from destructuring in elsif, block in another elsif
+def simplify(node)
+  if plain_node?(node)
+    unwrap(node)
+  elsif special_node?(node)
+    *before, list = node.variables.first.children
+    unwrap(list)
+  elsif templates.any? { |list| list === node }
+    node.variables.map(&method(:strip))
+  end
+end
+

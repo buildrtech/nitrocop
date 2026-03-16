@@ -98,3 +98,32 @@ def configure(**options)
   end
   handler.call
 end
+
+# FN fix: variable in non-adjacent elsif branches (2+ branches apart)
+def magic_method(method)
+  if method =~ /^items$/
+    items
+  elsif method =~ /^first_item$/
+    e = find_item(method)
+    e ? e[0] : nil
+  elsif method =~ /^parent_item$/
+    find_parent(method)
+  elsif method =~ /^each_item$/
+    each_entity(method) { |e| yield e }
+                           ^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `e`.
+  end
+end
+
+# FN fix: variable from while loop, block in else of same if
+def compress(body)
+  if body.is_a?(::File)
+    while part = body.read(8192)
+      write(part)
+    end
+  else
+    body.each { |part|
+                 ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `part`.
+      write(part)
+    }
+  end
+end
