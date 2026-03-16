@@ -66,6 +66,24 @@ use ruby_prism::Visit;
 /// **Fix:** Changed `chain_has_allowed_method` to use a recursive `Visit` subtree
 /// walker that checks all descendant call nodes (not just the linear receiver chain),
 /// matching RuboCop's `each_node(:send)` behavior.
+///
+/// ## Follow-up investigation (2026-03-16)
+///
+/// **FN=21 root cause:** `chain_has_allowed_method` walked ALL descendants of the
+/// `each` CallNode, including the block body. In RuboCop's AST, the block node
+/// wraps the send node (`(block (send ...) (args ...) (body ...))`), so
+/// `node.each_node(:send)` on the `:each` send does NOT enter the block body.
+/// In Prism, the block is a CHILD of CallNode, so the visitor entered the block
+/// body and found allowed methods like `order`, `select`, `limit` in the loop
+/// body, incorrectly suppressing the offense.
+///
+/// Examples: `Host.all.each { |h| h.devices.order(:name).each {...} }` — the inner
+/// `.order()` call suppressed the outer offense. `page.all(".q").each { select "..." }`
+/// — Capybara `select` helper matched the AllowedMethods `select`.
+///
+/// **Fix:** Changed `chain_has_allowed_method` to only walk the receiver subtree
+/// and arguments of the `each` call, skipping the block child. This matches
+/// RuboCop's AST structure where `each_node(:send)` cannot reach the block body.
 pub struct FindEach;
 
 const AR_SCOPE_METHODS: &[&[u8]] = &[
@@ -215,17 +233,18 @@ impl<'pr> FindEachVisitor<'_, '_> {
         ));
     }
 
-    /// Walk the ENTIRE subtree of the `each` call node and check AllowedMethods/AllowedPatterns
-    /// against ALL descendant send nodes (including those inside arguments).
+    /// Walk the receiver chain and arguments of the `each` call node to check
+    /// AllowedMethods/AllowedPatterns against all send nodes in the chain.
     ///
     /// This matches RuboCop's behavior:
     ///   method_chain = node.each_node(:send).map(&:method_name)
     ///   method_chain.any? { |m| allowed_method?(m) || matches_allowed_pattern?(m) }
     ///
-    /// The key difference from a linear receiver chain walk is that RuboCop's `each_node`
-    /// visits ALL descendants, including send nodes inside arguments to scope methods (e.g.,
-    /// `User.where(id: OtherModel.select(:user_id)).each` — the `select` inside the `where`
-    /// argument suppresses the offense).
+    /// In RuboCop's AST, a block wraps the send node (block > send), so
+    /// `each_node(:send)` on the send does NOT descend into the block body.
+    /// In Prism, the block is a child of CallNode, so we must explicitly skip
+    /// the block to avoid false negatives from allowed methods appearing in the
+    /// block body (e.g., `Host.all.each { |h| h.order(...) }` should still flag).
     fn chain_has_allowed_method(&self, node: &ruby_prism::CallNode<'pr>) -> bool {
         struct SubtreeChecker<'a> {
             allowed_methods: &'a [String],
@@ -258,7 +277,18 @@ impl<'pr> FindEachVisitor<'_, '_> {
             allowed_patterns: &self.allowed_patterns,
             found: false,
         };
-        checker.visit_call_node(node);
+        // Walk receiver and arguments but NOT the block. In RuboCop's AST,
+        // the block wraps the send node, so `each_node(:send)` on the send
+        // only visits the receiver chain and arguments. Prism's CallNode
+        // includes the block as a child, so we visit children selectively.
+        if let Some(recv) = node.receiver() {
+            checker.visit(&recv);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                checker.visit(&arg);
+            }
+        }
         checker.found
     }
 }
