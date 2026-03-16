@@ -4,6 +4,23 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=59, FN=54,201.
+///
+/// FN=54,201: Root cause was missing `YieldNode` handling. RuboCop aliases
+/// `on_yield` to `on_send` for this cop, so `yield arg` (without parens) is
+/// flagged in require_parentheses mode and `yield(arg)` (with parens) is
+/// flagged in omit_parentheses mode. Added `visit_yield_node` with
+/// `check_require_parentheses_yield` and `check_omit_parentheses_yield`.
+/// Reduces FN by ~13,200 (remaining FN is mostly file-drop noise from repos
+/// like jruby where RuboCop parser crashes cause file drops).
+///
+/// FP=59: Root cause was `visit_lambda_node` pushing `Scope::Other`, breaking
+/// macro scope inheritance. RuboCop's `macro?` returns true for calls inside
+/// lambdas that are in class/module bodies. Fixed by using
+/// `wrapper_child_scope()` for lambdas (same as blocks), so macro scope
+/// propagates through lambdas.
 pub struct MethodCallWithArgsParentheses;
 
 fn is_operator(name: &[u8]) -> bool {
@@ -605,6 +622,107 @@ impl ParenVisitor<'_> {
             _ => self.check_require_parentheses(call),
         }
     }
+
+    /// Check yield node in require_parentheses mode.
+    /// RuboCop aliases `on_yield` to `on_send`, so yield with args is checked.
+    fn check_require_parentheses_yield(&mut self, node: &ruby_prism::YieldNode<'_>) {
+        let has_parens = node.lparen_loc().is_some();
+        if has_parens {
+            return;
+        }
+
+        // Must have arguments
+        if node.arguments().is_none() {
+            return;
+        }
+
+        // AllowedMethods: check if "yield" is in the list
+        if let Some(methods) = self.allowed_methods {
+            if methods.iter().any(|m| m == "yield") {
+                return;
+            }
+        }
+
+        // AllowedPatterns: check if "yield" matches any pattern
+        if let Some(patterns) = self.allowed_patterns {
+            if matches_any_pattern("yield", patterns) {
+                return;
+            }
+        }
+
+        // IgnoreMacros: yield is always receiverless, check macro scope
+        if self.ignore_macros && self.is_macro_scope() {
+            let in_included = self
+                .included_macros
+                .is_some_and(|macros| macros.iter().any(|m| m == "yield"));
+            let in_included_patterns = self
+                .included_macro_patterns
+                .is_some_and(|patterns| matches_any_pattern("yield", patterns));
+
+            if !in_included && !in_included_patterns {
+                return;
+            }
+        }
+
+        // Report at the yield keyword location
+        let (line, column) = self
+            .source
+            .offset_to_line_col(node.keyword_loc().start_offset());
+        self.diagnostics.push(self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            "Use parentheses for method calls with arguments.".to_string(),
+        ));
+    }
+
+    /// Check yield node in omit_parentheses mode.
+    fn check_omit_parentheses_yield(&mut self, node: &ruby_prism::YieldNode<'_>) {
+        let has_parens = node.lparen_loc().is_some();
+        if !has_parens {
+            return;
+        }
+
+        // inside_endless_method_def? — parens required in endless methods
+        if self.in_endless_def && node.arguments().is_some() {
+            return;
+        }
+
+        // super_call_without_arguments? — yield is not super
+
+        // legitimate_call_with_parentheses? — check applicable sub-checks
+        // For yield, most of the ambiguity checks apply through parent context
+        if self.call_in_literals()
+            || self.immediate_parent() == Some(ParentKind::When)
+            || self.call_in_logical_operators()
+            || self.call_in_optional_arguments()
+            || self.call_as_argument_or_chain()
+            || self.call_in_match_pattern()
+        {
+            return;
+        }
+
+        // Check for ambiguous arguments in yield's args
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                if is_ambiguous_descendant(&arg, self.source) {
+                    return;
+                }
+            }
+        }
+
+        let open_loc = match node.lparen_loc() {
+            Some(loc) => loc,
+            None => return,
+        };
+        let (line, column) = self.source.offset_to_line_col(open_loc.start_offset());
+        self.diagnostics.push(self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            "Omit parentheses for method calls with arguments.".to_string(),
+        ));
+    }
 }
 
 /// Check if a hash node has value omission (Ruby 3.1 shorthand `{foo:}`)
@@ -907,11 +1025,32 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
-        self.scope_stack.push(Scope::Other);
+        // RuboCop's macro? returns true for calls inside lambdas when the
+        // lambda is ultimately in a macro scope (class/module body, top level).
+        // Use wrapper_child_scope() to preserve the parent's macro scope.
+        let child_scope = self.wrapper_child_scope();
+        self.scope_stack.push(child_scope);
         if let Some(body) = node.body() {
             self.visit(&body);
         }
         self.scope_stack.pop();
+    }
+
+    fn visit_yield_node(&mut self, node: &ruby_prism::YieldNode<'pr>) {
+        // RuboCop aliases on_yield to on_send for this cop
+        match self.enforced_style {
+            "omit_parentheses" => self.check_omit_parentheses_yield(node),
+            _ => self.check_require_parentheses_yield(node),
+        }
+
+        // Visit arguments as children
+        if let Some(args) = node.arguments() {
+            self.parent_stack.push(ParentKind::Call);
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+            self.parent_stack.pop();
+        }
     }
 
     fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
@@ -1833,6 +1972,85 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should allow parens inside string interpolation"
+        );
+    }
+
+    #[test]
+    fn yield_with_args_flagged() {
+        let source = b"def foo\n  yield item\nend\n";
+        let diags = run_cop_full(&MethodCallWithArgsParentheses, source);
+        assert_eq!(diags.len(), 1, "yield with args should be flagged");
+    }
+
+    #[test]
+    fn yield_with_parens_ok() {
+        let source = b"def foo\n  yield(item)\nend\n";
+        let diags = run_cop_full(&MethodCallWithArgsParentheses, source);
+        assert!(diags.is_empty(), "yield with parens should be ok");
+    }
+
+    #[test]
+    fn yield_no_args_ok() {
+        let source = b"def foo\n  yield\nend\n";
+        let diags = run_cop_full(&MethodCallWithArgsParentheses, source);
+        assert!(diags.is_empty(), "yield with no args should be ok");
+    }
+
+    #[test]
+    fn yield_at_top_level_is_macro() {
+        // yield at top level is macro scope — skipped with IgnoreMacros: true
+        let source = b"yield item\n";
+        let diags = run_cop_full(&MethodCallWithArgsParentheses, source);
+        assert!(
+            diags.is_empty(),
+            "yield at top level should be treated as macro"
+        );
+    }
+
+    #[test]
+    fn omit_yield_flags_parens() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"def foo\n  yield(item)\nend\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag yield parens with omit_parentheses"
+        );
+    }
+
+    #[test]
+    fn omit_yield_no_parens_ok() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"def foo\n  yield item\nend\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert!(
+            diags.is_empty(),
+            "yield without parens should be ok in omit_parentheses"
+        );
+    }
+
+    #[test]
+    fn lambda_in_class_body_preserves_macro_scope() {
+        let source = b"class C\n  subject { -> { get :index } }\nend\n";
+        let diags = run_cop_full(&MethodCallWithArgsParentheses, source);
+        assert!(
+            diags.is_empty(),
+            "Receiverless call inside lambda in class body should be treated as macro"
         );
     }
 }

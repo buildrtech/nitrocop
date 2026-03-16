@@ -28,3 +28,17 @@ expect(described_class.new)
 custom_fields
   .include? attribute
 # nitrocop-expect: 22:0 Style/MethodCallWithArgsParentheses: Use parentheses for method calls with arguments.
+
+# yield with args and no parens in method body
+def each_item
+  yield element
+  ^^^^^ Style/MethodCallWithArgsParentheses: Use parentheses for method calls with arguments.
+end
+
+# yield with multiple args
+def traverse(tree, &block)
+  tree.each do |item|
+    yield item, tree
+    ^^^^^ Style/MethodCallWithArgsParentheses: Use parentheses for method calls with arguments.
+  end
+end

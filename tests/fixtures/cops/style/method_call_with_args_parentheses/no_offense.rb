@@ -104,3 +104,18 @@ module MyMod
     end
   end
 end
+
+# Macros inside lambda inside block inside class (RuboCop macro? = true)
+class MyController
+  subject { -> { get :index } }
+end
+
+# yield with parentheses is fine in require_parentheses mode
+def each_item
+  yield(element)
+end
+
+# yield with no arguments is fine
+def run
+  yield
+end
