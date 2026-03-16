@@ -8,6 +8,9 @@ has_one :profile, class_name: "UserProfile"
 has_and_belongs_to_many :tags
 has_and_belongs_to_many :tags, class_name: "CustomTag"
 
+# has_and_belongs_to_many is not checked by this cop (not in RESTRICT_ON_SEND)
+has_and_belongs_to_many :tags, class_name: Tag
+
 # Symbol values for class_name are also acceptable
 has_many :associated_articles, class_name: :Article
 belongs_to :root_article, class_name: :Article
@@ -34,3 +37,13 @@ has_many :events, class_name: do_something.to_s
 
 # Bare to_s is a method call, not a constant
 has_many :accounts, class_name: to_s
+
+# Local variable assigned a string
+class_name = 'Account'
+has_many :accounts, class_name: class_name
+
+# Bare method call (no visible assignment, parser treats as method call)
+has_many :accounts, class_name: class_name_method
+
+# Method call on a variable
+has_many :accounts, class_name: some_thing.class_name
