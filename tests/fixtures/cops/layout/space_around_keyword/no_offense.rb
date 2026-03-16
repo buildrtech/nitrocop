@@ -157,3 +157,31 @@ def mab(&b)extend Mab;mab(&b)end
 def r404(p);p.to_s end
 class Foo;end
 module Bar;end
+
+# Unary ! before keyword (accepted — flagged by other cops)
+x = !yield
+x = !super.method
+
+# Unary ? and > before keywords (accepted)
+x = a > begin; 1; end
+
+# Method names containing digits before keyword-like suffixes (e.g. ft2in, yd2in)
+module Prawn
+  module Measurements
+    def cm2mm(cm)
+      cm * 10
+    end
+    def ft2in(ft)
+      ft * 12
+    end
+    def pt2mm(pt)
+      pt * 0.352778
+    end
+    def yd2in(yd)
+      yd * 36
+    end
+    def in2pt(value)
+      value * 72
+    end
+  end
+end

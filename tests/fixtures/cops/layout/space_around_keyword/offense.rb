@@ -18,3 +18,25 @@ x = 1or 2
      ^^ Layout/SpaceAroundKeyword: Space before keyword `or` is missing.
 x = a.to_s; y = b.to_s; z = c if(true)
                               ^^ Layout/SpaceAroundKeyword: Space after keyword `if` is missing.
+case(ENV.fetch("DIST"))
+^^^^ Layout/SpaceAroundKeyword: Space after keyword `case` is missing.
+when "redhat"
+  puts "ok"
+end
+if true
+  1
+elsif(options.fetch(:cacheable))
+^^^^^ Layout/SpaceAroundKeyword: Space after keyword `elsif` is missing.
+  nil
+end
+x = defined?SafeYAML
+    ^^^^^^^^ Layout/SpaceAroundKeyword: Space after keyword `defined?` is missing.
+x = super!=true
+    ^^^^^ Layout/SpaceAroundKeyword: Space after keyword `super` is missing.
+f = "x"
+f.chop!until f[-1] != "/"
+       ^^^^^ Layout/SpaceAroundKeyword: Space before keyword `until` is missing.
+def bar; return(1); end
+         ^^^^^^ Layout/SpaceAroundKeyword: Space after keyword `return` is missing.
+[1].each { |x|->do end.call }
+                ^^ Layout/SpaceAroundKeyword: Space before keyword `do` is missing.

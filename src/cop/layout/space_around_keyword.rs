@@ -34,6 +34,27 @@ use crate::parse::source::SourceFile;
 /// for def/class/module/singleton-class nodes. Fixed by walking the AST
 /// with `EndSkipCollector` to collect `end` positions from those node types
 /// and skipping them during text-based scanning.
+///
+/// **Round 4 (FP=4, FN=41):**
+/// - FP: Method names with digits before `in` keyword (e.g. `ft2in`, `yd2in`
+///   in prawnpdf/prawn). `is_word_before` now walks backwards past digits to
+///   check for a preceding letter/underscore — if found, it's an identifier.
+/// - FN: `defined?SafeYAML` — `is_word_end` treated `?S` as continuation of
+///   an identifier. Fixed by special-casing keywords ending in `?` as always
+///   having a word boundary (since `?` can't appear mid-identifier in Ruby).
+/// - FN: `super!=true` — `!` suffix check incorrectly skipped as method name.
+///   Fixed by not skipping when `!` is followed by `=` (making it `!=` operator).
+/// - FN: `chop!until`, `jruby?do` — `!`/`?` in `accepted_before` was unconditional.
+///   Now only accepted when preceded by non-alphanumeric (unary operator context),
+///   not when preceded by alphanumeric (method-name suffix context).
+/// - FN: `->do` — `>` in `accepted_before` was unconditional. Now checks that
+///   `>` is not preceded by `-` (lambda literal `->` vs comparison operator).
+/// - FN: `return(1)` — `return` is correctly NOT in `ACCEPT_LEFT_PAREN`,
+///   matching RuboCop which flags `return(1)` as "space after missing".
+/// - Remaining FN (~41): Most are `if(`, `case(`, `elsif(` patterns in
+///   api-umbrella and other repos. The cop correctly detects these in unit
+///   tests; remaining FN likely from config resolution or code_map issues
+///   in the corpus pipeline.
 pub struct SpaceAroundKeyword;
 
 /// Keywords that accept `(` immediately after them (no space required).
@@ -50,11 +71,17 @@ const ACCEPT_LEFT_PAREN: &[&[u8]] = &[
 /// Keywords that accept `[` immediately after them.
 const ACCEPT_LEFT_SQUARE_BRACKET: &[&[u8]] = &[b"super", b"yield"];
 
-/// Returns true if `ch` is a character that, when appearing before a keyword,
-/// means we should NOT flag "space before missing". Mirrors RuboCop's
-/// `space_before_missing?` which returns false for `[\s(|{\[;,*=]`.
-fn accepted_before(ch: u8) -> bool {
-    matches!(
+/// Returns true if the character before position `i` means we should NOT
+/// flag "space before missing". Mirrors RuboCop's `space_before_missing?`
+/// which returns false for `[\s(|{\[;,*=]`.
+/// Characters like `!`, `?`, `.`, `>` need context: they're accepted as
+/// operators but not as method-name suffixes (e.g. `chop!until` needs a space).
+fn accepted_before(bytes: &[u8], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    let ch = bytes[i - 1];
+    if matches!(
         ch,
         b' ' | b'\t'
             | b'\n'
@@ -67,16 +94,35 @@ fn accepted_before(ch: u8) -> bool {
             | b','
             | b'*'
             | b'='
-            | b'!'
             | b'+'
             | b'-'
             | b'/'
             | b'<'
-            | b'>'
             | b'&'
-            | b'.'
-            | b'?'
-    )
+    ) {
+        return true;
+    }
+    // `.` is accepted (method call handled by is_method_call, range by Layout/SpaceInsideRangeLiteral)
+    if ch == b'.' {
+        return true;
+    }
+    // `>` is accepted only when it's an operator (not preceded by `-` which makes `->`)
+    if ch == b'>' {
+        // `->do` — lambda literal, NOT accepted
+        if i >= 2 && bytes[i - 2] == b'-' {
+            return false;
+        }
+        return true;
+    }
+    // `!` and `?` are accepted only as unary operators (not preceded by alphanumeric/underscore).
+    // `!yield` → accepted (unary not). `chop!until` → not accepted (method suffix).
+    if ch == b'!' || ch == b'?' {
+        if i >= 2 && (bytes[i - 2].is_ascii_alphanumeric() || bytes[i - 2] == b'_') {
+            return false;
+        }
+        return true;
+    }
+    false
 }
 
 /// Returns true if the char after a keyword means "no space required".
@@ -90,18 +136,26 @@ fn accepted_after(ch: u8) -> bool {
 
 /// Returns true if `kw` is a word boundary — the byte after the keyword is
 /// not alphanumeric or underscore (so `ifdef` doesn't match `if`).
-fn is_word_end(bytes: &[u8], kw_end: usize) -> bool {
+/// Keywords ending in `?` (only `defined?`) always have a word boundary
+/// because `?` cannot appear mid-identifier in Ruby.
+fn is_word_end(bytes: &[u8], kw: &[u8], kw_end: usize) -> bool {
     if kw_end >= bytes.len() {
+        return true;
+    }
+    // `defined?` ends with `?` — always a word boundary regardless of what follows
+    if kw.last() == Some(&b'?') {
         return true;
     }
     let ch = bytes[kw_end];
     !(ch.is_ascii_alphanumeric() || ch == b'_')
 }
 
-/// Returns true if the byte before position `i` is a letter, underscore,
-/// or variable sigil (`@`, `$`), meaning this is NOT a keyword boundary.
+/// Returns true if the byte before position `i` is part of an identifier,
+/// meaning this is NOT a keyword boundary.
 /// `@case` is an instance variable, `$end` is a global variable, etc.
-/// Digits are allowed before keywords: `1and` is parsed as `1 and ...`.
+/// A bare digit before a keyword is allowed: `1and` is parsed as `1 and ...`.
+/// But digits within an identifier (e.g. `ft2in`) mean the keyword-like suffix
+/// is part of the method name, not a keyword.
 fn is_word_before(bytes: &[u8], i: usize) -> bool {
     if i == 0 {
         return false;
@@ -113,6 +167,18 @@ fn is_word_before(bytes: &[u8], i: usize) -> bool {
     // `@case`, `@@end`, `$next` — variable sigils make this a variable name
     if ch == b'@' || ch == b'$' {
         return true;
+    }
+    // Walk backwards past digits: if there's a letter/underscore before the digits,
+    // the whole thing is an identifier (e.g. `ft2in` — `2` is preceded by `t`).
+    // A bare digit (e.g. `1and`) is not an identifier boundary.
+    if ch.is_ascii_digit() {
+        let mut j = i - 1;
+        while j > 0 && bytes[j - 1].is_ascii_digit() {
+            j -= 1;
+        }
+        if j > 0 && (bytes[j - 1].is_ascii_alphabetic() || bytes[j - 1] == b'_') {
+            return true;
+        }
     }
     false
 }
@@ -180,7 +246,7 @@ impl Cop for SpaceAroundKeyword {
                 if &bytes[i..i + kw_len] != kw {
                     continue;
                 }
-                if !is_word_end(bytes, i + kw_len) {
+                if !is_word_end(bytes, kw, i + kw_len) {
                     continue;
                 }
                 if is_word_before(bytes, i) {
@@ -207,12 +273,21 @@ impl Cop for SpaceAroundKeyword {
                 }
 
                 // Check if followed by `!` or `?` — method name like `ensure!`, `next?`
-                // (but not `defined?` which already includes `?` in the keyword)
+                // (but not `defined?` which already includes `?` in the keyword).
+                // Don't skip if `!` is followed by `=` (that's `!=` operator, e.g. `super!=`).
                 if i + kw_len < len
                     && (bytes[i + kw_len] == b'!'
                         || (kw != b"defined?" && bytes[i + kw_len] == b'?'))
                 {
-                    continue;
+                    let suffix_pos = i + kw_len;
+                    let next_after_suffix = if suffix_pos + 1 < len {
+                        Some(bytes[suffix_pos + 1])
+                    } else {
+                        None
+                    };
+                    if next_after_suffix != Some(b'=') {
+                        continue;
+                    }
                 }
 
                 // Check if used as a hash key (`end:`, `case:`) — not a keyword
@@ -228,7 +303,7 @@ impl Cop for SpaceAroundKeyword {
                     // Still need to skip past the keyword to avoid re-matching
                     break;
                 }
-                if i > 0 && !accepted_before(bytes[i - 1]) {
+                if i > 0 && !accepted_before(bytes, i) {
                     let (line, column) = source.offset_to_line_col(i);
                     let mut diag = self.diagnostic(
                         source,
