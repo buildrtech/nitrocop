@@ -3,26 +3,12 @@ use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
-/// Detects chaining of a block after another block that spans multiple lines.
-///
-/// Investigation notes:
-/// - RuboCop triggers `on_block`, then walks `node.send_node.each_node(:call)` to find
-///   a call whose receiver is a multiline block. It reports from the receiver block's
-///   `end`/`}` keyword to the end of the outer block's send node (e.g., `end.map`).
-/// - Original nitrocop had two bugs:
-///   1. Only checked the direct receiver for a block, missing intermediate method chains
-///      like `end.c1.c2 do` where `.c1` has no block but its receiver does.
-///   2. Reported at the method name location (e.g., `map`) instead of from the block's
-///      closing delimiter (`end` or `}`) to the method name (e.g., `end.map`).
-/// - The near-equal FP/FN counts in corpus repos (e.g., oga 39 FP / 40 FN) confirmed
-///   a location mismatch: same chains detected but reported on different lines/columns.
 pub struct MultilineBlockChain;
 
 /// Visitor that checks for multiline block chains.
-/// RuboCop triggers on_block, then walks send_node.each_node(:call) looking for
-/// a call whose receiver is a multiline block. We replicate this by visiting
-/// CallNodes that have blocks and walking the receiver chain to find a
-/// multiline block receiver (possibly through intermediate method calls).
+/// RuboCop triggers on_block, then checks if the block's send_node
+/// has a receiver that is itself a multiline block. We replicate this
+/// by visiting CallNodes that have blocks and checking their receiver chain.
 struct BlockChainVisitor<'a> {
     source: &'a SourceFile,
     cop_name: &'static str,
@@ -50,65 +36,50 @@ impl<'pr> Visit<'pr> for BlockChainVisitor<'_> {
 }
 
 impl BlockChainVisitor<'_> {
-    /// Walk the receiver chain of a call-with-block, looking for a multiline block.
-    ///
-    /// RuboCop does `node.send_node.each_node(:call)` which walks all call nodes
-    /// in the send chain. For `end.c1.c2 do ... end`, the send node chain is:
-    /// `.c2` -> `.c1` -> (block receiver). We follow CallNode receivers until we
-    /// find one with a multiline block, or run out of calls.
     fn check_receiver_chain(&mut self, node: &ruby_prism::CallNode<'_>) {
-        // Walk the receiver chain: node -> receiver -> receiver's receiver -> ...
-        // At each step, if the current call has a multiline block receiver, report.
-        let mut current = match node.receiver() {
+        let receiver = match node.receiver() {
             Some(r) => r,
             None => return,
         };
 
-        loop {
-            let call = match current.as_call_node() {
-                Some(c) => c,
-                None => return,
-            };
+        let recv_call = match receiver.as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
 
-            // Does this call have a real block (do..end or {..})?
-            if let Some(block_arg) = call.block() {
-                if let Some(block_node) = block_arg.as_block_node() {
-                    // Is the block multiline?
-                    let block_loc = block_node.location();
-                    let (block_start, _) = self.source.offset_to_line_col(block_loc.start_offset());
-                    let (block_end, _) = self
-                        .source
-                        .offset_to_line_col(block_loc.end_offset().saturating_sub(1));
-
-                    if block_start != block_end {
-                        // Found a multiline block in the receiver chain.
-                        // Report from the block's closing delimiter to the end of
-                        // the outermost send node's method name.
-                        // RuboCop: range_between(receiver.loc.end.begin_pos,
-                        //                        node.send_node.source_range.end_pos)
-                        let closing_loc = block_node.closing_loc();
-                        let (line, column) =
-                            self.source.offset_to_line_col(closing_loc.start_offset());
-
-                        self.diagnostics.push(Diagnostic {
-                            path: self.source.path_str().to_string(),
-                            location: Location { line, column },
-                            severity: Severity::Convention,
-                            cop_name: self.cop_name.to_string(),
-                            message: "Avoid multi-line chains of blocks.".to_string(),
-                            corrected: false,
-                        });
-                        return;
-                    }
-                }
-            }
-
-            // Continue walking up the receiver chain
-            current = match call.receiver() {
-                Some(r) => r,
-                None => return,
-            };
+        // Does the receiver call have a real block (do..end or {..})?
+        let recv_block = match recv_call.block() {
+            Some(b) => b,
+            None => return,
+        };
+        if recv_block.as_block_node().is_none() {
+            return;
         }
+
+        // Is the receiver's block multiline?
+        let block_loc = recv_block.location();
+        let (block_start, _) = self.source.offset_to_line_col(block_loc.start_offset());
+        let (block_end, _) = self
+            .source
+            .offset_to_line_col(block_loc.end_offset().saturating_sub(1));
+
+        if block_start == block_end {
+            return;
+        }
+
+        // Multiline block chain: receiver has a multiline block,
+        // and current node also has a block.
+        let msg_loc = node.message_loc().unwrap_or_else(|| node.location());
+        let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
+        self.diagnostics.push(Diagnostic {
+            path: self.source.path_str().to_string(),
+            location: Location { line, column },
+            severity: Severity::Convention,
+            cop_name: self.cop_name.to_string(),
+            message: "Avoid multi-line chains of blocks.".to_string(),
+
+            corrected: false,
+        });
     }
 }
 
