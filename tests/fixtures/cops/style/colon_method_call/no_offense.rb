@@ -6,4 +6,4 @@ test.method_name
 
 Class.method_name(arg)
 
-Java::int
+Module::CONSTANT
