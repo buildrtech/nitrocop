@@ -97,7 +97,7 @@ fn is_flow_call(node: &ruby_prism::Node<'_>) -> bool {
                     cr.name().as_slice() == b"Kernel"
                 } else if let Some(cp) = recv.as_constant_path_node() {
                     // ::Kernel.raise — parent is None (root), child is "Kernel"
-                    cp.parent().is_none() && cp.name().map_or(false, |n| n.as_slice() == b"Kernel")
+                    cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"Kernel")
                 } else {
                     false
                 };
