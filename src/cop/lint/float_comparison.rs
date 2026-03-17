@@ -3,6 +3,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Lint/FloatComparison: detects unreliable float equality comparisons.
+///
+/// ## Investigation (2026-03-17)
+/// 191 FN all from the same pattern: `.to_f` method calls compared with `==`/`!=`.
+/// Root cause: `is_float()` only checked for `FloatNode` literals, not for method calls
+/// that return floats (`.to_f`, `.fdiv`, `Float()`). Fixed by extending `is_float()`
+/// to also detect `CallNode` with float-returning method names, matching RuboCop's
+/// `FLOAT_RETURNING_METHODS = [:to_f, :Float, :fdiv]`.
 pub struct FloatComparison;
 
 impl Cop for FloatComparison {
@@ -74,7 +82,17 @@ impl Cop for FloatComparison {
 }
 
 fn is_float(node: &ruby_prism::Node<'_>) -> bool {
-    node.as_float_node().is_some()
+    if node.as_float_node().is_some() {
+        return true;
+    }
+    // Detect method calls that return floats: .to_f, .fdiv, Float()
+    if let Some(call) = node.as_call_node() {
+        let method = call.name().as_slice();
+        if matches!(method, b"to_f" | b"fdiv" | b"Float") {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_literal_safe(node: &ruby_prism::Node<'_>) -> bool {
