@@ -3,6 +3,10 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Investigation: synthetic corpus showed 1 FP and 1 FN because the offense was
+/// reported at the `attr_reader` call location instead of the trailing comma position.
+/// RuboCop reports at the comma after the last attribute argument (before the DefNode).
+/// Fixed by scanning forward from the last non-DefNode argument to find the `,` character.
 pub struct TrailingCommaInAttributeDeclaration;
 
 const ATTR_METHODS: &[&[u8]] = &[b"attr_reader", b"attr_writer", b"attr_accessor", b"attr"];
@@ -59,9 +63,19 @@ impl Cop for TrailingCommaInAttributeDeclaration {
         // `attr_reader :foo,` followed by `def bar; end` causes the `def` to be
         // parsed as an argument to `attr_reader`.
         let last_arg = &arg_list[arg_list.len() - 1];
-        if last_arg.as_def_node().is_some() {
-            let loc = call.location();
-            let (line, column) = source.offset_to_line_col(loc.start_offset());
+        if last_arg.as_def_node().is_some() && arg_list.len() >= 2 {
+            // Find the trailing comma after the last real attribute argument
+            // (the argument before the DefNode). RuboCop reports the offense
+            // at the comma position, not at the attr_reader call.
+            let last_attr_arg = &arg_list[arg_list.len() - 2];
+            let search_start = last_attr_arg.location().end_offset();
+            let src_bytes = source.as_bytes();
+            let comma_offset = src_bytes[search_start..]
+                .iter()
+                .position(|&b| b == b',')
+                .map(|pos| search_start + pos);
+            let offset = comma_offset.unwrap_or(search_start);
+            let (line, column) = source.offset_to_line_col(offset);
             diagnostics.push(self.diagnostic(
                 source,
                 line,
