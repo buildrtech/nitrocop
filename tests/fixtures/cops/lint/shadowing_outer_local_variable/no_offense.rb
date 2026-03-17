@@ -222,15 +222,39 @@ def format_value(key, opts)
   end
 end
 
-# FP fix: variable from destructuring in elsif, block in another elsif
-def simplify(node)
-  if plain_node?(node)
-    unwrap(node)
-  elsif special_node?(node)
-    *before, list = node.variables.first.children
-    unwrap(list)
-  elsif templates.any? { |list| list === node }
-    node.variables.map(&method(:strip))
+
+# FP fix: variable assigned in one when body, block param in different when body
+def process_slug(slug)
+  case slug
+  when 'items'
+    node = find_node('#Items')
+    node.css('li').each { |n| register(n) }
+  when 'utils'
+    css('dl > dt').each do |node|
+      register(node)
+    end
+  end
+end
+
+# FP fix: 3 when branches - block param in one, local var in another, block param in third
+def process_data(slug)
+  case slug
+  when 'first'
+    css('h2').each do |heading|
+      heading.css('a').each do |node|
+        register(node)
+      end
+    end
+  when 'second'
+    node = find('#Section')
+    node = node.next while node.name != 'ul'
+    node.css('li').each do |n|
+      register(n)
+    end
+  when 'third'
+    css('dl > dt').each do |node|
+      register(node)
+    end
   end
 end
 

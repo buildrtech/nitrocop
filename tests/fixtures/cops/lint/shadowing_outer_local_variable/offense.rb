@@ -127,3 +127,45 @@ def compress(body)
     }
   end
 end
+
+# FN fix: block param shadows outer from nested block in same scope
+def build_graph(prev)
+  block.prev.each do |prev|
+                      ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `prev`.
+    trans[prev]
+  end
+end
+
+# FN fix: elsif condition assignment, block in later elsif shadows earlier
+def validate_archive(archive)
+  if archive.too_large?
+    report_error
+  elsif entry = archive.entries.find { |entry| entry.starts_with?("/") }
+    report(entry)
+  elsif entry = archive.entries.find { |entry| entry.traversal? }
+                                        ^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `entry`.
+    report(entry)
+  end
+end
+
+
+# FN fix: variable from block, block param inside block body shadows it
+def process_items(times)
+  times_by_group.each do |group, times|
+                                 ^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `times`.
+    times.each { |t| group.enqueue(t) }
+  end
+end
+
+# FN fix: variable from method arg, block in else branch shadows it
+def handle(response)
+  if responses.length == 1
+    run(response)
+  elsif responses.length > 1
+    responses.each_with_index do |response, index|
+                                  ^^^^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `response`.
+      say response[:command]
+    end
+  end
+end
+
