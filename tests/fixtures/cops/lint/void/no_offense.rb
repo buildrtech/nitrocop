@@ -227,3 +227,12 @@ rescue
 ensure
   $!.should == nil
 end
+
+# ** (exponentiation) is NOT a void operator — RuboCop excludes it
+def power_operator
+  c = Complex(1, 2)
+  c ** 2
+  c ** 2.0
+  c ** 3r
+  do_something
+end

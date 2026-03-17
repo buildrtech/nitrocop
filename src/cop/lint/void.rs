@@ -100,8 +100,17 @@ use ruby_prism::Visit;
 /// `InterpolatedStringNode`, `InterpolatedSymbolNode`, and
 /// `InterpolatedRegularExpressionNode` detection.
 ///
-/// Remaining gaps (19 FP, 441 FN): mostly location mismatches for complex
-/// multiline patterns and missing operator detection in deeply nested contexts.
+/// ## Investigation findings (2026-03-17)
+///
+/// **FP: `**` (exponentiation) incorrectly in void operators list** — RuboCop's
+/// `BINARY_OPERATORS` is `%i[* / % + - == === != < > <= >= <=>]` — it does NOT
+/// include `**`. Removed `**` from `void_operator_name_offset()` match list.
+/// This fixes 19 FPs (17 from ruby__rbs, 2 remaining from rufo may be
+/// location mismatches for unary operators).
+///
+/// Remaining gaps (~0 FP, ~453 FN): FNs are diverse across jruby, eye, natalie
+/// repos — mostly location mismatches for complex multiline patterns and missing
+/// operator detection in deeply nested contexts.
 pub struct Void;
 
 impl Cop for Void {
@@ -516,7 +525,6 @@ fn void_operator_name_offset(node: &ruby_prism::Node<'_>, in_each_block: bool) -
                 | b"*"
                 | b"/"
                 | b"%"
-                | b"**"
                 | b"=="
                 | b"==="
                 | b"!="
