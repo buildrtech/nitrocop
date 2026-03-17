@@ -27,6 +27,22 @@ use crate::parse::source::SourceFile;
 ///   but many files have trailing spaces/tabs on "blank" lines. Switched all blank
 ///   line checks to `is_blank_or_whitespace_line` to match RuboCop's `blank?`.
 ///
+/// **FP fix (2026-03-17): Multi-line guard statements and continuation lines**
+/// - Multi-line guard STATEMENTS (fail/raise/return call spanning lines via `\`,
+///   multi-line strings, comma-separated args, or braces) are not guard clauses
+///   per RuboCop's `match_guard_clause?` which requires `single_line?`. Added
+///   the same check for modifier form (previously only block form was checked).
+///   Exception: heredoc arguments make the statement multi-line in Prism but
+///   RuboCop still treats them as valid guards.
+/// - Consecutive guards with line continuations: `raise "msg" \\\n unless cond`
+///   followed by `raise "msg" \\\n if cond` — the NEXT guard's `if`/`unless`
+///   is on a continuation line. Extended `is_guard_line` → `is_guard_line_with_continuations`
+///   to follow backslash/operator/comma continuations and multi-line expressions
+///   to find the modifier keyword.
+/// - Guard → comment → blank → guard pattern: RuboCop uses AST-level sibling
+///   analysis which ignores comments/blanks. Extended the else branch in step 3
+///   to also check for guard clauses after blank lines.
+///
 /// **Remaining gaps:** Some edge cases with heredocs inside conditions
 /// (e.g., `return true if <<~TEXT.length > bar`) may still differ.
 pub struct EmptyLineAfterGuardClause;
@@ -137,9 +153,12 @@ impl Cop for EmptyLineAfterGuardClause {
         }
 
         // RuboCop's guard_clause? requires the guard statement to be single-line.
-        // A multi-line `next foo && bar && ...` inside a block-form if is not
-        // considered a guard clause.
-        if !is_modifier {
+        // For block form: a multi-line body like `next foo && bar && ...` is not a guard.
+        // For modifier form: a multi-line guard statement like `fail "str1" \\\n "str2" if cond`
+        // or `return "\n...\n" if cond` is not a guard — the raise/fail/return call itself
+        // must be single-line. Exception: heredoc arguments make the statement multi-line
+        // in Prism's AST but RuboCop still treats them as valid guard clauses.
+        {
             let stmt_start_line = source
                 .offset_to_line_col(first_stmt.location().start_offset())
                 .0;
@@ -147,7 +166,15 @@ impl Cop for EmptyLineAfterGuardClause {
                 .offset_to_line_col(first_stmt.location().end_offset().saturating_sub(1))
                 .0;
             if stmt_start_line != stmt_end_line {
-                return;
+                // For modifier form, check if the multi-line span is due to a heredoc.
+                // Heredoc guards are valid despite spanning multiple lines.
+                if is_modifier {
+                    if find_heredoc_end_line(source, first_stmt).is_none() {
+                        return;
+                    }
+                } else {
+                    return;
+                }
             }
         }
 
@@ -250,11 +277,12 @@ impl Cop for EmptyLineAfterGuardClause {
         // - If the guard is followed only by comments → end of scope → no offense
         //   (but only if the comments lead to a scope-close like `end`)
         // - If comments → blank → code → it IS an offense (no blank immediately after guard)
-        if let Some(code_content) = find_next_code_line(&lines, effective_end_line) {
+        if let Some((code_content, code_line_idx)) = find_next_code_line(&lines, effective_end_line)
+        {
             if is_scope_close_or_clause_keyword(code_content) {
                 return;
             }
-            if is_guard_line(code_content) {
+            if is_guard_line_with_continuations(code_content, &lines, code_line_idx) {
                 return;
             }
             if is_multiline_guard_block(code_content, &lines, effective_end_line) {
@@ -264,19 +292,25 @@ impl Cop for EmptyLineAfterGuardClause {
             // find_next_code_line returned None — either hit a blank line (after
             // skipping comments) or reached EOF. Since the immediate next line was
             // NOT blank (checked in step 1), we have comments before the blank/EOF.
-            // Check if a scope-closing keyword follows the blank line.
-            if let Some(code_after_blank) =
+            // Check if a scope-closing keyword or guard clause follows.
+            if let Some((code_after_blank, code_after_idx)) =
                 find_first_code_line_anywhere(&lines, effective_end_line)
             {
                 if is_scope_close_or_clause_keyword(code_after_blank) {
+                    return;
+                }
+                // Also check if the code after blank is a guard clause —
+                // matches RuboCop's AST-level sibling analysis which ignores
+                // comments and blank lines between consecutive guards.
+                if is_guard_line_with_continuations(code_after_blank, &lines, code_after_idx) {
                     return;
                 }
             } else {
                 // Only comments/blanks until EOF — guard is effectively last stmt
                 return;
             }
-            // If there's code after the blank that's not a scope-close, fall through
-            // to flag the offense (guard → comment → blank → code without blank after guard).
+            // If there's code after the blank that's not a scope-close or guard,
+            // fall through to flag the offense.
         }
 
         let (line, col) = source.offset_to_line_col(offense_offset);
@@ -352,7 +386,7 @@ impl EmptyLineAfterGuardClause {
             return;
         }
 
-        if let Some(code_content) = find_next_code_line(&lines, end_line) {
+        if let Some((code_content, _)) = find_next_code_line(&lines, end_line) {
             if is_scope_close_or_clause_keyword(code_content) {
                 return;
             }
@@ -476,8 +510,12 @@ fn is_guard_stmt(node: &ruby_prism::Node<'_>) -> bool {
 
 /// Find the first non-blank, non-comment line starting from `start_idx` (0-indexed),
 /// looking across blank lines (unlike `find_next_code_line` which stops at blanks).
-fn find_first_code_line_anywhere<'a>(lines: &[&'a [u8]], start_idx: usize) -> Option<&'a [u8]> {
-    for line in &lines[start_idx..] {
+/// Also returns the 0-indexed line index.
+fn find_first_code_line_anywhere<'a>(
+    lines: &[&'a [u8]],
+    start_idx: usize,
+) -> Option<(&'a [u8], usize)> {
+    for (i, line) in lines[start_idx..].iter().enumerate() {
         if util::is_blank_or_whitespace_line(line) {
             continue;
         }
@@ -486,7 +524,7 @@ fn find_first_code_line_anywhere<'a>(lines: &[&'a [u8]], start_idx: usize) -> Op
             if content.starts_with(b"#") {
                 continue;
             }
-            return Some(content);
+            return Some((content, start_idx + i));
         }
     }
     None
@@ -494,8 +532,9 @@ fn find_first_code_line_anywhere<'a>(lines: &[&'a [u8]], start_idx: usize) -> Op
 
 /// Find the next non-blank, non-comment line starting from `start_idx` (0-indexed).
 /// Returns None if a blank line is found first or we reach EOF.
-fn find_next_code_line<'a>(lines: &[&'a [u8]], start_idx: usize) -> Option<&'a [u8]> {
-    for line in &lines[start_idx..] {
+/// Also returns the 0-indexed line index of the found line.
+fn find_next_code_line<'a>(lines: &[&'a [u8]], start_idx: usize) -> Option<(&'a [u8], usize)> {
+    for (i, line) in lines[start_idx..].iter().enumerate() {
         if util::is_blank_or_whitespace_line(line) {
             return None;
         }
@@ -504,7 +543,7 @@ fn find_next_code_line<'a>(lines: &[&'a [u8]], start_idx: usize) -> Option<&'a [
             if content.starts_with(b"#") {
                 continue;
             }
-            return Some(content);
+            return Some((content, start_idx + i));
         }
     }
     None
@@ -553,6 +592,87 @@ fn is_guard_line(content: &[u8]) -> bool {
     // Also check modifier if/unless containing a guard
     if contains_modifier_guard(content) {
         return true;
+    }
+    false
+}
+
+/// Like `is_guard_line` but also follows continuation lines to find a modifier
+/// `if`/`unless` keyword. Handles patterns like:
+/// - `raise "msg" \` + `  unless cond` (backslash continuation)
+/// - `raise "msg" +` + `  "more" if cond` (operator continuation)
+/// - `return {` + `  ...` + `}.to_json if cond` (multi-line expression)
+/// - `raise Error,` + `  "msg" unless cond` (argument continuation)
+/// - `raise "msg" if (` + `  long_cond` + `)` (multi-line condition)
+fn is_guard_line_with_continuations(content: &[u8], lines: &[&[u8]], line_idx: usize) -> bool {
+    // First check single-line (original logic)
+    if is_guard_line(content) {
+        return true;
+    }
+
+    // Check if the line starts with a guard keyword — if not, it can't be
+    // a multi-line guard clause (we don't need to follow continuations for
+    // non-guard lines).
+    let starts_with_guard = GUARD_METHODS
+        .iter()
+        .any(|kw| starts_with_keyword(content, kw));
+    if !starts_with_guard {
+        return false;
+    }
+
+    // The line starts with a guard keyword but has no `if`/`unless` on this line.
+    // Check continuation lines for the modifier keyword.
+    // We look ahead through continuation lines — lines connected by `\` at end,
+    // or lines that are part of a multi-line expression (open parens, braces,
+    // trailing comma/operator).
+    is_multiline_modifier_guard(lines, line_idx)
+}
+
+/// Check if the line at `line_idx` starts a multi-line modifier guard clause.
+/// Scans forward through continuation lines looking for `if`/`unless` keyword.
+fn is_multiline_modifier_guard(lines: &[&[u8]], line_idx: usize) -> bool {
+    let mut depth: i32 = 0; // track paren/brace nesting
+    let mut is_first = true;
+    for line in &lines[line_idx..] {
+        let trimmed_bytes = line
+            .iter()
+            .position(|&b| b != b' ' && b != b'\t')
+            .map(|s| &line[s..])
+            .unwrap_or(b"");
+
+        // Track paren/brace depth to know when a multi-line expression closes
+        for &b in trimmed_bytes {
+            match b {
+                b'(' | b'{' | b'[' => depth += 1,
+                b')' | b'}' | b']' => depth -= 1,
+                _ => {}
+            }
+        }
+
+        // Check if this line has a modifier `if`/`unless` at the appropriate nesting level
+        // For the first line, we already checked via is_guard_line, so skip
+        if !is_first
+            && depth <= 0
+            && (contains_word(trimmed_bytes, b"if") || contains_word(trimmed_bytes, b"unless"))
+        {
+            return true;
+        }
+        is_first = false;
+
+        // Check if line ends with continuation: backslash, operator, or comma
+        let stripped = trimmed_bytes
+            .iter()
+            .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+            .map(|end| &trimmed_bytes[..=end])
+            .unwrap_or(trimmed_bytes);
+
+        let continues = stripped.ends_with(b"\\")
+            || stripped.ends_with(b",")
+            || stripped.ends_with(b"+")
+            || depth > 0;
+
+        if !continues {
+            break;
+        }
     }
     false
 }

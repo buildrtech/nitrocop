@@ -334,6 +334,103 @@ end
 # Guard clause followed by whitespace-only blank line (tab)
 def guard_whitespace_blank_tab
   raise ActiveRecord::RecordNotFound unless record.present?
-	
+
   process(record)
+end
+
+# Consecutive guard clauses with line continuation (backslash)
+def consecutive_guards_with_continuation
+  raise ArgumentError, "invalid method" \
+    unless method == 'dns'
+  raise ArgumentError, "a non-empty list is required" \
+    if servers.empty?
+end
+
+# Multiple consecutive guards with line continuation
+def multiple_guards_continuation
+  raise ArgumentError, "method should be a symbol" \
+    unless method.is_a?(Symbol)
+  raise ArgumentError, "uri should be a string" \
+    unless uri.is_a?(String)
+  raise ArgumentError, "body should be a string" \
+    if body && !body.is_a?(String)
+  raise ArgumentError, "headers should be a hash" \
+    if headers && !headers.is_a?(Hash)
+end
+
+# Guard with line continuation followed by non-guard with blank line
+def guard_continuation_then_blank
+  raise ArgumentError, "invalid input" \
+    unless valid?
+
+  process
+end
+
+# Guard with line continuation at end of method
+def guard_continuation_at_end
+  raise ArgumentError, "missing config" \
+    unless config.present?
+end
+
+# Guard with string concatenation continuation
+def guard_string_concat_continuation
+  raise "Must specify the file to " + \
+    "convert to the new model" if filename.nil?
+  raise "File does not " + \
+    "exist: #{filename}" unless File.exist?(filename)
+end
+
+# Guard with multi-line return value followed by modifier
+def guard_multiline_return_value
+  return {
+    status: "err",
+    error: "Invalid input."
+  }.to_json if !info
+  return {
+    status: "err",
+    error: "Wrong ID."
+  }.to_json if not get_item(id)
+end
+
+# Guard with multi-line return string followed by code
+def guard_multiline_return_string
+  return "
+    * navigate
+  " if options[:task] == []
+  prefix = "open" if options[:task] == ["navigate"]
+end
+
+# Guard with multi-line raise (args on next line)
+def guard_multiline_raise_args
+  raise ArgumentError,
+    "msg here" unless condition
+  raise BadError,
+    "Response is empty." if raw_text.blank?
+end
+
+# Guard with fail and line continuation
+def guard_fail_continuation
+  fail "Association defined for a second time. " \
+       "Associations can only be defined once" if duplicate?(name)
+  associations[name] = object
+end
+
+# Guard with parenthesized multi-line condition
+def guard_paren_multiline_condition
+  raise ArgumentError, "invalid interval" if (
+      discovery.key?('interval') &&
+      !(discovery['interval'].is_a?(Numeric) &&
+      discovery['interval'] >= 0)
+    )
+  raise ArgumentError, "missing host" \
+    unless discovery['hosts']
+end
+
+# Guard followed by comment, blank line, then another guard
+def guard_comment_blank_guard
+  next if file =~ /pattern_a/ && VERSION <= Gem::Version.new('1.7.25')
+  # EMXIF
+
+  # FIXME: Remove when we stop testing old version
+  next if file =~ /pattern_b/ && VERSION <= Gem::Version.new('1.7.13')
 end
