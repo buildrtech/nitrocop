@@ -72,3 +72,23 @@ end
 def match_only(str)
   /(?<_capture>\w+)/ =~ str
 end
+
+# Variable assigned in block but never read (no cross-block leaking)
+describe 'records' do
+  it 'does something' do
+    _unused_record = create(:record)
+    expect(1).to eq(1)
+  end
+
+  it 'does something else' do
+    _unused_record = create(:record)
+    expect(2).to eq(2)
+  end
+end
+
+# Variable inside a module block, not read
+module Config
+  setup do
+    _temp = 42
+  end
+end

@@ -99,3 +99,23 @@ end
 children.each { |(_page, _children)| add(_page, _children) }
                   ^^^^^ Lint/UnderscorePrefixedVariableName: Do not use prefix `_` for a variable that is used.
                          ^^^^^^^^^ Lint/UnderscorePrefixedVariableName: Do not use prefix `_` for a variable that is used.
+
+# Variable assigned and used inside a block in module body
+module HasData
+  included do
+    _record_name = self.name.sub('Data', '').underscore
+    ^^^^^^^^^^^^ Lint/UnderscorePrefixedVariableName: Do not use prefix `_` for a variable that is used.
+    self.primary_key = "#{_record_name}_id"
+  end
+end
+
+# Variable assigned and used inside a let block (class-level)
+describe 'records' do
+  let(:item) do
+    _obj = Record.new
+    ^^^^ Lint/UnderscorePrefixedVariableName: Do not use prefix `_` for a variable that is used.
+    _obj.name = 'test'
+    _obj.save
+    _obj
+  end
+end

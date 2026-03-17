@@ -8,9 +8,18 @@ use ruby_prism::Visit;
 /// Checks for underscore-prefixed variables that are actually used.
 ///
 /// RuboCop uses VariableForce to track variable scoping across all scope types
-/// (def, block, lambda, top-level). This implementation replicates that behavior
-/// by visiting each scope type and checking parameters and local variable writes
-/// within that scope for reads.
+/// (def, block, lambda, top-level, class, module). This implementation replicates
+/// that behavior by treating each scope type independently:
+/// - Each scope (def, block, lambda, top-level, class/module body) checks variables
+///   declared within it (params + direct local var writes at that level).
+/// - Write collection stops at inner scope boundaries (blocks, lambdas, defs, classes,
+///   modules) so each scope only handles its own variables.
+/// - Read collection crosses into blocks (since blocks can read outer-scope variables)
+///   but stops at lambdas/defs/classes/modules.
+///
+/// This matches RuboCop's VariableForce model where blocks are "twisted scopes"
+/// that create their own variable tables. Variables first assigned inside a block
+/// belong to that block's scope, not the enclosing scope.
 ///
 /// Key behaviors matching RuboCop:
 /// - Flags underscore-prefixed method params, block params, and local variable
@@ -21,7 +30,7 @@ use ruby_prism::Visit;
 ///   the outer scope variable.
 /// - Handles `AllowKeywordBlockArguments` config to skip keyword block params.
 /// - Skips variables implicitly forwarded via bare `super` or `binding`.
-/// - Handles top-level scope (variables outside any def/block).
+/// - Handles top-level scope, class/module bodies, and nested blocks.
 /// - Handles destructured block parameters (e.g., `|(a, _b)|`).
 ///
 /// Supported variable declaration types (matching RuboCop's VariableForce):
@@ -33,16 +42,14 @@ use ruby_prism::Visit;
 /// - Operator writes (`_x += 1`, `_x ||= 1`, `_x &&= 1`) count as both
 ///   writes and reads (they read the variable before writing)
 ///
-/// Scoping model: In Ruby, blocks share the enclosing def's variable scope.
-/// A local variable first assigned inside a block belongs to the enclosing
-/// def scope, not the block. Lambdas and defs create new scopes.
-/// Therefore:
-/// - `check_def` collects writes from the body AND nested blocks (crossing
-///   block boundaries). It does NOT cross into lambdas/defs.
-/// - `check_block` only checks block parameters (not local var writes, which
-///   belong to the enclosing scope).
-/// - `check_lambda` checks lambda params and local var writes within the
-///   lambda (lambdas create new scopes).
+/// Scoping model changes (matching RuboCop VariableForce):
+/// - Each block independently checks local variable writes within it.
+/// - Def/lambda/top-level scopes check only direct local var writes (not crossing
+///   into blocks). Reads still cross into blocks to catch outer-scope references.
+/// - To prevent double-reporting when a variable is written at def level and
+///   reassigned inside a block, blocks skip writes for names already declared
+///   in an enclosing scope (tracked via `outer_var_names`).
+/// - Class/module bodies are visited so blocks within them are checked.
 ///
 /// Historical bugs fixed:
 /// - `check_def` returned early when no underscore vars in def scope, skipping
@@ -51,6 +58,13 @@ use ruby_prism::Visit;
 /// - Destructured block params (MultiTargetNode) were not collected.
 /// - Block-scope WriteCollector picked up reassignments of outer scope variables,
 ///   causing FP double-reporting.
+/// - Blocks inside class/module bodies were never checked (FN). Fixed by adding
+///   class/module visiting to ScopeFinder.
+/// - Multiple blocks in the same def with the same variable name only reported
+///   the first occurrence (FN). Fixed by making each block its own scope.
+/// - Variables in different blocks at top-level sharing the same name caused
+///   FP (reads from one block attributed to writes in another). Fixed by per-block
+///   scoping.
 pub struct UnderscorePrefixedVariableName;
 
 impl Cop for UnderscorePrefixedVariableName {
@@ -77,6 +91,7 @@ impl Cop for UnderscorePrefixedVariableName {
             source,
             allow_keyword_block_args,
             diagnostics: Vec::new(),
+            outer_var_names: HashSet::new(),
         };
         // Check top-level scope first
         visitor.check_scope_body(&parse_result.node());
@@ -91,6 +106,9 @@ struct ScopeFinder<'a, 'src> {
     source: &'src SourceFile,
     allow_keyword_block_args: bool,
     diagnostics: Vec<Diagnostic>,
+    /// Variable names declared in enclosing scopes. Used by check_block to
+    /// skip reassignments of outer-scope variables (avoids double-reporting).
+    outer_var_names: HashSet<String>,
 }
 
 impl<'pr> Visit<'pr> for ScopeFinder<'_, '_> {
@@ -107,6 +125,37 @@ impl<'pr> Visit<'pr> for ScopeFinder<'_, '_> {
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         self.check_lambda(node);
     }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        // Enter class body so blocks inside it are visited.
+        // Reset outer_var_names since class creates a new variable scope.
+        let old_outer = std::mem::take(&mut self.outer_var_names);
+        if let Some(body) = node.body() {
+            self.check_scope_body(&body);
+            self.visit(&body);
+        }
+        self.outer_var_names = old_outer;
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        // Enter module body so blocks inside it are visited.
+        let old_outer = std::mem::take(&mut self.outer_var_names);
+        if let Some(body) = node.body() {
+            self.check_scope_body(&body);
+            self.visit(&body);
+        }
+        self.outer_var_names = old_outer;
+    }
+
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        // Enter singleton class body so blocks inside it are visited.
+        let old_outer = std::mem::take(&mut self.outer_var_names);
+        if let Some(body) = node.body() {
+            self.check_scope_body(&body);
+            self.visit(&body);
+        }
+        self.outer_var_names = old_outer;
+    }
 }
 
 impl ScopeFinder<'_, '_> {
@@ -118,13 +167,17 @@ impl ScopeFinder<'_, '_> {
         }
 
         // Collect underscore-prefixed local variable writes in the body.
-        // WriteCollector crosses into blocks (blocks share the def scope)
-        // but stops at lambdas and nested defs.
+        // WriteCollector stops at blocks — each block handles its own writes.
+        // Still stops at lambdas and nested defs (which create new scopes).
         if let Some(body) = def_node.body() {
             let mut write_collector = WriteCollector { writes: Vec::new() };
             write_collector.visit(&body);
             underscore_vars.extend(write_collector.writes);
         }
+
+        // Build the set of variable names declared at this def level
+        let def_var_names: HashSet<String> =
+            underscore_vars.iter().map(|v| v.name.clone()).collect();
 
         if !underscore_vars.is_empty() {
             // Collect all local variable reads in the body, respecting block scoping
@@ -147,17 +200,21 @@ impl ScopeFinder<'_, '_> {
             self.emit_diagnostics(&underscore_vars, &reads, has_forwarding);
         }
 
+        // Set outer_var_names for nested blocks within this def
+        let old_outer = std::mem::replace(&mut self.outer_var_names, def_var_names);
+
         // Always visit body for nested scopes (blocks, lambdas, nested defs)
         if let Some(body) = def_node.body() {
             self.visit(&body);
         }
+
+        self.outer_var_names = old_outer;
     }
 
     fn check_block(&mut self, block_node: &ruby_prism::BlockNode<'_>) {
         let mut underscore_vars: Vec<UnderscoreVar> = Vec::new();
 
-        // Only check block parameters — local variable writes inside blocks
-        // belong to the enclosing def/top-level scope and are checked there.
+        // Collect block parameters
         if let Some(params) = block_node.parameters() {
             if let Some(params_node) = params.as_block_parameters_node() {
                 if let Some(inner_params) = params_node.parameters() {
@@ -165,6 +222,23 @@ impl ScopeFinder<'_, '_> {
                 }
             }
         }
+
+        // Also collect local variable writes directly in the block body.
+        // WriteCollector stops at nested blocks, so this only gets writes at
+        // this block level. Filter out reassignments of enclosing-scope vars.
+        if let Some(body) = block_node.body() {
+            let mut write_collector = WriteCollector { writes: Vec::new() };
+            write_collector.visit(&body);
+            for write in write_collector.writes {
+                if !self.outer_var_names.contains(&write.name) {
+                    underscore_vars.push(write);
+                }
+            }
+        }
+
+        // Build block-level var names for nested scope tracking
+        let block_var_names: HashSet<String> =
+            underscore_vars.iter().map(|v| v.name.clone()).collect();
 
         if !underscore_vars.is_empty() {
             // Collect reads in body, respecting nested block scoping
@@ -181,10 +255,16 @@ impl ScopeFinder<'_, '_> {
             self.emit_diagnostics(&underscore_vars, &reads, false);
         }
 
+        // Update outer_var_names for nested blocks: include both enclosing + this block's vars
+        let old_outer = self.outer_var_names.clone();
+        self.outer_var_names.extend(block_var_names);
+
         // Visit body for nested scopes
         if let Some(body) = block_node.body() {
             self.visit(&body);
         }
+
+        self.outer_var_names = old_outer;
     }
 
     fn check_lambda(&mut self, lambda_node: &ruby_prism::LambdaNode<'_>) {
@@ -205,6 +285,9 @@ impl ScopeFinder<'_, '_> {
             underscore_vars.extend(write_collector.writes);
         }
 
+        let lambda_var_names: HashSet<String> =
+            underscore_vars.iter().map(|v| v.name.clone()).collect();
+
         if !underscore_vars.is_empty() {
             // Collect reads in body
             let mut reads = HashSet::new();
@@ -220,15 +303,20 @@ impl ScopeFinder<'_, '_> {
             self.emit_diagnostics(&underscore_vars, &reads, false);
         }
 
+        // Lambdas create new scopes — reset outer_var_names
+        let old_outer = std::mem::replace(&mut self.outer_var_names, lambda_var_names);
+
         // Visit body for nested scopes
         if let Some(body) = lambda_node.body() {
             self.visit(&body);
         }
+
+        self.outer_var_names = old_outer;
     }
 
-    /// Check top-level scope: variables outside any def/block/lambda.
+    /// Check a scope body for local variable writes: top-level, class, module.
     fn check_scope_body(&mut self, node: &ruby_prism::Node<'_>) {
-        // Collect top-level local variable writes (crosses into blocks)
+        // Collect local variable writes at this scope level (stops at blocks)
         let mut underscore_vars: Vec<UnderscoreVar> = Vec::new();
         let mut write_collector = WriteCollector { writes: Vec::new() };
         write_collector.visit(node);
@@ -238,7 +326,12 @@ impl ScopeFinder<'_, '_> {
             return;
         }
 
-        // Collect reads at top level, respecting scoping
+        // Set outer var names for nested blocks
+        let scope_var_names: HashSet<String> =
+            underscore_vars.iter().map(|v| v.name.clone()).collect();
+        self.outer_var_names.extend(scope_var_names);
+
+        // Collect reads at this scope level, respecting scoping
         let mut reads = HashSet::new();
         collect_reads_scope_aware(node, &mut reads);
 
@@ -457,8 +550,7 @@ fn collect_underscore_multi_target(
 }
 
 /// Collects underscore-prefixed local variable writes.
-/// Crosses into blocks (blocks share enclosing scope) but stops at
-/// defs, classes, modules, and lambdas (which create new scopes).
+/// Stops at blocks, defs, classes, modules, and lambdas (each handles its own).
 struct WriteCollector {
     writes: Vec<UnderscoreVar>,
 }
@@ -563,8 +655,8 @@ impl<'pr> Visit<'pr> for WriteCollector {
         self.visit(&node.value());
     }
 
-    // Blocks share the enclosing scope — DO cross into them (default visit)
-    // Don't cross into nested defs/classes/modules/lambdas — they create new scopes
+    // Stop at all scope boundaries — each scope handles its own writes
+    fn visit_block_node(&mut self, _node: &ruby_prism::BlockNode<'pr>) {}
     fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
     fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
     fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
@@ -909,6 +1001,90 @@ mod tests {
             diags.len(),
             1,
             "Expected 1 offense for _locale, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_let_block_var_used() {
+        let cop = UnderscorePrefixedVariableName;
+        let source = b"describe 'test' do\n  let(:record) do\n    _p = Record.last\n    _p.name = 'test'\n    _p.save\n    _p\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for _p in let block, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_times_block_var_used() {
+        let cop = UnderscorePrefixedVariableName;
+        let source =
+            b"3.times do |i|\n  _user = User.first\n  _user.name = 'test'\n  _user.save!\nend\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for _user in times block, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_included_block_var_used() {
+        let cop = UnderscorePrefixedVariableName;
+        // Module included block pattern (discourse)
+        let source = b"module HasSearchData\n  included do\n    _name = self.name.sub('SearchData', '').underscore\n    self.primary_key = _name\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for _name in included block, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_var_only_assigned_in_block_no_offense() {
+        // FP test: variable assigned in a block but never read
+        let cop = UnderscorePrefixedVariableName;
+        let source = b"describe 'test' do\n  it 'does something' do\n    _unused = create(:record)\n    expect(1).to eq(1)\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Expected 0 offenses for unused _unused, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_multiple_blocks_same_var_name() {
+        // Each block should be flagged independently (RuboCop treats each block as a scope)
+        let cop = UnderscorePrefixedVariableName;
+        let source = b"def test_data\n  assert_raise(Error) do\n    _data = data.dup\n    _data[_data.size - 4] = 'X'\n  end\n\n  assert_raise(Error) do\n    _data = data.dup\n    _data[_data.size - 5] = 'X'\n  end\n\n  assert_raise(Error) do\n    _data = data.dup\n    _data = _data.slice!(0, _data.size - 1)\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        assert_eq!(
+            diags.len(),
+            3,
+            "Expected 3 offenses (one per block), got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_different_blocks_same_var_name_no_cross_leak() {
+        // FP test: two different it blocks with same variable name, only one reads it
+        let cop = UnderscorePrefixedVariableName;
+        let source = b"describe 'test' do\n  it 'first' do\n    _x = create(:record)\n    expect(1).to eq(1)\n  end\n\n  it 'second' do\n    _x = create(:record)\n    puts _x\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&cop, source);
+        // Only the second block should have an offense
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense (only in second block), got: {:?}",
             diags
         );
     }
