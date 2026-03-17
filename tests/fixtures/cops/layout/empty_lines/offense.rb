@@ -23,16 +23,6 @@ b = 2
 ^ Layout/EmptyLines: Extra blank line detected.
 # another comment
 
-# Consecutive blank lines inside =begin/=end blocks ARE flagged.
-=begin
-some docs
-
-
-^ Layout/EmptyLines: Extra blank line detected.
-more docs
-=end
-p 1
-
 # Consecutive blank lines in a comment-only file
 # frozen_string_literal: true
 

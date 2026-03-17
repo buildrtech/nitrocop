@@ -13,14 +13,6 @@ b = 2
 
 # another comment
 
-# Consecutive blank lines inside =begin/=end blocks ARE flagged.
-=begin
-some docs
-
-more docs
-=end
-p 1
-
 # Consecutive blank lines in a comment-only file
 # frozen_string_literal: true
 
