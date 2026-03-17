@@ -234,3 +234,52 @@ def simplify(node)
   end
 end
 
+# FP fix: variable and block both inside else clause of if
+def process_sequential(lib, &block)
+  if parallel?
+    run_parallel(lib)
+  else
+    value = block.call(lib)
+    items.each { |value| puts value }
+  end
+end
+
+# FP fix: nested blocks inside else clause
+def scan_headings
+  if heading =~ /pattern/
+    do_something
+  else
+    structure.each do |k, v|
+      v[2].each do |k, txt|
+        puts k, txt
+      end
+    end
+  end
+end
+
+# FP fix: variable and block inside unless-else
+def process_unless_else
+  unless cond
+    something
+  else
+    value = compute
+    items.each { |value| puts value }
+  end
+end
+
+# FP fix: variable assigned in if predicate, block in if body
+def create_menu_item(page)
+  if item = page.menu_item
+    item.tap { |item| item.parent_id = nil }
+  else
+    create_new_item
+  end
+end
+
+# FP fix: variable assigned in if predicate, block in if body (no else)
+def setup_item(page)
+  if item = page.menu_item
+    item.tap { |item| item.parent_id = nil }
+  end
+end
+
