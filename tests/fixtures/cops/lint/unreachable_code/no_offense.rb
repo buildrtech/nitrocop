@@ -74,3 +74,40 @@ def test_conditional
   end
   more_code
 end
+
+# begin..rescue..end is NOT flow-breaking because rescue provides alternate path
+def test_begin_rescue_not_flow_breaking
+  begin
+    raise "something"
+  rescue StandardError => e
+    wrapped = handle(e)
+  end
+  wrapped
+end
+
+# begin..rescue with exit in body — rescue catches it
+def test_begin_rescue_exit
+  begin
+    exit 1
+  rescue SystemExit => e
+    puts "caught"
+  end
+  puts "next line"
+end
+
+# begin..rescue in case/when — code after case is still reachable
+def test_begin_rescue_in_case
+  case other
+  when Numeric
+    return @delta <=> other
+  when Delta
+    return @delta <=> other.delta
+  else
+    begin
+      l, r = other.coerce(self)
+      return l <=> r
+    rescue NoMethodError
+    end
+  end
+  nil
+end

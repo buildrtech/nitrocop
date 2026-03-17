@@ -29,6 +29,18 @@ use ruby_prism::Visit;
 /// is flow-breaking if both branches are, case/when/else is flow-breaking if
 /// all branches (including else) are, and begin blocks are flow-breaking if
 /// any contained expression is flow-breaking.
+///
+/// ## Investigation (2026-03-17, second pass)
+///
+/// FP=228: `begin..rescue..end` blocks were treated as flow-breaking because
+/// `flow_expression()` checked if ANY statement in the begin body breaks flow.
+/// But when a rescue clause is present, the rescue provides an alternate
+/// execution path — the exception is caught, and code after the begin block
+/// continues. Fixed by returning false from `flow_expression()` when the
+/// `BeginNode` has a `rescue_clause()`.
+///
+/// FN=28: Mostly `break 1`/`next 1` at top level in spec files (ruby-formatter/rufo).
+/// Not addressed in this pass.
 pub struct UnreachableCode;
 
 impl Cop for UnreachableCode {
@@ -145,7 +157,12 @@ fn flow_expression(node: &ruby_prism::Node<'_>) -> bool {
     }
 
     // begin..end (explicit)
+    // A begin..rescue..end is NOT flow-breaking because the rescue clause
+    // provides an alternate execution path that may not break flow.
     if let Some(begin_node) = node.as_begin_node() {
+        if begin_node.rescue_clause().is_some() {
+            return false;
+        }
         if let Some(stmts) = begin_node.statements() {
             return stmts.body().iter().any(|s| flow_expression(&s));
         }
