@@ -148,3 +148,53 @@ def test_begin_rescue_ensure
   end
   next_line
 end
+
+# Redefined method: abort redefined in scope is not flow-breaking
+class Server
+  def abort
+    log("aborting")
+  end
+
+  def restart
+    abort
+    if running?
+      stop
+    end
+  end
+end
+
+# Redefined method: abort with arguments (custom method, not Kernel#abort)
+class Connection
+  def abort(reason)
+    log(reason)
+  end
+
+  def close
+    abort(:limit_reached)
+    return 0
+  end
+end
+
+# Redefined method: flow method inside block after redefined method
+class Worker
+  def abort
+    log("abort")
+  end
+
+  def setup
+    trap("SIGTERM") { abort; exit!(0) }
+    trap("USR2") { abort; restart }
+    run_loop
+  end
+end
+
+# instance_eval suppresses flow-breaking detection
+class Dummy
+  def abort; end
+end
+
+d = Dummy.new
+d.instance_eval do
+  abort
+  bar
+end

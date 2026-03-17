@@ -57,11 +57,19 @@ use ruby_prism::Visit;
 /// means multiple consecutive flow commands (e.g., `break; break; break`) each
 /// get flagged individually.
 ///
-/// Remaining FP=4: method redefinition awareness. RuboCop tracks `def abort`,
+/// ## Investigation (2026-03-17, fourth pass)
+///
+/// FP=4: method redefinition awareness. RuboCop tracks `def abort`,
 /// `def raise`, etc. in `@redefined` and doesn't treat those calls as
 /// flow-breaking if redefined in scope (e.g., Spork's `def abort` and
 /// EventMachine's `def abort(reason)`). Also tracks `instance_eval` context
-/// to suppress warnings inside `instance_eval` blocks. Not yet implemented.
+/// to suppress warnings inside `instance_eval` blocks.
+///
+/// Fixed by adding `redefined` set and `instance_eval_count` to the visitor.
+/// `flow_expression()` now calls `register_redefinition()` on `def`/`defs`
+/// nodes matching RuboCop's approach. `is_flow_call()` returns false for
+/// bare calls to redefined methods and for any method call inside
+/// `instance_eval` blocks.
 pub struct UnreachableCode;
 
 impl Cop for UnreachableCode {
@@ -86,6 +94,8 @@ impl Cop for UnreachableCode {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            redefined: Vec::new(),
+            instance_eval_count: 0,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -96,19 +106,40 @@ struct UnreachableVisitor<'a, 'src> {
     cop: &'a UnreachableCode,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    redefined: Vec<Vec<u8>>,
+    instance_eval_count: u32,
+}
+
+const REDEFINABLE_FLOW_METHODS: &[&[u8]] =
+    &[b"raise", b"fail", b"throw", b"exit", b"exit!", b"abort"];
+
+fn is_redefinable_flow_method(name: &[u8]) -> bool {
+    REDEFINABLE_FLOW_METHODS.contains(&name)
 }
 
 /// Check if a node is a simple flow-breaking statement (return, break, next, etc.)
-fn is_flow_command(node: &ruby_prism::Node<'_>) -> bool {
+fn is_flow_command(
+    node: &ruby_prism::Node<'_>,
+    redefined: &[Vec<u8>],
+    instance_eval_count: u32,
+) -> bool {
     node.as_return_node().is_some()
         || node.as_break_node().is_some()
         || node.as_next_node().is_some()
         || node.as_redo_node().is_some()
-        || is_flow_call(node)
+        || is_flow_call(node, redefined, instance_eval_count)
 }
 
 /// Check if a node is a flow-breaking method call (raise, fail, throw, exit, exit!, abort)
-fn is_flow_call(node: &ruby_prism::Node<'_>) -> bool {
+/// Matches RuboCop's `report_on_flow_command?` logic:
+/// - Calls on Kernel are always flow-breaking
+/// - Bare calls inside instance_eval are NOT flow-breaking (can't determine self type)
+/// - Bare calls to redefined methods are NOT flow-breaking
+fn is_flow_call(
+    node: &ruby_prism::Node<'_>,
+    redefined: &[Vec<u8>],
+    instance_eval_count: u32,
+) -> bool {
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
         // Kernel#raise/fail never accept blocks — a block means this is a DSL
@@ -116,16 +147,25 @@ fn is_flow_call(node: &ruby_prism::Node<'_>) -> bool {
         if call.block().is_some() {
             return false;
         }
-        // Only bare calls or calls on Kernel are flow-breaking
         match call.receiver() {
             None => {
-                matches!(
+                if !matches!(
                     name,
                     b"raise" | b"fail" | b"throw" | b"exit" | b"exit!" | b"abort"
-                )
+                ) {
+                    return false;
+                }
+                // Keywords (return, next, break, redo) can't be redefined, but
+                // method-based flow commands can be. Check redefinition state.
+                // Inside instance_eval, we can't determine self type, so suppress.
+                if instance_eval_count > 0 {
+                    return false;
+                }
+                !redefined.iter().any(|r| r.as_slice() == name)
             }
             Some(recv) => {
-                // Kernel.raise, Kernel.exit, etc.
+                // Kernel.raise, Kernel.exit, etc. — always flow-breaking regardless
+                // of redefinition (matches RuboCop: calls on Kernel always report)
                 let is_kernel = if let Some(cr) = recv.as_constant_read_node() {
                     cr.name().as_slice() == b"Kernel"
                 } else if let Some(cp) = recv.as_constant_path_node() {
@@ -154,14 +194,30 @@ fn is_flow_call(node: &ruby_prism::Node<'_>) -> bool {
 /// - `if/else` where BOTH branches break flow
 /// - `case/when/else` where ALL branches (including else) break flow
 /// - `begin`/`kwbegin` where ANY expression breaks flow (since it stops execution)
-fn flow_expression(node: &ruby_prism::Node<'_>) -> bool {
-    if is_flow_command(node) {
+/// - `def`/`defs` nodes register method redefinitions (matching RuboCop line 93-95)
+fn flow_expression(
+    node: &ruby_prism::Node<'_>,
+    redefined: &mut Vec<Vec<u8>>,
+    instance_eval_count: u32,
+) -> bool {
+    if is_flow_command(node, redefined, instance_eval_count) {
         return true;
+    }
+
+    // def/defs: register method redefinition if it redefines a flow method
+    // This matches RuboCop's flow_expression? which calls register_redefinition
+    // for :def/:defs node types and returns false.
+    if let Some(def_node) = node.as_def_node() {
+        let name = def_node.name().as_slice();
+        if is_redefinable_flow_method(name) {
+            redefined.push(name.to_vec());
+        }
+        return false;
     }
 
     // if/elsif/else: flow-breaking if both if-branch and else-branch break flow
     if let Some(if_node) = node.as_if_node() {
-        return check_if_flow(&if_node);
+        return check_if_flow(&if_node, redefined, instance_eval_count);
     }
 
     // unless: also an IfNode in Prism (just with different structure)
@@ -169,12 +225,12 @@ fn flow_expression(node: &ruby_prism::Node<'_>) -> bool {
 
     // case/when/else
     if let Some(case_node) = node.as_case_node() {
-        return check_case_flow(&case_node);
+        return check_case_flow(&case_node, redefined, instance_eval_count);
     }
 
     // case/in pattern matching
     if let Some(case_match) = node.as_case_match_node() {
-        return check_case_match_flow(&case_match);
+        return check_case_match_flow(&case_match, redefined, instance_eval_count);
     }
 
     // begin..end (explicit)
@@ -186,7 +242,10 @@ fn flow_expression(node: &ruby_prism::Node<'_>) -> bool {
             return false;
         }
         if let Some(stmts) = begin_node.statements() {
-            return stmts.body().iter().any(|s| flow_expression(&s));
+            return stmts
+                .body()
+                .iter()
+                .any(|s| flow_expression(&s, redefined, instance_eval_count));
         }
     }
 
@@ -194,7 +253,10 @@ fn flow_expression(node: &ruby_prism::Node<'_>) -> bool {
     if let Some(parens) = node.as_parentheses_node() {
         if let Some(stmts) = parens.body() {
             if let Some(stmts_node) = stmts.as_statements_node() {
-                return stmts_node.body().iter().any(|s| flow_expression(&s));
+                return stmts_node
+                    .body()
+                    .iter()
+                    .any(|s| flow_expression(&s, redefined, instance_eval_count));
             }
         }
     }
@@ -202,7 +264,11 @@ fn flow_expression(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-fn check_if_flow(node: &ruby_prism::IfNode<'_>) -> bool {
+fn check_if_flow(
+    node: &ruby_prism::IfNode<'_>,
+    redefined: &mut Vec<Vec<u8>>,
+    instance_eval_count: u32,
+) -> bool {
     let if_branch = node.statements();
     let else_branch = node.subsequent();
 
@@ -215,7 +281,10 @@ fn check_if_flow(node: &ruby_prism::IfNode<'_>) -> bool {
     };
 
     // Check if-branch: any statement in the if body is flow-breaking
-    let if_breaks = if_stmts.body().iter().any(|s| flow_expression(&s));
+    let if_breaks = if_stmts
+        .body()
+        .iter()
+        .any(|s| flow_expression(&s, redefined, instance_eval_count));
     if !if_breaks {
         return false;
     }
@@ -223,24 +292,35 @@ fn check_if_flow(node: &ruby_prism::IfNode<'_>) -> bool {
     // Check else-branch: could be ElseNode or another IfNode (elsif)
     if let Some(else_node) = else_clause.as_else_node() {
         if let Some(stmts) = else_node.statements() {
-            return stmts.body().iter().any(|s| flow_expression(&s));
+            return stmts
+                .body()
+                .iter()
+                .any(|s| flow_expression(&s, redefined, instance_eval_count));
         }
         return false;
     }
     if let Some(ref elsif_node) = else_clause.as_if_node() {
-        return check_if_flow(elsif_node);
+        return check_if_flow(elsif_node, redefined, instance_eval_count);
     }
     false
 }
 
-fn check_case_flow(node: &ruby_prism::CaseNode<'_>) -> bool {
+fn check_case_flow(
+    node: &ruby_prism::CaseNode<'_>,
+    redefined: &mut Vec<Vec<u8>>,
+    instance_eval_count: u32,
+) -> bool {
     // Must have an else branch
     let Some(else_clause) = node.else_clause() else {
         return false;
     };
     // Check else branch
     if let Some(stmts) = else_clause.statements() {
-        if !stmts.body().iter().any(|s| flow_expression(&s)) {
+        if !stmts
+            .body()
+            .iter()
+            .any(|s| flow_expression(&s, redefined, instance_eval_count))
+        {
             return false;
         }
     } else {
@@ -255,7 +335,11 @@ fn check_case_flow(node: &ruby_prism::CaseNode<'_>) -> bool {
     for condition in conditions.iter() {
         if let Some(when_node) = condition.as_when_node() {
             if let Some(stmts) = when_node.statements() {
-                if !stmts.body().iter().any(|s| flow_expression(&s)) {
+                if !stmts
+                    .body()
+                    .iter()
+                    .any(|s| flow_expression(&s, redefined, instance_eval_count))
+                {
                     return false;
                 }
             } else {
@@ -268,13 +352,21 @@ fn check_case_flow(node: &ruby_prism::CaseNode<'_>) -> bool {
     true
 }
 
-fn check_case_match_flow(node: &ruby_prism::CaseMatchNode<'_>) -> bool {
+fn check_case_match_flow(
+    node: &ruby_prism::CaseMatchNode<'_>,
+    redefined: &mut Vec<Vec<u8>>,
+    instance_eval_count: u32,
+) -> bool {
     // Must have an else branch
     let Some(else_clause) = node.else_clause() else {
         return false;
     };
     if let Some(stmts) = else_clause.statements() {
-        if !stmts.body().iter().any(|s| flow_expression(&s)) {
+        if !stmts
+            .body()
+            .iter()
+            .any(|s| flow_expression(&s, redefined, instance_eval_count))
+        {
             return false;
         }
     } else {
@@ -289,7 +381,11 @@ fn check_case_match_flow(node: &ruby_prism::CaseMatchNode<'_>) -> bool {
     for condition in conditions.iter() {
         if let Some(in_node) = condition.as_in_node() {
             if let Some(stmts) = in_node.statements() {
-                if !stmts.body().iter().any(|s| flow_expression(&s)) {
+                if !stmts
+                    .body()
+                    .iter()
+                    .any(|s| flow_expression(&s, redefined, instance_eval_count))
+                {
                     return false;
                 }
             } else {
@@ -302,6 +398,11 @@ fn check_case_match_flow(node: &ruby_prism::CaseMatchNode<'_>) -> bool {
     true
 }
 
+/// Check if a call node is `instance_eval` (matches RuboCop's `instance_eval_block?`)
+fn is_instance_eval_block(node: &ruby_prism::CallNode<'_>) -> bool {
+    node.name().as_slice() == b"instance_eval" && node.block().is_some()
+}
+
 impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         let body: Vec<_> = node.body().iter().collect();
@@ -309,7 +410,7 @@ impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_> {
         // Match RuboCop's each_cons(2) approach: for each consecutive pair,
         // if the first expression is flow-breaking, flag the second.
         for pair in body.windows(2) {
-            if flow_expression(&pair[0]) {
+            if flow_expression(&pair[0], &mut self.redefined, self.instance_eval_count) {
                 let loc = pair[1].location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                 self.diagnostics.push(self.cop.diagnostic(
@@ -322,6 +423,16 @@ impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_> {
         }
 
         ruby_prism::visit_statements_node(self, node);
+    }
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if is_instance_eval_block(node) {
+            self.instance_eval_count += 1;
+        }
+        ruby_prism::visit_call_node(self, node);
+        if is_instance_eval_block(node) {
+            self.instance_eval_count -= 1;
+        }
     }
 }
 
