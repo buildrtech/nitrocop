@@ -22,21 +22,44 @@ use crate::parse::source::SourceFile;
 /// - case/in (pattern matching): else aligns with last `in` keyword
 /// - begin/rescue/else: else aligns with `begin` keyword
 /// - def/rescue/else: else aligns with `def` keyword
-///   1 FP from minified Ruby single-line modifier if/else (unfixable).
 ///
 /// **Investigation (2026-03-17, FP=8, FN=6):**
 /// FP=7: `else` on the same line as `when`/`in` keyword in case expressions
 /// (e.g., `when 1 then 2 else 3`). The single-line skip only checked
 /// `else_line == case_line`, not `else_line == last_when_line`. Fixed by
 /// also checking if else is on the same line as the last when/in keyword.
-/// FP=1: camping minified Ruby (unfixable).
 /// FN=6: Prism has a separate `UnlessNode` that wasn't handled — only
 /// `IfNode` was checked. `unless` keywords go through `UnlessNode`, not
 /// `IfNode`. Fixed by adding `UNLESS_NODE` to interested types and
 /// handling `as_unless_node()` with the same alignment logic.
+///
+/// **Investigation (2026-03-17, FP=1):**
+/// FP=1: camping minified Ruby — `else` keyword mid-line after semicolons
+/// (e.g., `...;s else raise "no template"`). RuboCop's `begins_its_line?`
+/// skips alignment when `else` is not the first non-whitespace token on its
+/// line. Fixed by adding an equivalent check.
 pub struct ElseAlignment;
 
 impl ElseAlignment {
+    /// Returns true if the token at `offset` is the first non-whitespace on its line.
+    /// Mirrors RuboCop's `begins_its_line?` — alignment checks are skipped when
+    /// `else`/`elsif` does not begin its line (e.g., compressed/minified code).
+    fn begins_its_line(source: &SourceFile, offset: usize) -> bool {
+        let bytes = source.as_bytes();
+        let mut pos = offset;
+        while pos > 0 && bytes[pos - 1] != b'\n' {
+            pos -= 1;
+        }
+        // pos is now the start of the line; scan forward for first non-whitespace
+        let mut first_nonws = pos;
+        while first_nonws < bytes.len()
+            && (bytes[first_nonws] == b' ' || bytes[first_nonws] == b'\t')
+        {
+            first_nonws += 1;
+        }
+        first_nonws == offset
+    }
+
     /// Check else alignment for begin/rescue/else constructs.
     /// `base_keyword` is the keyword name to use in the message (e.g., "begin", "def").
     fn check_begin_else(
@@ -53,6 +76,9 @@ impl ElseAlignment {
             None => return,
         };
         let else_kw_loc = else_clause.else_keyword_loc();
+        if !Self::begins_its_line(source, else_kw_loc.start_offset()) {
+            return;
+        }
         let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
         // Skip single-line constructs
         if else_line == base_line {
@@ -115,6 +141,9 @@ impl Cop for ElseAlignment {
                 None => return,
             };
             let else_kw_loc = else_clause.else_keyword_loc();
+            if !Self::begins_its_line(source, else_kw_loc.start_offset()) {
+                return;
+            }
             let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
             // Skip single-line: else on same line as case OR same line as last when
             let case_line = source
@@ -154,6 +183,9 @@ impl Cop for ElseAlignment {
                 None => return,
             };
             let else_kw_loc = else_clause.else_keyword_loc();
+            if !Self::begins_its_line(source, else_kw_loc.start_offset()) {
+                return;
+            }
             let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
             // Skip single-line: else on same line as case OR same line as last in
             let case_line = source
@@ -264,6 +296,9 @@ impl Cop for ElseAlignment {
             };
 
             let else_kw_loc = else_clause.else_keyword_loc();
+            if !Self::begins_its_line(source, else_kw_loc.start_offset()) {
+                return;
+            }
             let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
             // Single-line unless/else — skip
             if else_line == unless_line {
@@ -321,6 +356,10 @@ impl Cop for ElseAlignment {
         while let Some(subsequent) = current {
             if let Some(else_node) = subsequent.as_else_node() {
                 let else_kw_loc = else_node.else_keyword_loc();
+                if !Self::begins_its_line(source, else_kw_loc.start_offset()) {
+                    current = None;
+                    continue;
+                }
                 let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
                 // Single-line if/else — alignment is inherently satisfied
                 if else_line == if_line {
@@ -341,6 +380,10 @@ impl Cop for ElseAlignment {
                     Some(loc) => loc,
                     None => break,
                 };
+                if !Self::begins_its_line(source, elsif_kw_loc.start_offset()) {
+                    current = elsif_node.subsequent();
+                    continue;
+                }
                 let (elsif_line, elsif_col) =
                     source.offset_to_line_col(elsif_kw_loc.start_offset());
                 // Single-line elsif — skip alignment check

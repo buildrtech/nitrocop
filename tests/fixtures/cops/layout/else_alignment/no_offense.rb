@@ -136,3 +136,10 @@ case 1
 case [0]
  in [*a] then a else 3
  end
+
+# else keyword does not begin its line (compressed/minified code)
+# RuboCop skips alignment when else is not the first token on its line
+def render v,*a,&b;if t=lookup(v);r=@_r;s=(t==true)?mab{
+send v,*a,&b}: t.render(self,{},&b);s=render(:layout,{}){s
+} if o[:layout] or o[:layout].nil?&&!r&&v.to_s[0]!=?_;s else raise "no template: #{v}"
+end end
