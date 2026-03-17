@@ -283,6 +283,28 @@ def setup_item(page)
   end
 end
 
+# Block param in one when branch, local var in another when branch
+def process_by_type(slug)
+  case slug
+  when 'items'
+    headings.each do |heading|
+      heading.children.each do |node|
+        puts node
+      end
+    end
+  when 'docs'
+    node = at_css('#heading')
+    node = node.next while node.name != 'ul'
+    node.css('li').each do |n|
+      puts n
+    end
+  when 'utils'
+    css('dl > dt').each do |node|
+      puts node
+    end
+  end
+end
+
 # Block param in RHS of assignment — variable_used_in_declaration_of_outer suppression
 def find_result(results, line_number)
   if interline_align

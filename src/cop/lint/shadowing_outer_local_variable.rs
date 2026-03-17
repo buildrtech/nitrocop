@@ -162,6 +162,14 @@ impl ShadowVisitor<'_, '_> {
 
     fn add_local(&mut self, name: &str) {
         if let Some(scope) = self.scopes.last_mut() {
+            // If the variable already exists in this scope, preserve its
+            // original conditional context. RuboCop's VariableForce uses
+            // the FIRST declaration's conditional ancestor, not the latest
+            // reassignment. Without this, `node = x; node = y while cond`
+            // would change node's conditional from case/when to while.
+            if scope.contains_key(name) {
+                return;
+            }
             let last = self.conditional_branch_stack.last();
             let info = VarInfo {
                 conditional_branch: last.map(|&(c, b, _)| (c, b)),
