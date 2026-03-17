@@ -19,6 +19,7 @@ Parent::Child = [1, 2, 3]
 Parent::Child = Struct.new(:name, :age)
 ^^^^^^ Lint/ConstantResolution: Fully qualify this constant to avoid possibly ambiguous resolution.
                 ^^^^^^ Lint/ConstantResolution: Fully qualify this constant to avoid possibly ambiguous resolution.
-# Class.new target is suppressed, but unqualified argument IS flagged
+# Class.new target is suppressed, but Class receiver and argument ARE flagged
 Registry::Entry = Class.new(Base)
+                  ^^^^^ Lint/ConstantResolution: Fully qualify this constant to avoid possibly ambiguous resolution.
                             ^^^^ Lint/ConstantResolution: Fully qualify this constant to avoid possibly ambiguous resolution.

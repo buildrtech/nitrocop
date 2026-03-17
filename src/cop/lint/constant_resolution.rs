@@ -136,11 +136,23 @@ fn is_class_or_module_new(node: &ruby_prism::Node<'_>) -> bool {
     let Some(receiver) = call.receiver() else {
         return false;
     };
-    let Some(const_read) = receiver.as_constant_read_node() else {
+    // Handle both `Class.new` (ConstantReadNode) and `::Class.new` (ConstantPathNode).
+    let receiver_name = if let Some(const_read) = receiver.as_constant_read_node() {
+        std::str::from_utf8(const_read.name().as_slice()).unwrap_or("")
+    } else if let Some(const_path) = receiver.as_constant_path_node() {
+        // `::Class` has parent=None and name=Class
+        if const_path.parent().is_none() {
+            const_path
+                .name()
+                .map(|n| std::str::from_utf8(n.as_slice()).unwrap_or(""))
+                .unwrap_or("")
+        } else {
+            return false;
+        }
+    } else {
         return false;
     };
-    let name = std::str::from_utf8(const_read.name().as_slice()).unwrap_or("");
-    matches!(name, "Class" | "Module")
+    matches!(receiver_name, "Class" | "Module")
 }
 
 impl<'pr> Visit<'pr> for ConstantResolutionVisitor<'_, '_> {
@@ -241,10 +253,7 @@ impl<'pr> Visit<'pr> for ConstantResolutionVisitor<'_, '_> {
         ruby_prism::visit_constant_path_node(self, node);
     }
 
-    fn visit_constant_path_write_node(
-        &mut self,
-        node: &ruby_prism::ConstantPathWriteNode<'pr>,
-    ) {
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
         // RuboCop's `defined_module` returns truthy for `casgn` nodes where the
         // RHS is `Class.new` or `Module.new` — the target path is treated as a
         // module definition name. For plain assignments like `Foo::Bar = 42`,
@@ -331,15 +340,15 @@ mod tests {
     fn constant_path_write_class_new_suppresses_target() {
         // `ProblemCheck::TestCheck = Class.new(ProblemCheck)` — target path is
         // a module definition; root of target should NOT be flagged.
-        // But `ProblemCheck` in the argument IS flagged.
+        // But `Class` (receiver) and `ProblemCheck` (argument) ARE flagged.
         let diags = crate::testutil::run_cop_full(
             &ConstantResolution,
             b"ProblemCheck::TestCheck = Class.new(ProblemCheck)\n",
         );
         assert_eq!(
             diags.len(),
-            1,
-            "Expected 1 offense for ProblemCheck arg, got: {:?}",
+            2,
+            "Expected 2 offenses (Class + ProblemCheck arg), got: {:?}",
             diags
         );
     }
@@ -347,14 +356,15 @@ mod tests {
     #[test]
     fn constant_path_write_module_new_suppresses_target() {
         // `Validators::Custom = Module.new` — the target is a module definition.
+        // `Module` (receiver of .new) is still an unqualified constant and IS flagged.
         let diags = crate::testutil::run_cop_full(
             &ConstantResolution,
             b"Validators::Custom = Module.new\n",
         );
         assert_eq!(
             diags.len(),
-            0,
-            "Expected 0 offenses, got: {:?}",
+            1,
+            "Expected 1 offense for Module, got: {:?}",
             diags
         );
     }
