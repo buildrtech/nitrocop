@@ -149,3 +149,40 @@ class WithConditionalAccessModifier
     @name = name
   end
 end
+
+# FP fix: access modifier with chained method call (not a bare access modifier)
+# e.g., module_function.should equal(nil) — module_function is the receiver of .should
+Module.new do
+  module_function.should equal(nil)
+end
+
+# FP fix: private/protected/public with chained method call
+(class << Object.new; self; end).class_eval do
+  def foo; end
+  private.should equal(nil)
+end
+
+(class << Object.new; self; end).class_eval do
+  def foo; end
+  protected.should equal(nil)
+end
+
+(class << Object.new; self; end).class_eval do
+  def foo; end
+  public.should equal(nil)
+end
+
+# FP fix: private + def inside unrecognized block inside single-statement module body
+# RuboCop's check_node only calls check_scope on begin-type bodies (multiple statements)
+module WithPrivateInUnrecognizedBlock
+  describe Hooks do
+    build_hooked do
+      before :add_around
+
+      private
+
+      def add_around
+      end
+    end
+  end
+end
