@@ -6,8 +6,7 @@ use regex::Regex;
 use crate::parse::source::SourceFile;
 
 static DIRECTIVE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // Anchored: nested comments like `#   # rubocop:disable all` must not match.
-    Regex::new(r"^#\s*(?:rubocop|nitrocop)\s*:\s*(disable|enable|todo)\s+(.+)").unwrap()
+    Regex::new(r"#\s*(?:rubocop|nitrocop)\s*:\s*(disable|enable|todo)\s+(.+)").unwrap()
 });
 
 /// Normalize a cop name from disable comments.
@@ -90,6 +89,17 @@ impl DisabledRanges {
             let Some(caps) = DIRECTIVE_RE.captures(comment_str) else {
                 continue;
             };
+
+            // Reject YARD doc nested comments like `#   # rubocop:disable all`
+            // where Prism reports the entire line as one comment token.
+            // The text before the directive match is only `#` + whitespace.
+            let match_start = caps.get(0).unwrap().start();
+            if match_start > 0 {
+                let prefix = &comment_str[..match_start];
+                if prefix.bytes().all(|b| b == b'#' || b == b' ' || b == b'\t') {
+                    continue;
+                }
+            }
 
             found_any = true;
 
@@ -924,6 +934,50 @@ mod tests {
         assert!(
             unused.is_empty(),
             "moved legacy alias directive should be marked used"
+        );
+    }
+
+    #[test]
+    fn yard_nested_comment_not_parsed_as_directive() {
+        // YARD doc examples: `#   # rubocop:disable all` should NOT be a real directive
+        let src = "# @example\n#   # rubocop:disable Layout/LineLength\n#   long_line = true\n#   # rubocop:enable Layout/LineLength\nx = 1\n";
+        let dr = disabled_ranges(src);
+        assert!(
+            !dr.is_disabled("Layout/LineLength", 5),
+            "YARD nested comment should not create a real disable range"
+        );
+    }
+
+    #[test]
+    fn directive_after_other_comment_text() {
+        // `# :nodoc: # rubocop:disable Foo/Bar` — the directive should be recognized
+        let src = "def foo # :nodoc: # rubocop:disable Naming/PredicateMethod\n  true\nend\n";
+        let dr = disabled_ranges(src);
+        assert!(
+            dr.is_disabled("Naming/PredicateMethod", 1),
+            "directive after :nodoc: should be recognized"
+        );
+    }
+
+    #[test]
+    fn directive_after_steep_ignore() {
+        // `# steep:ignore # rubocop:disable Metrics/BlockLength`
+        let src = "Obj = Lib.build do |c| # steep:ignore # rubocop:disable Metrics/BlockLength\n  x = 1\nend\n";
+        let dr = disabled_ranges(src);
+        assert!(
+            dr.is_disabled("Metrics/BlockLength", 1),
+            "directive after steep:ignore should be recognized"
+        );
+    }
+
+    #[test]
+    fn directive_after_descriptive_comment() {
+        // `# strip leading dot # rubocop:disable Performance/Foo`
+        let src = "x = key[1..] # strip leading dot # rubocop:disable Performance/ArraySemiInfiniteRangeSlice\ny = 2\n";
+        let dr = disabled_ranges(src);
+        assert!(
+            dr.is_disabled("Performance/ArraySemiInfiniteRangeSlice", 1),
+            "directive after descriptive comment should be recognized"
         );
     }
 
