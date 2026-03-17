@@ -25,6 +25,7 @@ use crate::parse::source::SourceFile;
 /// 3. Missed ALL migrate files in corpus mode (15,621 FN) — corpus paths have a
 ///    `vendor/corpus/repo_id/` prefix, so the non-globbed `db/migrate/**/*.rb`
 ///    pattern never matched.
+///
 /// Fix: removed `default_include` override. Commit 2026-03-17.
 pub struct SchemaComment;
 
