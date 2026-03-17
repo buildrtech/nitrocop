@@ -44,6 +44,30 @@ use ruby_prism::Visit;
 /// adding visit handlers for all three operator-write node types in
 /// `VarRefFinder`. Remaining FPs may be from VariableForce sophistication
 /// gaps (e.g., scope tracking differences).
+///
+/// ## Corpus investigation (2026-03-16)
+///
+/// Corpus oracle reported FP=13, FN=5320 (46.7% match).
+///
+/// FN=5320 root cause: `BlockVisitor` stopped at `def`/`class`/`module`
+/// nodes (line `fn visit_def_node(&mut self, _node) {}`), meaning blocks
+/// inside method bodies — which is essentially all real-world Ruby code —
+/// were never visited. Fixed by making `BlockVisitor` recurse into
+/// `def`/`class`/`module`/`singleton_class` bodies. The scope boundary
+/// for variable references is correctly handled by `VarRefFinder`, not
+/// `BlockVisitor`, so this is safe.
+///
+/// FP=13 root cause: `VarRefFinder` didn't recognize `def o.method` as a
+/// use of block argument `o`. When a block argument is used as the receiver
+/// of a singleton method definition (`def o.to_str; ...; end`), it IS a
+/// reference to that variable, but `DefNode` was being skipped entirely by
+/// `VarRefFinder`. Fixed by checking the receiver of `DefNode` — if it's a
+/// `LocalVariableReadNode`, the name is counted as referenced.
+///
+/// After fix: FP=0, FN=114 (98.9% match). Remaining 114 FN are edge cases
+/// (e.g., NumberedParametersNode, `for` loops, or other VariableForce
+/// subtleties that would require significantly more sophisticated scope
+/// tracking to match).
 pub struct UnusedBlockArgument;
 
 impl Cop for UnusedBlockArgument {
