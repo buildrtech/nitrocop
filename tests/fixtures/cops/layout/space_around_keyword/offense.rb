@@ -40,3 +40,5 @@ def bar; return(1); end
          ^^^^^^ Layout/SpaceAroundKeyword: Space after keyword `return` is missing.
 [1].each { |x|->do end.call }
                 ^^ Layout/SpaceAroundKeyword: Space before keyword `do` is missing.
+x = a==[]?self[m.to_s]:super
+                       ^^^^^ Layout/SpaceAroundKeyword: Space before keyword `super` is missing.

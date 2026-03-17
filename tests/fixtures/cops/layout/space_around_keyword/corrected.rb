@@ -26,3 +26,4 @@ f = "x"
 f.chop! until f[-1] != "/"
 def bar; return (1); end
 [1].each { |x|-> do end.call }
+x = a==[]?self[m.to_s]: super

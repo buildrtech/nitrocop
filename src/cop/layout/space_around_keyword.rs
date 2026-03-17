@@ -55,6 +55,19 @@ use crate::parse::source::SourceFile;
 ///   api-umbrella and other repos. The cop correctly detects these in unit
 ///   tests; remaining FN likely from config resolution or code_map issues
 ///   in the corpus pipeline.
+///
+/// **Round 5 (FP=0, FN=36):**
+/// - FN: `]:super` in camping's minified Ruby — ternary `condition ? val :super`.
+///   `is_symbol_literal` incorrectly treated `:super` as a symbol because it
+///   only checked for `::` prefix. Fixed by also rejecting `:` when immediately
+///   preceded by `)`, `]`, or `}` (expression-ending delimiters that never
+///   precede symbol literals). Fixes 2 camping FN.
+/// - Remaining FN (~34): `if(`, `case(`, `elsif(`, `return(` patterns across
+///   8 repos (26 in api-umbrella). Cop correctly detects these in unit tests.
+///   Root cause is external to cop logic — likely AllCops.Exclude `build/**/*`
+///   path matching differences between nitrocop and RuboCop in the corpus
+///   pipeline, or file-discovery divergence. Not a cop code bug.
+/// - Also fixed: offense.rb annotation column for `->do` (was off by 1).
 pub struct SpaceAroundKeyword;
 
 /// Keywords that accept `(` immediately after them (no space required).
@@ -393,7 +406,8 @@ fn preceded_by_def(bytes: &[u8], i: usize) -> bool {
 }
 
 /// Check if the keyword at position `i` is preceded by `:` making it a symbol literal.
-/// Returns true for `:end`, `:rescue`, etc. but NOT for `::rescue` (constant path).
+/// Returns true for `:end`, `:rescue`, etc. but NOT for `::rescue` (constant path)
+/// and NOT for ternary `:super` (where `:` is the else branch of `? :`).
 fn is_symbol_literal(bytes: &[u8], i: usize) -> bool {
     if i == 0 {
         return false;
@@ -403,6 +417,13 @@ fn is_symbol_literal(bytes: &[u8], i: usize) -> bool {
     }
     // It's `::` (constant path), not a symbol — handled separately by is_method_call
     if i >= 2 && bytes[i - 2] == b':' {
+        return false;
+    }
+    // Distinguish symbol `:keyword` from ternary `expr:keyword`.
+    // When `)`, `]`, or `}` immediately precede `:`, it's a ternary else operator,
+    // not a symbol. These closing delimiters always end expressions and never
+    // appear before a symbol literal in valid Ruby.
+    if i >= 2 && matches!(bytes[i - 2], b')' | b']' | b'}') {
         return false;
     }
     true
@@ -477,6 +498,25 @@ mod tests {
 
     crate::cop_fixture_tests!(SpaceAroundKeyword, "cops/layout/space_around_keyword");
     crate::cop_autocorrect_fixture_tests!(SpaceAroundKeyword, "cops/layout/space_around_keyword");
+
+    #[test]
+    fn ternary_colon_super_no_space_detected() {
+        // Ternary `]:super` — colon is ternary else, not a symbol prefix.
+        // Camping-style minified Ruby: `a==[]?self[m.to_s]:super`
+        let input = b"x = a==[]?self[m.to_s]:super\n";
+        let diags = crate::testutil::run_cop_full(&SpaceAroundKeyword, input);
+        let super_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("super"))
+            .collect();
+        assert_eq!(
+            super_diags.len(),
+            1,
+            "Expected 1 super offense but got {}: {:?}",
+            super_diags.len(),
+            super_diags
+        );
+    }
 
     #[test]
     fn autocorrect_insert_space() {

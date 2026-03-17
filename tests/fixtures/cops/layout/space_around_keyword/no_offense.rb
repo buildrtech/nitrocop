@@ -83,6 +83,9 @@ r = :ensure
 q = :do
 p_val = :super
 o = :yield
+# Symbol arguments to methods (not ternary)
+foo :super
+bar :rescue, :next
 
 # Method names that look like keywords with ! or ?
 ensure!
