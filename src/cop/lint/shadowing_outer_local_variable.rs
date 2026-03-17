@@ -54,6 +54,38 @@ use ruby_prism::Visit;
 ///   Blocks in the same `when` body that reuse the variable name are suppressed.
 ///   This matches RuboCop's `same_conditions_node_different_branch?` logic where both
 ///   the block and the outer variable resolve to the same conditional (case) node.
+///
+/// ## Corpus investigation (2026-03-17)
+///
+/// Corpus oracle reported FP=4, FN=26. After fixes: FP=0, FN=18.
+///
+/// FP fixes applied:
+/// - **Else clause suppression**: Added `in_else_of_if` tracking. When both the outer
+///   variable and block are in the same else clause, suppresses shadowing. Matches
+///   RuboCop's `variable_node == outer_local_variable_node.else_branch` check.
+///   Only set for actual else clauses, not elsif chains.
+/// - **If-predicate suppression**: Added `in_predicate_of_if` tracking. When the outer
+///   variable was assigned in an if/unless predicate (`if item = expr`) and the block
+///   is in the body or else of the same conditional, suppresses shadowing. Matches
+///   RuboCop's `variable_node == outer_local_variable_node` check.
+/// - **Adjacent elsif predicate refinement**: Skip adjacent elsif suppression when BOTH
+///   the outer variable and block are in predicates of adjacent elsifs. In Parser AST,
+///   the block inside `elsif x = find { |x| }` has a send parent (not the elsif node),
+///   so RuboCop's else_branch check doesn't match.
+/// - **Variable reassignment context preservation**: `add_local` now preserves the first
+///   assignment's conditional context on reassignment. Fixes FP where `node = x;
+///   node = y while cond` changed the variable's context from case/when to while.
+///
+/// FN fixes applied:
+/// - **Non-adjacent elsif branches**: Variables from 2+ elsifs apart now correctly
+///   shadow (e.g., `e` in elsif #2 shadowed by `|e|` in elsif #4).
+/// - **While-loop variable in else**: `part` assigned in `while` inside if-body correctly
+///   shadows `|part|` in the else clause of the same if.
+/// - **Block body scope inherits else context**: `build_block_body_scope` now receives
+///   `in_else_of_if` so block params get the correct else context for nested blocks.
+///
+/// Remaining FN (18): Various patterns including lambda scoping, complex control flow,
+/// and edge cases in VariableForce's variable_table lookup order.
 pub struct ShadowingOuterLocalVariable;
 
 impl Cop for ShadowingOuterLocalVariable {
