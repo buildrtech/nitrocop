@@ -42,20 +42,6 @@ use crate::parse::source::SourceFile;
 /// `collect_param_locations` only collected top-level params, so inner params
 /// of `MultiTargetNode` groups were never checked. Fix: recurse into
 /// `MultiTargetNode` children via `collect_multi_target_locations`.
-///
-/// ## Corpus investigation (2026-03-16)
-///
-/// Remaining FN=18, all "Space before first block parameter detected." in
-/// blocks with block-local variables using semicolon syntax (`|; foo|`,
-/// `|;glark|`, `|;a|`). Root cause: `collect_param_locations` only gathered
-/// regular params from `block_params.parameters()`, ignoring block-local
-/// variables from `block_params.locals()`. The byte-scanning approach
-/// (`first_non_ws`) treated the `;` as the first content, missing the gap
-/// between `|` and the local variable name. RuboCop's `arguments.children`
-/// includes shadow vars, so its first/last arg checks naturally span them.
-/// Fix: (1) include `BlockLocalVariableNode` locations in `collect_param_locations`,
-/// (2) replace byte-scanning with AST-based param positions for first/last
-/// arg boundary checks, (3) add `find_trailing_end` for trailing comma handling.
 pub struct SpaceAroundBlockParameters;
 
 /// Extracted info about a block or lambda's parameters and body.
@@ -120,28 +106,18 @@ impl Cop for SpaceAroundBlockParameters {
         if inner_start > inner_end || inner_end > bytes.len() {
             return;
         }
-
-        // Use AST-based param locations to determine first/last arg boundaries.
-        // This is more accurate than byte scanning because it correctly handles
-        // block-local variables (|; x| or |a; x|) where the semicolon should
-        // not be treated as the first/last parameter content.
-        let first_arg_start = info.param_locations.first().map(|&(s, _)| s);
-        let last_arg_end = info.param_locations.last().map(|&(_, e)| e);
-
-        let Some(first_arg_start) = first_arg_start else {
+        let Some(first_non_ws) = first_non_whitespace(bytes, inner_start, inner_end) else {
             return;
         };
-        let Some(last_arg_end) = last_arg_end else {
+        let Some(last_non_ws) = last_non_whitespace(bytes, inner_start, inner_end) else {
             return;
         };
-
-        // Account for trailing comma after last arg (RuboCop's last_end_pos_inside_pipes)
-        let trailing_start = find_trailing_end(bytes, last_arg_end, inner_end);
+        let trailing_start = last_non_ws + 1;
 
         match style {
             "no_space" => {
-                if first_arg_start > inner_start
-                    && !contains_line_break(bytes, inner_start, first_arg_start)
+                if first_non_ws > inner_start
+                    && !contains_line_break(bytes, inner_start, first_non_ws)
                 {
                     let (line, col) = source.offset_to_line_col(inner_start);
                     let mut diag = self.diagnostic(
@@ -153,7 +129,7 @@ impl Cop for SpaceAroundBlockParameters {
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
                             start: inner_start,
-                            end: first_arg_start,
+                            end: first_non_ws,
                             replacement: String::new(),
                             cop_name: self.name(),
                             cop_index: 0,
@@ -197,8 +173,8 @@ impl Cop for SpaceAroundBlockParameters {
                 );
             }
             "space" => {
-                let opening_has_newline = contains_line_break(bytes, inner_start, first_arg_start);
-                if !opening_has_newline && first_arg_start == inner_start {
+                let opening_has_newline = contains_line_break(bytes, inner_start, first_non_ws);
+                if !opening_has_newline && first_non_ws == inner_start {
                     let (line, col) = source.offset_to_line_col(inner_start);
                     let mut diag = self.diagnostic(
                         source,
@@ -219,7 +195,7 @@ impl Cop for SpaceAroundBlockParameters {
                     diagnostics.push(diag);
                 }
 
-                if !opening_has_newline && first_arg_start > inner_start + 1 {
+                if !opening_has_newline && first_non_ws > inner_start + 1 {
                     let extra_start = inner_start + 1;
                     let (line, col) = source.offset_to_line_col(extra_start);
                     let mut diag = self.diagnostic(
@@ -231,7 +207,7 @@ impl Cop for SpaceAroundBlockParameters {
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
                             start: extra_start,
-                            end: first_arg_start,
+                            end: first_non_ws,
                             replacement: String::new(),
                             cop_name: self.name(),
                             cop_index: 0,
@@ -445,58 +421,49 @@ fn extract_lambda_info(lambda: &ruby_prism::LambdaNode<'_>) -> Option<BlockInfo>
 /// Collect (start_offset, end_offset) for each parameter in the block_params.
 /// Recursively descends into destructured (MultiTargetNode) parameters to check
 /// inner args too, matching RuboCop's `check_arg` which recurses into `mlhs_type?`.
-/// Also includes block-local variables (`|x; local|`) since RuboCop treats them
-/// as children of the arguments node for spacing purposes.
 fn collect_param_locations(
     block_params: &ruby_prism::BlockParametersNode<'_>,
 ) -> Vec<(usize, usize)> {
+    let Some(params_node) = block_params.parameters() else {
+        return Vec::new();
+    };
+
     let mut locations = Vec::new();
 
-    if let Some(params_node) = block_params.parameters() {
-        // Collect all required, optional, rest, keyword, etc. parameters
-        for p in params_node.requireds().iter() {
-            locations.push((p.location().start_offset(), p.location().end_offset()));
-            // Recurse into destructured params like (x, y)
-            if let Some(mt) = p.as_multi_target_node() {
-                collect_multi_target_locations(&mt, &mut locations);
-            }
-        }
-        for p in params_node.optionals().iter() {
-            locations.push((p.location().start_offset(), p.location().end_offset()));
-        }
-        if let Some(rest) = params_node.rest() {
-            locations.push((rest.location().start_offset(), rest.location().end_offset()));
-        }
-        for p in params_node.posts().iter() {
-            locations.push((p.location().start_offset(), p.location().end_offset()));
-            if let Some(mt) = p.as_multi_target_node() {
-                collect_multi_target_locations(&mt, &mut locations);
-            }
-        }
-        for p in params_node.keywords().iter() {
-            locations.push((p.location().start_offset(), p.location().end_offset()));
-        }
-        if let Some(kw_rest) = params_node.keyword_rest() {
-            locations.push((
-                kw_rest.location().start_offset(),
-                kw_rest.location().end_offset(),
-            ));
-        }
-        if let Some(block) = params_node.block() {
-            locations.push((
-                block.location().start_offset(),
-                block.location().end_offset(),
-            ));
+    // Collect all required, optional, rest, keyword, etc. parameters
+    for p in params_node.requireds().iter() {
+        locations.push((p.location().start_offset(), p.location().end_offset()));
+        // Recurse into destructured params like (x, y)
+        if let Some(mt) = p.as_multi_target_node() {
+            collect_multi_target_locations(&mt, &mut locations);
         }
     }
-
-    // Collect block-local variables (|x; local_var| or |; local_var|).
-    // RuboCop's `arguments.children` includes these as shadow variables,
-    // and they participate in the first/last arg spacing checks.
-    for local in block_params.locals().iter() {
-        if let Some(blv) = local.as_block_local_variable_node() {
-            locations.push((blv.location().start_offset(), blv.location().end_offset()));
+    for p in params_node.optionals().iter() {
+        locations.push((p.location().start_offset(), p.location().end_offset()));
+    }
+    if let Some(rest) = params_node.rest() {
+        locations.push((rest.location().start_offset(), rest.location().end_offset()));
+    }
+    for p in params_node.posts().iter() {
+        locations.push((p.location().start_offset(), p.location().end_offset()));
+        if let Some(mt) = p.as_multi_target_node() {
+            collect_multi_target_locations(&mt, &mut locations);
         }
+    }
+    for p in params_node.keywords().iter() {
+        locations.push((p.location().start_offset(), p.location().end_offset()));
+    }
+    if let Some(kw_rest) = params_node.keyword_rest() {
+        locations.push((
+            kw_rest.location().start_offset(),
+            kw_rest.location().end_offset(),
+        ));
+    }
+    if let Some(block) = params_node.block() {
+        locations.push((
+            block.location().start_offset(),
+            block.location().end_offset(),
+        ));
     }
 
     // Sort by start offset so we process them in order
@@ -533,21 +500,14 @@ fn collect_multi_target_locations(
     }
 }
 
-/// Find the end position after the last arg, including any trailing comma.
-/// Matches RuboCop's `last_end_pos_inside_pipes` which scans forward from the
-/// last arg's end for a trailing comma and includes it.
-fn find_trailing_end(bytes: &[u8], last_arg_end: usize, inner_end: usize) -> usize {
-    let mut pos = last_arg_end;
-    // Skip whitespace after last arg
-    while pos < inner_end && matches!(bytes[pos], b' ' | b'\t') {
-        pos += 1;
-    }
-    // Include trailing comma if present
-    if pos < inner_end && bytes[pos] == b',' {
-        pos + 1
-    } else {
-        last_arg_end
-    }
+fn first_non_whitespace(bytes: &[u8], start: usize, end: usize) -> Option<usize> {
+    (start..end).find(|&idx| !matches!(bytes[idx], b' ' | b'\t' | b'\n' | b'\r'))
+}
+
+fn last_non_whitespace(bytes: &[u8], start: usize, end: usize) -> Option<usize> {
+    (start..end)
+        .rev()
+        .find(|&idx| !matches!(bytes[idx], b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 fn contains_line_break(bytes: &[u8], start: usize, end: usize) -> bool {

@@ -34,12 +34,3 @@ items.each { |a,  (x,  y),  z| puts x }
                  ^ Layout/SpaceAroundBlockParameters: Extra space before block parameter detected.
                       ^ Layout/SpaceAroundBlockParameters: Extra space before block parameter detected.
                            ^ Layout/SpaceAroundBlockParameters: Extra space before block parameter detected.
-
-[1].each {|; foo| foo }
-           ^ Layout/SpaceAroundBlockParameters: Space before first block parameter detected.
-
-[1].each {|;glark| 1}
-           ^ Layout/SpaceAroundBlockParameters: Space before first block parameter detected.
-
-1.times do |;a|
-            ^ Layout/SpaceAroundBlockParameters: Space before first block parameter detected.

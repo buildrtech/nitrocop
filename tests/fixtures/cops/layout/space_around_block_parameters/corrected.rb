@@ -19,9 +19,3 @@ items.each { |x, y| puts x }
 items.each { |a, (x, y), z| puts x }
 
 items.each { |a, (x, y), z| puts x }
-
-[1].each {|foo| foo }
-
-[1].each {|glark| 1}
-
-1.times do |a|
