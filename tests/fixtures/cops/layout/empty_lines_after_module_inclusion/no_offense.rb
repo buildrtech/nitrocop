@@ -161,3 +161,22 @@ def expected_items
   include(first_item.uri, second_item.uri)
     .and(not_include(excluded_item.uri))
 end
+
+# include with rescue modifier followed by another include (grouped)
+class Legacy
+  include Serializable rescue NameError
+  include Comparable
+
+  def setup; end
+end
+
+# include inside multi-statement if followed by empty line (no offense)
+class Config
+  if RUBY_VERSION >= '1.9'
+    include Comparable
+
+    def <=>(other)
+      name <=> other.name
+    end
+  end
+end

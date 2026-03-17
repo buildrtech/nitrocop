@@ -55,3 +55,48 @@ def setup
   ^^^^^^^^^^^^^^^^ Layout/EmptyLinesAfterModuleInclusion: Add an empty line after module inclusion.
   do_stuff
 end
+
+# include inside multi-statement if body (parent is begin, not if)
+class Config
+  if RUBY_VERSION >= '1.9'
+    include Comparable
+    ^^^^^^^^^^^^^^^^^^^ Layout/EmptyLinesAfterModuleInclusion: Add an empty line after module inclusion.
+    def <=>(other)
+      name <=> other.name
+    end
+  end
+end
+
+# extend inside multi-statement if body
+class Worker
+  if feature_enabled?
+    extend Forwardable
+    ^^^^^^^^^^^^^^^^^^^ Layout/EmptyLinesAfterModuleInclusion: Add an empty line after module inclusion.
+    def_delegator :config, :timeout
+  end
+end
+
+# include inside begin...rescue block
+class Service
+  begin
+    include Serializable
+    ^^^^^^^^^^^^^^^^^^^^ Layout/EmptyLinesAfterModuleInclusion: Add an empty line after module inclusion.
+    validate :check_format
+  rescue NameError
+    use_fallback
+  end
+end
+
+# include with rescue modifier followed by non-include code
+class Provider
+  include Logging rescue LoadError
+  ^^^^^^^^^^^^^^^ Layout/EmptyLinesAfterModuleInclusion: Add an empty line after module inclusion.
+  validate :check_config
+end
+
+# extend with rescue modifier followed by non-include code
+module Helpers
+  extend Formatting rescue NameError
+  ^^^^^^^^^^^^^^^^^ Layout/EmptyLinesAfterModuleInclusion: Add an empty line after module inclusion.
+  def setup; end
+end

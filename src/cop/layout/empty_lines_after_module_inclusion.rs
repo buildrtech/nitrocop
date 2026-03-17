@@ -30,6 +30,23 @@ use crate::parse::source::SourceFile;
 ///
 /// The cop now follows RuboCop's sibling-oriented behavior instead of trying
 /// to infer a narrower "real module body" context from surrounding nodes.
+///
+/// ## Investigation findings (2026-03-17)
+///
+/// 88 FNs across 52 repos from two root causes:
+///
+/// 1. **if/unless body over-suppression**: The `in_if_body` flag was set for
+///    ALL descendants of if/unless nodes. RuboCop only skips when
+///    `node.parent.if_type?` — true only when the include is the sole
+///    statement in a branch (single child of if node). Multi-statement
+///    branches use a `begin` parent, so `if_type?` is false and the cop
+///    fires. Fix: only set `in_if_body` when `StatementsNode.body().len() <= 1`.
+///
+/// 2. **Rescue modifier false skip**: `include Foo rescue Bar` wraps the call
+///    in a `RescueModifierNode`. The `line_has_trailing_code` check saw
+///    `rescue Bar` as trailing code and bailed out. Fix: handle
+///    `visit_rescue_modifier_node` to pass the modifier's end_offset,
+///    bypassing the trailing-code check.
 pub struct EmptyLinesAfterModuleInclusion;
 
 const MODULE_INCLUSION_METHODS: &[&[u8]] = &[b"include", b"extend", b"prepend"];
@@ -171,7 +188,11 @@ struct InclusionVisitor<'a> {
 }
 
 impl InclusionVisitor<'_> {
-    fn check_call(&mut self, call: &ruby_prism::CallNode<'_>) {
+    /// Check whether a call node is an include/extend/prepend at module level.
+    /// `end_offset_override` allows rescue modifiers to pass their own end offset,
+    /// since `include Foo rescue Bar` has trailing code after the call but before
+    /// the rescue modifier's end.
+    fn check_call(&mut self, call: &ruby_prism::CallNode<'_>, end_offset_override: Option<usize>) {
         // Must be a bare call (no receiver)
         if call.receiver().is_some() {
             return;
@@ -200,12 +221,15 @@ impl InclusionVisitor<'_> {
         }
 
         let loc = call.location();
+        let effective_end = end_offset_override.unwrap_or_else(|| loc.end_offset());
         let (last_line, _) = self
             .source
-            .offset_to_line_col(loc.end_offset().saturating_sub(1));
+            .offset_to_line_col(effective_end.saturating_sub(1));
         let lines: Vec<&[u8]> = self.source.lines().collect();
 
-        if line_has_trailing_code(self.source, &loc) {
+        // Only check for trailing code when no end_offset_override is provided
+        // (rescue modifiers provide their own end offset so trailing code is expected)
+        if end_offset_override.is_none() && line_has_trailing_code(self.source, &loc) {
             return;
         }
 
@@ -277,7 +301,7 @@ impl InclusionVisitor<'_> {
 impl<'pr> Visit<'pr> for InclusionVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Check if this call is an include/extend/prepend at the right level
-        self.check_call(node);
+        self.check_call(node, None);
 
         // When descending into arguments of a call node, mark that we're
         // inside a "send" context. This prevents include/extend/prepend
@@ -404,20 +428,78 @@ impl<'pr> Visit<'pr> for InclusionVisitor<'_> {
     }
 
     // If/unless bodies: RuboCop's `next_line_node` returns nil when
-    // `node.parent.if_type?`, so include/extend/prepend inside if/unless
-    // bodies are never flagged.
+    // `node.parent.if_type?`, meaning the include is the *direct* child
+    // of the if node (sole statement in a branch). In Prism, branches always
+    // use StatementsNode, so we check statement count: only skip when the
+    // branch has exactly 1 statement (matching RuboCop's single-child parent).
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
         let was = self.in_if_body;
-        self.in_if_body = true;
-        ruby_prism::visit_if_node(self, node);
+
+        // Visit predicate normally
+        self.visit(&node.predicate());
+
+        // Visit then-branch: only set in_if_body for single-statement branches
+        if let Some(stmts) = node.statements() {
+            self.in_if_body = stmts.body().len() <= 1;
+            self.visit(&stmts.as_node());
+        }
+
+        // Visit else/elsif branch
+        if let Some(subsequent) = node.subsequent() {
+            // elsif is another IfNode — it will handle its own branches
+            // else branch: check if it's an ElseNode with single statement
+            if let Some(else_node) = subsequent.as_else_node() {
+                if let Some(else_stmts) = else_node.statements() {
+                    self.in_if_body = else_stmts.body().len() <= 1;
+                    self.visit(&else_stmts.as_node());
+                }
+            } else {
+                // elsif — recurse via visit_if_node which handles its own logic
+                self.in_if_body = was;
+                self.visit(&subsequent);
+            }
+        }
+
         self.in_if_body = was;
     }
 
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         let was = self.in_if_body;
-        self.in_if_body = true;
-        ruby_prism::visit_unless_node(self, node);
+
+        // Visit predicate normally
+        self.visit(&node.predicate());
+
+        // Visit then-branch: only set in_if_body for single-statement branches
+        if let Some(stmts) = node.statements() {
+            self.in_if_body = stmts.body().len() <= 1;
+            self.visit(&stmts.as_node());
+        }
+
+        // Visit else branch
+        if let Some(else_clause) = node.else_clause() {
+            if let Some(else_stmts) = else_clause.statements() {
+                self.in_if_body = else_stmts.body().len() <= 1;
+                self.visit(&else_stmts.as_node());
+            }
+        }
+
         self.in_if_body = was;
+    }
+
+    // Rescue modifier: `include Foo rescue Bar` wraps the include call
+    // in a RescueModifierNode. The call's end_offset is at `Foo`, but the
+    // line continues with `rescue Bar`. Without special handling,
+    // line_has_trailing_code would bail out. Pass the rescue modifier's
+    // end_offset so the trailing-code check is skipped and the line-end
+    // position is correct.
+    fn visit_rescue_modifier_node(&mut self, node: &ruby_prism::RescueModifierNode<'pr>) {
+        let expr = node.expression();
+        if let Some(call) = expr.as_call_node() {
+            self.check_call(&call, Some(node.location().end_offset()));
+        } else {
+            self.visit(&expr);
+        }
+        self.visit(&node.rescue_expression());
     }
 
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
