@@ -42,6 +42,22 @@ use crate::parse::source::SourceFile;
 /// `collect_param_locations` only collected top-level params, so inner params
 /// of `MultiTargetNode` groups were never checked. Fix: recurse into
 /// `MultiTargetNode` children via `collect_multi_target_locations`.
+///
+/// ## Known false negatives (18 FN in corpus as of 2026-03-17)
+///
+/// An attempt was made to fix block-local variable FNs (commit 19d87d7b,
+/// reverted ffa7be5a). The approach: include `BlockLocalVariableNode` from
+/// `block_params.locals()` in `collect_param_locations`, and replace byte
+/// scanning (`first_non_ws`/`last_non_ws`) with AST-based param positions.
+/// Code path changed: `collect_param_locations` + first/last arg boundary checks.
+/// Acceptance gate before: expected=551, actual=551, excess=0, missing=0.
+/// Acceptance gate after: expected=569, actual=2,284, excess=1,733, missing=0.
+/// This fixed the 18 block-local FNs but introduced 1,411 NEW false positives.
+/// Root cause of regression: replacing byte scanning with AST positions changed
+/// how first/last argument boundaries are calculated for ALL blocks, not just
+/// those with block-local variables. The fix was too broad.
+/// A correct fix needs to: keep byte scanning for normal blocks, and only add
+/// special handling for the semicolon+locals case (|; x| or |a; x|).
 pub struct SpaceAroundBlockParameters;
 
 /// Extracted info about a block or lambda's parameters and body.
