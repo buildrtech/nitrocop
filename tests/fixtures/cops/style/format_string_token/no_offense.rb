@@ -14,3 +14,17 @@ i = ['%{', '}']
 j = '%<'
 # Interpolated string with %{ that doesn't form complete token
 k = "%{#{keyword}}"
+# Unannotated tokens in interpolated format strings are NOT flagged
+# because str parts inside dstr don't have format context in RuboCop
+l = format("#{prefix} %s %s", a, b)
+m = sprintf("#{prefix} %d %d", a, b)
+# Unannotated in heredoc used as format string
+n = format(<<~FMT, a, b)
+  %s
+  %s
+FMT
+# Unannotated tokens in non-format-context string
+o = "contains %s and %d tokens"
+# Strings inside backtick (xstr) context are skipped
+p = `curl -w '%{http_code}' http://example.com`
+q = `echo %{name} %s`

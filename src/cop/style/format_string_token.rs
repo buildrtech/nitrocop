@@ -4,128 +4,182 @@ use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 use std::collections::HashSet;
 
+/// Corpus investigation (FP=120, FN=161):
+/// Root cause: nitrocop reported one offense per string at the string's start position,
+/// while RuboCop reports one offense per format token at the token's exact position.
+/// For heredocs and interpolated strings, this caused offenses at the wrong line (FP)
+/// and missed per-token offenses on content lines (FN).
+///
+/// Additionally, format context for unannotated tokens was incorrectly propagated to
+/// string parts inside interpolated strings. RuboCop's `format_string_in_typical_context?`
+/// checks only the immediate parent node, so str parts inside a dstr (even when the dstr
+/// is a format arg) are NOT in format context. This matches RuboCop's conservative treatment
+/// of unannotated tokens in interpolated format strings.
+///
+/// Fix: per-token reporting at exact source positions + format context only for top-level
+/// string nodes (not propagated to parts of interpolated strings).
 pub struct FormatStringToken;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenStyle {
+    Annotated,
+    Template,
+    Unannotated,
+}
+
+struct FormatToken {
+    style: TokenStyle,
+    /// Byte offset within the content string where this token starts
+    offset: usize,
+}
+
 impl FormatStringToken {
-    /// Check for annotated tokens like %<name>s
-    /// Requires a complete %<word_chars>type pattern matching RuboCop's NAME regex.
-    fn has_annotated_token(s: &str) -> bool {
-        let bytes = s.as_bytes();
+    /// Find all format tokens in a string and return their styles and positions.
+    /// Handles: annotated (%<name>s), template (%{name}), unannotated (%s),
+    /// positional (%1$s), and template-with-flags (%-20.5{name}).
+    fn find_tokens(s: &[u8]) -> Vec<FormatToken> {
+        let mut tokens = Vec::new();
         let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'%' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+        while i < s.len() {
+            if s[i] == b'%' && i + 1 < s.len() {
+                if s[i + 1] == b'%' {
                     i += 2;
                     continue;
                 }
-                if i + 1 < bytes.len() && bytes[i + 1] == b'<' {
-                    // Must have at least one word character followed by closing >
-                    let mut j = i + 2;
-                    let mut has_word_char = false;
-                    while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-                    {
-                        has_word_char = true;
-                        j += 1;
-                    }
-                    if has_word_char && j < bytes.len() && bytes[j] == b'>' {
-                        return true;
-                    }
-                }
-            }
-            i += 1;
-        }
-        false
-    }
-
-    /// Check for template tokens like %{name}
-    /// Requires a complete %{word_chars} pattern matching RuboCop's TEMPLATE_NAME regex.
-    fn has_template_token(s: &str) -> bool {
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'%' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
-                    i += 2;
-                    continue;
-                }
-                if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-                    // Must have at least one word character followed by closing }
-                    let mut j = i + 2;
-                    let mut has_word_char = false;
-                    while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-                    {
-                        has_word_char = true;
-                        j += 1;
-                    }
-                    if has_word_char && j < bytes.len() && bytes[j] == b'}' {
-                        return true;
-                    }
-                }
-            }
-            i += 1;
-        }
-        false
-    }
-
-    /// Check for unannotated tokens like %s, %d, %f
-    fn count_unannotated_tokens(s: &str) -> usize {
-        let bytes = s.as_bytes();
-        let mut count = 0;
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'%' && i + 1 < bytes.len() {
-                let next = bytes[i + 1];
-                if next == b'%' {
-                    i += 2;
-                    continue;
-                }
-                if next == b'<' || next == b'{' {
-                    i += 2;
-                    continue;
-                }
-                // Skip flags and width
+                let start = i;
                 let mut j = i + 1;
-                while j < bytes.len()
-                    && (bytes[j] == b'-'
-                        || bytes[j] == b'+'
-                        || bytes[j] == b' '
-                        || bytes[j] == b'0'
-                        || bytes[j] == b'#'
-                        || bytes[j].is_ascii_digit()
-                        || bytes[j] == b'.'
-                        || bytes[j] == b'*')
-                {
+
+                // Skip positional specifier: N$ (digits followed by $)
+                let pos_start = j;
+                while j < s.len() && s[j].is_ascii_digit() {
                     j += 1;
                 }
-                if j < bytes.len()
-                    && matches!(
-                        bytes[j],
-                        b's' | b'd'
-                            | b'f'
-                            | b'g'
-                            | b'e'
-                            | b'x'
-                            | b'X'
-                            | b'o'
-                            | b'b'
-                            | b'B'
-                            | b'i'
-                            | b'u'
-                            | b'c'
-                            | b'p'
-                            | b'a'
-                            | b'A'
-                            | b'E'
-                            | b'G'
-                    )
-                {
-                    count += 1;
+                if j > pos_start && j < s.len() && s[j] == b'$' {
+                    j += 1; // skip $
+                } else {
+                    j = pos_start; // reset if no $
+                }
+
+                // Skip flags: -, +, space, 0, #
+                while j < s.len() && matches!(s[j], b'-' | b'+' | b' ' | b'0' | b'#') {
+                    j += 1;
+                }
+
+                // Skip width: digits or * (with optional N$)
+                if j < s.len() && s[j] == b'*' {
+                    j += 1;
+                    // Width from positional arg: *N$
+                    let w_start = j;
+                    while j < s.len() && s[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j > w_start && j < s.len() && s[j] == b'$' {
+                        j += 1;
+                    } else {
+                        j = w_start; // no N$ after *, that's fine
+                    }
+                } else {
+                    while j < s.len() && s[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                }
+
+                // Skip precision: .digits or .* (with optional N$)
+                if j < s.len() && s[j] == b'.' {
+                    j += 1;
+                    if j < s.len() && s[j] == b'*' {
+                        j += 1;
+                        let p_start = j;
+                        while j < s.len() && s[j].is_ascii_digit() {
+                            j += 1;
+                        }
+                        if j > p_start && j < s.len() && s[j] == b'$' {
+                            j += 1;
+                        } else {
+                            j = p_start; // no N$ after .*, fine
+                        }
+                    } else {
+                        while j < s.len() && s[j].is_ascii_digit() {
+                            j += 1;
+                        }
+                    }
+                }
+
+                // Now check what follows: type letter, {name}, or <name>
+                if j < s.len() && s[j] == b'<' {
+                    // Annotated: %[N$][flags][width][.prec]<name>type
+                    let mut k = j + 1;
+                    let mut has_word_char = false;
+                    while k < s.len() && (s[k].is_ascii_alphanumeric() || s[k] == b'_') {
+                        has_word_char = true;
+                        k += 1;
+                    }
+                    if has_word_char && k < s.len() && s[k] == b'>' {
+                        k += 1;
+                        // Optional trailing type after >
+                        if k < s.len() && is_format_type(s[k]) {
+                            k += 1;
+                        }
+                        tokens.push(FormatToken {
+                            style: TokenStyle::Annotated,
+                            offset: start,
+                        });
+                        i = k;
+                        continue;
+                    }
+                } else if j < s.len() && s[j] == b'{' {
+                    // Template: %[flags][width][.prec]{name}
+                    let mut k = j + 1;
+                    let mut has_word_char = false;
+                    while k < s.len() && (s[k].is_ascii_alphanumeric() || s[k] == b'_') {
+                        has_word_char = true;
+                        k += 1;
+                    }
+                    if has_word_char && k < s.len() && s[k] == b'}' {
+                        tokens.push(FormatToken {
+                            style: TokenStyle::Template,
+                            offset: start,
+                        });
+                        i = k + 1;
+                        continue;
+                    }
+                } else if j < s.len() && is_format_type(s[j]) {
+                    // Unannotated: %[N$][flags][width][.prec]type
+                    tokens.push(FormatToken {
+                        style: TokenStyle::Unannotated,
+                        offset: start,
+                    });
+                    i = j + 1;
+                    continue;
                 }
             }
             i += 1;
         }
-        count
+        tokens
     }
+}
+
+fn is_format_type(b: u8) -> bool {
+    matches!(
+        b,
+        b's' | b'd'
+            | b'f'
+            | b'g'
+            | b'e'
+            | b'x'
+            | b'X'
+            | b'o'
+            | b'b'
+            | b'B'
+            | b'i'
+            | b'u'
+            | b'c'
+            | b'p'
+            | b'a'
+            | b'A'
+            | b'E'
+            | b'G'
+    )
 }
 
 impl Cop for FormatStringToken {
@@ -159,6 +213,7 @@ impl Cop for FormatStringToken {
             allowed_patterns,
             format_context_offsets: HashSet::new(),
             allowed_method_string_offsets: HashSet::new(),
+            inside_xstr_or_regexp: 0,
         };
 
         // First pass: collect offsets of strings in format contexts and allowed method contexts
@@ -202,12 +257,21 @@ impl FormatContextCollector<'_> {
         false
     }
 
-    /// Collect start offsets of all string/interpolated-string nodes in a subtree
-    fn collect_string_offsets(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<usize>) {
+    /// Collect start offset of the top-level string/interpolated-string node only.
+    /// Does NOT propagate to parts inside interpolated strings, matching RuboCop's
+    /// `format_string_in_typical_context?` which only checks the immediate parent.
+    fn collect_top_level_string_offset(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<usize>) {
         if node.as_string_node().is_some() || node.as_interpolated_string_node().is_some() {
             offsets.insert(node.location().start_offset());
         }
-        // Also check inside interpolated strings for their parts
+    }
+
+    /// Collect start offsets of all string/interpolated-string nodes in a subtree
+    /// (for allowed methods, which suppress all string args regardless of nesting)
+    fn collect_all_string_offsets(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<usize>) {
+        if node.as_string_node().is_some() || node.as_interpolated_string_node().is_some() {
+            offsets.insert(node.location().start_offset());
+        }
         struct StringCollector<'a> {
             offsets: &'a mut HashSet<usize>,
         }
@@ -236,11 +300,14 @@ impl<'pr> Visit<'pr> for FormatContextCollector<'_> {
 
         // Check if this is a format method: format, sprintf, printf
         if matches!(method_name, "format" | "sprintf" | "printf") {
-            // The first argument is the format string
+            // The first argument is the format string - only mark the top-level node
             if let Some(args) = node.arguments() {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
                 if !arg_list.is_empty() {
-                    Self::collect_string_offsets(&arg_list[0], self.format_context_offsets);
+                    Self::collect_top_level_string_offset(
+                        &arg_list[0],
+                        self.format_context_offsets,
+                    );
                 }
             }
         }
@@ -248,7 +315,7 @@ impl<'pr> Visit<'pr> for FormatContextCollector<'_> {
         // Check if this is the % operator: "string" % args
         if method_name == "%" {
             if let Some(receiver) = node.receiver() {
-                Self::collect_string_offsets(&receiver, self.format_context_offsets);
+                Self::collect_top_level_string_offset(&receiver, self.format_context_offsets);
             }
         }
 
@@ -257,7 +324,7 @@ impl<'pr> Visit<'pr> for FormatContextCollector<'_> {
             // All string arguments to this method should be suppressed
             if let Some(args) = node.arguments() {
                 for arg in args.arguments().iter() {
-                    Self::collect_string_offsets(&arg, self.allowed_method_string_offsets);
+                    Self::collect_all_string_offsets(&arg, self.allowed_method_string_offsets);
                 }
             }
         }
@@ -275,22 +342,148 @@ struct FormatStringTokenVisitor<'a> {
     conservative: bool,
     allowed_methods: Option<Vec<String>>,
     allowed_patterns: Option<Vec<String>>,
-    /// Offsets of strings that are in a format context (format/sprintf/printf/%)
+    /// Offsets of top-level strings that are in a format context (format/sprintf/printf/%)
     format_context_offsets: HashSet<usize>,
     /// Offsets of strings that are args to allowed methods
     allowed_method_string_offsets: HashSet<usize>,
+    /// Depth counter for xstr/regexp contexts (skip strings inside these)
+    inside_xstr_or_regexp: usize,
 }
 
-impl<'pr> Visit<'pr> for FormatStringTokenVisitor<'_> {
-    fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
-        let content_bytes = node.unescaped();
-        let content_str = match std::str::from_utf8(content_bytes) {
+impl FormatStringTokenVisitor<'_> {
+    fn check_string_content(
+        &mut self,
+        content: &[u8],
+        content_start_offset: usize,
+        in_format_context: bool,
+    ) {
+        let content_str = match std::str::from_utf8(content) {
             Ok(s) => s,
             Err(_) => return,
         };
 
-        // Skip strings inside regexp or xstr (handled by format_string_token? in RuboCop)
         if !content_str.contains('%') {
+            return;
+        }
+
+        let tokens = FormatStringToken::find_tokens(content);
+        if tokens.is_empty() {
+            return;
+        }
+
+        // Separate tokens by style
+        let unannotated: Vec<&FormatToken> = tokens
+            .iter()
+            .filter(|t| t.style == TokenStyle::Unannotated)
+            .collect();
+        let named: Vec<&FormatToken> = tokens
+            .iter()
+            .filter(|t| t.style != TokenStyle::Unannotated)
+            .collect();
+
+        // Per RuboCop: unannotated tokens are always treated conservatively.
+        // Only flag when the string is directly in a format context (not parts of dstr).
+        let check_unannotated = in_format_context;
+        let check_named = if self.conservative {
+            in_format_context
+        } else {
+            true
+        };
+
+        match self.style.as_str() {
+            "annotated" => {
+                // Flag template tokens
+                if check_named {
+                    for tok in &named {
+                        if tok.style == TokenStyle::Template {
+                            let (line, column) = self
+                                .source
+                                .offset_to_line_col(content_start_offset + tok.offset);
+                            self.diagnostics.push(self.cop.diagnostic(
+                                self.source,
+                                line,
+                                column,
+                                "Prefer annotated tokens (like `%<foo>s`) over template tokens (like `%{foo}`).".to_string(),
+                            ));
+                        }
+                    }
+                }
+                // Flag unannotated tokens (only if count exceeds max AND in format context)
+                if check_unannotated && unannotated.len() > self.max_unannotated {
+                    // RuboCop reports one offense per unannotated token
+                    for tok in &unannotated {
+                        let (line, column) = self
+                            .source
+                            .offset_to_line_col(content_start_offset + tok.offset);
+                        self.diagnostics.push(self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            "Prefer annotated tokens (like `%<foo>s`) over unannotated tokens (like `%s`).".to_string(),
+                        ));
+                    }
+                }
+            }
+            "template" => {
+                if check_named {
+                    for tok in &named {
+                        if tok.style == TokenStyle::Annotated {
+                            let (line, column) = self
+                                .source
+                                .offset_to_line_col(content_start_offset + tok.offset);
+                            self.diagnostics.push(self.cop.diagnostic(
+                                self.source,
+                                line,
+                                column,
+                                "Prefer template tokens (like `%{foo}`) over annotated tokens (like `%<foo>s`).".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if check_unannotated && unannotated.len() > self.max_unannotated {
+                    for tok in &unannotated {
+                        let (line, column) = self
+                            .source
+                            .offset_to_line_col(content_start_offset + tok.offset);
+                        self.diagnostics.push(self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            "Prefer template tokens (like `%{foo}`) over unannotated tokens (like `%s`).".to_string(),
+                        ));
+                    }
+                }
+            }
+            "unannotated" => {
+                if check_named {
+                    for tok in &named {
+                        let msg = if tok.style == TokenStyle::Annotated {
+                            "Prefer unannotated tokens (like `%s`) over annotated tokens (like `%<foo>s`)."
+                        } else {
+                            "Prefer unannotated tokens (like `%s`) over template tokens (like `%{foo}`)."
+                        };
+                        let (line, column) = self
+                            .source
+                            .offset_to_line_col(content_start_offset + tok.offset);
+                        self.diagnostics.push(self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            msg.to_string(),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for FormatStringTokenVisitor<'_> {
+    fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+        // Skip strings inside xstr (backticks) or regexp, matching RuboCop's
+        // format_string_token? which checks node.each_ancestor(:xstr, :regexp).any?
+        if self.inside_xstr_or_regexp > 0 {
             return;
         }
 
@@ -301,85 +494,44 @@ impl<'pr> Visit<'pr> for FormatStringTokenVisitor<'_> {
             return;
         }
 
-        let has_annotated = FormatStringToken::has_annotated_token(content_str);
-        let has_template = FormatStringToken::has_template_token(content_str);
-        let unannotated_count = FormatStringToken::count_unannotated_tokens(content_str);
-
         let in_format_context = self.format_context_offsets.contains(&offset);
 
-        // Per RuboCop: unannotated tokens are always treated conservatively.
-        // They are only flagged when the string is in a format context.
-        // In conservative mode, ALL token types are only flagged in format context.
-        let check_unannotated = in_format_context;
-        let check_named = if self.conservative {
-            in_format_context
-        } else {
-            true
-        };
+        // Use content_loc for positional mapping (raw source bytes)
+        let content_loc = node.content_loc();
+        let content = content_loc.as_slice();
+        let content_start = content_loc.start_offset();
 
-        let loc = node.location();
-        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+        self.check_string_content(content, content_start, in_format_context);
+    }
 
-        match self.style.as_str() {
-            "annotated" => {
-                if has_template && check_named {
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Prefer annotated tokens (like `%<foo>s`) over template tokens (like `%{foo}`).".to_string(),
-                    ));
-                    return;
-                }
-                if unannotated_count > self.max_unannotated && check_unannotated {
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Prefer annotated tokens (like `%<foo>s`) over unannotated tokens (like `%s`).".to_string(),
-                    ));
-                }
-            }
-            "template" => {
-                if has_annotated && check_named {
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Prefer template tokens (like `%{foo}`) over annotated tokens (like `%<foo>s`).".to_string(),
-                    ));
-                    return;
-                }
-                if unannotated_count > self.max_unannotated && check_unannotated {
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Prefer template tokens (like `%{foo}`) over unannotated tokens (like `%s`).".to_string(),
-                    ));
-                }
-            }
-            "unannotated" => {
-                if has_annotated && check_named {
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Prefer unannotated tokens (like `%s`) over annotated tokens (like `%<foo>s`).".to_string(),
-                    ));
-                    return;
-                }
-                if has_template && check_named {
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Prefer unannotated tokens (like `%s`) over template tokens (like `%{foo}`).".to_string(),
-                    ));
-                }
-            }
-            _ => {}
-        }
+    fn visit_interpolated_x_string_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedXStringNode<'pr>,
+    ) {
+        self.inside_xstr_or_regexp += 1;
+        ruby_prism::visit_interpolated_x_string_node(self, node);
+        self.inside_xstr_or_regexp -= 1;
+    }
+
+    fn visit_x_string_node(&mut self, node: &ruby_prism::XStringNode<'pr>) {
+        self.inside_xstr_or_regexp += 1;
+        ruby_prism::visit_x_string_node(self, node);
+        self.inside_xstr_or_regexp -= 1;
+    }
+
+    fn visit_interpolated_regular_expression_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedRegularExpressionNode<'pr>,
+    ) {
+        self.inside_xstr_or_regexp += 1;
+        ruby_prism::visit_interpolated_regular_expression_node(self, node);
+        self.inside_xstr_or_regexp -= 1;
+    }
+
+    fn visit_regular_expression_node(&mut self, node: &ruby_prism::RegularExpressionNode<'pr>) {
+        self.inside_xstr_or_regexp += 1;
+        ruby_prism::visit_regular_expression_node(self, node);
+        self.inside_xstr_or_regexp -= 1;
     }
 }
 
