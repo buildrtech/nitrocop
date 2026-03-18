@@ -122,3 +122,37 @@ else
 ^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
   "{\"bar\":\"\342\200\250 and \342\200\251\"}"
 end
+
+# case/when branches with different whitespace but same AST
+case node_type
+when :dstr
+  each_child(node).all? {|child| check(child)}
+when :begin
+^^^^^^^^^^^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
+  each_child(node).all? {|child| check(child) }
+end
+
+# if/elsif branches with different comments but same code
+if foo
+  # comment about foo
+  handle_error(x)
+  return []
+elsif bar
+^^^^^^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
+  # different comment
+  handle_error(x)
+  return []
+end
+
+# rescue branches with different blank lines but same code
+begin
+  work
+rescue FirstError
+  report(e)
+  false
+rescue SecondError
+^^^^^^^^^^^^^^^^^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
+  report(e)
+
+  false
+end
