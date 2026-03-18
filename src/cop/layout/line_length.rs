@@ -8,6 +8,14 @@ use crate::parse::source::SourceFile;
 /// `# rubocop:disable Metrics/LineLength`. RuboCop still suppresses
 /// `Layout/LineLength` for that moved legacy name because the short name stayed
 /// `LineLength`. Fixed centrally in `parse/directives.rs`.
+///
+/// ## Corpus investigation (2026-03-18)
+///
+/// FP=146 traced to multi-heredoc lines like `expect(<<~HTML).to eq(<<~TEXT)`.
+/// The original code used `Option<Vec<u8>>` (single terminator), so only the first
+/// heredoc was tracked — the second heredoc's body lines were flagged as too long.
+/// Fixed by converting to `Vec<Vec<u8>>` (stack of terminators) so all heredocs
+/// opened on one line are tracked and their bodies correctly skipped.
 pub struct LineLength;
 
 impl Cop for LineLength {
@@ -47,11 +55,16 @@ impl Cop for LineLength {
             .collect();
 
         let lines: Vec<&[u8]> = source.lines().collect();
-        let mut heredoc_terminator: Option<Vec<u8>> = None;
+        // Stack of pending heredoc terminators — a single line can open multiple
+        // heredocs (e.g. `expect(<<~HTML).to eq(<<~TEXT)`), and their bodies appear
+        // sequentially.  We collect ALL openers from the opening line and consume
+        // them one by one as each terminator is encountered.
+        let mut heredoc_terminators: Vec<Vec<u8>> = Vec::new();
 
         for (i, line) in lines.iter().enumerate() {
-            // Track heredoc regions
-            if let Some(ref terminator) = heredoc_terminator {
+            // Track heredoc regions — check if the current line closes the
+            // active (first) heredoc.
+            if let Some(terminator) = heredoc_terminators.first() {
                 let trimmed: Vec<u8> = line
                     .iter()
                     .copied()
@@ -60,7 +73,13 @@ impl Cop for LineLength {
                 if trimmed == *terminator
                     || trimmed.strip_suffix(b"\r").unwrap_or(&trimmed) == terminator.as_slice()
                 {
-                    heredoc_terminator = None;
+                    heredoc_terminators.remove(0);
+                    // If there are more pending heredocs, the next line starts
+                    // the next heredoc body — skip the terminator line's length
+                    // check only when inside a heredoc.
+                    if !heredoc_terminators.is_empty() && allow_heredoc {
+                        continue;
+                    }
                 } else if allow_heredoc {
                     continue; // Skip length check inside heredoc
                 }
@@ -68,7 +87,8 @@ impl Cop for LineLength {
 
             // Detect heredoc openers — scan all `<<` occurrences since `<<` can
             // also be the shovel operator (e.g. `file << <<~HEREDOC`).
-            if heredoc_terminator.is_none() {
+            // Collect ALL heredoc identifiers from the line into the stack.
+            if heredoc_terminators.is_empty() {
                 let mut search_from = 0;
                 while let Some(rel_pos) = line[search_from..].windows(2).position(|w| w == b"<<") {
                     let pos = search_from + rel_pos;
@@ -95,8 +115,8 @@ impl Cop for LineLength {
                         .take_while(|&b| b.is_ascii_alphanumeric() || b == b'_')
                         .collect();
                     if !ident.is_empty() {
-                        heredoc_terminator = Some(ident);
-                        break;
+                        heredoc_terminators.push(ident);
+                        // Continue scanning for more heredoc openers on this line
                     }
                 }
             }
@@ -423,6 +443,54 @@ mod tests {
         LineLength.check_lines(&source, &config, &mut diags, None);
         // Only the first line (x = <<~TXT) should be checked, heredoc body skipped
         assert!(diags.is_empty() || diags.iter().all(|d| d.location.line == 1));
+    }
+
+    #[test]
+    fn allow_heredoc_dash_syntax() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([
+                ("Max".into(), serde_yml::Value::Number(10.into())),
+                ("AllowHeredoc".into(), serde_yml::Value::Bool(true)),
+            ]),
+            ..CopConfig::default()
+        };
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"x = <<-TXT\n  this is a very long line inside a heredoc with dash syntax\nTXT\n"
+                .to_vec(),
+        );
+        let mut diags = Vec::new();
+        LineLength.check_lines(&source, &config, &mut diags, None);
+        assert!(
+            diags.is_empty() || diags.iter().all(|d| d.location.line == 1),
+            "AllowHeredoc should skip long lines inside <<- heredoc"
+        );
+    }
+
+    #[test]
+    fn allow_heredoc_class_shovel_then_heredoc() {
+        // Reproduce: class << self followed by <<-HEREDOC on a later line
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([
+                ("Max".into(), serde_yml::Value::Number(10.into())),
+                ("AllowHeredoc".into(), serde_yml::Value::Bool(true)),
+            ]),
+            ..CopConfig::default()
+        };
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"class << self\n  def foo\n    <<-SQL\n    SELECT * INTO existing_grant FROM role_memberships WHERE admin = true\n    SQL\n  end\nend\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        LineLength.check_lines(&source, &config, &mut diags, None);
+        // Line 4 is the long SQL inside heredoc — should be skipped
+        assert!(
+            !diags.iter().any(|d| d.location.line == 4),
+            "AllowHeredoc should skip long lines inside heredoc after class << self; got {:?}",
+            diags.iter().map(|d| d.location.line).collect::<Vec<_>>()
+        );
     }
 
     #[test]
