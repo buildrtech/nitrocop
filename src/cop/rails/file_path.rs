@@ -47,6 +47,20 @@ use crate::parse::source::SourceFile;
 /// RuboCop's `check_for_extension_after_rails_root_join_in_dstr` does NOT require the
 /// inner expression to be `.join()` — it checks extension for any dstr containing
 /// Rails.root. Removed the `is_rails_root_join` guard.
+///
+/// ## Investigation findings (2026-03-18)
+///
+/// **FP root cause**: `is_extension_node` matched a bare `"."` (sentence separator) because
+/// `starts_with(b'.')` was true and the vacuously-true `[1..].all(ascii_alphabetic)` on an
+/// empty slice returned true. Pattern: `"...text #{Rails.root.join('path')}."` was incorrectly
+/// flagged. Fixed by requiring the suffix after the dot to be non-empty.
+///
+/// **FN root cause**: `contains_rails_root()` only matched direct `Rails.root` nodes, not
+/// `Rails.root` wrapped in a call chain. `File.join(Rails.root.to_s, "lib", "captcha")` was
+/// missed because the first arg is a `CallNode` (`to_s`) whose receiver is `Rails.root`.
+/// RuboCop's `rails_root_nodes?` is a tree search (`def_node_search`) that traverses the
+/// full subtree. Fixed by making `contains_rails_root` recursively check call receivers
+/// and call arguments, matching the tree-search semantics.
 pub struct FilePath;
 
 /// Check if a constant node is top-level (bare `Foo` or `::Foo`), not namespaced (`A::Foo`).
