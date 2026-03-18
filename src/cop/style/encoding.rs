@@ -2,6 +2,20 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/Encoding checks for unnecessary utf-8 encoding comments.
+///
+/// ## Investigation findings (2026-03-18)
+///
+/// ### FP root cause fixed:
+/// - Non-magic comment lines (e.g., `# This is a description`) on line 1 or 2
+///   should stop magic comment processing. Previously we checked the first 3 lines
+///   regardless; now we match RuboCop's behavior of only processing contiguous
+///   magic comment lines (frozen_string_literal, encoding, shareable_constant_value,
+///   typed, rbs_inline). Regular comments terminate the search.
+///
+/// ### FN root cause fixed:
+/// - `# coding: utf-8` format was already handled but lacked fixture coverage.
+///   Added coding_format.rb scenario.
 pub struct Encoding;
 
 impl Cop for Encoding {
@@ -23,40 +37,38 @@ impl Cop for Encoding {
         let total_len = source.as_bytes().len();
         let mut byte_offset: usize = 0;
 
-        // Only check the first 3 lines (line 1, optional shebang pushes encoding to line 2,
-        // and possibly line 3 with multiple magic comments)
+        // Process contiguous magic comment lines at the top of the file,
+        // matching RuboCop's behavior: skip shebangs, then process each line
+        // as a magic comment. Stop as soon as a non-magic-comment line is found.
         for (i, line) in source.lines().enumerate() {
             let line_len = line.len() + 1; // +1 for newline
-            if i >= 3 {
-                break;
-            }
 
             let line_str = match std::str::from_utf8(line) {
                 Ok(s) => s.trim(),
                 Err(_) => {
-                    byte_offset += line_len;
-                    continue;
+                    break;
                 }
             };
 
-            // Skip non-comment lines (but allow shebang on first line)
+            // Skip shebang lines
+            if line_str.starts_with("#!") {
+                byte_offset += line_len;
+                continue;
+            }
+
+            // Non-comment or blank line: stop processing
             if !line_str.starts_with('#') {
-                // If it's the first line and a shebang, or blank, continue
-                if i == 0 && line_str.starts_with("#!") {
-                    byte_offset += line_len;
-                    continue;
-                }
-                // If it's a code line, stop checking (encoding must be at the top)
-                if !line_str.is_empty() {
-                    break;
-                }
-                // Blank line: encoding comment is only valid in the first 2 lines
-                // (or first 3 if there's a shebang). A blank line means we've left
-                // the magic comment area.
                 break;
             }
 
-            // Check for various encoding comment formats
+            // Must be a valid magic comment to continue processing.
+            // RuboCop uses MagicComment.parse(line).valid? which checks for
+            // encoding, frozen_string_literal, shareable_constant_value, typed, rbs_inline.
+            if !is_magic_comment(line_str) {
+                break;
+            }
+
+            // Check if it's specifically a UTF-8 encoding comment
             if is_utf8_encoding_comment(line_str) {
                 let mut diag = self.diagnostic(
                     source,
@@ -81,6 +93,56 @@ impl Cop for Encoding {
             byte_offset += line_len;
         }
     }
+}
+
+/// Check if a comment line is a valid Ruby magic comment.
+/// Matches RuboCop's MagicComment.parse(line).valid? behavior:
+/// recognized types are encoding/coding, frozen_string_literal, shareable_constant_value,
+/// typed (Sorbet), and rbs_inline.
+fn is_magic_comment(line: &str) -> bool {
+    let lower = line.to_lowercase();
+
+    // Extract content after # (with optional space)
+    let content = if let Some(rest) = lower.strip_prefix("# ") {
+        rest.trim()
+    } else if let Some(rest) = lower.strip_prefix('#') {
+        rest.trim()
+    } else {
+        return false;
+    };
+
+    // Emacs style: -*- ... -*-
+    if content.starts_with("-*-") && content.ends_with("-*-") {
+        // Any emacs-style magic comment is valid
+        return true;
+    }
+
+    // Vim style: vim: ...
+    if content.starts_with("vim:") || content.starts_with("vim :") {
+        return true;
+    }
+
+    // Simple magic comment keywords (case-insensitive)
+    // encoding/coding, frozen_string_literal/frozen-string-literal,
+    // shareable_constant_value/shareable-constant-value, typed, rbs_inline
+    let magic_prefixes = &[
+        "encoding:",
+        "coding:",
+        "frozen_string_literal:",
+        "frozen-string-literal:",
+        "shareable_constant_value:",
+        "shareable-constant-value:",
+        "typed:",
+        "rbs_inline:",
+    ];
+
+    for prefix in magic_prefixes {
+        if content.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Check if a comment line is a UTF-8 encoding magic comment.
@@ -158,6 +220,7 @@ mod tests {
         standard = "standard.rb",
         mixed_case = "mixed_case.rb",
         after_shebang = "after_shebang.rb",
+        coding_format = "coding_format.rb",
     );
 
     #[test]
@@ -168,5 +231,63 @@ mod tests {
         let cs = crate::correction::CorrectionSet::from_vec(corrections);
         let corrected = cs.apply(input);
         assert_eq!(corrected, b"x = 1\n");
+    }
+
+    #[test]
+    fn no_fp_regular_comment_before_encoding() {
+        // A regular comment (not a magic comment) on line 1 should stop processing.
+        // RuboCop only processes contiguous magic comment lines.
+        let input = b"# This is a regular comment\n# encoding: utf-8\ndef foo; end\n";
+        let diags = crate::testutil::run_cop_full(&Encoding, input);
+        assert!(
+            diags.is_empty(),
+            "Should NOT flag encoding comment after a regular (non-magic) comment: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn flags_encoding_after_frozen_string_literal() {
+        // frozen_string_literal IS a valid magic comment, so processing continues
+        let input = b"# frozen_string_literal: true\n# encoding: utf-8\ndef foo; end\n";
+        let diags = crate::testutil::run_cop_full(&Encoding, input);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag encoding comment after frozen_string_literal"
+        );
+    }
+
+    #[test]
+    fn flags_coding_format() {
+        // # coding: utf-8 is a valid encoding magic comment
+        let input = b"# coding: utf-8\ndef foo; end\n";
+        let diags = crate::testutil::run_cop_full(&Encoding, input);
+        assert_eq!(diags.len(), 1, "Should flag # coding: utf-8");
+    }
+
+    #[test]
+    fn no_fp_encoding_after_non_magic_comment_line2() {
+        // Shebang is OK, but a regular comment on line 2 should stop processing
+        let input =
+            b"#!/usr/bin/env ruby\n# A description comment\n# encoding: utf-8\ndef foo; end\n";
+        let diags = crate::testutil::run_cop_full(&Encoding, input);
+        assert!(
+            diags.is_empty(),
+            "Should NOT flag encoding after non-magic comment: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn flags_after_shebang_then_magic_comment() {
+        // shebang → frozen_string_literal → encoding: all valid magic comments
+        let input = b"#!/usr/bin/env ruby\n# frozen_string_literal: true\n# encoding: utf-8\ndef foo; end\n";
+        let diags = crate::testutil::run_cop_full(&Encoding, input);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag encoding after shebang + frozen_string_literal"
+        );
     }
 }
