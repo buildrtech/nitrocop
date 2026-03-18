@@ -20,3 +20,11 @@ pluck(:name).uniq
 # uniq! is not flagged (RuboCop only restricts on :uniq, not :uniq!)
 Album.pluck(:band_name).uniq!
 Model.pluck(:name).uniq!
+# Block body — RuboCop skips pluck.uniq inside block bodies (!^any_block)
+cache { Model.pluck(:name).uniq }
+get_set_cache("icons") { Badge.pluck(:icon).uniq }
+items.map { |i| Item.pluck(:name).uniq }
+# Multi-line block body (single statement)
+cache do
+  Model.pluck(:name).uniq
+end

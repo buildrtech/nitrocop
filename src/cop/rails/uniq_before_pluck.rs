@@ -19,9 +19,18 @@
 /// `uniq!`. The round-1 implementation also flagged `uniq!`, causing 2 false positives in the
 /// corpus. Fixed by only checking for `uniq` (not `uniq!`).
 ///
+/// ## Fix (2026-03, round 3) — false positives from block bodies
+/// RuboCop's NodePattern includes `!^any_block` which means the parent of the `pluck.uniq`
+/// send node must NOT be a block node. In Parser AST, when `pluck.uniq` is the sole body
+/// expression of a block (e.g., `cache { Model.pluck(:name).uniq }`), its parent IS the
+/// block node, so it's excluded. Converted from `check_node` to `check_source` with a
+/// visitor that tracks `in_block_body` to replicate this behavior. This eliminated 2 FPs
+/// in the corpus (both in discourse's `lib/svg_sprite.rb`).
+///
 /// Offense is reported at the `uniq` selector location (matching RuboCop's
 /// `node.loc.selector`), i.e., `message_loc()` of the `uniq` call node.
-use crate::cop::node_type::CALL_NODE;
+use ruby_prism::Visit;
+
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -37,39 +46,54 @@ impl Cop for UniqBeforePluck {
         Severity::Convention
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let uniq_call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
+        let style = config.get_str("EnforcedStyle", "conservative");
+        let mut visitor = UniqBeforePluckVisitor {
+            cop: self,
+            source,
+            conservative: style == "conservative",
+            in_block_body: false,
+            diagnostics: Vec::new(),
         };
+        visitor.visit(&parse_result.node());
+        diagnostics.extend(visitor.diagnostics);
+    }
+}
 
-        // Only interested in `uniq` method calls.
-        // RuboCop restricts on :uniq only (RESTRICT_ON_SEND = %i[uniq].freeze).
-        // `uniq!` is intentionally excluded — flagging it would be a false positive.
-        let method_name = uniq_call.name().as_slice();
-        if method_name != b"uniq" {
+struct UniqBeforePluckVisitor<'a, 'src> {
+    cop: &'a UniqBeforePluck,
+    source: &'src SourceFile,
+    conservative: bool,
+    /// True when we're visiting statements that are the direct body of a block.
+    /// In Parser AST, a single-statement block body has the statement as a direct
+    /// child of the block node, so `!^any_block` excludes it. For multi-statement
+    /// bodies, the parent is `begin` (not block), so they ARE flagged.
+    in_block_body: bool,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl UniqBeforePluckVisitor<'_, '_> {
+    fn check_uniq_call(&mut self, node: &ruby_prism::CallNode<'_>) {
+        // Only interested in `uniq` method calls (not `uniq!`).
+        if node.name().as_slice() != b"uniq" {
             return;
         }
 
-        // uniq/uniq! must not have a block argument
-        if uniq_call.block().is_some() {
+        // uniq must not have a block argument
+        if node.block().is_some() {
             return;
         }
 
         // The receiver of `uniq` must be a `pluck(...)` call
-        let receiver = match uniq_call.receiver() {
+        let receiver = match node.receiver() {
             Some(r) => r,
             None => return,
         };
@@ -81,13 +105,11 @@ impl Cop for UniqBeforePluck {
             return;
         }
 
-        let style = config.get_str("EnforcedStyle", "conservative");
-
-        // In conservative mode, only flag if the root receiver of pluck is a constant (model class)
-        if style == "conservative" {
+        // In conservative mode, only flag if the root receiver of pluck is a constant
+        if self.conservative {
             let pluck_receiver = match pluck_call.receiver() {
                 Some(r) => r,
-                None => return, // no receiver (bare `pluck(...).uniq`) — skip in conservative
+                None => return,
             };
             let is_const = pluck_receiver.as_constant_read_node().is_some()
                 || pluck_receiver.as_constant_path_node().is_some();
@@ -96,17 +118,89 @@ impl Cop for UniqBeforePluck {
             }
         }
 
-        // Report at the `uniq` selector (message_loc), matching RuboCop's node.loc.selector
-        let loc = uniq_call
-            .message_loc()
-            .unwrap_or_else(|| uniq_call.location());
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
+        // Skip if this is a direct block body (!^any_block in RuboCop)
+        if self.in_block_body {
+            return;
+        }
+
+        // Report at the `uniq` selector (message_loc)
+        let loc = node.message_loc().unwrap_or_else(|| node.location());
+        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+        self.diagnostics.push(self.cop.diagnostic(
+            self.source,
             line,
             column,
             "Use `distinct` before `pluck`.".to_string(),
         ));
+    }
+}
+
+impl<'pr> Visit<'pr> for UniqBeforePluckVisitor<'_, '_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        self.check_uniq_call(node);
+
+        // Visit children normally (receiver, arguments)
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        if let Some(args) = node.arguments() {
+            self.visit_arguments_node(&args);
+        }
+        // Visit block — block body children get in_block_body set in visit_block_node
+        if let Some(block) = node.block() {
+            self.visit(&block);
+        }
+    }
+
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        // Visit parameters normally
+        if let Some(params) = node.parameters() {
+            self.visit(&params);
+        }
+        // Visit body with in_block_body tracking.
+        // In Parser AST, !^any_block excludes single-statement block bodies because
+        // the statement is a direct child of the block. For multi-statement bodies,
+        // the parent is `begin` (not block). In Prism, the body is always a
+        // StatementsNode. We check if it has exactly one statement — if so, set
+        // in_block_body=true for that statement.
+        if let Some(body) = node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                let stmt_list: Vec<_> = stmts.body().iter().collect();
+                if stmt_list.len() == 1 {
+                    let saved = self.in_block_body;
+                    self.in_block_body = true;
+                    self.visit(&stmt_list[0]);
+                    self.in_block_body = saved;
+                } else {
+                    // Multi-statement body: parent is `begin` in Parser AST, not block
+                    self.visit(&body);
+                }
+            } else {
+                self.visit(&body);
+            }
+        }
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        // Lambda is also a block type in RuboCop's `any_block`
+        if let Some(params) = node.parameters() {
+            self.visit(&params);
+        }
+        if let Some(body) = node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                let stmt_list: Vec<_> = stmts.body().iter().collect();
+                if stmt_list.len() == 1 {
+                    let saved = self.in_block_body;
+                    self.in_block_body = true;
+                    self.visit(&stmt_list[0]);
+                    self.in_block_body = saved;
+                } else {
+                    self.visit(&body);
+                }
+            } else {
+                self.visit(&body);
+            }
+        }
     }
 }
 
