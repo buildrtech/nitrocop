@@ -1,4 +1,4 @@
-use crate::cop::node_type::INTEGER_NODE;
+use crate::cop::node_type::{FLOAT_NODE, INTEGER_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -7,6 +7,13 @@ use crate::parse::source::SourceFile;
 /// were flagged for missing underscores. RuboCop exempts all non-decimal bases including
 /// implicit octals. 199/404 FPs were from puppet's acceptance tests with file permission modes.
 /// Other FP repos: jruby (98), ffi (30), peritor (27), natalie (20).
+///
+/// ## Investigation findings (2026-03-18)
+///
+/// ### FN root cause fixed:
+/// - Float literals (e.g. `10000.0`, `123456.789`, `10000e10`) were not checked.
+///   RuboCop's `on_float` handler extracts the integer part before `.` or `e/E`
+///   and checks it the same way as integer literals. Added FLOAT_NODE support.
 pub struct NumericLiterals;
 
 /// Check if a numeric string has underscores at every 3-digit grouping from the right.
@@ -30,32 +37,15 @@ fn is_correctly_grouped(text: &str) -> bool {
     true
 }
 
-impl Cop for NumericLiterals {
-    fn name(&self) -> &'static str {
-        "Style/NumericLiterals"
-    }
-
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[INTEGER_NODE]
-    }
-
-    fn check_node(
+impl NumericLiterals {
+    fn check_integer_part(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        loc: &ruby_prism::Location<'_>,
+        int_part: &str,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let int_node = match node.as_integer_node() {
-            Some(i) => i,
-            None => return,
-        };
-
-        let loc = int_node.location();
-        let source_text = loc.as_slice();
-
         let min_digits = config.get_usize("MinDigits", 5);
         let strict = config.get_bool("Strict", false);
         let allowed_numbers = config
@@ -65,55 +55,35 @@ impl Cop for NumericLiterals {
             .get_string_array("AllowedPatterns")
             .unwrap_or_default();
 
-        let text = std::str::from_utf8(source_text).unwrap_or("");
-
-        // Skip non-decimal literals:
-        // - Explicit prefixes: 0x (hex), 0b (binary), 0o (octal), 0d (decimal)
-        // - Implicit octal: leading 0 followed by digits (e.g., 00644, 02744)
-        if text.starts_with("0x")
-            || text.starts_with("0X")
-            || text.starts_with("0b")
-            || text.starts_with("0B")
-            || text.starts_with("0o")
-            || text.starts_with("0O")
-            || text.starts_with("0d")
-            || text.starts_with("0D")
-        {
+        // Skip non-decimal literals (leading 0)
+        if int_part.starts_with('0') {
             return;
         }
 
-        // Skip implicit octal literals (leading 0 followed by at least one digit)
-        if text.starts_with('0') && text.len() > 1 && text.as_bytes()[1].is_ascii_digit() {
-            return;
-        }
-
-        // Strip leading minus sign if present
-        let digits_part = if let Some(stripped) = text.strip_prefix('-') {
-            stripped
-        } else {
-            text
-        };
-
-        // Get the integer-only portion (digits and underscores, no sign)
-        let int_str: String = digits_part.chars().filter(|c| c.is_ascii_digit()).collect();
+        // Get digits-only string (strip underscores)
+        let int_str: String = int_part.chars().filter(|c| c.is_ascii_digit()).collect();
 
         // Check AllowedNumbers (compared as strings)
         if allowed_numbers.iter().any(|n| n == &int_str) {
             return;
         }
 
-        // Check AllowedPatterns (simple substring match, similar to RuboCop)
+        // Check AllowedPatterns (regex-style match, anchored like RuboCop)
         if !allowed_patterns.is_empty() {
             for pattern in &allowed_patterns {
-                if int_str.contains(pattern.as_str()) {
+                if let Ok(re) = regex::Regex::new(&format!("\\A{}\\z", pattern)) {
+                    if re.is_match(&int_str) {
+                        return;
+                    }
+                } else if int_str.contains(pattern.as_str()) {
+                    // Fallback to substring match if regex parsing fails
                     return;
                 }
             }
         }
 
-        // Count actual digits (not underscores)
         let digit_count = int_str.len();
-        let has_underscores = digits_part.contains('_');
+        let has_underscores = int_part.contains('_');
 
         if digit_count < min_digits {
             return;
@@ -127,10 +97,11 @@ impl Cop for NumericLiterals {
                 column,
                 "Use underscores(_) as thousands separator.".to_string(),
             ));
+            return;
         }
 
         // Strict mode: check that underscores are at correct every-3-digit positions
-        if strict && !is_correctly_grouped(digits_part) {
+        if strict && !is_correctly_grouped(int_part) {
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             diagnostics.push(self.diagnostic(
                 source,
@@ -139,6 +110,51 @@ impl Cop for NumericLiterals {
                 "Use underscores(_) as thousands separator.".to_string(),
             ));
         }
+    }
+}
+
+impl Cop for NumericLiterals {
+    fn name(&self) -> &'static str {
+        "Style/NumericLiterals"
+    }
+
+    fn interested_node_types(&self) -> &'static [u8] {
+        &[INTEGER_NODE, FLOAT_NODE]
+    }
+
+    fn check_node(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        // Get the source location and text for either integer or float nodes
+        let loc = if let Some(int_node) = node.as_integer_node() {
+            int_node.location()
+        } else if let Some(float_node) = node.as_float_node() {
+            float_node.location()
+        } else {
+            return;
+        };
+
+        let source_text = loc.as_slice();
+        let text = std::str::from_utf8(source_text).unwrap_or("");
+
+        // Extract the integer part: strip sign, split on e/E/., take the first part
+        // This matches RuboCop's IntegerNode#integer_part behavior
+        let unsigned = text
+            .strip_prefix('-')
+            .or(text.strip_prefix('+'))
+            .unwrap_or(text);
+        let int_part = unsigned
+            .split(|c: char| c == 'e' || c == 'E' || c == '.')
+            .next()
+            .unwrap_or(unsigned);
+
+        self.check_integer_part(source, &loc, int_part, config, diagnostics);
     }
 }
 

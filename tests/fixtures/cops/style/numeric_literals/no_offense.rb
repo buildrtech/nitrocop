@@ -13,3 +13,7 @@ b = 00444
 c = 02744
 d = 00744
 e = 0100644
+# Float literals with proper grouping or below min_digits
+f = 1_000.0
+g = 1234.56
+h = 1.0e10
