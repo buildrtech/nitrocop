@@ -97,3 +97,14 @@ class PartialOrderController < ApplicationController
   def create
   end
 end
+
+# Module concerns should not be checked for action order
+module LabelConcern
+  def create
+    model.update_labels(params[:labels])
+  end
+
+  def index
+    @labels = model.label_list
+  end
+end

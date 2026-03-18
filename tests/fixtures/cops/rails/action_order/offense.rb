@@ -44,16 +44,3 @@ class ConditionalController < BaseController
   end
 end
 
-# Module-based controller concern with out-of-order actions
-module ResourceActions
-  def create
-  end
-
-  def show
-  ^^^ Rails/ActionOrder: Action `show` should appear before `create` in the controller.
-  end
-
-  def index
-  ^^^ Rails/ActionOrder: Action `index` should appear before `show` in the controller.
-  end
-end

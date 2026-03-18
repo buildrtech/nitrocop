@@ -1,4 +1,4 @@
-use crate::cop::node_type::{CLASS_NODE, DEF_NODE, MODULE_NODE, STATEMENTS_NODE};
+use crate::cop::node_type::{CLASS_NODE, DEF_NODE, STATEMENTS_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -38,6 +38,15 @@ use crate::parse::source::SourceFile;
 /// finds `def` nodes regardless of whether the enclosing scope is a class or module.
 /// Fix: added MODULE_NODE to interested_node_types and handle ModuleNode in check_node
 /// with the same logic as ClassNode.
+///
+/// ## Corpus investigation (2026-03-18)
+///
+/// Corpus oracle reported FP=5, FN=0.
+///
+/// FP=5: All 5 FPs were in `app/controllers/concerns/` module files. RuboCop's
+/// ActionOrder cop only checks classes, not modules. Controller concern modules
+/// define actions mixed into multiple controllers — ordering within the concern
+/// is irrelevant. Fix: removed MODULE_NODE from interested_node_types.
 pub struct ActionOrder;
 
 const STANDARD_ORDER: &[&[u8]] = &[
@@ -172,7 +181,7 @@ impl Cop for ActionOrder {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CLASS_NODE, MODULE_NODE, DEF_NODE, STATEMENTS_NODE]
+        &[CLASS_NODE, DEF_NODE, STATEMENTS_NODE]
     }
 
     fn check_node(
@@ -184,11 +193,9 @@ impl Cop for ActionOrder {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Handle both ClassNode and ModuleNode (for controller concerns)
+        // Only check ClassNode — RuboCop does not check ModuleNode (controller concerns).
         let body = if let Some(class) = node.as_class_node() {
             class.body()
-        } else if let Some(module) = node.as_module_node() {
-            module.body()
         } else {
             return;
         };
