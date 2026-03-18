@@ -136,6 +136,44 @@ use crate::parse::source::SourceFile;
 /// **FP 1 & 2**: Both FPs remain — they are caused by visibility context (private
 /// block earlier in the file) that our line-based scanning doesn't detect. The methods
 /// ARE valid delegation patterns that RuboCop flags when public, confirmed via testing.
+///
+/// ## Investigation (2026-03-18): FP=2, FN=14
+///
+/// **FP root causes (2 FP — gumroad and anyway_config)**:
+/// Both cases have `module_function` declared in an OUTER ancestor module, AFTER a nested
+/// class/module definition in that outer module. The forward scan in `is_in_module_function_scope`
+/// broke as soon as it encountered a `class`/`module` at `indent < def_col`, stopping before
+/// it could reach the `module_function` in the outer scope.
+///
+/// Example (gumroad): `def to_stripejs_customer_id` inside `module ExtensionMethods` (indent 4).
+/// After `ExtensionMethods` ends, `class StripeJs` appears at indent 2 (the outer scope).
+/// The scan stopped at `class StripeJs`, never reaching `module_function` at indent 2 in
+/// `module StripePaymentMethodHelper`. RuboCop's `module_function_declared?` checks ALL
+/// ancestors, so it finds it.
+///
+/// Fix: Changed forward scan to track `sibling_scope_depth`. When `class`/`module` at
+/// `indent < def_col` is encountered, increment depth (skip its body). When the matching
+/// `end` is seen, decrement. Only check `module_function` when `sibling_scope_depth == 0`.
+/// This allows scanning past sibling class/module bodies to find `module_function` in the
+/// outer ancestor scope.
+///
+/// **FN root causes (14 FN — mongomapper, rouge, rails, coderay, etc.)**:
+/// All FNs involve delegations via `def foo; self.class.foo; end` inside a module that
+/// has a sibling `module ClassMethods` (or `class << self`) at the same indent level.
+/// The sibling has `private` declared inside it at the same indent. The forward scan in
+/// `is_private_or_protected` (which scans top-to-bottom) set `in_private = true` when
+/// it encountered `private` inside the sibling, and never reset it when the sibling's
+/// `end` was reached (because `end` at `indent == def_col` did not reset in_private).
+///
+/// Example (mongomapper): `module ClassMethods` at indent 6, with `private` at indent 6
+/// inside it. After `end` of ClassMethods, `def associations` at indent 6 was incorrectly
+/// considered private.
+///
+/// Fix: Added `peer_scope_depth` tracking in `is_private_or_protected`. When `class`/`module`
+/// at `indent == def_col` is encountered, increment depth (entering a peer scope). When `end`
+/// at `indent == def_col` decrements it to 0 (exiting peer scope), `in_private` updates are
+/// skipped while inside the peer scope. This prevents `private` from inside sibling
+/// class/modules from bleeding into instance methods at the same level.
 pub struct Delegate;
 
 impl Cop for Delegate {
