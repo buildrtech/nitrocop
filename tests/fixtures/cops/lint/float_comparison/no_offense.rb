@@ -19,3 +19,8 @@ when 1
 when 'string'
   bar
 end
+
+x == 1.1.ceil
+x == 1.1.floor
+x == 1 + 2
+x == (1)

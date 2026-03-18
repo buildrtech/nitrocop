@@ -17,6 +17,18 @@ use crate::parse::source::SourceFile;
 /// Root cause: cop only handled CallNode for `==`/`!=`/`eql?`/`equal?`, missing
 /// RuboCop's `on_case` handler. Fixed by adding WhenNode handling that checks each
 /// condition for float literals, using the dedicated MSG_CASE message.
+///
+/// ## Investigation (2026-03-18, round 2)
+/// 57 FN from binary operations on floats and float instance methods.
+/// Root cause: `is_float()` only checked for `FloatNode` and float-returning method
+/// names (to_f, fdiv, Float), missing RuboCop's recursive `float_send?` logic:
+/// - Arithmetic operations (+, -, *, /, **, %) with a float operand produce floats
+/// - Float instance methods (abs, magnitude, next_float, prev_float, etc.) on float receivers
+/// - Numeric-returning methods (ceil, floor, round, truncate) with positive precision arg
+/// - Parenthesized expressions (ParenthesesNode wrapping StatementsNode)
+///
+/// FN concentrated in jruby (20) and natalie (18) spec files comparing float constants
+/// and expressions like `2.0 ** -52`, `1.0 + Float::EPSILON`, `0.0.next_float`.
 pub struct FloatComparison;
 
 impl Cop for FloatComparison {
@@ -104,17 +116,100 @@ impl Cop for FloatComparison {
     }
 }
 
+/// Arithmetic operators that propagate float type from either operand.
+const ARITHMETIC_METHODS: &[&[u8]] = &[b"+", b"-", b"*", b"/", b"**", b"%"];
+
+/// Float instance methods that return a float when called on a float receiver.
+/// Matches RuboCop's `FLOAT_INSTANCE_METHODS`.
+const FLOAT_INSTANCE_METHODS: &[&[u8]] = &[
+    b"-@",
+    b"abs",
+    b"magnitude",
+    b"modulo",
+    b"next_float",
+    b"prev_float",
+    b"quo",
+];
+
 fn is_float(node: &ruby_prism::Node<'_>) -> bool {
     if node.as_float_node().is_some() {
         return true;
     }
-    // Detect method calls that return floats: .to_f, .fdiv, Float()
+
+    // Parenthesized expressions: (0.1) -> unwrap and check inner expression
+    if let Some(parens) = node.as_parentheses_node() {
+        if let Some(body) = parens.body() {
+            // body is typically a StatementsNode wrapping the inner expression
+            if let Some(stmts) = body.as_statements_node() {
+                let stmts_body = stmts.body();
+                if stmts_body.len() == 1 {
+                    return is_float(&stmts_body.iter().next().unwrap());
+                }
+            } else {
+                return is_float(&body);
+            }
+        }
+        return false;
+    }
+
     if let Some(call) = node.as_call_node() {
-        let method = call.name().as_slice();
-        if matches!(method, b"to_f" | b"fdiv" | b"Float") {
-            return true;
+        return is_float_call(call);
+    }
+    false
+}
+
+fn is_float_call(call: ruby_prism::CallNode<'_>) -> bool {
+    let method = call.name().as_slice();
+
+    // Float-returning methods: .to_f, .fdiv, Float()
+    if matches!(method, b"to_f" | b"fdiv" | b"Float") {
+        return true;
+    }
+
+    // Arithmetic operations: if either operand is float, result is float
+    if ARITHMETIC_METHODS.contains(&method) {
+        if let Some(receiver) = call.receiver() {
+            if is_float(&receiver) {
+                return true;
+            }
+        }
+        if let Some(args) = call.arguments() {
+            if let Some(first_arg) = args.arguments().iter().next() {
+                if is_float(&first_arg) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Float instance methods on a float receiver
+    if let Some(receiver) = call.receiver() {
+        if is_float(&receiver) {
+            // Methods that always return float from a float receiver
+            if FLOAT_INSTANCE_METHODS.contains(&method) {
+                return true;
+            }
+            // Numeric-returning methods: ceil/floor/round/truncate return float
+            // only when called with a positive integer precision argument
+            if matches!(method, b"ceil" | b"floor" | b"round" | b"truncate") {
+                if let Some(args) = call.arguments() {
+                    if let Some(first_arg) = args.arguments().iter().next() {
+                        if let Some(int_node) = first_arg.as_integer_node() {
+                            let src = int_node.location().as_slice();
+                            // Positive integer precision -> returns float
+                            if !src.starts_with(b"-") && src != b"0" {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // No args or non-positive precision -> returns integer
+                return false;
+            }
         }
     }
+
     false
 }
 
