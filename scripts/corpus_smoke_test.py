@@ -91,6 +91,8 @@ REGRESSION_TOLERANCE = 5  # absolute offense count
 
 
 def release_binary_path() -> str:
+    if "NITROCOP_BIN" in os.environ:
+        return os.environ["NITROCOP_BIN"]
     target_dir = os.environ.get("CARGO_TARGET_DIR", "target")
     return os.path.join(ROOT, target_dir, "release", "nitrocop")
 

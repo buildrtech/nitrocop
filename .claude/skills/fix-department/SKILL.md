@@ -89,6 +89,20 @@ Ephemeral cloud VMs typically run as `root` or a CI-specific user, not `vscode`.
      ```
    - Missing vendor **rubocop** submodules are setup failures. Missing `vendor/corpus`
      is not a failure unless the current investigation step needs local corpus files.
+   - **Build isolation (required when multiple agents share the repo):**
+     Multiple `/fix-department` sessions may run in parallel on the same repo. Each
+     session MUST use a unique target directory and set `NITROCOP_BIN` to avoid
+     competing `cargo build` invocations:
+     ```bash
+     export CARGO_TARGET_DIR="target-${target_name}"  # e.g. target-lint, target-rspec
+     cargo build --release
+     cp "${CARGO_TARGET_DIR}/release/nitrocop" "/tmp/nitrocop-${target_name}"
+     export NITROCOP_BIN="/tmp/nitrocop-${target_name}"
+     ```
+     All Python scripts (`check-cop.py`, `verify-cop-locations.py`, `corpus_smoke_test.py`,
+     `reduce-mismatch.py`) honor `NITROCOP_BIN` to find the binary. Copying to `/tmp/`
+     prevents other agents' builds from overwriting it. Rebuild and re-copy after code
+     changes (Phase 4 verification).
 
 6. Show the user the target status and confirm it.
 
@@ -287,12 +301,16 @@ if the prompt/examples require local corpus source context.
      and cherry-pick the commit into your working branch
    - **No-worktree mode (ephemeral cloud VM):** commits are already on the current branch — no cherry-picking needed
 
-3. Run full verification:
+3. **Rebuild the isolated binary** (must use the session's unique target dir):
    ```bash
    cargo fmt
    cargo clippy --release -- -D warnings
    cargo test --release
-   python3 scripts/corpus_smoke_test.py --binary target/release/nitrocop
+   # Rebuild to the session's isolated target dir and copy to /tmp
+   CARGO_TARGET_DIR="target-${target_name}" cargo build --release
+   cp "${CARGO_TARGET_DIR}/release/nitrocop" "/tmp/nitrocop-${target_name}"
+   export NITROCOP_BIN="/tmp/nitrocop-${target_name}"
+   python3 scripts/corpus_smoke_test.py --binary "$NITROCOP_BIN"
    ```
 
    Run the corpus smoke test once per batch, not after every cop. It is the cheap
@@ -300,7 +318,7 @@ if the prompt/examples require local corpus source context.
    and other cross-cop regressions that per-cop `check-cop.py` reruns will not catch.
    It does not require `vendor/corpus/`.
 
-4. Verify each fixed cop with the right acceptance gate:
+4. Verify each fixed cop with the right acceptance gate (with `NITROCOP_BIN` set):
    ```bash
    python3 scripts/check-cop.py Department/CopName --verbose --rerun
    python3 bench/synthetic/run_synthetic.py --verbose
