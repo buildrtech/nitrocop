@@ -258,3 +258,27 @@ def process_data(slug)
   end
 end
 
+# FP fix: variable in elsif body, block param in next elsif condition
+def unwrap(node)
+  if condition_a?(node)
+    do_a(node)
+  elsif condition_b?(node)
+    *before, list = node.children
+    [*before, transform(list)]
+  elsif items.any? { |list| list === node }
+    do_c(node)
+  else
+    node
+  end
+end
+
+# FP fix: variable assigned in if-condition, block in then-body (tap pattern)
+def find_or_create_item(page)
+  record = if item = page.menu_item
+             item.tap { |item| item.parent_id = nil }
+           else
+             build_item(page)
+           end
+  record
+end
+

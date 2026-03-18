@@ -73,55 +73,30 @@ use ruby_prism::Visit;
 /// Remaining FN (18): Most require `variable_used_in_declaration_of_outer?` or
 /// deeper VariableForce tracking that nitrocop doesn't implement.
 ///
-/// ## Investigation attempt (2026-03-18, incomplete — code reverted, findings preserved)
+/// ## Corpus fix (2026-03-18): FP=4→2, FN=19 unchanged
 ///
-/// An agent attempted to fix the remaining FP=4, FN=19. The code changes were
-/// incomplete (tests failed) and were reverted, but the investigation uncovered
-/// 4 specific suppression patterns RuboCop uses. A future fix should implement:
+/// Fixed 2 of 4 FPs via two new suppression mechanisms:
 ///
-/// 1. **Else-branch suppression**: When the block is in an else/elsif branch
-///    and the outer variable is under the same conditional node, suppress the
-///    offense. RuboCop's `variable_node == outer.else_branch` check. Only
-///    applies when the block is NOT in an assignment RHS.
+/// 1. **Adjacent-elsif suppression extended to predicates**: Previously
+///    Check 2 only fired when `block_is_in_body=true`. Changed to
+///    `block_is_in_body || !outer_info.is_condition_var`, which allows
+///    predicate blocks to be suppressed when the outer var was body-assigned.
+///    Fixes FP in molybdenum-99/reality where `list` assigned in one elsif
+///    body and block `{ |list| }` is in the next elsif's condition.
 ///
-/// 2. **Single-statement condition-body suppression**: When the outer variable
-///    was declared in a condition (e.g., `if item = page.menu_item`) and the
-///    block is the sole statement in the then-body (e.g., `item.tap { |item| }`),
-///    suppress because `variable_node == outer_local_variable_node`.
+/// 2. **Same-conditional-node suppression (Check 3)**: When the outer var
+///    was assigned in a conditional's predicate (`is_condition_var=true`)
+///    and the block is in the same conditional's body, suppress. Matches
+///    RuboCop's `variable_node == outer_local_variable_node` check. Fixes
+///    FP in opf/openproject where `if item = page.menu_item` followed by
+///    `item.tap { |item| }` in the then-body.
 ///
-/// 3. **Assignment RHS tracking**: Need an `in_assignment_rhs` flag. Blocks in
-///    assignment RHS (e.g., `item = items.detect { |item| }`) should NOT be
-///    suppressed by else-branch logic — they are real shadowing offenses.
+/// Remaining FP (2): opal/opal Thread.new(value) { |value| } and
+/// trogdoro/xiki nested block shadowing require deeper analysis —
+/// possibly VariableForce-level semantics or a corpus oracle anomaly.
 ///
-/// 4. **`is_condition_var` flag on VarInfo**: Distinguish variables declared in
-///    conditions (is_body=false) vs bodies (is_body=true) for adjacent-elsif
-///    suppression. Body-assigned vars in if-branches DO shadow block params in
-///    elsif-branches (matching RuboCop where `find_conditional_node_from_ascendant`
-///    on body vars finds a `begin` wrapper that prevents the match).
-///
-/// FP test patterns (for no_offense.rb when code is ready):
-/// ```ruby
-/// # elsif condition block, outer var in previous elsif body
-/// *before, list = node.children; elsif TEMPLATES.any? { |list| list === node }
-/// # Both var and block in same else branch
-/// value = block.call(lib); Thread.new(value) { |value| value }
-/// # Outer var in if-condition, block sole statement in then-body
-/// if item = page.menu_item; item.tap { |item| item.parent_id = nil }
-/// # Nested block in else branch shadowing outer block param
-/// structure.each do |k, v|; (else branch) v[2].each do |k, txt|
-/// ```
-///
-/// FN test patterns (for offense.rb when code is ready):
-/// ```ruby
-/// # var in if-then multi-stmt, block in elsif multi-stmt
-/// prev = blocks.prev.first; blocks.prev.each do |prev|
-/// # var in when body, block in different when body
-/// times = compute_hours; times_by_tp.each do |tp, times|
-/// # block in assignment RHS in elsif — should flag
-/// elsif item = items.detect { |item| item.name == "foo" }
-/// # block in assignment RHS in else — should flag
-/// caller_locations.find { |loc| loc.path && File.exist?(loc.path) }
-/// ```
+/// Remaining FN (19): Require `variable_used_in_declaration_of_outer?`
+/// or deeper VariableForce tracking that nitrocop doesn't implement.
 pub struct ShadowingOuterLocalVariable;
 
 impl Cop for ShadowingOuterLocalVariable {
@@ -180,6 +155,11 @@ struct VarInfo {
     /// RuboCop's VariableForce behavior where both resolve to the same
     /// conditional (case) node.
     when_condition_of_case: Option<usize>,
+    /// True if the variable was assigned in a conditional's predicate/condition
+    /// (is_body=false), e.g., `if item = get_item`. Used for the "same
+    /// conditional node" suppression: when both the outer variable and the
+    /// block resolve to the same conditional node, RuboCop suppresses.
+    is_condition_var: bool,
 }
 
 struct ShadowVisitor<'a, 'src> {
@@ -224,10 +204,12 @@ impl ShadowVisitor<'_, '_> {
                 return;
             }
             let last = self.conditional_branch_stack.last();
+            let is_condition_var = matches!(last, Some(&(_, _, _, false)));
             let info = VarInfo {
                 conditional_branch: last.map(|&(c, b, _, _)| (c, b)),
                 cond_subsequent_offset: last.and_then(|&(_, _, s, _)| s),
                 when_condition_of_case: self.when_condition_case_offset,
+                is_condition_var,
             };
             scope.insert(name.to_string(), info);
         }
@@ -796,26 +778,34 @@ fn is_different_conditional_branch(
             return true;
         }
     }
-    // Check 2: adjacent elsif suppression.
+    // Check 2: adjacent elsif suppression (predicate blocks only).
     // If the outer variable's conditional has a subsequent (else/elsif) and
     // the block's nearest conditional starts AT that subsequent, the block
     // is in the immediate next elsif/else → suppress.
     //
-    // This only applies when:
-    // - The block is in the body (not a predicate/condition expression)
-    // - The outer variable was assigned in a condition (not a body)
-    //
-    // RuboCop's check: `outer_local_variable_node.if_type? &&
-    // variable_node == outer_local_variable_node.else_branch`. This matches
-    // when: (a) the outer var's nearest conditional is an if/elsif (found
-    // via the condition→if path), and (b) the block's variable_node IS the
-    // next elsif IfNode (only true when block is a direct child of that
-    // elsif's body). Variables in BODIES have a `begin` node between them
-    // and the if-node, so `find_conditional_node_from_ascendant` walks
-    // further and the else_branch comparison fails.
-    if block_is_in_body {
+    // Suppressed when the block is in a body (any outer var type), or
+    // when the outer var was body-assigned (not a condition var).
+    // The exception: condition-assigned vars (e.g., `elsif entry =
+    // list.find { |entry| }`) where the block is ALSO in a predicate
+    // must NOT be suppressed — both are conditions of adjacent elsifs,
+    // and the block param genuinely shadows the outer assignment.
+    if block_is_in_body || !outer_info.is_condition_var {
         if let Some(subsequent_offset) = outer_info.cond_subsequent_offset {
             if block_branch.0 == subsequent_offset {
+                return true;
+            }
+        }
+    }
+    // Check 3: same conditional node suppression.
+    // When the outer variable was assigned in a conditional's predicate
+    // (e.g., `if item = get_item`) and the block is in the same
+    // conditional's then-body, RuboCop's `variable_node ==
+    // outer_local_variable_node` fires because both resolve to the same
+    // IfNode. We suppress when the outer var is a condition var and
+    // the block is in the same conditional.
+    if outer_info.is_condition_var {
+        if let Some((outer_cond, _)) = outer_info.conditional_branch {
+            if outer_cond == block_branch.0 {
                 return true;
             }
         }
@@ -1170,6 +1160,7 @@ fn build_block_body_scope(
                     conditional_branch: None,
                     cond_subsequent_offset: None,
                     when_condition_of_case: None,
+                    is_condition_var: false,
                 },
             );
         }
@@ -1187,6 +1178,7 @@ fn build_block_body_scope(
                     conditional_branch: None,
                     cond_subsequent_offset: None,
                     when_condition_of_case: None,
+                    is_condition_var: false,
                 },
             );
         }
@@ -1285,6 +1277,7 @@ fn collect_multi_target_names_from_params(
                         conditional_branch: None,
                         when_condition_of_case: None,
                         cond_subsequent_offset: None,
+                        is_condition_var: false,
                     },
                 );
             }
@@ -1302,6 +1295,7 @@ fn collect_multi_target_names_from_params(
                         conditional_branch: None,
                         when_condition_of_case: None,
                         cond_subsequent_offset: None,
+                        is_condition_var: false,
                     },
                 );
             }
