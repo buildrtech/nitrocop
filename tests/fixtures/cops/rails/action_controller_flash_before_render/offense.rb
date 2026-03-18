@@ -105,3 +105,56 @@ class TasksController < ApplicationController
     end
   end
 end
+
+# FN fix: modifier-unless flash before render at def level
+class SessionsController < ApplicationController
+  def failure
+    flash[:error] = "Auth error" unless params[:message].nil?
+    ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+    render action: :new
+  end
+end
+
+# FN fix: flash inside unless block with render in method after unless
+class TagsController < ApplicationController
+  def create
+    unless type_valid?
+      flash[:error] = "Please provide a category."
+      ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+      return
+    end
+    process_tag
+    render action: "new"
+  end
+end
+
+# FN fix: modifier-if flash inside else branch with render as sibling in same branch
+class InvitationsController < ApplicationController
+  def update
+    if @invitation.save
+      redirect_to @invitation
+    else
+      flash[:error] = "Invalid email" if @invitation.invitee_email.blank?
+      ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+      render action: "show"
+    end
+  end
+end
+
+# FN fix: flash in elsif branch before render in same branch
+class PreferencesController < ApplicationController
+  def update
+    if valid_params?
+      if @user.update(params[:user])
+        redirect_to config_path
+      else
+        flash[:error] = "Error updating preferences"
+        ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+        render :edit
+      end
+    else
+      announce_bad_data
+      render :edit
+    end
+  end
+end

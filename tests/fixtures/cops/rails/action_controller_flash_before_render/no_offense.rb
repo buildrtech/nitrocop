@@ -120,3 +120,96 @@ class TasksController < ApplicationController
     end
   end
 end
+
+# Flash in rescue with render && return — rescue ancestor has no right siblings
+# Method body after begin/end has more code but RuboCop doesn't check it
+class ArchivesController < ApplicationController
+  def create_from_tar
+    begin
+      do_something
+    rescue SyntaxError => e
+      flash[:error] = "Parse error"
+      render(action: "new") && return
+    rescue StandardError => e
+      flash[:error] = "Read error"
+      render(action: "new") && return
+    end
+
+    begin
+      save_result
+    rescue StandardError => e
+      flash[:error] = "Extract error"
+      render(action: "new") && return
+    end
+
+    unless @record.save
+      flash[:error] = "Save failed"
+      render(action: "new") && return
+    end
+
+    redirect_to @record
+  end
+end
+
+# Flash in else branch of if/elsif/else — RuboCop checks first if ancestor's
+# right siblings which are empty (elsif is nested inside the outer if)
+class AccountsController < ApplicationController
+  def create
+    if admin?
+      @user = User.new(admin_params)
+    elsif moderator?
+      @user = User.new(mod_params)
+    else
+      flash[:error] = "Permission denied"
+      redirect_to(root_path) && return
+    end
+
+    if @user.save
+      redirect_to @user
+    else
+      render action: "new"
+    end
+  end
+end
+
+# Flash in deeply nested if inside another if — only innermost if ancestor
+# is checked, and its right siblings within parent are empty
+class ProfilesController < ApplicationController
+  def destroy
+    if authorized_to_delete?
+      if @record.present?
+        if @record.active?
+          flash[:notice] = "Deactivated"
+        else
+          flash[:error] = "Already inactive"
+        end
+      end
+    end
+
+    respond_to do |format|
+      format.html { render "show" }
+    end
+  end
+end
+
+# Flash in rescue body with redirect inside nested begin/rescue — rescue ancestor
+# has no right siblings, method body after has render but RuboCop doesn't check
+class SetupController < ApplicationController
+  def install
+    begin
+      build_folder
+    rescue StandardError => e
+      flash[:error] = e.to_s
+      begin
+        cleanup_folder
+      rescue StandardError => e2
+        flash[:error] += "Recovery error: #{e2}"
+        redirect_to(action: :retry)
+        return
+      end
+    end
+
+    flash[:success] = "Installed"
+    redirect_to root_path
+  end
+end

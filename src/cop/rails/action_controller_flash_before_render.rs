@@ -22,6 +22,12 @@
 ///   `redirect_to`. RuboCop's `use_redirect_to?` only checks direct siblings (non-recursive)
 ///   and only matches `redirect_to` (not `redirect_back`). Changed to non-recursive
 ///   `is_redirect_sibling` that matches RuboCop's behavior.
+/// - Root cause 8 (FP=20): outer_siblings from the method body were propagated through all
+///   nesting levels of if/rescue/block. RuboCop only checks the FIRST if/rescue ancestor's
+///   right_siblings, which may be empty for deeply nested structures. Fixed by passing the
+///   nested node's remaining siblings within its current branch context instead.
+/// - Root cause 9 (FN): `UnlessNode` was not handled — Prism has separate `UnlessNode` and
+///   `IfNode` types. Added unless handling in all places that handle if.
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -133,11 +139,13 @@ impl FlashVisitor<'_> {
 
     /// Check a list of sibling statements for flash-before-render patterns.
     ///
+    /// This is the top-level checker for def bodies and class-level block bodies.
     /// For each statement:
     /// - If it is a flash assignment: check if any subsequent sibling contains render,
     ///   OR if there are no subsequent siblings and no redirect among siblings → implicit render.
-    /// - If it is an if/rescue block: recurse into its branches, treating the parent
-    ///   statements as the outer context for render detection.
+    /// - If it is an if/unless/rescue block: recurse into its branches, using the
+    ///   remaining siblings as the outer context for render detection (matching RuboCop's
+    ///   behavior of checking the first if/rescue ancestor's right_siblings).
     fn check_statements(&mut self, stmts: &[ruby_prism::Node<'_>]) {
         for (i, stmt) in stmts.iter().enumerate() {
             let remaining = &stmts[i + 1..];
@@ -158,19 +166,18 @@ impl FlashVisitor<'_> {
                 };
 
                 if is_offense {
-                    let (line, column) = self.source.offset_to_line_col(flash_loc);
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Use `flash.now` before `render`.".to_string(),
-                    ));
+                    self.emit_diagnostic(flash_loc);
                 }
             }
 
             // Flash inside an if/else branch: check if render appears in the outer context
             if let Some(if_node) = stmt.as_if_node() {
                 self.check_if_node_with_outer(&if_node, remaining);
+            }
+
+            // Flash inside an unless block
+            if let Some(unless_node) = stmt.as_unless_node() {
+                self.check_unless_node_with_outer(&unless_node, remaining);
             }
 
             // Flash inside a begin/rescue block: similar outer-context check
@@ -182,34 +189,124 @@ impl FlashVisitor<'_> {
             // Pass outer siblings so implicit-render detection can see outer redirect/render.
             if let Some(call_node) = stmt.as_call_node() {
                 if let Some(block) = call_node.block() {
-                    self.check_block_body_with_outer(&block, remaining);
+                    self.check_block_body_with_outer(&block, remaining, false);
                 }
             }
         }
     }
 
     /// Check an if-node's branches. Flash assignments inside branches are offenses
-    /// if the outer siblings (or the branch itself if no outer context) contain render.
+    /// if the outer siblings (the if node's right siblings) contain render.
+    ///
+    /// RuboCop uses Parser AST where single-statement if bodies place the child
+    /// directly as a child of the if node (no begin wrapper). This means the child's
+    /// right_siblings include the else clause. For multi-statement bodies, a begin
+    /// wrapper isolates children from the else clause. We replicate this by collecting
+    /// "else siblings" — nodes from the else/elsif branches — and including them
+    /// in the outer context when the if body has exactly one statement.
     fn check_if_node_with_outer(
         &mut self,
         if_node: &ruby_prism::IfNode<'_>,
         outer_siblings: &[ruby_prism::Node<'_>],
     ) {
-        // Check flash in the if-branch body with outer siblings as render context
+        self.check_if_node_impl(if_node, outer_siblings, false);
+    }
+
+    /// Core implementation for checking an if node's branches.
+    ///
+    /// `parent_render_flag`: extra render context from a parent single-statement
+    /// branch. In Parser AST, when an if is the sole child of another if's body
+    /// (no begin wrapper), its right_siblings include the parent's else clause.
+    /// This flag carries that information.
+    fn check_if_node_impl(
+        &mut self,
+        if_node: &ruby_prism::IfNode<'_>,
+        outer_siblings: &[ruby_prism::Node<'_>],
+        parent_render_flag: bool,
+    ) {
+        // In Parser AST, when the if body is a single node, it's placed directly
+        // as a child of the if (no begin wrapper), so its right_siblings include
+        // the else body. We compute `else_has_render` for this case.
+        let single_stmt_body = if_node
+            .statements()
+            .is_some_and(|s| s.body().iter().count() == 1);
+        let else_has_render = if single_stmt_body {
+            if_node.subsequent().is_some_and(|s| contains_render(&s))
+        } else {
+            false
+        };
+
+        // Combine with parent render flag
+        let effective_render = parent_render_flag || else_has_render;
+
+        // Check flash in the if-branch body.
+        // When the body is a single if/unless node, directly recurse into it with
+        // the effective_render flag (which includes this if's else clause render).
+        // This avoids going through check_branch_stmts_with_outer which would lose
+        // the parent_render_flag context.
         if let Some(stmts) = if_node.statements() {
             let body_nodes: Vec<_> = stmts.body().iter().collect();
-            self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+            if body_nodes.len() == 1 {
+                if let Some(nested_if) = body_nodes[0].as_if_node() {
+                    // In Parser AST, single-stmt if body has no begin wrapper, so
+                    // the nested if's right_siblings = parent's else clause (captured
+                    // in effective_render). The parent's outer_siblings do NOT leak
+                    // through — pass &[] to match RuboCop's ancestor walk behavior.
+                    self.check_if_node_impl(&nested_if, &[], effective_render);
+                } else if let Some(nested_unless) = body_nodes[0].as_unless_node() {
+                    self.check_unless_node_with_outer(&nested_unless, &[]);
+                } else {
+                    self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+                }
+            } else {
+                self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+            }
         }
-        // Check subsequent elsif/else clauses
+        // Check subsequent elsif/else clauses.
+        // For elsif/else, outer_siblings is empty (in Parser AST, elsif is the
+        // last child of the parent if). But parent_render_flag still applies.
         if let Some(subsequent) = if_node.subsequent() {
             if let Some(elsif) = subsequent.as_if_node() {
-                self.check_if_node_with_outer(&elsif, outer_siblings);
+                self.check_if_node_impl(&elsif, &[], parent_render_flag);
             }
             if let Some(else_clause) = subsequent.as_else_node() {
                 if let Some(stmts) = else_clause.statements() {
                     let body_nodes: Vec<_> = stmts.body().iter().collect();
-                    self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+                    // When parent_render_flag is set, flash in this else body
+                    // should be flagged because in Parser AST the parent if's
+                    // right_siblings (which include render) apply here too.
+                    if parent_render_flag {
+                        for (i, stmt) in body_nodes.iter().enumerate() {
+                            if let Some(flash_loc) = get_flash_assignment(stmt) {
+                                let remaining = &body_nodes[i + 1..];
+                                let has_redirect = remaining.iter().any(|s| is_redirect_sibling(s));
+                                if !has_redirect {
+                                    self.emit_diagnostic(flash_loc);
+                                }
+                            }
+                        }
+                    }
+                    self.check_branch_stmts_with_outer(&body_nodes, &[], true);
                 }
+            }
+        }
+    }
+
+    /// Check an unless-node's body. Mirrors check_if_node_with_outer.
+    fn check_unless_node_with_outer(
+        &mut self,
+        unless_node: &ruby_prism::UnlessNode<'_>,
+        outer_siblings: &[ruby_prism::Node<'_>],
+    ) {
+        if let Some(stmts) = unless_node.statements() {
+            let body_nodes: Vec<_> = stmts.body().iter().collect();
+            self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+        }
+        // unless ... else ... end (rare but possible)
+        if let Some(else_clause) = unless_node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                let body_nodes: Vec<_> = stmts.body().iter().collect();
+                self.check_branch_stmts_with_outer(&body_nodes, &[], true);
             }
         }
     }
@@ -223,8 +320,10 @@ impl FlashVisitor<'_> {
             let body_nodes: Vec<_> = stmts.body().iter().collect();
             self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
         }
+        // For rescue clauses: RuboCop's each_ancestor(:rescue) finds the rescue node,
+        // and rescue.right_siblings within the begin is empty. So pass empty outer.
         if let Some(rescue) = begin_node.rescue_clause() {
-            self.check_rescue_with_outer(&rescue, outer_siblings);
+            self.check_rescue_with_outer(&rescue, &[]);
         }
     }
 
@@ -248,8 +347,7 @@ impl FlashVisitor<'_> {
     ///
     /// For **if/rescue branches** (`is_if_rescue_branch=true`):
     /// RuboCop walks up to the if/rescue ancestor and checks its right siblings
-    /// for render. It does NOT check for render within the same branch. Flash's
-    /// inner siblings are only checked for redirect_to.
+    /// for render. It does NOT check for render within the same branch.
     ///
     /// For **block bodies** (`is_if_rescue_branch=false`):
     /// Blocks are treated like def bodies — flash's inner siblings ARE checked
@@ -292,57 +390,64 @@ impl FlashVisitor<'_> {
                 };
 
                 if is_offense {
-                    let (line, column) = self.source.offset_to_line_col(flash_loc);
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Use `flash.now` before `render`.".to_string(),
-                    ));
+                    self.emit_diagnostic(flash_loc);
                 }
             }
 
-            // Recurse into nested if/rescue inside the branch
+            // Recurse into nested if/unless/rescue/block inside the branch.
+            // Pass `inner_remaining` (the remaining siblings within this branch)
+            // as the outer context, not the original `outer_siblings`.
             if let Some(nested_if) = stmt.as_if_node() {
-                self.check_if_node_with_outer(&nested_if, outer_siblings);
+                self.check_if_node_with_outer(&nested_if, inner_remaining);
+            }
+            if let Some(nested_unless) = stmt.as_unless_node() {
+                self.check_unless_node_with_outer(&nested_unless, inner_remaining);
             }
             if let Some(nested_begin) = stmt.as_begin_node() {
-                self.check_begin_node_with_outer(&nested_begin, outer_siblings);
+                self.check_begin_node_with_outer(&nested_begin, inner_remaining);
             }
-            // Recurse into nested call blocks (e.g. respond_to → format.js do...end)
             if let Some(call_node) = stmt.as_call_node() {
                 if let Some(block) = call_node.block() {
-                    self.check_block_body_with_outer(&block, outer_siblings);
+                    self.check_block_body_with_outer(&block, inner_remaining, is_if_rescue_branch);
                 }
             }
         }
     }
 
     /// Check a block body with awareness of the outer sibling context.
-    ///
-    /// For flash inside a block body:
-    /// - If flash has siblings inside the block that contain render → offense (no outer context needed)
-    /// - If flash is alone in the block (no inner siblings): treat outer siblings as context.
-    ///   If outer siblings contain redirect → no offense; if outer contains render or no outer → offense.
-    ///
-    /// This correctly handles:
-    /// - `respond_to do |f|; flash; render; end` → offense (render inside block)
-    /// - `messages.each { flash }; redirect_to` → no offense (outer redirect)
-    /// - `messages.each { flash }; render` → offense (outer render)
+    /// `in_if_rescue_context`: when true, the block is inside an if/rescue branch.
+    /// RuboCop's ancestor walk is transparent to blocks — if flash is inside a
+    /// block that's inside an if, the if ancestor is found, not the block.
+    /// So blocks inside if/rescue use `is_if_rescue_branch=true` to only check
+    /// outer siblings for render, not inner block siblings.
     fn check_block_body_with_outer(
         &mut self,
         block: &ruby_prism::Node<'_>,
         outer_siblings: &[ruby_prism::Node<'_>],
+        in_if_rescue_context: bool,
     ) {
         if let Some(block_node) = block.as_block_node() {
             if let Some(body) = block_node.body() {
                 if let Some(stmts) = body.as_statements_node() {
                     let body_nodes: Vec<_> = stmts.body().iter().collect();
-                    // Block bodies are like def bodies — check inner render too
-                    self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, false);
+                    self.check_branch_stmts_with_outer(
+                        &body_nodes,
+                        outer_siblings,
+                        in_if_rescue_context,
+                    );
                 }
             }
         }
+    }
+
+    fn emit_diagnostic(&mut self, flash_loc: usize) {
+        let (line, column) = self.source.offset_to_line_col(flash_loc);
+        self.diagnostics.push(self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            "Use `flash.now` before `render`.".to_string(),
+        ));
     }
 }
 
