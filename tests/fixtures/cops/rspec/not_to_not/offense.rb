@@ -10,3 +10,9 @@ expect {
   ^^^^^^ RSpec/NotToNot: Prefer `not_to` over `to_not`.
 it { is_expected.to_not be_nil }
                  ^^^^^^ RSpec/NotToNot: Prefer `not_to` over `to_not`.
+expect_it { to_not be_buffered }
+            ^^^^^^ RSpec/NotToNot: Prefer `not_to` over `to_not`.
+expect_it { to_not be_streaming }
+            ^^^^^^ RSpec/NotToNot: Prefer `not_to` over `to_not`.
+expect_it { to_not be_timed_out }
+            ^^^^^^ RSpec/NotToNot: Prefer `not_to` over `to_not`.

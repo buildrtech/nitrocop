@@ -6,10 +6,15 @@ use crate::parse::source::SourceFile;
 
 /// RSpec/NotToNot - Checks for consistent method usage for negating expectations.
 ///
-/// RuboCop's matcher is `(send _ % ...)` where `_` matches ANY receiver,
-/// not just `expect()`. This means `not_to`/`to_not` is flagged on any
-/// receiver (e.g., `expect(x).to_not`, `expect { ... }.to_not`, or even
-/// chained calls), as long as a receiver is present.
+/// RuboCop's matcher is `(send _ % ...)` where `_` matches ANY node
+/// including nil (no receiver). This means `not_to`/`to_not` is flagged
+/// regardless of receiver: `expect(x).to_not`, `expect { ... }.to_not`,
+/// chained calls, and receiverless calls like `expect_it { to_not ... }`
+/// (implicit self inside a block).
+///
+/// Corpus investigation: 10 FN in Arachni__arachni were all receiverless
+/// `to_not` inside `expect_it { ... }` blocks. Fixed by removing the
+/// receiver-presence check.
 pub struct NotToNot;
 
 impl Cop for NotToNot {
@@ -59,12 +64,10 @@ impl Cop for NotToNot {
             }
         }
 
-        // RuboCop's matcher is `(send _ % ...)` — `_` matches any receiver,
-        // not just `expect()`. Only require that a receiver exists.
-        if call.receiver().is_none() {
-            return;
-        }
-
+        // RuboCop's matcher is `(send _ % ...)` — `_` matches any node
+        // including nil (no receiver). This handles both `expect(x).to_not`
+        // (with receiver) and bare `to_not` inside blocks like
+        // `expect_it { to_not be_buffered }` (implicit self, no receiver).
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
 

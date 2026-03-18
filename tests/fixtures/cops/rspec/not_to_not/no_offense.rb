@@ -7,3 +7,5 @@ it { is_expected.not_to be_nil }
 expect {
   2 + 2
 }.not_to raise_error
+expect_it { not_to be_buffered }
+expect_it { not_to be_streaming }
