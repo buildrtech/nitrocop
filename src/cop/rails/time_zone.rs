@@ -20,7 +20,6 @@ use crate::parse::source::SourceFile;
 /// **Remaining gaps:**
 /// - Strict mode does not check GOOD_METHODS chain (e.g., `Time.now.zone` is
 ///   flagged in strict mode but shouldn't be). Requires AST parent walking.
-/// - `String#to_time` detection (RuboCop's `on_send` for `to_time`) not implemented.
 /// - Byte-level chain scanner vs RuboCop's AST parent walking: the scanner works
 ///   correctly for most cases because `call.location().end_offset()` ends at the
 ///   closing paren of arguments, so `foo(Time.now).utc` correctly sees `)` (not
@@ -41,10 +40,12 @@ use crate::parse::source::SourceFile;
 /// locate the outer call's closing `)`, then `chain_contains_tz_safe_method()` checks the
 /// chain continuing after it.
 ///
-/// **2. `String#to_time` detection in strict mode (FN fix, 59 FNs):**
-/// RuboCop's `check_to_time` flags any `.to_time` call but only in strict mode (returns
-/// early if `style == :flexible`). Added detection: when method is `to_time` and
-/// `EnforcedStyle` is `strict`, emit "Do not use `String#to_time` without zone."
+/// **2. `String#to_time` detection in both modes (FN fix):**
+/// RuboCop's `on_send` fires on `.to_time` unconditionally (no mode check), but ONLY when
+/// the receiver is a string literal (`node.receiver&.str_type?`). Previously nitrocop
+/// only flagged in strict mode AND flagged variable receivers too. Fixed to:
+/// - Fire in both flexible and strict mode (matching RuboCop's unconditional `on_send`)
+/// - Only flag when receiver is a string literal node (not variables)
 ///
 /// ## Investigation (2026-03-15): FP=17, FN=82
 ///
@@ -81,6 +82,15 @@ use crate::parse::source::SourceFile;
 /// doesn't see the outer `Time.utc(...)` call.
 /// Fix: added `enclosing_call_is_safe()` backward scan: if Time.now is directly preceded
 /// by `safe_method(`, suppress the offense.
+///
+/// ## Investigation (2026-03-18): FP=1, FN=361
+///
+/// **FN root cause (`String#to_time` in flexible mode):**
+/// RuboCop's `on_send` fires on `.to_time` in BOTH strict and flexible mode, but only
+/// when the receiver is a string literal (`node.receiver&.str_type?`). Nitrocop was only
+/// firing in strict mode AND was incorrectly flagging variable receivers (e.g.,
+/// `date_str.to_time`). Fixed by: (1) removing the strict-mode gate so `to_time` fires
+/// in both modes, (2) checking that the receiver is a string literal node before flagging.
 pub struct TimeZone;
 
 impl Cop for TimeZone {
@@ -112,24 +122,33 @@ impl Cop for TimeZone {
 
         let method = call.name().as_slice();
 
-        // String#to_time detection — only in strict mode.
-        // RuboCop's check_to_time: flags any `.to_time` call unless style is flexible.
-        // MSG_TO_TIME: "Do not use `String#to_time` without zone. Use `Time.zone.parse` instead."
+        // String#to_time detection — fires in BOTH strict and flexible mode.
+        // RuboCop's on_send fires unconditionally (no mode check) but only when the
+        // receiver is a string literal (`node.receiver&.str_type?`). This means
+        // `"string".to_time` is always an offense, but `variable.to_time` is not.
+        // Also skips when the string has a timezone specifier (e.g., "...Z").
         if method == b"to_time" {
-            let style = config.get_str("EnforcedStyle", "flexible");
-            if style == "strict" {
-                let loc = call.message_loc().unwrap_or(call.location());
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(
-                    self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Do not use `String#to_time` without zone. Use `Time.zone.parse` instead."
-                            .to_string(),
-                    ),
-                );
+            // Only flag when receiver is a string literal
+            if let Some(recv) = call.receiver() {
+                if let Some(str_node) = recv.as_string_node() {
+                    let content = str_node.unescaped();
+                    if !has_timezone_specifier(content) {
+                        let loc = call.message_loc().unwrap_or(call.location());
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(
+                            self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Do not use `String#to_time` without zone. Use `Time.zone.parse` instead."
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                }
+                // Non-string receivers (variables, expressions) are never flagged
             }
+            // No receiver (bare `to_time`) — not an offense
             return;
         }
 
@@ -679,16 +698,24 @@ mod tests {
             options,
             ..CopConfig::default()
         };
-        let fixture = b"\"2005-02-27 23:50\".to_time\n                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\n\"2005-02-27 23:50\".to_time(:utc)\n                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\ndate_str.to_time\n         ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\n";
+        // In strict mode, string literal receivers are flagged.
+        // Non-string receivers (date_str.to_time) are NOT flagged — RuboCop requires str_type?.
+        let fixture = b"\"2005-02-27 23:50\".to_time\n                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\n\"2005-02-27 23:50\".to_time(:utc)\n                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\n";
         crate::testutil::assert_cop_offenses_full_with_config(&TimeZone, fixture, config);
     }
 
     #[test]
-    fn to_time_allowed_in_flexible_mode() {
-        let source = br#""2005-02-27 23:50".to_time
-"2005-02-27 23:50".to_time(:utc)
-date_str.to_time
-"#;
+    fn to_time_flagged_in_flexible_mode() {
+        // RuboCop fires on String#to_time in BOTH strict and flexible mode.
+        // Variable receivers are NOT flagged (RuboCop requires str_type? receiver).
+        let fixture = b"\"2005-02-27 23:50\".to_time\n                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\n\"2005-02-27 23:50\".to_time(:utc)\n                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\n";
+        crate::testutil::assert_cop_offenses_full(&TimeZone, fixture);
+    }
+
+    #[test]
+    fn to_time_not_flagged_for_non_string_receivers() {
+        // RuboCop only flags string literal receivers, not variable.to_time
+        let source = b"date_str.to_time\nmy_var.to_time\nto_time\n";
         crate::testutil::assert_cop_no_offenses_full(&TimeZone, source);
     }
 }

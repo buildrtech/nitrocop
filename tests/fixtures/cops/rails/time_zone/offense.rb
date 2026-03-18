@@ -1,3 +1,10 @@
+# String#to_time without timezone specifier — bad in flexible mode (default)
+"2012-03-02 16:05:37".to_time
+                      ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.
+
+"2005-02-27 23:50".to_time
+                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.
+
 Time.now
      ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
 

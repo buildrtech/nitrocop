@@ -3,6 +3,14 @@ Time.zone.now
 foo.now
 DateTime.current
 Process.clock_gettime(Process::CLOCK_MONOTONIC)
+# String#to_time with timezone specifier is NOT an offense
+"2012-03-02T16:05:37Z".to_time
+"2012-03-02T16:05:37+05:00".to_time
+# to_time without a receiver (bare method call) is NOT an offense
+to_time
+# variable.to_time is NOT an offense (receiver is not a string literal)
+date_str.to_time
+my_var.to_time
 Time.now.utc
 Time.now.in_time_zone
 Time.now.to_i
