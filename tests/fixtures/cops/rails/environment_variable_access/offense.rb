@@ -24,3 +24,6 @@ ENV['COUNTER'] &&= 'updated'
 ^^^ Rails/EnvironmentVariableAccess: Do not write to `ENV` directly post initialization.
 ENV['COUNT'] += '1'
 ^^^ Rails/EnvironmentVariableAccess: Do not write to `ENV` directly post initialization.
+ENV['A'], ENV['B'] = a, b
+^^^ Rails/EnvironmentVariableAccess: Do not write to `ENV` directly post initialization.
+          ^^^ Rails/EnvironmentVariableAccess: Do not write to `ENV` directly post initialization.

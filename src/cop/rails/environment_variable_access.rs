@@ -1,5 +1,6 @@
 use crate::cop::node_type::{
     CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE,
+    MULTI_WRITE_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -38,6 +39,13 @@ use crate::parse::source::SourceFile;
 /// Similarly `&&=` → `IndexAndWriteNode`, `+=` → `IndexOperatorWriteNode`.
 /// These are all writes (RuboCop's `env_write?` matches `indexasgn`).
 /// Fixed by adding these three node types to `interested_node_types`.
+///
+/// ## Root cause of 1 FN (2026-03-18)
+///
+/// Multi-assignment `ENV['A'], ENV['B'] = a, b` is parsed as `MultiWriteNode`
+/// with `IndexTargetNode` children (not `CallNode`). Fixed by adding
+/// `MULTI_WRITE_NODE` to `interested_node_types` and iterating `lefts()`
+/// to check each target for ENV receiver.
 pub struct EnvironmentVariableAccess;
 
 impl Cop for EnvironmentVariableAccess {
@@ -59,6 +67,7 @@ impl Cop for EnvironmentVariableAccess {
             INDEX_OR_WRITE_NODE,
             INDEX_AND_WRITE_NODE,
             INDEX_OPERATOR_WRITE_NODE,
+            MULTI_WRITE_NODE,
         ]
     }
 
@@ -73,6 +82,45 @@ impl Cop for EnvironmentVariableAccess {
     ) {
         let allow_reads = config.get_bool("AllowReads", false);
         let allow_writes = config.get_bool("AllowWrites", false);
+
+        // Handle multi-write: ENV['A'], ENV['B'] = a, b
+        // Prism parses these targets as IndexTargetNode inside MultiWriteNode.
+        if let Some(mw) = node.as_multi_write_node() {
+            if !allow_writes {
+                for target in mw.lefts().iter() {
+                    if let Some(idx) = target.as_index_target_node() {
+                        let recv = idx.receiver();
+                        if is_env_receiver(&recv) {
+                            let loc = recv.location();
+                            let (line, column) = source.offset_to_line_col(loc.start_offset());
+                            diagnostics.push(self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Do not write to `ENV` directly post initialization.".to_string(),
+                            ));
+                        }
+                    }
+                }
+                // Also check rest target if present
+                if let Some(rest) = mw.rest() {
+                    if let Some(idx) = rest.as_index_target_node() {
+                        let recv = idx.receiver();
+                        if is_env_receiver(&recv) {
+                            let loc = recv.location();
+                            let (line, column) = source.offset_to_line_col(loc.start_offset());
+                            diagnostics.push(self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Do not write to `ENV` directly post initialization.".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
         // Handle ENV['KEY'] ||= val, &&= val, += val (IndexOrWriteNode, IndexAndWriteNode,
         // IndexOperatorWriteNode). These are all writes — RuboCop's env_write? matches `indexasgn`.
