@@ -555,6 +555,25 @@ fn is_in_module_function_scope(source: &SourceFile, def_offset: usize) -> bool {
     // This catches patterns like:
     //   `end; module_function :method_name`  (inline on same line as end)
     //   `module_function :method_name`        (after the def on its own line)
+    //
+    // Sibling scope skipping: when a class/module at indent < def_col appears AFTER the def
+    // (e.g., `class StripeJs` after `def to_stripejs_customer_id`), we skip its body and
+    // continue scanning for module_function in the outer scope. This matches RuboCop's
+    // `each_ancestor(:module, :begin)` behavior which checks ALL ancestor modules.
+    //
+    // Example (gumroad pattern): module_function in outer module after nested class:
+    //   module StripeHelper
+    //     module ExtensionMethods
+    //       def to_customer_id   ← def_col=4
+    //         to_customer.id
+    //       end
+    //     end
+    //     class StripeJs         ← sibling, skip over it
+    //       ...
+    //     end
+    //     module_function        ← found in ancestor StripeHelper ✓
+    //   end
+    let mut sibling_scope_depth = 0usize;
     for line in lines[def_line..].iter() {
         let indent = line
             .iter()
@@ -562,18 +581,32 @@ fn is_in_module_function_scope(source: &SourceFile, def_offset: usize) -> bool {
             .count();
         let trimmed: &[u8] = &line[indent..];
 
-        // Stop at module/class boundary at lower indentation (scope ends)
-        if indent < def_col && (trimmed.starts_with(b"module ") || trimmed.starts_with(b"class ")) {
-            break;
+        // At indent < def_col, track sibling class/module bodies.
+        // When entering a sibling, increment depth to skip its contents.
+        // When exiting a sibling (its end), decrement depth.
+        // `end` at indent < def_col with sibling_scope_depth == 0 means we've exited
+        // the def's own containing scope — but we continue scanning the outer scope
+        // because module_function may be declared there (as in the gumroad pattern).
+        if indent < def_col {
+            if trimmed.starts_with(b"module ") || trimmed.starts_with(b"class ") {
+                sibling_scope_depth += 1;
+            } else if sibling_scope_depth > 0
+                && (trimmed == b"end"
+                    || trimmed.starts_with(b"end ")
+                    || trimmed.starts_with(b"end;"))
+            {
+                sibling_scope_depth -= 1;
+            }
         }
 
+        // Only check for module_function when not inside a sibling scope body.
         // Check if this line contains `module_function` as an actual statement (not in a comment).
         // Only match at the same or enclosing scope level (indent <= def_col) to avoid
         // matching `module_function` in nested blocks, modules, or method calls.
         // Handles `module_function :name`, `end; module_function :name`, etc.
         // IMPORTANT: Use word boundary matching, not substring matching. Otherwise
         // identifiers like `register_module_function` or `module_function?` falsely trigger.
-        if indent <= def_col {
+        if sibling_scope_depth == 0 && indent <= def_col {
             // Strip comment portion: find first `#` that's not inside a string
             let code_portion = if let Some(hash_pos) = trimmed.iter().position(|&b| b == b'#') {
                 &trimmed[..hash_pos]
