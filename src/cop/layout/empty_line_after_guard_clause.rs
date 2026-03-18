@@ -288,6 +288,9 @@ impl Cop for EmptyLineAfterGuardClause {
             if is_multiline_guard_block(code_content, &lines, effective_end_line) {
                 return;
             }
+            if is_ternary_guard_line(code_content) {
+                return;
+            }
         } else {
             // find_next_code_line returned None — either hit a blank line (after
             // skipping comments) or reached EOF. Since the immediate next line was
@@ -303,6 +306,12 @@ impl Cop for EmptyLineAfterGuardClause {
                 // matches RuboCop's AST-level sibling analysis which ignores
                 // comments and blank lines between consecutive guards.
                 if is_guard_line_with_continuations(code_after_blank, &lines, code_after_idx) {
+                    return;
+                }
+                if is_multiline_guard_block(code_after_blank, &lines, code_after_idx) {
+                    return;
+                }
+                if is_ternary_guard_line(code_after_blank) {
                     return;
                 }
             } else {
@@ -639,6 +648,17 @@ fn is_multiline_modifier_guard(lines: &[&[u8]], line_idx: usize) -> bool {
             .map(|s| &line[s..])
             .unwrap_or(b"");
 
+        // Check if this line has a modifier `if`/`unless` BEFORE tracking depth.
+        // This is important because `unless system(` has the modifier keyword before
+        // the opening paren, so depth should be 0 when we check.
+        if !is_first
+            && depth <= 0
+            && (contains_word(trimmed_bytes, b"if") || contains_word(trimmed_bytes, b"unless"))
+        {
+            return true;
+        }
+        is_first = false;
+
         // Track paren/brace depth to know when a multi-line expression closes
         for &b in trimmed_bytes {
             match b {
@@ -647,16 +667,6 @@ fn is_multiline_modifier_guard(lines: &[&[u8]], line_idx: usize) -> bool {
                 _ => {}
             }
         }
-
-        // Check if this line has a modifier `if`/`unless` at the appropriate nesting level
-        // For the first line, we already checked via is_guard_line, so skip
-        if !is_first
-            && depth <= 0
-            && (contains_word(trimmed_bytes, b"if") || contains_word(trimmed_bytes, b"unless"))
-        {
-            return true;
-        }
-        is_first = false;
 
         // Check if line ends with continuation: backslash, operator, or comma
         let stripped = trimmed_bytes
@@ -679,6 +689,10 @@ fn is_multiline_modifier_guard(lines: &[&[u8]], line_idx: usize) -> bool {
 
 /// Check if the next code line starts a multi-line if/unless block that contains
 /// a guard clause (return/raise/fail/throw/next/break).
+/// Per RuboCop, `contains_guard_clause?` checks `node.if_branch&.guard_clause?` —
+/// only the FIRST statement in the if-branch, and it must be a bare guard statement
+/// (not modifier-form like `return unless cond`). Also handles `and`/`or` operator
+/// guard forms like `redirect_to(@work) && return`.
 fn is_multiline_guard_block(content: &[u8], lines: &[&[u8]], start_idx: usize) -> bool {
     if !starts_with_keyword(content, b"if") && !starts_with_keyword(content, b"unless") {
         return false;
@@ -689,44 +703,98 @@ fn is_multiline_guard_block(content: &[u8], lines: &[&[u8]], start_idx: usize) -
         None => return false,
     };
 
-    let mut depth: i32 = 1;
-    for line in &lines[(content_line_idx + 1)..] {
+    // RuboCop checks `if_branch.guard_clause?` — only the first statement in the
+    // if-branch, not all statements or the else-branch. Find the first non-blank
+    // non-comment line after the if/unless keyword (the if-branch body).
+    for (i, line) in lines[(content_line_idx + 1)..].iter().enumerate() {
         let Some(start) = line.iter().position(|&b| b != b' ' && b != b'\t') else {
             continue;
         };
         let trimmed = &line[start..];
 
-        if starts_with_keyword(trimmed, b"if")
-            || starts_with_keyword(trimmed, b"unless")
-            || starts_with_keyword(trimmed, b"def")
-            || starts_with_keyword(trimmed, b"class")
-            || starts_with_keyword(trimmed, b"module")
-            || starts_with_keyword(trimmed, b"do")
-            || starts_with_keyword(trimmed, b"begin")
-            || starts_with_keyword(trimmed, b"case")
+        // Skip comments
+        if trimmed.starts_with(b"#") {
+            continue;
+        }
+
+        // Stop at scope-closing or else keywords (we've gone past the if-branch)
+        if starts_with_keyword(trimmed, b"end")
+            || starts_with_keyword(trimmed, b"else")
+            || starts_with_keyword(trimmed, b"elsif")
         {
-            depth += 1;
+            break;
         }
 
-        if starts_with_keyword(trimmed, b"end") {
-            depth -= 1;
-            if depth == 0 {
-                break;
-            }
-        }
-
-        if depth == 1 {
-            for keyword in GUARD_METHODS {
-                if starts_with_keyword(trimmed, keyword) {
-                    return true;
-                }
-            }
-            if is_guard_line(trimmed) {
-                return true;
-            }
-        }
+        // The first code line is the if-branch body — check if it's a guard
+        return is_bare_guard_in_block(trimmed, lines, content_line_idx + 1 + i);
     }
     false
+}
+
+/// Check if a trimmed line inside a block is a bare guard statement.
+/// This matches RuboCop's `guard_clause?` which requires `single_line?` AND
+/// only matches bare guard calls (return/raise/fail/next/break), NOT modifier-form
+/// guards like `return unless condition`.
+/// Also handles `and`/`or`/`&&`/`||` return patterns.
+fn is_bare_guard_in_block(trimmed: &[u8], lines: &[&[u8]], line_idx: usize) -> bool {
+    // Check for guard keyword at the start of the line
+    let has_guard_keyword = GUARD_METHODS
+        .iter()
+        .any(|kw| starts_with_keyword(trimmed, kw));
+
+    // If the line starts with a guard keyword but also has a modifier `if`/`unless`,
+    // it's NOT a bare guard statement — it's a modifier-form if/unless wrapping the
+    // guard. RuboCop's `guard_clause?` does NOT match these.
+    if has_guard_keyword
+        && (contains_word(trimmed, b"if") || contains_word(trimmed, b"unless"))
+    {
+        return false;
+    }
+
+    // Check for `and`/`or`/`&&`/`||` with guard keyword (e.g., `redirect_to(@work) && return`)
+    let has_operator_guard = !has_guard_keyword
+        && GUARD_METHODS.iter().any(|kw| contains_word(trimmed, kw))
+        && (contains_word(trimmed, b"and")
+            || contains_word(trimmed, b"or")
+            || trimmed.windows(2).any(|w| w == b"&&" || w == b"||"));
+
+    if !has_guard_keyword && !has_operator_guard {
+        return false;
+    }
+
+    // Guard statement must be single-line: not continuing to the next line.
+    let stripped = trimmed
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+        .map(|end| &trimmed[..=end])
+        .unwrap_or(trimmed);
+
+    if stripped.ends_with(b"\\") || stripped.ends_with(b",") {
+        return false;
+    }
+
+    // Check for unclosed parens/braces (multi-line argument list)
+    if line_idx + 1 < lines.len() {
+        let next = lines[line_idx + 1];
+        let next_trimmed = next
+            .iter()
+            .position(|&b| b != b' ' && b != b'\t')
+            .map(|s| &next[s..])
+            .unwrap_or(b"");
+        let mut paren_depth: i32 = 0;
+        for &b in trimmed {
+            match b {
+                b'(' | b'{' | b'[' => paren_depth += 1,
+                b')' | b'}' | b']' => paren_depth -= 1,
+                _ => {}
+            }
+        }
+        if paren_depth > 0 && !next_trimmed.is_empty() {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn find_line_index_from(lines: &[&[u8]], from_idx: usize, content: &[u8]) -> Option<usize> {
@@ -739,6 +807,22 @@ fn find_line_index_from(lines: &[&[u8]], from_idx: usize, content: &[u8]) -> Opt
         }
     }
     None
+}
+
+/// Check if a line contains a ternary expression with a guard keyword in one branch.
+/// Matches patterns like `cond ? raise(e) : other` or `x ? fail(msg) : y`.
+/// RuboCop's `next_sibling_empty_or_guard_clause?` checks `next_sibling.if_type? &&
+/// contains_guard_clause?(next_sibling)` which matches ternaries with guard if-branches.
+fn is_ternary_guard_line(content: &[u8]) -> bool {
+    if !content.windows(1).any(|w| w == b"?") {
+        return false;
+    }
+    for keyword in GUARD_METHODS {
+        if contains_word(content, keyword) {
+            return true;
+        }
+    }
+    false
 }
 
 fn contains_modifier_guard(content: &[u8]) -> bool {
@@ -891,6 +975,121 @@ mod tests {
             diags.len(),
             1,
             "Expected 1 offense for guard then rubocop:enable then code, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_before_if_block_with_multiline_raise() {
+        // FN: guard clause followed by `if` block containing multi-line raise
+        // (multi-line raise is NOT a guard clause per RuboCop's single_line? check)
+        let source = b"def foo\n  return if !argv\n  if argv.empty? || argv.length > 2\n    raise Errors::CLIInvalidUsage,\n      help: opts.help.chomp\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for guard before if-with-multiline-raise, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_before_if_block_with_single_line_raise_no_offense() {
+        // No offense: guard followed by if block with single-line raise (IS a guard clause)
+        let source =
+            b"def foo\n  return if !argv\n  if argv.empty?\n    raise \"error\"\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Expected 0 offenses for guard before if-with-single-line-raise, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_followed_by_last_expression_no_offense() {
+        // FP: guard clause followed by ternary with guard keyword — RuboCop treats as guard
+        let source = b"def foo\n  return unless broken_rule\n  fail_build ? fail(message) : warn(message)\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Expected 0 offenses for guard before ternary expression, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_followed_by_comment_then_if_guard_no_offense() {
+        // FP: guard clause followed by comment, then blank, then if-block with guard
+        let source = b"def foo\n  return true if result\n  # comment\n  # more comment\n\n  if BCrypt::Password.new(enc) == [password].join\n    return true\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Expected 0 offenses for guard then comment then if-guard, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn block_guard_followed_by_if_and_return_no_offense() {
+        // FP: block-form guard `unless..raise..end` followed by if-block with `&& return`
+        let source = b"def foo\n  unless @work\n    raise \"not found\"\n  end\n  if @collection\n    redirect_to(@work) && return\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Expected 0 offenses for block guard before if-with-and-return, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_followed_by_last_expression_with_next() {
+        // FP: `next unless check_port` followed by ternary with break/next
+        let source = b"items.each do |item|\n  next unless item.check_port\n  item.run || error ? break : next\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Expected 0 offenses for guard before ternary in block, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn block_form_guard_end_followed_by_code() {
+        // FN: block-form `unless valid?; raise; end` followed by `if` code
+        let source = b"def foo\n  unless valid?(level)\n    raise \"invalid\"\n  end\n  if logger.respond_to?(:add)\n    logger.add(level, message)\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for block guard end then code, got {}: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn guard_then_if_block_with_modifier_return_offense() {
+        // FN: `return unless doc.blocks?` followed by if-block where body is
+        // `return unless (...)` — a modifier-form return is NOT a guard per RuboCop
+        let source = b"def foo\n  return unless doc.blocks?\n  if (first_block = doc.blocks[0]).context == :preamble\n    return unless (first_block = first_block.blocks[0])\n  elsif first_block.context == :section\n    return\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterGuardClause, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for guard before if-with-modifier-return, got {}: {:?}",
             diags.len(),
             diags
         );
