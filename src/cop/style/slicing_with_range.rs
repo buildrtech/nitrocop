@@ -9,10 +9,12 @@ use crate::parse::source::SourceFile;
 ///   integer `-1`, missing the NilNode case. Fixed by treating NilNode right child
 ///   the same as absent (endless) for both `0..nil` (redundant) and `x..nil` (suggest
 ///   endless range) patterns, matching RuboCop's behavior.
-/// - FP: 4 corpus FPs on `x[0..]` patterns remain under investigation. These appear
-///   in repos where RuboCop (Prism backend) unexpectedly does not flag them, possibly
-///   due to a Prism-specific edge case in RuboCop's NodePattern matching. The behavior
-///   of flagging `x[0..]` is semantically correct (redundant slice).
+/// - FP fix: 4 corpus FPs on `x[0..]` / `x[0...]` patterns. RuboCop's NodePattern
+///   `nil` matches a NilNode AST type, NOT an absent child. So `{(int -1) nil}` matches
+///   `0..-1` and `0..nil` but NOT `0..` (endless range where right child is absent).
+///   Fixed by only flagging explicit-nil right (`0..nil`, `0...nil`), not endless
+///   ranges (`0..`, `0...`). The `right_is_nil_like` helper was removed; Pattern 1b
+///   now checks for `right.as_nil_node()` specifically.
 pub struct SlicingWithRange;
 
 impl SlicingWithRange {
@@ -26,12 +28,11 @@ impl SlicingWithRange {
         None
     }
 
-    /// Check if the right side of a range is "nil-like": either absent (endless range
-    /// like `x..`) or an explicit NilNode (like `x..nil`). Both are semantically
-    /// equivalent for slicing purposes.
-    fn right_is_nil_like(range: &ruby_prism::RangeNode<'_>) -> bool {
+    /// Check if the right side of a range is an explicit `nil` keyword (NilNode).
+    /// This does NOT match an absent right child (endless range like `x..`).
+    fn right_is_explicit_nil(range: &ruby_prism::RangeNode<'_>) -> bool {
         match range.right() {
-            None => true,
+            None => false,
             Some(right) => right.as_nil_node().is_some(),
         }
     }
@@ -117,8 +118,10 @@ impl Cop for SlicingWithRange {
                         }
                     }
 
-                    // Pattern 1b: 0..nil, 0.. (inclusive), 0...nil, 0... (exclusive) — redundant
-                    if (is_inclusive || is_exclusive) && Self::right_is_nil_like(&irange) {
+                    // Pattern 1b: 0..nil (inclusive), 0...nil (exclusive) — redundant
+                    // Note: 0.. and 0... (endless ranges) are NOT flagged — RuboCop's
+                    // NodePattern `nil` matches NilNode, not absent children.
+                    if (is_inclusive || is_exclusive) && Self::right_is_explicit_nil(&irange) {
                         let (line, column) = source.offset_to_line_col(bracket_offset);
                         let src = std::str::from_utf8(node.location().as_slice()).unwrap_or("");
                         let recv =
