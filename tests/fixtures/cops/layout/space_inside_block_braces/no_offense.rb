@@ -5,3 +5,9 @@
 end
 foo.select { |x| x > 1 }
 x = {}
+items.each { |x|
+  puts x
+}
+items.map {
+  42
+}

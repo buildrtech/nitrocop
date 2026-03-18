@@ -1,3 +1,18 @@
+/// Layout/SpaceInsideBlockBraces checks that block braces have or don't have
+/// surrounding space inside them based on configuration.
+///
+/// ## Investigation notes
+///
+/// FN root causes identified:
+/// 1. Multiline blocks were completely skipped, but RuboCop only skips multiline
+///    *empty* blocks. For multiline blocks with content, RuboCop still checks the
+///    left brace for `{|x|` (SpaceBeforeBlockParameters) violations.
+/// 2. Empty braces with multiple spaces (`{   }`) were not detected — only exactly
+///    one space was checked. RuboCop flags any whitespace-only content inside braces.
+/// 3. When SpaceBeforeBlockParameters=true (default) and `{|x|` is used, the cop
+///    should flag "Space between { and | missing." but was instead falling through
+///    to the generic "Space missing inside {." check, which has a different message
+///    and location.
 use crate::cop::node_type::BLOCK_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -47,17 +62,29 @@ impl Cop for SpaceInsideBlockBraces {
         let empty_style = config.get_str("EnforcedStyleForEmptyBraces", "no_space");
         let space_before_params = config.get_bool("SpaceBeforeBlockParameters", true);
 
-        // Handle empty blocks {}
-        if close_start == open_end {
-            // Empty block with no space: {}
-            match empty_style {
-                "space" => {
+        let (open_line, _) = source.offset_to_line_col(opening.start_offset());
+        let (close_line, _) = source.offset_to_line_col(closing.start_offset());
+        let is_multiline = open_line != close_line;
+
+        // Determine if block is empty (no body)
+        let block_body_empty = block.body().is_none();
+
+        // Handle empty blocks: {} or { } or {   }
+        if block_body_empty {
+            // Skip multiline empty blocks entirely (matches RuboCop behavior)
+            if is_multiline {
+                return;
+            }
+
+            if close_start == open_end {
+                // Adjacent braces: {}
+                if empty_style == "space" {
                     let (line, column) = source.offset_to_line_col(opening.start_offset());
                     let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
-                        "Space inside empty braces missing.".to_string(),
+                        "Space missing inside empty braces.".to_string(),
                     );
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
@@ -70,15 +97,15 @@ impl Cop for SpaceInsideBlockBraces {
                         diag.corrected = true;
                     }
                     diagnostics.push(diag);
-                    return;
                 }
-                _ => return, // no_space is fine for {}
+                return;
             }
-        }
-        // Check for { } (empty with space)
-        if close_start == open_end + 1 && bytes.get(open_end) == Some(&b' ') {
-            match empty_style {
-                "no_space" => {
+
+            // Check if the content between braces is whitespace-only
+            let inner = &bytes[open_end..close_start];
+            let is_whitespace_only = inner.iter().all(|&b| b == b' ' || b == b'\t');
+            if is_whitespace_only {
+                if empty_style == "no_space" {
                     let (line, column) = source.offset_to_line_col(open_end);
                     let mut diag = self.diagnostic(
                         source,
@@ -89,7 +116,7 @@ impl Cop for SpaceInsideBlockBraces {
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
                             start: open_end,
-                            end: open_end + 1,
+                            end: close_start,
                             replacement: String::new(),
                             cop_name: self.name(),
                             cop_index: 0,
@@ -97,17 +124,24 @@ impl Cop for SpaceInsideBlockBraces {
                         diag.corrected = true;
                     }
                     diagnostics.push(diag);
-                    return;
                 }
-                _ => return, // space is fine for { }
+                return;
             }
         }
 
-        // SpaceBeforeBlockParameters: check space between { and |
-        if !space_before_params {
-            if let Some(params) = block.parameters() {
-                let pipe_start = params.location().start_offset();
-                if pipe_start == open_end + 1 && bytes.get(open_end) == Some(&b' ') {
+        // For blocks with content: check left brace and parameters
+        let has_params = block.parameters().is_some();
+
+        // Check left brace / space before block parameters
+        if has_params {
+            let params = block.parameters().unwrap();
+            let pipe_start = params.location().start_offset();
+            let space_after_open = open_end < pipe_start && bytes.get(open_end) == Some(&b' ');
+
+            if space_after_open {
+                // There IS a space between { and |
+                if !space_before_params {
+                    // SpaceBeforeBlockParameters: false — flag the space
                     let (line, column) = source.offset_to_line_col(open_end);
                     let mut diag = self.diagnostic(
                         source,
@@ -118,7 +152,7 @@ impl Cop for SpaceInsideBlockBraces {
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
                             start: open_end,
-                            end: open_end + 1,
+                            end: pipe_start,
                             replacement: String::new(),
                             cop_name: self.name(),
                             cop_index: 0,
@@ -126,32 +160,18 @@ impl Cop for SpaceInsideBlockBraces {
                         diag.corrected = true;
                     }
                     diagnostics.push(diag);
-                    return;
                 }
-            }
-        }
-
-        // Skip multiline blocks
-        let (open_line, _) = source.offset_to_line_col(opening.start_offset());
-        let (close_line, _) = source.offset_to_line_col(closing.start_offset());
-        if open_line != close_line {
-            return;
-        }
-
-        let enforced = config.get_str("EnforcedStyle", "space");
-
-        let space_after_open = bytes.get(open_end) == Some(&b' ');
-        let space_before_close = close_start > 0 && bytes.get(close_start - 1) == Some(&b' ');
-
-        match enforced {
-            "space" => {
-                if !space_after_open {
+                // If space_before_params is true, space between { and | is correct — no offense
+            } else if pipe_start == open_end {
+                // No space: {|x| — directly adjacent
+                if space_before_params {
+                    // SpaceBeforeBlockParameters: true — flag missing space
                     let (line, column) = source.offset_to_line_col(opening.start_offset());
                     let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
-                        "Space missing inside {.".to_string(),
+                        "Space between { and | missing.".to_string(),
                     );
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
@@ -165,70 +185,116 @@ impl Cop for SpaceInsideBlockBraces {
                     }
                     diagnostics.push(diag);
                 }
-                if !space_before_close {
-                    let (line, column) = source.offset_to_line_col(closing.start_offset());
-                    let mut diag = self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Space missing inside }.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        corr.push(crate::correction::Correction {
-                            start: close_start,
-                            end: close_start,
-                            replacement: " ".to_string(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diag.corrected = true;
+                // If space_before_params is false, {| is correct — no offense on left brace
+            }
+        } else {
+            // No params — check space after opening brace (only for single-line)
+            if !is_multiline {
+                let enforced = config.get_str("EnforcedStyle", "space");
+                let space_after_open = bytes.get(open_end) == Some(&b' ');
+
+                match enforced {
+                    "space" => {
+                        if !space_after_open {
+                            let (line, column) = source.offset_to_line_col(opening.start_offset());
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Space missing inside {.".to_string(),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start: open_end,
+                                    end: open_end,
+                                    replacement: " ".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                            diagnostics.push(diag);
+                        }
                     }
-                    diagnostics.push(diag);
+                    "no_space" => {
+                        if space_after_open {
+                            let (line, column) = source.offset_to_line_col(open_end);
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Space inside { detected.".to_string(),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start: open_end,
+                                    end: open_end + 1,
+                                    replacement: String::new(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                            diagnostics.push(diag);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            "no_space" => {
-                if space_after_open {
-                    let (line, column) = source.offset_to_line_col(open_end);
-                    let mut diag = self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Space inside { detected.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        corr.push(crate::correction::Correction {
-                            start: open_end,
-                            end: open_end + 1,
-                            replacement: String::new(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diag.corrected = true;
+        }
+
+        // Check right brace (only for single-line blocks)
+        if !is_multiline {
+            let enforced = config.get_str("EnforcedStyle", "space");
+            let space_before_close = close_start > 0 && bytes.get(close_start - 1) == Some(&b' ');
+
+            match enforced {
+                "space" => {
+                    if !space_before_close {
+                        let (line, column) = source.offset_to_line_col(closing.start_offset());
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Space missing inside }.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: close_start,
+                                end: close_start,
+                                replacement: " ".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
                     }
-                    diagnostics.push(diag);
                 }
-                if space_before_close {
-                    let (line, column) = source.offset_to_line_col(close_start - 1);
-                    let mut diag = self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Space inside } detected.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        corr.push(crate::correction::Correction {
-                            start: close_start - 1,
-                            end: close_start,
-                            replacement: String::new(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diag.corrected = true;
+                "no_space" => {
+                    if space_before_close {
+                        let (line, column) = source.offset_to_line_col(close_start - 1);
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Space inside } detected.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: close_start - 1,
+                                end: close_start,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
                     }
-                    diagnostics.push(diag);
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 }
@@ -286,5 +352,46 @@ mod tests {
             diags.iter().any(|d| d.message.contains("{ and |")),
             "SpaceBeforeBlockParameters:false should flag space between {{ and |"
         );
+    }
+
+    #[test]
+    fn multiline_block_with_params_missing_space() {
+        use crate::testutil::run_cop_full;
+        let src = b"items.each {|x|\n  puts x\n}\n";
+        let diags = run_cop_full(&SpaceInsideBlockBraces, src);
+        assert_eq!(diags.len(), 1, "should flag missing space between {{ and |");
+        assert!(diags[0].message.contains("{ and |"));
+    }
+
+    #[test]
+    fn multiline_block_with_params_has_space() {
+        use crate::testutil::run_cop_full;
+        let src = b"items.each { |x|\n  puts x\n}\n";
+        let diags = run_cop_full(&SpaceInsideBlockBraces, src);
+        assert!(
+            diags.is_empty(),
+            "should not flag multiline block with space before params"
+        );
+    }
+
+    #[test]
+    fn multiline_empty_block_no_offense() {
+        use crate::testutil::run_cop_full;
+        let src = b"items.each {\n}\n";
+        let diags = run_cop_full(&SpaceInsideBlockBraces, src);
+        assert!(diags.is_empty(), "should not flag multiline empty blocks");
+    }
+
+    #[test]
+    fn empty_braces_multiple_spaces() {
+        use crate::testutil::run_cop_full;
+        let src = b"items.each {   }\n";
+        let diags = run_cop_full(&SpaceInsideBlockBraces, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "should flag empty braces with multiple spaces"
+        );
+        assert!(diags[0].message.contains("empty braces detected"));
     }
 }
