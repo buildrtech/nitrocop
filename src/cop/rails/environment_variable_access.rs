@@ -1,4 +1,6 @@
-use crate::cop::node_type::CALL_NODE;
+use crate::cop::node_type::{
+    CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -29,6 +31,13 @@ use crate::parse::source::SourceFile;
 /// Note: Prism parses `ENV['FOO'] = 'bar'` as a `CallNode` with method `[]=`, not as
 /// an `IndexAndWriteNode`. The `IndexAndWriteNode` is only used for `ENV['FOO'] += val`
 /// style compound assignments.
+///
+/// ## Root cause of 105 FNs (2026-03-18)
+///
+/// `ENV['KEY'] ||= value` is parsed as `IndexOrWriteNode`, not `CallNode`.
+/// Similarly `&&=` → `IndexAndWriteNode`, `+=` → `IndexOperatorWriteNode`.
+/// These are all writes (RuboCop's `env_write?` matches `indexasgn`).
+/// Fixed by adding these three node types to `interested_node_types`.
 pub struct EnvironmentVariableAccess;
 
 impl Cop for EnvironmentVariableAccess {
@@ -45,7 +54,12 @@ impl Cop for EnvironmentVariableAccess {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[
+            CALL_NODE,
+            INDEX_OR_WRITE_NODE,
+            INDEX_AND_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+        ]
     }
 
     fn check_node(
@@ -60,6 +74,30 @@ impl Cop for EnvironmentVariableAccess {
         let allow_reads = config.get_bool("AllowReads", false);
         let allow_writes = config.get_bool("AllowWrites", false);
 
+        // Handle ENV['KEY'] ||= val, &&= val, += val (IndexOrWriteNode, IndexAndWriteNode,
+        // IndexOperatorWriteNode). These are all writes — RuboCop's env_write? matches `indexasgn`.
+        if let Some(recv) = node
+            .as_index_or_write_node()
+            .and_then(|n| n.receiver())
+            .or_else(|| node.as_index_and_write_node().and_then(|n| n.receiver()))
+            .or_else(|| {
+                node.as_index_operator_write_node()
+                    .and_then(|n| n.receiver())
+            })
+        {
+            if !allow_writes && is_env_receiver(&recv) {
+                let loc = recv.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Do not write to `ENV` directly post initialization.".to_string(),
+                ));
+            }
+            return;
+        }
+
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -70,19 +108,7 @@ impl Cop for EnvironmentVariableAccess {
             None => return,
         };
 
-        // Receiver must be ENV or ::ENV (not Foo::ENV)
-        // util::constant_name returns the last segment, so we also need to ensure
-        // that for ConstantPathNode, the parent is nil (i.e. ::ENV not Foo::ENV).
-        let is_env = if let Some(cr) = recv.as_constant_read_node() {
-            cr.name().as_slice() == b"ENV"
-        } else if let Some(cp) = recv.as_constant_path_node() {
-            // ::ENV has no parent; Foo::ENV has a parent
-            cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"ENV")
-        } else {
-            false
-        };
-
-        if !is_env {
+        if !is_env_receiver(&recv) {
             return;
         }
 
@@ -111,6 +137,17 @@ impl Cop for EnvironmentVariableAccess {
                 "Do not read from `ENV` directly post initialization.".to_string(),
             ));
         }
+    }
+}
+
+/// Check if a receiver node is `ENV` or `::ENV` (not `Foo::ENV`).
+fn is_env_receiver(recv: &ruby_prism::Node<'_>) -> bool {
+    if let Some(cr) = recv.as_constant_read_node() {
+        cr.name().as_slice() == b"ENV"
+    } else if let Some(cp) = recv.as_constant_path_node() {
+        cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"ENV")
+    } else {
+        false
     }
 }
 
