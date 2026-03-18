@@ -7,6 +7,11 @@ use crate::parse::source::SourceFile;
 
 /// Checks for `Hash` creation with a mutable default value.
 /// `Hash.new([])` or `Hash.new({})` shares the default across all keys.
+///
+/// Corpus FN=10 fix: keyword arguments like `Hash.new(unknown: true)` produce
+/// a `KeywordHashNode` in Prism (not `HashNode`). Added detection for keyword
+/// hash args as mutable defaults. Also added exclusion for `Hash.new(capacity: N)`
+/// which is a legitimate non-mutable argument per RuboCop's pattern.
 pub struct SharedMutableDefault;
 
 impl Cop for SharedMutableDefault {
@@ -107,10 +112,12 @@ fn is_mutable_value(node: &ruby_prism::Node<'_>) -> bool {
         return true;
     }
     // Hash literal {}
-    // Note: as_keyword_hash_node() is not checked here because keyword hash
-    // nodes (keyword args like `foo(a: 1)`) cannot appear as Hash.new arguments.
     if node.as_hash_node().is_some() {
         return true;
+    }
+    // Keyword hash args like Hash.new(unknown: true) — Prism wraps these in KeywordHashNode
+    if let Some(kh) = node.as_keyword_hash_node() {
+        return !is_capacity_keyword_argument(&kh);
     }
     // Array.new or Hash.new (only bare or root-qualified, not Concurrent::Array.new)
     if let Some(call) = node.as_call_node() {
@@ -131,6 +138,20 @@ fn is_mutable_value(node: &ruby_prism::Node<'_>) -> bool {
                 if is_plain_array_or_hash {
                     return true;
                 }
+            }
+        }
+    }
+    false
+}
+
+/// Returns true if the keyword hash node is a single `capacity:` keyword argument,
+/// which is a legitimate Hash.new argument (not a mutable default).
+fn is_capacity_keyword_argument(kh: &ruby_prism::KeywordHashNode<'_>) -> bool {
+    let elements: Vec<_> = kh.elements().iter().collect();
+    if elements.len() == 1 {
+        if let Some(pair) = elements[0].as_assoc_node() {
+            if let Some(sym) = pair.key().as_symbol_node() {
+                return sym.unescaped() == b"capacity";
             }
         }
     }

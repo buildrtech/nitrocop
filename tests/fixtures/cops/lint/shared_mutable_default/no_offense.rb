@@ -7,3 +7,6 @@ Hash.new('default')
 # Qualified constant paths are not flagged — only bare Hash
 Concurrent::Hash.new(Concurrent::Array.new)
 MyModule::Hash.new([])
+
+# capacity keyword argument is not a mutable default
+Hash.new(capacity: 5)
