@@ -204,3 +204,46 @@ def join_results(fruits)
                        ^^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `fruits`.
 end
 
+# FN fix: when-condition assignment in second when clause shadows first when's var
+def transform(decls)
+  case
+  when decl = decls.find {|decl| decl.special? }
+    process(decl)
+  when decl = decls.find {|decl| decl.lambda? }
+                           ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `decl`.
+    transform(decl)
+  end
+end
+
+# FN fix: variable assigned earlier, block param in find on separate line
+def locate(tp, caller_locations)
+  loc = build_source_location(tp, caller_locations)
+  caller_location = caller_locations
+    .find { |loc| loc.path && File.exist?(loc.path) }
+             ^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `loc`.
+  caller_location
+end
+
+# FN fix: multi-assign LHS variable, block in else branch shadows it
+def find_source(accounts)
+  host, username, password = accounts.find { |h, u, p| h == target }
+  if username
+    use(host)
+  else
+    accounts.each do |host, olduser, oldpw|
+                      ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `host`.
+      menu.choice(olduser, host)
+    end
+  end
+end
+
+# FN fix: block param shadows variable from outer catch/else scope
+def parse_args(sw)
+  catch(:prune) do
+    visit(:each_option) do |sw|
+                            ^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `sw`.
+      sw.block.call(arg) if Switch === sw
+    end
+  end
+end
+

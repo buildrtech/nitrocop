@@ -126,6 +126,37 @@ use ruby_prism::Visit;
 /// Remaining FN (8): Shopify/tapioca, holman/boom (2),
 /// interagent/prmd, soutaro/steep (2), sup-heliotrope/sup,
 /// troessner/reek — these require deeper VariableForce semantics.
+///
+/// ## Corpus fix (2026-03-18): FP=2 unchanged, FN=8→3
+///
+/// Fixed 5 of 8 FNs via two changes:
+///
+/// 1. **When-condition predicate context**: Added a `CondBranchEntry`
+///    with `is_body: false` and `single_stmt: false` when visiting
+///    when conditions in `visit_when_node_with_case_offset`. Previously,
+///    blocks inside when conditions inherited the when body's
+///    `single_stmt` flag, causing Check 1 to incorrectly suppress
+///    shadowing between different when clauses. The new entry ensures
+///    blocks in when conditions don't benefit from single-stmt
+///    suppression. Fixes steep FN: `when decl = find {|decl|}` in
+///    second when clause now correctly flags shadowing.
+///
+/// 2. **Check 3 branch constraint**: Tightened the same-conditional-node
+///    suppression (Check 3) to require matching branch_offset, not just
+///    cond_offset. Previously, variables assigned in one when's condition
+///    would suppress blocks in any other when's condition because both
+///    shared the case's cond_offset. Now Check 3 only suppresses when
+///    the block is in the SAME branch as the outer variable (e.g.,
+///    `if item = get_item; item.tap { |item| }` in the then-body).
+///
+/// Remaining FP (2): unchanged (opal Thread.new, xiki nested block —
+/// both likely VariableForce-level semantics or corpus oracle anomalies).
+/// Remaining FN (3): holman/boom (2) are NOT real FNs — the block is
+/// inside the outer variable's assignment RHS, suppressed by both
+/// RuboCop's `variable_used_in_declaration_of_outer?` and nitrocop's
+/// visit-RHS-first ordering. interagent/prmd FN requires detecting
+/// that a block nested in a method chain (`.map {}.reduce()`) should
+/// not be suppressed by Check 2 — would need parent-pointer tracking.
 pub struct ShadowingOuterLocalVariable;
 
 impl Cop for ShadowingOuterLocalVariable {
@@ -381,12 +412,29 @@ impl ShadowVisitor<'_, '_> {
         node: &ruby_prism::WhenNode<'_>,
         case_offset: usize,
     ) {
-        // Visit when conditions with when_condition_case_offset set
+        // Visit when conditions with when_condition_case_offset set.
+        // Push a predicate-context entry so blocks in when conditions
+        // don't get the when body's single_stmt flag (which would
+        // incorrectly suppress shadowing via Check 1 in
+        // is_different_conditional_branch). In Parser gem, blocks
+        // in when conditions have a send node as parent, not the
+        // case node, so they should not benefit from single-stmt
+        // suppression.
         let saved = self.when_condition_case_offset;
         self.when_condition_case_offset = Some(case_offset);
+        let cond_offset = node.location().start_offset();
+        self.conditional_branch_stack.push(CondBranchEntry {
+            cond_offset: case_offset,
+            branch_offset: cond_offset,
+            subsequent_offset: None,
+            is_body: false,
+            is_if_type: false,
+            single_stmt: false,
+        });
         for condition in node.conditions().iter() {
             self.visit(&condition);
         }
+        self.conditional_branch_stack.pop();
         self.when_condition_case_offset = saved;
 
         // Visit when body with in_when_body_of_case set
@@ -942,10 +990,15 @@ fn is_different_conditional_branch(
     // Check 3: same conditional node suppression.
     // When the outer variable was assigned in a conditional's predicate
     // (e.g., `if item = get_item`) and the block is in the same
-    // conditional's then-body, suppress.
+    // conditional's then-body, suppress. The block must be in the SAME
+    // branch as the outer var (same branch_offset) to ensure we only
+    // suppress when the block is in the body corresponding to the
+    // condition where the var was assigned. Without this check, vars
+    // assigned in one when's condition would suppress blocks in a
+    // different when's condition (both sharing the case cond_offset).
     if outer_info.is_condition_var {
-        if let Some((outer_cond, _)) = outer_info.conditional_branch {
-            if outer_cond == block_branch.0 {
+        if let Some((outer_cond, outer_branch)) = outer_info.conditional_branch {
+            if outer_cond == block_branch.0 && outer_branch == block_branch.1 {
                 return true;
             }
         }
