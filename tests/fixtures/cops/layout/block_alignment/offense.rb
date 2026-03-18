@@ -35,3 +35,22 @@ assert_called_with(
           filename)
         end
         ^^^ Layout/BlockAlignment: Align `end` with the start of the line where the block is defined.
+# FN: lambda do..end block misaligned
+let(:app) do
+   ->(_) do
+    [200, {}, "ok"]
+  end
+  ^^^ Layout/BlockAlignment: Align `end` with the start of the line where the block is defined.
+end
+# FN: lambda brace block } misaligned
+-> {
+  m_that_does_not_use_block { }
+    }.should complain("warning")
+    ^ Layout/BlockAlignment: Align `}` with the start of the line where the block is defined.
+# FN: accepted_states.any? block end misaligned (off by 2)
+accepted_states.any? do |(status, reason)|
+  if reason.nil?
+    payment[:payment_status] == status
+  end
+    end
+    ^^^ Layout/BlockAlignment: Align `end` with the start of the line where the block is defined.

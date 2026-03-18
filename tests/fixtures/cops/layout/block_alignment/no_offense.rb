@@ -126,3 +126,36 @@ add_api_endpoint "API::V3::Users::UsersAPI", :id,
                  icon: "image" do
   mount ::API::V3::Users::UserAvatarAPI
 end
+
+# FP fix: chained block end aligns with method name in assignment context
+response = stub_comms do
+             verify_something
+           end.check_request do |data|
+  assert_match(/pattern/, data)
+end.respond_with(response)
+
+# FP fix: end&.path aligns with method name in assignment context
+tmpl_path = caller_locations(1, 2).find do |loc|
+              loc.label.include?("method_missing").!
+            end&.path
+
+# FP fix: && on same line as do — end aligns with LHS of && expression
+next true if urls&.size&.positive? && urls&.all? do |url|
+               url.include?(T.must(cred["registry"]))
+             end
+
+
+# Lambda/proc brace block } aligns with -> start or line indent
+scope :last_n_per_feed, -> (n, feed_ids) {
+   ranked_posts = select(select_sql)
+   from(ranked_posts, "entries")
+     .where("entries_rank <= ?", n)
+     .where(feed_id: feed_ids)
+}
+
+# Lambda brace block } aligns with -> start or line indent
+[:favorite_even_number, validate_with: -> (v) {
+   unless v.nil? || v.even?
+     {code: :even, msg: "Value must be even. Was: #{v}"}
+   end
+}]

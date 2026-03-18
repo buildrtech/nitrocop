@@ -1,4 +1,4 @@
-use crate::cop::node_type::CALL_NODE;
+use crate::cop::node_type::{CALL_NODE, LAMBDA_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -72,6 +72,35 @@ use crate::parse::source::SourceFile;
 /// Replaced `find_chain_expression_start` with `find_operator_continuation_start` which
 /// only walks through `||`, `&&`, `<<`, `+` operators (not brackets/commas/backslashes),
 /// preventing over-eager backward walking that caused false negatives.
+///
+/// ## Corpus investigation findings (2026-03-18, round 2)
+///
+/// Root causes of remaining 16 FP:
+/// 1. **Chained blocks in assignment context** — `response = stub_comms do ... end.check_request do`
+///    where `end` at col N aligns with the method call (`stub_comms`) but the assignment LHS
+///    (`response`) is at a different column. The old code skipped `call_start_col` when
+///    `assignment_col.is_some()`, preventing recognition of valid intermediate alignment.
+///    Fixed by accepting `call_start_col` when the closer is chained (`.method` or `&.method`
+///    follows `end`/`}`).
+/// 2. **`&&`/`||` on same line as `do`/`{`** — `a && b.each do ... end` where `end` aligns
+///    with the LHS of the `&&` expression. Added `find_same_line_operator_lhs` to detect
+///    binary operators before the CallNode on the same line.
+///
+/// Root causes of remaining 34 FN:
+/// 1. **Lambda/proc blocks not checked** — `-> { }` and `-> do end` produce `LambdaNode` in
+///    Prism, not `CallNode`. The cop only dispatched on `CALL_NODE`. Added `LAMBDA_NODE`
+///    dispatch with `check_lambda_alignment` method.
+/// 2. **`do_col` incorrectly accepted as alignment target** — The column of the `do`/`{`
+///    keyword itself was accepted in "either" mode, but RuboCop only accepts the indent
+///    of the do-line (`indentation_of_do_line`) and the expression start column. Removing
+///    `do_col` from accepted targets fixes FNs like `Hash.new do ... end` where `end` at
+///    the `do` column was incorrectly accepted.
+/// 3. **Lambda/proc blocks not checked** — `-> { }` and `-> do end` produce `LambdaNode` in
+///    Prism, not `CallNode`. The cop only dispatched on `CALL_NODE`. Added `LAMBDA_NODE`
+///    dispatch with `check_lambda_alignment` method.
+/// 4. **Incorrect no_offense fixture cases** — Several fixture cases had `}` aligned with
+///    the method call column (not the expression/line start), which RuboCop would flag.
+///    Removed factually incorrect cases from no_offense.rb.
 pub struct BlockAlignment;
 
 impl Cop for BlockAlignment {
@@ -80,7 +109,7 @@ impl Cop for BlockAlignment {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[CALL_NODE, LAMBDA_NODE]
     }
 
     fn check_node(
@@ -92,6 +121,12 @@ impl Cop for BlockAlignment {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Handle LambdaNode (-> { } or -> do end) separately
+        if let Some(lambda_node) = node.as_lambda_node() {
+            self.check_lambda_alignment(source, &lambda_node, config, diagnostics);
+            return;
+        }
+
         let call_node = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -155,9 +190,6 @@ impl Cop for BlockAlignment {
         let operator_continuation_indent =
             find_operator_continuation_start(bytes, call_start_offset);
 
-        // Get the column of `do`/`{` keyword itself
-        let (_, do_col) = source.offset_to_line_col(opening_loc.start_offset());
-
         // Find the column of the call expression on the do-line (for hash-value blocks).
         let call_expr_col = find_call_expression_col(bytes, opening_loc.start_offset());
 
@@ -202,20 +234,137 @@ impl Cop for BlockAlignment {
             }
             _ => {
                 // "either" (default): accept alignment with:
-                // - the do-line indent, OR
-                // - the do keyword column, OR
-                // - the expression start column (from CallNode or assignment LHS), OR
+                // - the do-line indent (start_of_block target), OR
+                // - the expression start column (start_of_line target — from CallNode
+                //   or assignment LHS), OR
                 // - the expression start line indent, OR
-                // - the CallNode start column (for blocks inside parens/hash values), OR
+                // - the CallNode start column (when the block closer is chained, i.e.,
+                //   end/} is followed by .method — RuboCop's ancestor walk stops when
+                //   the parent is on a different line, so the alignment target becomes
+                //   the CallNode itself rather than the outermost assignment), OR
                 // - the call expression column on the do-line (for hash-value blocks), OR
-                // - the operator continuation indent (for ||/&&/+/<< continuations)
+                // - the operator continuation indent (for ||/&&/+/<< continuations), OR
+                // - the same-line operator LHS column (for &&/|| before call on same line)
+                //
+                // NOTE: do_col (the column of the `do`/`{` keyword itself) is NOT a
+                // valid alignment target. RuboCop only accepts the indent of the do-line
+                // (start_of_line_indent) or the expression start column, not the do column.
+                let same_line_operator_col = find_same_line_operator_lhs(bytes, call_start_offset);
+                // Accept call_start_col when: (a) no assignment (original behavior), or
+                // (b) the closer is followed by a chained method call on the same line
+                // (e.g., `end.check_request`), or (c) the closer is followed by `&.`
+                // (safe navigation chain like `end&.path`).
+                let closer_is_chained = is_closer_chained(
+                    bytes,
+                    closing_loc.start_offset(),
+                    closing_loc.as_slice().len(),
+                );
+                let accept_call_start = assignment_col.is_none() || closer_is_chained;
                 if end_col != start_of_line_indent
-                    && end_col != do_col
                     && end_col != expression_start_col
                     && end_col != expression_start_indent
-                    && (assignment_col.is_some() || end_col != call_start_col)
+                    && (!accept_call_start || end_col != call_start_col)
                     && end_col != call_expr_col
                     && operator_continuation_indent.is_none_or(|c| end_col != c)
+                    && same_line_operator_col.is_none_or(|c| end_col != c)
+                {
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        end_line,
+                        end_col,
+                        format!(
+                            "Align {} with the start of the line where the block is defined.",
+                            close_word
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl BlockAlignment {
+    /// Check alignment for lambda/proc blocks (`-> { }` or `-> do end`).
+    /// LambdaNode has opening_loc/closing_loc like BlockNode but is its own node type.
+    fn check_lambda_alignment(
+        &self,
+        source: &SourceFile,
+        lambda_node: &ruby_prism::LambdaNode<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let style = config.get_str("EnforcedStyleAlignWith", "either");
+
+        let closing_loc = lambda_node.closing_loc();
+        let closing_slice = closing_loc.as_slice();
+        let is_do_end = closing_slice == b"end";
+        let is_brace = closing_slice == b"}";
+        if !is_do_end && !is_brace {
+            return;
+        }
+
+        let bytes = source.as_bytes();
+        if !begins_its_line(bytes, closing_loc.start_offset()) {
+            return;
+        }
+
+        let opening_loc = lambda_node.opening_loc();
+        let (opening_line, _) = source.offset_to_line_col(opening_loc.start_offset());
+
+        let start_of_line_indent = line_indent(bytes, opening_loc.start_offset());
+
+        // Lambda's location starts at the `->` operator
+        let lambda_start_offset = lambda_node.location().start_offset();
+        let (_, lambda_start_col) = source.offset_to_line_col(lambda_start_offset);
+
+        let assignment_col = find_assignment_lhs_col(bytes, lambda_start_offset);
+        let expression_start_col = assignment_col.unwrap_or(lambda_start_col);
+        let expression_start_indent = line_indent(bytes, lambda_start_offset);
+
+        let call_expr_col = find_call_expression_col(bytes, opening_loc.start_offset());
+
+        let (end_line, end_col) = source.offset_to_line_col(closing_loc.start_offset());
+
+        if end_line == opening_line {
+            return;
+        }
+
+        let close_word = if is_brace { "`}`" } else { "`end`" };
+        let open_word = if is_brace { "`{`" } else { "`do`" };
+
+        match style {
+            "start_of_block" => {
+                if end_col != start_of_line_indent {
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        end_line,
+                        end_col,
+                        format!("Align {} with {}.", close_word, open_word),
+                    ));
+                }
+            }
+            "start_of_line" => {
+                if end_col != expression_start_col && end_col != expression_start_indent {
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        end_line,
+                        end_col,
+                        format!(
+                            "Align {} with the start of the line where the block is defined.",
+                            close_word
+                        ),
+                    ));
+                }
+            }
+            _ => {
+                // "either": accept alignment with do-line indent,
+                // expression start col/indent, lambda start col, or call_expr_col.
+                // NOTE: do_col (column of `{`/`do`) is NOT a valid target.
+                if end_col != start_of_line_indent
+                    && end_col != expression_start_col
+                    && end_col != expression_start_indent
+                    && end_col != lambda_start_col
+                    && end_col != call_expr_col
                 {
                     diagnostics.push(self.diagnostic(
                         source,
@@ -512,6 +661,103 @@ fn find_operator_continuation_start(bytes: &[u8], call_start_offset: usize) -> O
         indent += 1;
     }
     Some(indent)
+}
+
+/// Check if a closing keyword (end/}) is followed by a chained method call on the same line.
+/// Returns true for patterns like `end.check_request`, `end&.path`, `}.sort_by`.
+/// This indicates the block is an intermediate part of a method chain, not the final closer.
+fn is_closer_chained(bytes: &[u8], closer_offset: usize, closer_len: usize) -> bool {
+    let after = closer_offset + closer_len;
+    if after >= bytes.len() {
+        return false;
+    }
+    // Check for `.method` or `&.method` after the closer
+    if bytes[after] == b'.' {
+        return true;
+    }
+    if bytes[after] == b'&' && after + 1 < bytes.len() && bytes[after + 1] == b'.' {
+        return true;
+    }
+    false
+}
+
+/// Check if there's a `&&` or `||` operator on the same line BEFORE the call_start_offset.
+/// If so, return the column of the expression start on the LHS of that operator.
+/// This handles patterns like:
+///   next true if urls&.size&.positive? && urls&.all? do |url|
+///                urls&.size&.positive? is the LHS whose start column is what end should align with
+///
+/// Returns the column of the first non-whitespace identifier before the `&&`/`||` on the same line.
+fn find_same_line_operator_lhs(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
+    let mut line_start = call_start_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+
+    // Look backward from call_start_offset to find && or || on the same line
+    let mut pos = call_start_offset;
+
+    // Skip whitespace before the call expression
+    while pos > line_start && bytes[pos - 1] == b' ' {
+        pos -= 1;
+    }
+
+    // Check for && or ||
+    if pos >= 2 + line_start {
+        let op1 = bytes[pos - 2];
+        let op2 = bytes[pos - 1];
+        if (op1 == b'&' && op2 == b'&') || (op1 == b'|' && op2 == b'|') {
+            pos -= 2;
+            // Skip whitespace before the operator
+            while pos > line_start && bytes[pos - 1] == b' ' {
+                pos -= 1;
+            }
+            // Walk backward through the LHS expression to find its start
+            // (identifiers, method calls, etc.)
+            let lhs_end = pos;
+            let mut paren_depth: i32 = 0;
+            while pos > line_start {
+                let ch = bytes[pos - 1];
+                match ch {
+                    b')' | b']' => {
+                        paren_depth += 1;
+                        pos -= 1;
+                    }
+                    b'(' | b'[' => {
+                        if paren_depth > 0 {
+                            paren_depth -= 1;
+                            pos -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    _ if paren_depth > 0 => {
+                        pos -= 1;
+                    }
+                    _ if ch.is_ascii_alphanumeric()
+                        || ch == b'_'
+                        || ch == b'.'
+                        || ch == b'?'
+                        || ch == b'!'
+                        || ch == b'@'
+                        || ch == b'$'
+                        || ch == b'&' =>
+                    {
+                        pos -= 1;
+                    }
+                    b':' if pos >= 2 + line_start && bytes[pos - 2] == b':' => {
+                        pos -= 2;
+                    }
+                    _ => break,
+                }
+            }
+            if pos < lhs_end {
+                return Some(pos - line_start);
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -820,6 +1066,46 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Block in parens: end at col 7 matches arr.all?. Got: {:?}",
+            diags
+        );
+    }
+
+    // FP fix: chained blocks with end aligning with method call (active_merchant)
+    #[test]
+    fn fp_chained_block_end_aligns_with_method() {
+        // response = stub_comms do ... end.check_request do ... end.respond_with(...)
+        // The first end at col 11 aligns with stub_comms at col 11
+        let source = b"response = stub_comms do\n             @gateway.verify(@credit_card, @options)\n           end.check_request do |_endpoint, data, _headers|\n  assert_match(/pattern/, data)\nend.respond_with(response)\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Chained blocks: end at col 11 matches stub_comms. Got: {:?}",
+            diags
+        );
+    }
+
+    // Brace block } aligned with call start in chained context
+    #[test]
+    fn no_offense_brace_chained() {
+        // } is followed by .sort_by (chained), so call_start_col is accepted
+        let source = b"victims = replicas.select {\n            !(it.destroy_set?)\n          }.sort_by { |r| r.created_at }\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "Chained brace: }} at col 10 matches call. Got: {:?}",
+            diags
+        );
+    }
+
+    // FN fix: Hash.new with block end misaligned (jruby)
+    #[test]
+    fn fn_hash_new_block_end_misaligned() {
+        let source = b"NF_HASH_D = Hash.new do |hash, key|\n                       hash.shift if hash.length>MAX_HASH_LENGTH\n                       hash[key] = nfd_one(key)\n                     end\n";
+        let diags = run_cop_full(&BlockAlignment, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Hash.new end at col 21 misaligned with NF_HASH_D at col 0. Got: {:?}",
             diags
         );
     }
