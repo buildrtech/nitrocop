@@ -64,10 +64,19 @@ use ruby_prism::Visit;
 /// `VarRefFinder`. Fixed by checking the receiver of `DefNode` — if it's a
 /// `LocalVariableReadNode`, the name is counted as referenced.
 ///
-/// After fix: FP=0, FN=114 (98.9% match). Remaining 114 FN are edge cases
-/// (e.g., NumberedParametersNode, `for` loops, or other VariableForce
-/// subtleties that would require significantly more sophisticated scope
-/// tracking to match).
+/// After fix: FP=0, FN=114 (98.9% match). Remaining 114 FN were from three
+/// missing parameter types:
+///
+/// ## Corpus investigation (2026-03-18)
+///
+/// FN=114 root causes:
+/// - Destructured block params `|(a, b)|` represented as `MultiTargetNode`
+///   in `requireds()` / `posts()` were not traversed (~42 FN).
+/// - Block-pass params `&block` (`BlockParameterNode`) were not collected (~23 FN).
+/// - Keyword rest params `**opts` (`KeywordRestParameterNode`) were not collected (~30 FN).
+/// Fixed by adding `collect_multi_target_params` for destructured params, and
+/// handling `params.keyword_rest()` and `params.block()` in both param collection
+/// and shadowing name collection.
 pub struct UnusedBlockArgument;
 
 impl Cop for UnusedBlockArgument {
@@ -180,16 +189,8 @@ impl BlockVisitor<'_, '_> {
                 if self.ignore_empty {
                     return;
                 }
-                // Even with IgnoreEmptyBlocks: false, we need params to check
-                // but there's no body to check references in. Fall through
-                // to check params with empty reference set.
-                // Actually, for empty blocks with IgnoreEmptyBlocks: false,
-                // we still need to report unused args. But the body is None,
-                // so nothing is referenced.
                 match parameters {
                     Some(_) => {
-                        // Continue with empty body - will check params below
-                        // but use a special path since there's no body to visit
                         self.check_params_with_body(parameters, None);
                         return;
                     }
@@ -218,7 +219,7 @@ impl BlockVisitor<'_, '_> {
 
         // Collect regular parameters
         if let Some(params) = block_params_node.parameters() {
-            // Required params
+            // Required params (including destructured MultiTargetNode)
             for req in params.requireds().iter() {
                 if let Some(rp) = req.as_required_parameter_node() {
                     param_info.push(ParamInfo {
@@ -227,6 +228,8 @@ impl BlockVisitor<'_, '_> {
                         is_keyword: false,
                         is_block_local: false,
                     });
+                } else if let Some(mt) = req.as_multi_target_node() {
+                    collect_multi_target_params(&mt, &mut param_info);
                 }
             }
 
@@ -258,7 +261,7 @@ impl BlockVisitor<'_, '_> {
                 }
             }
 
-            // Post params (after rest)
+            // Post params (after rest, including destructured)
             for post in params.posts().iter() {
                 if let Some(rp) = post.as_required_parameter_node() {
                     param_info.push(ParamInfo {
@@ -267,6 +270,8 @@ impl BlockVisitor<'_, '_> {
                         is_keyword: false,
                         is_block_local: false,
                     });
+                } else if let Some(mt) = post.as_multi_target_node() {
+                    collect_multi_target_params(&mt, &mut param_info);
                 }
             }
 
@@ -285,6 +290,36 @@ impl BlockVisitor<'_, '_> {
                             name: kp.name().as_slice().to_vec(),
                             offset: kp.location().start_offset(),
                             is_keyword: true,
+                            is_block_local: false,
+                        });
+                    }
+                }
+            }
+
+            // Keyword rest parameter (**opts)
+            if let Some(kwrest) = params.keyword_rest() {
+                if let Some(kp) = kwrest.as_keyword_rest_parameter_node() {
+                    if let Some(name) = kp.name() {
+                        if let Some(name_loc) = kp.name_loc() {
+                            param_info.push(ParamInfo {
+                                name: name.as_slice().to_vec(),
+                                offset: name_loc.start_offset(),
+                                is_keyword: false,
+                                is_block_local: false,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Block parameter (&block)
+            if let Some(block) = params.block() {
+                if let Some(name) = block.name() {
+                    if let Some(name_loc) = block.name_loc() {
+                        param_info.push(ParamInfo {
+                            name: name.as_slice().to_vec(),
+                            offset: name_loc.start_offset(),
+                            is_keyword: false,
                             is_block_local: false,
                         });
                     }
@@ -365,6 +400,76 @@ impl BlockVisitor<'_, '_> {
                     format!("Unused {var_type} - `{display_name}`."),
                 ));
             }
+        }
+    }
+}
+
+/// Recursively collect ParamInfo from a destructured MultiTargetNode.
+/// E.g., `|(a, b, c)|` creates a MultiTargetNode with lefts [a, b, c].
+fn collect_multi_target_params(mt: &ruby_prism::MultiTargetNode<'_>, out: &mut Vec<ParamInfo>) {
+    for target in mt.lefts().iter() {
+        if let Some(rp) = target.as_required_parameter_node() {
+            out.push(ParamInfo {
+                name: rp.name().as_slice().to_vec(),
+                offset: rp.location().start_offset(),
+                is_keyword: false,
+                is_block_local: false,
+            });
+        } else if let Some(inner) = target.as_multi_target_node() {
+            collect_multi_target_params(&inner, out);
+        }
+    }
+    if let Some(rest) = mt.rest() {
+        if let Some(splat) = rest.as_splat_node() {
+            if let Some(expr) = splat.expression() {
+                if let Some(rp) = expr.as_required_parameter_node() {
+                    out.push(ParamInfo {
+                        name: rp.name().as_slice().to_vec(),
+                        offset: rp.location().start_offset(),
+                        is_keyword: false,
+                        is_block_local: false,
+                    });
+                }
+            }
+        }
+    }
+    for target in mt.rights().iter() {
+        if let Some(rp) = target.as_required_parameter_node() {
+            out.push(ParamInfo {
+                name: rp.name().as_slice().to_vec(),
+                offset: rp.location().start_offset(),
+                is_keyword: false,
+                is_block_local: false,
+            });
+        } else if let Some(inner) = target.as_multi_target_node() {
+            collect_multi_target_params(&inner, out);
+        }
+    }
+}
+
+/// Recursively collect names from a destructured MultiTargetNode (for shadowing).
+fn collect_multi_target_names(mt: &ruby_prism::MultiTargetNode<'_>, names: &mut Vec<Vec<u8>>) {
+    for target in mt.lefts().iter() {
+        if let Some(rp) = target.as_required_parameter_node() {
+            names.push(rp.name().as_slice().to_vec());
+        } else if let Some(inner) = target.as_multi_target_node() {
+            collect_multi_target_names(&inner, names);
+        }
+    }
+    if let Some(rest) = mt.rest() {
+        if let Some(splat) = rest.as_splat_node() {
+            if let Some(expr) = splat.expression() {
+                if let Some(rp) = expr.as_required_parameter_node() {
+                    names.push(rp.name().as_slice().to_vec());
+                }
+            }
+        }
+    }
+    for target in mt.rights().iter() {
+        if let Some(rp) = target.as_required_parameter_node() {
+            names.push(rp.name().as_slice().to_vec());
+        } else if let Some(inner) = target.as_multi_target_node() {
+            collect_multi_target_names(&inner, names);
         }
     }
 }
@@ -503,6 +608,8 @@ impl VarRefFinder {
         for req in params.requireds().iter() {
             if let Some(rp) = req.as_required_parameter_node() {
                 names.push(rp.name().as_slice().to_vec());
+            } else if let Some(mt) = req.as_multi_target_node() {
+                collect_multi_target_names(&mt, &mut names);
             }
         }
         for opt in params.optionals().iter() {
@@ -520,6 +627,8 @@ impl VarRefFinder {
         for post in params.posts().iter() {
             if let Some(rp) = post.as_required_parameter_node() {
                 names.push(rp.name().as_slice().to_vec());
+            } else if let Some(mt) = post.as_multi_target_node() {
+                collect_multi_target_names(&mt, &mut names);
             }
         }
         for kw in params.keywords().iter() {
@@ -527,6 +636,18 @@ impl VarRefFinder {
                 names.push(kp.name().as_slice().to_vec());
             } else if let Some(kp) = kw.as_optional_keyword_parameter_node() {
                 names.push(kp.name().as_slice().to_vec());
+            }
+        }
+        if let Some(kwrest) = params.keyword_rest() {
+            if let Some(kp) = kwrest.as_keyword_rest_parameter_node() {
+                if let Some(name) = kp.name() {
+                    names.push(name.as_slice().to_vec());
+                }
+            }
+        }
+        if let Some(block) = params.block() {
+            if let Some(name) = block.name() {
+                names.push(name.as_slice().to_vec());
             }
         }
         names
