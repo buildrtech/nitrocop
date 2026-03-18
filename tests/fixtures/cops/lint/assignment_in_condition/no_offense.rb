@@ -56,6 +56,10 @@ end
 # assignment inside method call arguments is not flagged
 return unless %i[asc desc].include?(order = params[:order])
 
+# safe assignment with constant path write (parenthesized)
+if (Foo::Bar = load_config)
+end
+
 # begin..end while/until with assignment in condition is not flagged
 # (while_post / until_post in parser gem — RuboCop's on_while doesn't fire for these)
 begin

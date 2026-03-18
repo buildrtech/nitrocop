@@ -27,6 +27,13 @@ use crate::parse::source::SourceFile;
 /// - Skips conditional assignments (`||=`, `&&=`)
 /// - Handles `AllowSafeAssignment` via parenthesized assignment detection
 /// - Reports offense on the `=` operator location specifically
+///
+/// ## FN fix (46 FNs):
+/// Added `ConstantPathWriteNode` handling (e.g., `Foo::Bar = 1` in condition).
+/// Parser gem's `:casgn` maps to both `ConstantWriteNode` (simple `Foo = 1`)
+/// and `ConstantPathWriteNode` (qualified `Foo::Bar = 1`). Only `ConstantWriteNode`
+/// was handled. Also added `MultiWriteNode` to `get_equals_assignment_operator_loc`
+/// for completeness (it was already in `is_assignment_node` for safe assignment).
 pub struct AssignmentInCondition;
 
 impl Cop for AssignmentInCondition {
@@ -169,6 +176,7 @@ fn is_assignment_node(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_class_variable_write_node().is_some()
         || node.as_global_variable_write_node().is_some()
         || node.as_constant_write_node().is_some()
+        || node.as_constant_path_write_node().is_some()
         || node.as_multi_write_node().is_some()
         || node.as_call_node().is_some_and(|c| c.is_attribute_write())
 }
@@ -188,6 +196,12 @@ fn get_equals_assignment_operator_loc(node: &ruby_prism::Node<'_>) -> Option<usi
         return Some(n.operator_loc().start_offset());
     }
     if let Some(n) = node.as_constant_write_node() {
+        return Some(n.operator_loc().start_offset());
+    }
+    if let Some(n) = node.as_constant_path_write_node() {
+        return Some(n.operator_loc().start_offset());
+    }
+    if let Some(n) = node.as_multi_write_node() {
         return Some(n.operator_loc().start_offset());
     }
     None
