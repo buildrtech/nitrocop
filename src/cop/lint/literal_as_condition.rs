@@ -109,6 +109,20 @@ use crate::parse::source::SourceFile;
 /// - Skip literal-condition offenses for `IfNode`/`UnlessNode` when the explicit
 ///   `else` branch exists and its statements are empty. This matches the corpus
 ///   oracle's RuboCop behavior.
+///
+/// ## Corpus investigation (2026-03-18)
+///
+/// Corpus oracle reported FP=0, FN=11.
+///
+/// FN root cause: The empty-else skip was too aggressive. It skipped ALL cases
+/// where the else branch was empty, including `if true; <nested>; else; end`
+/// where the then-body is non-empty. RuboCop 1.84.2 only crashes when BOTH
+/// the then-body AND else-body are empty (e.g. `if true; else; end`).
+/// When the then-body has content, RuboCop correctly flags the literal.
+///
+/// Fix: Changed `if_has_empty_body_and_empty_else` to `if_has_empty_body_and_empty_else`,
+/// which only skips when both branches are empty. This fixes 11 FNs across
+/// jruby (9 nested `if true;` with empty else) and rufo (2 `if 1; 2; else; end`).
 pub struct LiteralAsCondition;
 
 /// Check if a node is a literal value (matches RuboCop's `literal?`).
@@ -242,21 +256,29 @@ fn statements_are_empty(statements: Option<ruby_prism::StatementsNode<'_>>) -> b
     }
 }
 
-fn if_has_empty_else_branch(if_node: &ruby_prism::IfNode<'_>) -> bool {
+/// RuboCop 1.84.2 crashes (emits no offense) only when BOTH the then-body
+/// AND the else-body are empty, e.g. `if true; else; end`.
+/// When the then-body is non-empty (e.g. `if true; nested; else; end`), RuboCop
+/// correctly flags the literal condition.
+fn if_has_empty_body_and_empty_else(if_node: &ruby_prism::IfNode<'_>) -> bool {
+    if !statements_are_empty(if_node.statements()) {
+        return false;
+    }
     if let Some(subsequent) = if_node.subsequent() {
         if let Some(else_node) = subsequent.as_else_node() {
             return statements_are_empty(else_node.statements());
         }
     }
-
     false
 }
 
-fn unless_has_empty_else_branch(unless_node: &ruby_prism::UnlessNode<'_>) -> bool {
+fn unless_has_empty_body_and_empty_else(unless_node: &ruby_prism::UnlessNode<'_>) -> bool {
+    if !statements_are_empty(unless_node.statements()) {
+        return false;
+    }
     if let Some(else_node) = unless_node.else_clause() {
         return statements_are_empty(else_node.statements());
     }
-
     false
 }
 
@@ -350,7 +372,7 @@ impl Cop for LiteralAsCondition {
             if is_pattern_matching_guard(source, node) {
                 return;
             }
-            if if_has_empty_else_branch(&if_node) {
+            if if_has_empty_body_and_empty_else(&if_node) {
                 return;
             }
             let predicate = if_node.predicate();
@@ -367,7 +389,7 @@ impl Cop for LiteralAsCondition {
             if is_pattern_matching_guard(source, node) {
                 return;
             }
-            if unless_has_empty_else_branch(&unless_node) {
+            if unless_has_empty_body_and_empty_else(&unless_node) {
                 return;
             }
             let predicate = unless_node.predicate();
@@ -543,4 +565,32 @@ fn has_match_var_descendant(node: &ruby_prism::CaseMatchNode<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(LiteralAsCondition, "cops/lint/literal_as_condition");
+
+    #[test]
+    fn test_if_true_semicolon() {
+        let cop = LiteralAsCondition;
+        let diags = crate::testutil::run_cop_full(&cop, b"if true;\n  x = 1\nend\n");
+        assert!(
+            !diags.is_empty(),
+            "should detect literal in 'if true;' but got no diagnostics"
+        );
+    }
+
+    #[test]
+    fn test_nested_if_true_semicolons() {
+        let cop = LiteralAsCondition;
+        let src = b"if true;\n  if true;\n    x = 1\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&cop, src);
+        assert_eq!(diags.len(), 2, "should detect 2 literals in nested 'if true;'");
+    }
+
+    #[test]
+    fn test_if_literal_semicolon_else_end() {
+        let cop = LiteralAsCondition;
+        let diags = crate::testutil::run_cop_full(&cop, b"if 1; 2; else; end\n");
+        assert!(
+            !diags.is_empty(),
+            "should detect literal in 'if 1; 2; else; end' but got no diagnostics"
+        );
+    }
 }
