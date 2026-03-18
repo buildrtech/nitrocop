@@ -5,7 +5,7 @@ use crate::parse::source::SourceFile;
 
 /// Checks for hardcoded IP addresses in string literals.
 ///
-/// ## Investigation findings (2026-03-15)
+/// ## Investigation findings (2026-03-15, updated 2026-03-18)
 ///
 /// Root causes of 217 FPs and 66 FNs:
 ///
@@ -19,11 +19,20 @@ use crate::parse::source::SourceFile;
 /// 3. Used `unescaped()` instead of `content_loc().as_slice()`, so escape sequences
 ///    like `"\x31.2.3.4"` would expand to `1.2.3.4` and false-positive. RuboCop
 ///    checks the raw source between quotes (`node.source[1...-1]`).
+/// 4. IPv6 compressed validator accepted `:::` (three colons), `:::A`, and `::A:`
+///    as valid. `:::` is never valid IPv6 — added early rejection. `::A:` has a
+///    trailing colon creating empty groups; fixed by requiring all groups in the
+///    left/right halves of `::` split to be valid hex (no empty groups allowed).
+///    These patterns appear in Ruby code as scope resolution operators (`:::`) and
+///    IRB completion candidates.
 ///
 /// **FN causes (fixed):**
 /// 1. Missing IPv4-mapped IPv6 support (`::ffff:192.168.1.1`). Ruby's
 ///    `Resolv::IPv6::Regex` includes `Regex_6Hex4Dec` and `Regex_CompressedHex4Dec`
 ///    patterns for this format.
+///
+/// **Remaining FN (5):** No detailed location data available from corpus oracle.
+/// Likely edge cases in IPv6 validation or config resolution differences.
 pub struct IpAddresses;
 
 /// Maximum length of an IPv6 address string (IPv4-mapped IPv6 is longest).
@@ -67,6 +76,11 @@ impl IpAddresses {
             return false;
         }
 
+        // Three or more consecutive colons is never valid IPv6
+        if s.contains(":::") {
+            return false;
+        }
+
         // Try IPv4-mapped IPv6 formats first (e.g., ::ffff:192.168.1.1)
         if s.contains('.') {
             return Self::is_ipv6_with_ipv4(s);
@@ -100,29 +114,33 @@ impl IpAddresses {
         if parts.len() != 2 {
             return false;
         }
-        let left_groups = if parts[0].is_empty() {
-            0
+        // Validate left side: if non-empty, split by ':' and all groups must be valid hex
+        // (no empty groups allowed — that would indicate a leading/trailing/extra colon)
+        let left_groups: Vec<&str> = if parts[0].is_empty() {
+            vec![]
         } else {
-            parts[0].split(':').count()
-        };
-        let right_groups = if parts[1].is_empty() {
-            0
-        } else {
-            parts[1].split(':').count()
-        };
-        if left_groups + right_groups > 7 {
-            return false;
-        }
-        // Validate each group
-        for part in &parts {
-            for group in part.split(':') {
-                if group.is_empty() {
-                    continue;
-                }
-                if !Self::is_valid_hex_group(group) {
+            let groups: Vec<&str> = parts[0].split(':').collect();
+            for g in &groups {
+                if !Self::is_valid_hex_group(g) {
                     return false;
                 }
             }
+            groups
+        };
+        // Validate right side similarly
+        let right_groups: Vec<&str> = if parts[1].is_empty() {
+            vec![]
+        } else {
+            let groups: Vec<&str> = parts[1].split(':').collect();
+            for g in &groups {
+                if !Self::is_valid_hex_group(g) {
+                    return false;
+                }
+            }
+            groups
+        };
+        if left_groups.len() + right_groups.len() > 7 {
+            return false;
         }
         true
     }
@@ -163,30 +181,32 @@ impl IpAddresses {
             if parts.len() != 2 {
                 return false;
             }
-            let left_count = if parts[0].is_empty() {
-                0
+            let left_groups: Vec<&str> = if parts[0].is_empty() {
+                vec![]
             } else {
-                parts[0].split(':').count()
-            };
-            let right_count = if parts[1].is_empty() {
-                0
-            } else {
-                parts[1].split(':').count()
-            };
-            // IPv4 counts as 2 groups, so hex groups + 2 <= 8
-            if left_count + right_count > 5 {
-                return false;
-            }
-            // Validate hex groups
-            for part in &parts {
-                for group in part.split(':') {
-                    if group.is_empty() {
-                        continue;
-                    }
-                    if !Self::is_valid_hex_group(group) {
+                let groups: Vec<&str> = parts[0].split(':').collect();
+                for g in &groups {
+                    if !Self::is_valid_hex_group(g) {
                         return false;
                     }
                 }
+                groups
+            };
+            let right_part = parts[1].trim_end_matches(':');
+            let right_groups: Vec<&str> = if right_part.is_empty() {
+                vec![]
+            } else {
+                let groups: Vec<&str> = right_part.split(':').collect();
+                for g in &groups {
+                    if !Self::is_valid_hex_group(g) {
+                        return false;
+                    }
+                }
+                groups
+            };
+            // IPv4 counts as 2 groups, so hex groups + 2 <= 8
+            if left_groups.len() + right_groups.len() > 5 {
+                return false;
             }
             true
         } else {
@@ -343,6 +363,12 @@ mod tests {
         assert!(!IpAddresses::is_ipv6("2001:db8::1xyz"));
         assert!(!IpAddresses::is_ipv6(""));
         assert!(!IpAddresses::is_ipv6("not-an-ip"));
+
+        // Triple colons and related patterns are NOT valid IPv6
+        assert!(!IpAddresses::is_ipv6(":::"));
+        assert!(!IpAddresses::is_ipv6(":::A"));
+        assert!(!IpAddresses::is_ipv6("::A:"));
+        assert!(!IpAddresses::is_ipv6(":::A:"));
     }
 
     #[test]

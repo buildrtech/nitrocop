@@ -15,3 +15,8 @@
 "#{prefix}10.0.0.1#{suffix}"
 # Escape sequences that expand to IP-like content
 "\x31.2.3.4"
+# Triple colons and related patterns are NOT valid IPv6
+':::'
+':::A'
+'::A:'
+':::A:'
