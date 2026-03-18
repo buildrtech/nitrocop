@@ -90,3 +90,39 @@ end
   value.all? do |subvalue|
   type_check(subvalue)
 end
+
+# FP fix: multiline string literal (no explicit continuation) -- do on wrapped line
+it "returns remote census api response when available and valid without send
+    date_of_birth and postal_code" do
+  response = api.call(1, "A", nil, nil)
+  expect(response).to eq(true)
+end
+
+# FP fix: multiline args with comments between continuation lines
+it "navigates correctly the path from the overview page to boards",
+   # The polling interval is lowered for testing
+   # In reality, it does not really matter
+   with_settings: { notifications_polling_interval: 1_000 } do
+  visit project_path(project)
+  expect(true).to eq(true)
+end
+
+# FP fix: multiline string with backslash continuation spanning many lines
+describe "WHEN the user is allowed to update entries " \
+         "WHEN updating:
+            entity_type
+            entity_id
+            user_id
+            units
+            cost_type
+            spent_on" do
+  let(:expected_entity) { build(:entity) }
+end
+
+# FP fix: describe block with multiline arg and comma before do
+add_api_endpoint "API::V3::Users::UsersAPI", :id,
+                 caption: ->(*) { I18n.t("label") },
+                 if: ->(*) { enabled? },
+                 icon: "image" do
+  mount ::API::V3::Users::UserAvatarAPI
+end

@@ -1,4 +1,4 @@
-use crate::cop::node_type::BLOCK_NODE;
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -48,6 +48,27 @@ use crate::parse::source::SourceFile;
 ///    with the RHS when RuboCop requires alignment with the LHS variable.
 ///    Fixed by adding `skip_assignment_backward` to walk through `=`/`+=`/`||=`/etc.
 ///    to find the LHS variable.
+///
+/// ## Corpus investigation findings (2026-03-18)
+///
+/// Root causes of remaining 176 FP:
+/// 1. **Multiline string literals** — The line-based heuristic `find_chain_expression_start`
+///    could not detect string literals spanning multiple lines without explicit continuation
+///    markers (e.g., `it "long desc\n    continued" do`). This caused the expression start
+///    to be computed from the wrong line.
+/// 2. **Comment lines between continuations** — Comment lines interleaved in multi-line
+///    method calls (e.g., RSpec `it` with keyword args after comments) broke the backward
+///    line walk.
+///
+/// Root causes of remaining 55 FN:
+/// 1. **Over-eager backward walk** — `find_chain_expression_start` walked through unclosed
+///    brackets into outer expressions (e.g., from `lambda{|env|` through `show_status(` into
+///    `req = ...`), computing an expression indent that matched the misaligned closer.
+///
+/// Fix: Replaced `BLOCK_NODE` with `CALL_NODE` dispatch. The CallNode's `location()` in
+/// Prism spans the entire expression including receiver chains, giving the exact expression
+/// start without heuristic line-based backward walking. This eliminates multiline string,
+/// comment interleaving, and bracket-balance issues in one structural change.
 pub struct BlockAlignment;
 
 impl Cop for BlockAlignment {
@@ -56,7 +77,7 @@ impl Cop for BlockAlignment {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -68,11 +89,18 @@ impl Cop for BlockAlignment {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let style = config.get_str("EnforcedStyleAlignWith", "either");
-        let block_node = match node.as_block_node() {
+        let call_node = match node.as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Only process CallNodes that have a block (do..end or {..})
+        let block_node = match call_node.block().and_then(|b| b.as_block_node()) {
             Some(b) => b,
             None => return,
         };
+
+        let style = config.get_str("EnforcedStyleAlignWith", "either");
 
         let closing_loc = block_node.closing_loc();
         let closing_slice = closing_loc.as_slice();
@@ -95,25 +123,39 @@ impl Cop for BlockAlignment {
         // Find the indentation of the line containing the block opener.
         let start_of_line_indent = line_indent(bytes, opening_loc.start_offset());
 
-        // For `start_of_line` and `either` styles, RuboCop walks up the
-        // expression tree to find the outermost ancestor that starts on a
-        // different line. For a chained method like:
-        //   @account.things
-        //            .where(...)
-        //            .in_batches do |b|
-        //     ...
-        //   end
-        // The `end` should align with `@account` (col 2), not `.in_batches` line.
-        // Since Prism doesn't give parent pointers, we scan backwards through
-        // source lines for continuation patterns (lines starting with `.`).
-        let expression_start_indent =
-            find_chain_expression_start(bytes, opening_loc.start_offset());
+        // Use the CallNode's location to get the expression start.
+        // In Prism, call_node.location() spans the entire expression including
+        // the full receiver chain (e.g., for `@account.things.where(...).in_batches do`,
+        // the CallNode location starts at `@account`). This replaces the previous
+        // heuristic line-based backward scanning (`find_chain_expression_start`),
+        // which couldn't handle multiline strings, interleaved comments, etc.
+        let call_start_offset = call_node.location().start_offset();
+        let (_, call_start_col) = source.offset_to_line_col(call_start_offset);
+
+        // Check for assignment: if the call expression is on the RHS of `=`/`+=`/etc.,
+        // walk backward from the call start to find the LHS variable.
+        // When there's an assignment, the alignment target is the LHS (matching RuboCop's
+        // behavior where `block_end_align_target` walks past assignment nodes).
+        let assignment_col = find_assignment_lhs_col(bytes, call_start_offset);
+
+        // The expression start column: if there's an assignment on the same line as
+        // the call start, use the LHS column. Otherwise use the CallNode's column.
+        let expression_start_col = assignment_col.unwrap_or(call_start_col);
+
+        // Also compute the expression start line's indent.
+        let expression_start_indent = line_indent(bytes, call_start_offset);
+
+        // Fallback: use the line-based heuristic for cases the AST can't cover.
+        // The CallNode doesn't include parent operators like `||`, `&&`, `<<`.
+        // The heuristic walks backward through continuation patterns.
+        // Use the MINIMUM of the heuristic indent and the AST-based indent,
+        // since the heuristic may walk further back through `||`/`&&` chains.
+        let heuristic_indent = find_chain_expression_start(bytes, opening_loc.start_offset());
 
         // Get the column of `do`/`{` keyword itself
         let (_, do_col) = source.offset_to_line_col(opening_loc.start_offset());
 
-        // Find the column of the call expression that owns this block.
-        // Walk backward from `do`/`{` to find the start of the method call chain.
+        // Find the column of the call expression on the do-line (for hash-value blocks).
         let call_expr_col = find_call_expression_col(bytes, opening_loc.start_offset());
 
         let (end_line, end_col) = source.offset_to_line_col(closing_loc.start_offset());
@@ -140,7 +182,10 @@ impl Cop for BlockAlignment {
             }
             "start_of_line" => {
                 // closing must align with start of the expression
-                if end_col != expression_start_indent {
+                if end_col != expression_start_col
+                    && end_col != expression_start_indent
+                    && end_col != heuristic_indent
+                {
                     diagnostics.push(self.diagnostic(
                         source,
                         end_line,
@@ -156,12 +201,18 @@ impl Cop for BlockAlignment {
                 // "either" (default): accept alignment with:
                 // - the do-line indent, OR
                 // - the do keyword column, OR
-                // - the expression start indent, OR
-                // - the call expression column (for hash-value blocks)
+                // - the expression start column (from CallNode or assignment LHS), OR
+                // - the expression start line indent, OR
+                // - the CallNode start column (for blocks inside parens/hash values), OR
+                // - the call expression column on the do-line (for hash-value blocks), OR
+                // - the heuristic chain expression indent (for ||/&& continuations)
                 if end_col != start_of_line_indent
                     && end_col != do_col
+                    && end_col != expression_start_col
                     && end_col != expression_start_indent
+                    && (assignment_col.is_some() || end_col != call_start_col)
                     && end_col != call_expr_col
+                    && end_col != heuristic_indent
                 {
                     diagnostics.push(self.diagnostic(
                         source,
@@ -228,6 +279,28 @@ fn line_indent(bytes: &[u8], offset: usize) -> usize {
         indent += 1;
     }
     indent
+}
+
+/// Check if the call expression at `call_start_offset` is the RHS of an assignment.
+/// If so, return the column of the LHS variable (the assignment target).
+/// This matches RuboCop's `find_lhs_node` which walks through op_asgn/masgn nodes.
+fn find_assignment_lhs_col(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
+    let mut line_start = call_start_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+
+    let call_col = call_start_offset - line_start;
+    if call_col == 0 {
+        return None;
+    }
+
+    let result = skip_assignment_backward(bytes, line_start, call_start_offset);
+    if result != call_start_offset {
+        Some(result - line_start)
+    } else {
+        None
+    }
 }
 
 /// Walk backward from the `do` keyword on the same line to find the column where
