@@ -17,3 +17,6 @@ Model.uniq
 Model.where(foo: 1).pluck(:name).uniq { |k| k[0] }
 # pluck without uniq receiver
 pluck(:name).uniq
+# uniq! is not flagged (RuboCop only restricts on :uniq, not :uniq!)
+Album.pluck(:band_name).uniq!
+Model.pluck(:name).uniq!

@@ -7,12 +7,17 @@
 /// `CallNode` as input — a constant read node is not a call node, so it always returned
 /// `None` and produced zero offenses.
 ///
-/// ## Fix
+/// ## Fix (2026-03, round 1)
 /// Switched to `CALL_NODE` as the interested type.  On every `CallNode`, check whether the
 /// method name is `uniq` or `uniq!` (no block arguments), and whether the receiver is also a
 /// `CallNode` whose method name is `pluck`.  In conservative mode (default), additionally
 /// require that the root receiver of the `pluck` call is a constant (model class), not an
 /// instance variable or a chained scope/association.
+///
+/// ## Fix (2026-03, round 2) — false positives from `uniq!`
+/// RuboCop uses `RESTRICT_ON_SEND = %i[uniq].freeze` — it only triggers on `uniq`, NOT on
+/// `uniq!`. The round-1 implementation also flagged `uniq!`, causing 2 false positives in the
+/// corpus. Fixed by only checking for `uniq` (not `uniq!`).
 ///
 /// Offense is reported at the `uniq` selector location (matching RuboCop's
 /// `node.loc.selector`), i.e., `message_loc()` of the `uniq` call node.
@@ -50,9 +55,11 @@ impl Cop for UniqBeforePluck {
             None => return,
         };
 
-        // Only interested in `uniq` or `uniq!` method calls
+        // Only interested in `uniq` method calls.
+        // RuboCop restricts on :uniq only (RESTRICT_ON_SEND = %i[uniq].freeze).
+        // `uniq!` is intentionally excluded — flagging it would be a false positive.
         let method_name = uniq_call.name().as_slice();
-        if method_name != b"uniq" && method_name != b"uniq!" {
+        if method_name != b"uniq" {
             return;
         }
 
