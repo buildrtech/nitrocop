@@ -581,7 +581,11 @@ mod tests {
         let cop = LiteralAsCondition;
         let src = b"if true;\n  if true;\n    x = 1\n  end\nend\n";
         let diags = crate::testutil::run_cop_full(&cop, src);
-        assert_eq!(diags.len(), 2, "should detect 2 literals in nested 'if true;'");
+        assert_eq!(
+            diags.len(),
+            2,
+            "should detect 2 literals in nested 'if true;'"
+        );
     }
 
     #[test]

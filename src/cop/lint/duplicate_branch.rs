@@ -52,6 +52,21 @@ use crate::parse::source::SourceFile;
 /// escape-equivalent forms compare equal. Also treat `KeywordHashNode` as a
 /// literal branch for the `IgnoreLiteralBranches` config path to satisfy the
 /// Prism hash/keyword-hash split.
+///
+/// ## Follow-up (2026-03-18)
+///
+/// Remaining 15 FN were caused by whitespace-only differences between branches.
+/// RuboCop compares branches by AST structure (which ignores whitespace and
+/// comments), but nitrocop was comparing raw source bytes.
+///
+/// Examples: `{|child| check(child)}` vs `{|child| check(child) }` (trailing
+/// space before `}`), or rescue branches with extra blank lines between
+/// statements.
+///
+/// Fix: normalize the source comparison key by collapsing all whitespace runs
+/// to a single space. Comments are already excluded since Prism's StatementsNode
+/// source range doesn't include them. String literals continue to use unescaped
+/// content for escape-equivalence.
 pub struct DuplicateBranch;
 
 impl Cop for DuplicateBranch {
@@ -148,13 +163,17 @@ impl Cop for DuplicateBranch {
 }
 
 /// Extract a comparison key for branch body.
-/// For heredocs, Prism's `location()` on the node only covers the opening
-/// delimiter (`<<~RUBY`), not the heredoc content/closing. We use a
-/// `MaxExtentFinder` visitor to discover the true end offset including
-/// heredoc closing locations, then slice the full source range.
 ///
-/// For single plain string-literal branches, use the unescaped byte content
-/// instead of the original source so equivalent escape spellings compare equal.
+/// RuboCop compares branches by AST structure, not raw source text. Two branches
+/// with different whitespace or string escape spellings are duplicates if they
+/// produce the same AST.
+///
+/// We approximate this by normalizing the source text:
+/// 1. For single string-literal branches, use unescaped byte content so
+///    equivalent escape spellings compare equal.
+/// 2. For heredocs, extend the source range to include the closing delimiter.
+/// 3. Collapse all whitespace runs to a single space, so formatting differences
+///    (extra spaces, blank lines, indentation) don't prevent duplicate detection.
 fn stmts_source(source: &SourceFile, stmts: &Option<ruby_prism::StatementsNode<'_>>) -> Vec<u8> {
     match stmts {
         Some(s) => {
@@ -178,14 +197,46 @@ fn stmts_source(source: &SourceFile, stmts: &Option<ruby_prism::StatementsNode<'
             end = finder.max_end;
 
             let bytes = source.as_bytes();
-            if end <= bytes.len() {
-                bytes[start..end].to_vec()
+            let raw = if end <= bytes.len() {
+                &bytes[start..end]
             } else {
-                loc.as_slice().to_vec()
-            }
+                loc.as_slice()
+            };
+
+            normalize_whitespace(raw)
         }
         None => Vec::new(),
     }
+}
+
+/// Strip all ASCII whitespace, inserting a single space only between two
+/// adjacent word characters (alphanumeric or underscore) to prevent identifier
+/// merging. This matches RuboCop's AST-based comparison which ignores all
+/// formatting whitespace.
+fn normalize_whitespace(src: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(src.len());
+    let mut pending_ws = false;
+    for &b in src {
+        if b.is_ascii_whitespace() {
+            pending_ws = true;
+        } else {
+            // Insert a space only if both the previous and current characters
+            // are word characters (to avoid merging `return []` into `return[]`)
+            if pending_ws && !result.is_empty() {
+                let prev = *result.last().unwrap();
+                if is_word_byte(prev) && is_word_byte(b) {
+                    result.push(b' ');
+                }
+            }
+            result.push(b);
+            pending_ws = false;
+        }
+    }
+    result
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 struct MaxExtentFinder {
@@ -738,5 +789,29 @@ mod tests {
 
         assert!(arg.as_keyword_hash_node().is_some());
         assert!(is_literal_node(&arg, false));
+    }
+
+    #[test]
+    fn whitespace_normalization() {
+        // Whitespace is stripped, with spaces preserved only between word chars
+        assert_eq!(
+            normalize_whitespace(b"foo(x)  .bar  {|y| baz(y)}"),
+            b"foo(x).bar{|y|baz(y)}"
+        );
+        // Both should match after normalization when the only difference is
+        // trailing space before closing brace
+        assert_eq!(
+            normalize_whitespace(b"each_child(node).all? {|child| check(child)}"),
+            normalize_whitespace(b"each_child(node).all? {|child| check(child) }"),
+        );
+        // Blank lines between statements collapse
+        assert_eq!(
+            normalize_whitespace(b"report(e)\n  false"),
+            normalize_whitespace(b"report(e)\n\n  false"),
+        );
+        // Space only preserved between two word chars
+        assert_eq!(normalize_whitespace(b"return []"), b"return[]");
+        // Space preserved between identifiers
+        assert_eq!(normalize_whitespace(b"foo bar baz"), b"foo bar baz");
     }
 }
