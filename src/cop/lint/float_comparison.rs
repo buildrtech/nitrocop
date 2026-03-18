@@ -1,4 +1,4 @@
-use crate::cop::node_type::{CALL_NODE, FLOAT_NODE, INTEGER_NODE, NIL_NODE};
+use crate::cop::node_type::{CALL_NODE, FLOAT_NODE, INTEGER_NODE, NIL_NODE, WHEN_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -11,6 +11,12 @@ use crate::parse::source::SourceFile;
 /// that return floats (`.to_f`, `.fdiv`, `Float()`). Fixed by extending `is_float()`
 /// to also detect `CallNode` with float-returning method names, matching RuboCop's
 /// `FLOAT_RETURNING_METHODS = [:to_f, :Float, :fdiv]`.
+///
+/// ## Investigation (2026-03-18)
+/// 68 FN from float literals in `when` clauses of case statements.
+/// Root cause: cop only handled CallNode for `==`/`!=`/`eql?`/`equal?`, missing
+/// RuboCop's `on_case` handler. Fixed by adding WhenNode handling that checks each
+/// condition for float literals, using the dedicated MSG_CASE message.
 pub struct FloatComparison;
 
 impl Cop for FloatComparison {
@@ -23,7 +29,7 @@ impl Cop for FloatComparison {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, FLOAT_NODE, INTEGER_NODE, NIL_NODE]
+        &[CALL_NODE, FLOAT_NODE, INTEGER_NODE, NIL_NODE, WHEN_NODE]
     }
 
     fn check_node(
@@ -35,6 +41,23 @@ impl Cop for FloatComparison {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Handle float literals in when clauses
+        if let Some(when_node) = node.as_when_node() {
+            for condition in when_node.conditions().iter() {
+                if is_float(&condition) && !is_literal_safe(&condition) {
+                    let loc = condition.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Avoid float literal comparisons in case statements as they are unreliable.".to_string(),
+                    ));
+                }
+            }
+            return;
+        }
+
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,

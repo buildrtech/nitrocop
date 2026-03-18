@@ -14,3 +14,19 @@ x.fdiv(2) == 1
 ^^^^^^^^^^^^^^ Lint/FloatComparison: Avoid equality comparisons of floats as they are unreliable.
 Float(x) == 1
 ^^^^^^^^^^^^^ Lint/FloatComparison: Avoid equality comparisons of floats as they are unreliable.
+
+case value
+when 1.0
+     ^^^ Lint/FloatComparison: Avoid float literal comparisons in case statements as they are unreliable.
+  foo
+when 2.0
+     ^^^ Lint/FloatComparison: Avoid float literal comparisons in case statements as they are unreliable.
+  bar
+end
+
+case value
+when 1.0, 2.0
+          ^^^ Lint/FloatComparison: Avoid float literal comparisons in case statements as they are unreliable.
+     ^^^ Lint/FloatComparison: Avoid float literal comparisons in case statements as they are unreliable.
+  foo
+end
