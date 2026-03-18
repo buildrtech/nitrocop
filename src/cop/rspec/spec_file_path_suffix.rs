@@ -16,6 +16,16 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: added receiver check so only receiverless calls (or `RSpec.describe`) count
 /// as example groups for this cop, matching RuboCop's behavior.
+///
+/// ## Corpus investigation (2026-03-18)
+///
+/// FN=16: Files with `describe` blocks wrapped inside `module` or `class`
+/// declarations were not detected. RuboCop's `TopLevelGroup` mixin recursively
+/// descends through `module`/`class` nodes to find top-level example groups,
+/// but nitrocop only checked direct children of the program body.
+///
+/// Fix: added recursive `collect_top_level_nodes` to descend through
+/// `ModuleNode`/`ClassNode` wrappers, matching RuboCop's `top_level_nodes`.
 pub struct SpecFilePathSuffix;
 
 impl Cop for SpecFilePathSuffix {
@@ -59,40 +69,9 @@ impl Cop for SpecFilePathSuffix {
         let body = stmts.body();
 
         // Check if file contains any top-level example group (not just shared examples).
-        // Must be receiverless OR RSpec.describe/::RSpec.describe to match RuboCop behavior.
-        // `1.describe(...)` or `SomeModule.describe` should NOT count.
-        let has_example_group = body.iter().any(|stmt| {
-            if let Some(call) = stmt.as_call_node() {
-                let name = call.name().as_slice();
-                // Check receiver: must be None, or be RSpec/::RSpec
-                let ok_receiver = match call.receiver() {
-                    None => true,
-                    Some(recv) => {
-                        if let Some(cr) = recv.as_constant_read_node() {
-                            cr.name().as_slice() == b"RSpec"
-                        } else if let Some(cp) = recv.as_constant_path_node() {
-                            cp.parent().is_none()
-                                && cp.name().is_some_and(|n| n.as_slice() == b"RSpec")
-                        } else {
-                            false
-                        }
-                    }
-                };
-                if ok_receiver
-                    && is_rspec_example_group(name)
-                    && name != b"shared_examples"
-                    && name != b"shared_examples_for"
-                    && name != b"shared_context"
-                {
-                    return true;
-                }
-                // Also handle feature (receiverless only)
-                if call.receiver().is_none() && name == b"feature" {
-                    return true;
-                }
-            }
-            false
-        });
+        // Recursively descends through module/class wrappers, matching RuboCop's
+        // TopLevelGroup#top_level_nodes behavior.
+        let has_example_group = has_example_group_in_nodes(body.iter());
 
         if !has_example_group {
             return;
@@ -113,6 +92,71 @@ impl Cop for SpecFilePathSuffix {
     }
 }
 
+/// Recursively descend through `module`/`class` nodes to collect the
+/// innermost statements, matching RuboCop's `TopLevelGroup#top_level_nodes`.
+/// This ensures `describe` blocks wrapped in `module Foo; ... end` are found.
+fn has_example_group_in_nodes<'a>(nodes: impl Iterator<Item = ruby_prism::Node<'a>>) -> bool {
+    for node in nodes {
+        if has_example_group_node(&node) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_example_group_node(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(module_node) = node.as_module_node() {
+        if let Some(body) = module_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                return has_example_group_in_nodes(stmts.body().iter());
+            }
+        }
+        return false;
+    }
+    if let Some(class_node) = node.as_class_node() {
+        if let Some(body) = class_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                return has_example_group_in_nodes(stmts.body().iter());
+            }
+        }
+        return false;
+    }
+    if let Some(call) = node.as_call_node() {
+        return is_rspec_example_group_call(&call);
+    }
+    false
+}
+
+fn is_rspec_example_group_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    let name = call.name().as_slice();
+    // Check receiver: must be None, or be RSpec/::RSpec
+    let ok_receiver = match call.receiver() {
+        None => true,
+        Some(recv) => {
+            if let Some(cr) = recv.as_constant_read_node() {
+                cr.name().as_slice() == b"RSpec"
+            } else if let Some(cp) = recv.as_constant_path_node() {
+                cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"RSpec")
+            } else {
+                false
+            }
+        }
+    };
+    if ok_receiver
+        && is_rspec_example_group(name)
+        && name != b"shared_examples"
+        && name != b"shared_examples_for"
+        && name != b"shared_context"
+    {
+        return true;
+    }
+    // Also handle feature (receiverless only)
+    if call.receiver().is_none() && name == b"feature" {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +167,8 @@ mod tests {
         scenario_repeated_rb = "repeated_rb.rb",
         scenario_missing_spec = "missing_spec.rb",
         scenario_wrong_ext = "wrong_ext.rb",
+        scenario_module_wrapped = "module_wrapped.rb",
+        scenario_class_wrapped = "class_wrapped.rb",
     );
 
     #[test]
