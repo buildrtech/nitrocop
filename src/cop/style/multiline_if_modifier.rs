@@ -1,34 +1,42 @@
-use crate::cop::node_type::{IF_NODE, UNLESS_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
+use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Checks for uses of if/unless modifiers with multiple-line bodies.
 ///
-/// ## Investigation findings (2026-03-15)
+/// ## Investigation findings (2026-03-15, updated 2026-03-18)
 ///
-/// **Root cause of FNs (12):** The previous implementation used a
+/// **Root cause of FNs (12, fixed):** The previous implementation used a
 /// `lines_joined_by_backslash` function to exempt backslash-continued lines.
 /// This was too broad — it exempted cases where the body itself spans multiple
 /// physical lines joined by `\` (e.g., `raise "msg" \ "more" if cond`).
 /// RuboCop flags these because `node.body.multiline?` checks if the body AST
 /// node's first_line != last_line, regardless of `\` continuation.
 ///
-/// **Root cause of FPs (44, across 15 repos):** Config-related, not cop logic
-/// bugs. All 44 FPs are legitimate offenses that RuboCop would also flag —
-/// the projects suppress them via `.rubocop_todo.yml` excludes or file-level
-/// disables. Common patterns: `class Foo...end if defined?(X)` (jruby),
-/// `def test_method...end if Puma.jruby?` (puma), `it "test"...end if
-/// RUBY_VERSION >= '3.'` (yard), `describe...end unless defined?(X)` (haml),
-/// `opts.on(...) { ... } unless Thin.win?` (thin). RuboCop's
-/// `node.modifier_form? && node.body.multiline?` correctly flags all of these.
-/// No cop logic fix possible — the gap is purely config resolution.
+/// **Root cause of FPs (44, across 15 repos, fixed):** NOT config-related as
+/// previously documented. The actual root cause is RuboCop's
+/// `part_of_ignored_node?` / `ignore_node` mechanism. When RuboCop flags a
+/// multiline modifier if/unless, it calls `ignore_node(node)` which marks
+/// the entire subtree as ignored. Any nested multiline modifier if/unless
+/// inside the flagged node is then skipped via `part_of_ignored_node?`.
 ///
-/// **Fix:** Replaced the `body_start_line < if_kw_line` + backslash exemption
-/// approach with a direct check: `body_start_line != body_end_line` (whether
-/// the body AST node itself spans multiple lines). This matches RuboCop's
-/// `node.body.multiline?` semantics and eliminates the need for backslash
-/// continuation handling entirely.
+/// Common patterns:
+/// - `module Foo...class Bar...end if defined?(X)...end if defined?(Y)`:
+///   Only the outermost modifier is flagged; inner class modifiers are ignored.
+///   (jruby test_ractor.rb: 6 inner class modifiers inside outer module modifier)
+/// - `class Foo...def bar...end unless m?...end if Puma.jruby?`:
+///   Only the class-level modifier is flagged; inner def modifiers are ignored.
+///   (puma test_puma_server_ssl.rb, ruby/debug session.rb)
+/// - `block { ...inner_call if cond... } unless outer_cond`:
+///   Only the outer block modifier is flagged.
+///   (ruby/debug server.rb)
+///
+/// **Fix:** Switched from `check_node` to `check_source` with a custom AST
+/// visitor that tracks whether we're inside an already-flagged modifier
+/// if/unless. When a multiline modifier is found, its subtree is marked as
+/// ignored and nested modifiers are skipped.
 pub struct MultilineIfModifier;
 
 impl Cop for MultilineIfModifier {
@@ -36,55 +44,86 @@ impl Cop for MultilineIfModifier {
         "Style/MultilineIfModifier"
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[IF_NODE, UNLESS_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Check `if` modifier form
-        if let Some(if_node) = node.as_if_node() {
-            let if_kw_loc = match if_node.if_keyword_loc() {
-                Some(loc) => loc,
-                None => return,
-            };
+        let mut visitor = MultilineIfModifierVisitor {
+            source,
+            cop: self,
+            diagnostics: Vec::new(),
+            inside_flagged: false,
+        };
+        visitor.visit(&parse_result.node());
+        diagnostics.extend(visitor.diagnostics);
+    }
+}
 
-            if if_kw_loc.as_slice() != b"if" {
-                return;
-            }
+struct MultilineIfModifierVisitor<'a> {
+    source: &'a SourceFile,
+    cop: &'a MultilineIfModifier,
+    diagnostics: Vec<Diagnostic>,
+    /// Whether we're currently inside a subtree of an already-flagged
+    /// multiline modifier if/unless (RuboCop's `part_of_ignored_node?`).
+    inside_flagged: bool,
+}
 
-            // Must be modifier form (no end keyword)
-            if if_node.end_keyword_loc().is_some() {
-                return;
-            }
+impl MultilineIfModifierVisitor<'_> {
+    /// Check if a modifier if/unless body spans multiple lines.
+    /// Returns `Some((body_start_offset, body_start_line, body_start_col))` if multiline.
+    fn check_body_multiline(
+        &self,
+        stmts: &ruby_prism::StatementsNode<'_>,
+    ) -> Option<(usize, usize, usize)> {
+        let body_nodes: Vec<_> = stmts.body().into_iter().collect();
+        if body_nodes.is_empty() {
+            return None;
+        }
 
-            // Check if the body spans multiple lines
-            if let Some(stmts) = if_node.statements() {
-                let body_nodes: Vec<_> = stmts.body().into_iter().collect();
-                if body_nodes.is_empty() {
-                    return;
-                }
+        let first = &body_nodes[0];
+        let last = &body_nodes[body_nodes.len() - 1];
+        let body_start_line = self
+            .source
+            .offset_to_line_col(first.location().start_offset())
+            .0;
+        let body_end_line = self
+            .source
+            .offset_to_line_col(last.location().end_offset().saturating_sub(1))
+            .0;
 
-                let first = &body_nodes[0];
-                let last = &body_nodes[body_nodes.len() - 1];
-                let body_start_line = source.offset_to_line_col(first.location().start_offset()).0;
-                let body_end_line = source
-                    .offset_to_line_col(last.location().end_offset().saturating_sub(1))
-                    .0;
+        if body_start_line < body_end_line {
+            let body_start = first.location().start_offset();
+            let (line, column) = self.source.offset_to_line_col(body_start);
+            Some((body_start, line, column))
+        } else {
+            None
+        }
+    }
+}
 
-                // Body is multiline if it spans more than one line
-                if body_start_line < body_end_line {
-                    let body_start = first.location().start_offset();
-                    let (line, column) = source.offset_to_line_col(body_start);
-                    diagnostics.push(self.diagnostic(
-                        source,
+impl<'pr> Visit<'pr> for MultilineIfModifierVisitor<'_> {
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        let is_modifier_multiline = node
+            .if_keyword_loc()
+            .as_ref()
+            .is_some_and(|loc| loc.as_slice() == b"if")
+            && node.end_keyword_loc().is_none()
+            && node
+                .statements()
+                .and_then(|stmts| self.check_body_multiline(&stmts))
+                .is_some();
+
+        if is_modifier_multiline && !self.inside_flagged {
+            // Flag this offense
+            if let Some(stmts) = node.statements() {
+                if let Some((_offset, line, column)) = self.check_body_multiline(&stmts) {
+                    self.diagnostics.push(self.cop.diagnostic(
+                        self.source,
                         line,
                         column,
                         "Favor a normal if-statement over a modifier clause in a multiline statement.".to_string(),
@@ -92,48 +131,45 @@ impl Cop for MultilineIfModifier {
                 }
             }
 
-            return;
+            // Mark subtree as ignored (RuboCop's ignore_node / part_of_ignored_node?)
+            let was_inside = self.inside_flagged;
+            self.inside_flagged = true;
+            ruby_prism::visit_if_node(self, node);
+            self.inside_flagged = was_inside;
+        } else {
+            // Not a modifier multiline, or inside an already-flagged node — visit children normally
+            ruby_prism::visit_if_node(self, node);
         }
+    }
 
-        // Check `unless` modifier form
-        if let Some(unless_node) = node.as_unless_node() {
-            let kw_loc = unless_node.keyword_loc();
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        let is_modifier_multiline = node.keyword_loc().as_slice() == b"unless"
+            && node.end_keyword_loc().is_none()
+            && node
+                .statements()
+                .and_then(|stmts| self.check_body_multiline(&stmts))
+                .is_some();
 
-            if kw_loc.as_slice() != b"unless" {
-                return;
-            }
-
-            // Must be modifier form (no end keyword)
-            if unless_node.end_keyword_loc().is_some() {
-                return;
-            }
-
-            // Check if the body spans multiple lines
-            if let Some(stmts) = unless_node.statements() {
-                let body_nodes: Vec<_> = stmts.body().into_iter().collect();
-                if body_nodes.is_empty() {
-                    return;
-                }
-
-                let first = &body_nodes[0];
-                let last = &body_nodes[body_nodes.len() - 1];
-                let body_start_line = source.offset_to_line_col(first.location().start_offset()).0;
-                let body_end_line = source
-                    .offset_to_line_col(last.location().end_offset().saturating_sub(1))
-                    .0;
-
-                // Body is multiline if it spans more than one line
-                if body_start_line < body_end_line {
-                    let body_start = first.location().start_offset();
-                    let (line, column) = source.offset_to_line_col(body_start);
-                    diagnostics.push(self.diagnostic(
-                        source,
+        if is_modifier_multiline && !self.inside_flagged {
+            // Flag this offense
+            if let Some(stmts) = node.statements() {
+                if let Some((_offset, line, column)) = self.check_body_multiline(&stmts) {
+                    self.diagnostics.push(self.cop.diagnostic(
+                        self.source,
                         line,
                         column,
                         "Favor a normal unless-statement over a modifier clause in a multiline statement.".to_string(),
                     ));
                 }
             }
+
+            // Mark subtree as ignored
+            let was_inside = self.inside_flagged;
+            self.inside_flagged = true;
+            ruby_prism::visit_unless_node(self, node);
+            self.inside_flagged = was_inside;
+        } else {
+            ruby_prism::visit_unless_node(self, node);
         }
     }
 }

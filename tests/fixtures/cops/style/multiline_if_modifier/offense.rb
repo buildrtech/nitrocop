@@ -50,3 +50,22 @@ raise StandardError, "spoofing attack?! " \
 ^ Style/MultilineIfModifier: Favor a normal if-statement over a modifier clause in a multiline statement.
   "CLIENT=#{@req.client_ip} " \
   "FORWARDED=#{@req.x_forwarded_for}" if @req.forwarded_for.any?
+
+# Nested modifier ifs: only the outermost is flagged (RuboCop's ignore_node behavior)
+# The class...end is the body of the outer modifier if, so only the outer is flagged.
+# The inner def...end if/unless inside it are ignored.
+class TestDigestHash < Test::Unit::TestCase
+^ Style/MultilineIfModifier: Favor a normal if-statement over a modifier clause in a multiline statement.
+  LIB = "digest/md5"
+  ALGO = Digest::MD5
+
+  def type_name
+    self.to_a[9]
+  end unless method_defined?(:type_name)
+
+  def param_symbols
+    ary = self.to_a
+    locals = ary.to_a[10]
+    locals[0...3]
+  end unless method_defined?(:param_symbols)
+end if defined?(Digest)
