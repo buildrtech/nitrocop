@@ -5,6 +5,13 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// ## Investigation findings
+///
+/// - FP root cause: `ENV['KEY']` guarded by `ENV.has_key?('KEY')`, `ENV.key?('KEY')`,
+///   or `ENV.include?('KEY')` in if/unless conditions was not suppressed. RuboCop's
+///   `used_in_condition?` checks `predicate_method?` and matches child nodes. Fixed by
+///   adding `collect_env_guard_key_ranges` to extract key arguments from these guard
+///   calls and including them in `condition_key_ranges` for body suppression.
 pub struct FetchEnvVar;
 
 impl FetchEnvVar {
@@ -95,6 +102,41 @@ impl FetchEnvVar {
     fn is_comparison_method(name: &[u8]) -> bool {
         matches!(name, b"==" | b"!=" | b"<" | b">" | b"<=" | b">=" | b"<=>")
     }
+
+    /// Extract key byte ranges from `ENV.has_key?('X')`, `ENV.key?('X')`, and
+    /// `ENV.include?('X')` calls in a subtree. These guard patterns suppress
+    /// `ENV['X']` in the body (RuboCop's `used_in_condition?` with `predicate_method?`).
+    fn collect_env_guard_key_ranges(node: &ruby_prism::Node<'_>) -> HashSet<(usize, usize)> {
+        struct GuardCollector {
+            key_ranges: HashSet<(usize, usize)>,
+        }
+        impl<'pr> Visit<'pr> for GuardCollector {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                let name = node.name();
+                let method = name.as_slice();
+                if matches!(method, b"has_key?" | b"key?" | b"include?") {
+                    if let Some(receiver) = node.receiver() {
+                        if FetchEnvVar::is_env_receiver(&receiver) {
+                            if let Some(args) = node.arguments() {
+                                let arg_list: Vec<_> = args.arguments().iter().collect();
+                                if arg_list.len() == 1 {
+                                    let loc = arg_list[0].location();
+                                    self.key_ranges
+                                        .insert((loc.start_offset(), loc.end_offset()));
+                                }
+                            }
+                        }
+                    }
+                }
+                ruby_prism::visit_call_node(self, node);
+            }
+        }
+        let mut collector = GuardCollector {
+            key_ranges: HashSet::new(),
+        };
+        collector.visit(node);
+        collector.key_ranges
+    }
 }
 
 impl Cop for FetchEnvVar {
@@ -145,10 +187,15 @@ struct FetchEnvVarVisitor<'a> {
 impl FetchEnvVarVisitor<'_> {
     /// Suppress all ENV['X'] nodes that appear inside an if/unless condition,
     /// AND collect ENV key ranges so that body ENV['same_key'] can be suppressed.
+    /// Also recognizes ENV.has_key?/key?/include? guard patterns.
     fn suppress_env_in_condition(&mut self, condition: &ruby_prism::Node<'_>) {
         FetchEnvVar::collect_env_bracket_offsets(condition, &mut self.suppressed_offsets);
         let key_ranges = FetchEnvVar::collect_env_key_ranges(condition);
         for range in key_ranges {
+            self.condition_key_ranges.push(range);
+        }
+        let guard_key_ranges = FetchEnvVar::collect_env_guard_key_ranges(condition);
+        for range in guard_key_ranges {
             self.condition_key_ranges.push(range);
         }
     }

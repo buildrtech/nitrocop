@@ -35,3 +35,24 @@ if ENV['X'].present?
 end
 do_something(ENV['X']) if ENV['X'].present?
 ENV['X'].empty? ? "" : YAML.parse(ENV['X']).to_ruby
+# ENV['KEY'] guarded by ENV.has_key?('KEY') in condition
+if ENV.has_key?('KEY')
+  puts ENV['KEY']
+end
+config = ENV['KEY'] if ENV.has_key?('KEY')
+# ENV['KEY'] guarded by ENV.key?('KEY') in condition
+if ENV.key?('KEY')
+  puts ENV['KEY']
+end
+config = ENV['KEY'] if ENV.key?('KEY')
+# ENV['KEY'] guarded by ENV.include?('KEY') in condition
+if ENV.include?('KEY')
+  puts ENV['KEY']
+end
+config = ENV['KEY'] if ENV.include?('KEY')
+# unless with ENV.key? guard
+unless ENV.key?('KEY')
+  fallback
+else
+  puts ENV['KEY']
+end

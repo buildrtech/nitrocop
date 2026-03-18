@@ -3,27 +3,25 @@ use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
-/// ## Known false positives (151 FP in corpus as of 2026-03-17)
+/// ## Corpus investigation history
 ///
-/// An attempt was made to fix two issues (commit 38898a01, reverted f8166f95):
-/// 1. Location mismatch: changed offense location from method name column to
-///    block closing delimiter (end/}) to match RuboCop's range.
-/// 2. Missing intermediate chain walk: added loop through receiver chain to
-///    find multiline blocks through intermediate non-block calls.
+/// ### Location fix (2026-03-18)
+/// Changed offense location from method name (message_loc) to the dot operator
+/// (call_operator_loc) before the chained method. RuboCop reports the offense
+/// at `range_between(receiver.loc.end.begin_pos, send_node.source_range.end_pos)`,
+/// which starts at the block closing delimiter. The corpus comparison uses
+/// line:col, and the dot is the correct location for matching.
 ///
-/// Acceptance gate before: expected=3,616, actual=3,454, excess=0, missing=162
-/// Acceptance gate after:  expected=3,616, actual=3,828, excess=212, missing=0
-/// This swung from FN=162 to FP=212 — a net regression of 278 new excess.
+/// ### Previous failed attempt (commit 38898a01, reverted f8166f95)
+/// Combined TWO changes: location fix + intermediate chain walk. The chain walk
+/// was too aggressive, swinging from FN=162 to FP=212. The location-only fix
+/// was separated out as the safe first step.
 ///
-/// Root cause of regression: the intermediate chain walk was too aggressive,
-/// detecting chains that RuboCop doesn't flag. The location change alone might
-/// be correct, but combined with the chain walk, it created new FPs.
-///
-/// A correct fix needs to:
-/// 1. Separate the location fix from the chain walk fix
-/// 2. Validate the location change independently against corpus
-/// 3. Only add chain walk for patterns RuboCop actually flags (compare
-///    RuboCop's on_block trigger more carefully)
+/// ### Remaining gaps
+/// FN from missing intermediate chain walk: RuboCop's `each_node(:call)` walks
+/// through non-block intermediate calls (e.g., `.foo.bar do...end` where `.foo`
+/// has no block). This needs careful implementation to avoid the over-detection
+/// seen in the reverted commit.
 pub struct MultilineBlockChain;
 
 /// Visitor that checks for multiline block chains.
@@ -90,8 +88,13 @@ impl BlockChainVisitor<'_> {
 
         // Multiline block chain: receiver has a multiline block,
         // and current node also has a block.
-        let msg_loc = node.message_loc().unwrap_or_else(|| node.location());
-        let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
+        // RuboCop reports at the dot (call operator) before the method name,
+        // not at the method name itself. Fall back to message_loc if no dot.
+        let loc = node
+            .call_operator_loc()
+            .or_else(|| node.message_loc())
+            .unwrap_or_else(|| node.location());
+        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
         self.diagnostics.push(Diagnostic {
             path: self.source.path_str().to_string(),
             location: Location { line, column },
