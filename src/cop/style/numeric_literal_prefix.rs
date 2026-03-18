@@ -3,6 +3,23 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Checks for octal, hex, binary, and decimal literals using uppercase prefixes
+/// and corrects them to lowercase prefix or no prefix (in case of decimals).
+///
+/// ## Investigation notes (2026-03-18)
+///
+/// **FP root cause:** `0_30` (underscore-separated decimal starting with 0) was
+/// incorrectly flagged as an octal literal. The old code stripped all underscores
+/// before matching, turning `0_30` into `030` which matched the octal pattern.
+/// RuboCop's regexes (`/^0O?[0-7]+$/`) match the original source without stripping
+/// underscores, so `0_30` correctly does NOT match because `_` is not in `[0-7]`.
+/// Fix: match the original source text without stripping underscores.
+///
+/// **FN root cause:** Negative integer literals like `-0O1` and `-01234` were missed.
+/// Prism includes the `-` sign in the `IntegerNode` location for negative literals,
+/// so `src_str` started with `-` and none of the `starts_with("0...")` checks matched.
+/// RuboCop's `integer_part` helper strips leading `+`/`-` before checking.
+/// Fix: strip leading sign before prefix matching, adjust column offset by 1.
 pub struct NumericLiteralPrefix;
 
 impl Cop for NumericLiteralPrefix {
@@ -35,39 +52,48 @@ impl Cop for NumericLiteralPrefix {
             Err(_) => return,
         };
 
-        // Strip any underscores for prefix matching
-        let clean = src_str.replace('_', "");
+        // Strip leading +/- sign, like RuboCop's integer_part helper.
+        // Do NOT strip underscores — RuboCop's regexes match the original source
+        // including underscores, so `0_30` correctly does NOT match octal patterns.
+        let (literal, sign_offset) = if src_str.starts_with('+') || src_str.starts_with('-') {
+            (&src_str[1..], 1usize)
+        } else {
+            (src_str, 0usize)
+        };
 
         let enforced_octal_style = config.get_str("EnforcedOctalStyle", "zero_with_o");
 
         let (line, column) = source.offset_to_line_col(loc.start_offset());
+        // Offset the column past the sign character so the diagnostic points at
+        // the numeric literal, not the sign.
+        let col = column + sign_offset;
 
         // Check uppercase hex prefix: 0X...
-        if clean.starts_with("0X") {
+        if literal.starts_with("0X") {
             diagnostics.push(self.diagnostic(
                 source,
                 line,
-                column,
+                col,
                 "Use 0x for hexadecimal literals.".to_string(),
             ));
         }
 
         // Check uppercase binary prefix: 0B...
-        if clean.starts_with("0B") {
+        if literal.starts_with("0B") {
             diagnostics.push(self.diagnostic(
                 source,
                 line,
-                column,
+                col,
                 "Use 0b for binary literals.".to_string(),
             ));
         }
 
         // Check decimal prefix: 0d... or 0D...
-        if clean.starts_with("0d") || clean.starts_with("0D") {
+        if literal.starts_with("0d") || literal.starts_with("0D") {
             diagnostics.push(self.diagnostic(
                 source,
                 line,
-                column,
+                col,
                 "Do not use prefixes for decimal literals.".to_string(),
             ));
         }
@@ -75,37 +101,39 @@ impl Cop for NumericLiteralPrefix {
         // Octal handling
         if enforced_octal_style == "zero_with_o" {
             // Bad: 0O... (uppercase)
-            if clean.starts_with("0O") {
+            if literal.starts_with("0O") {
                 diagnostics.push(self.diagnostic(
                     source,
                     line,
-                    column,
+                    col,
                     "Use 0o for octal literals.".to_string(),
                 ));
             }
             // Bad: plain 0... without 'o' (e.g., 01234)
-            // Must be octal: starts with 0, followed by digits 0-7, not 0x/0b/0d/0o
-            if clean.len() > 1
-                && clean.starts_with('0')
-                && !clean.starts_with("0x")
-                && !clean.starts_with("0b")
-                && !clean.starts_with("0o")
-                && clean[1..].bytes().all(|b| b.is_ascii_digit() && b < b'8')
+            // Must be octal: starts with 0, followed by digits 0-7 only, not 0x/0b/0d/0o
+            // Underscores in the source mean it's a decimal with visual separators (e.g. 0_30),
+            // not an octal literal.
+            if literal.len() > 1
+                && literal.starts_with('0')
+                && !literal.starts_with("0x")
+                && !literal.starts_with("0b")
+                && !literal.starts_with("0o")
+                && literal[1..].bytes().all(|b| b.is_ascii_digit() && b < b'8')
             {
                 diagnostics.push(self.diagnostic(
                     source,
                     line,
-                    column,
+                    col,
                     "Use 0o for octal literals.".to_string(),
                 ));
             }
         } else if enforced_octal_style == "zero_only" {
             // Bad: 0o... or 0O...
-            if clean.starts_with("0o") || clean.starts_with("0O") {
+            if literal.starts_with("0o") || literal.starts_with("0O") {
                 diagnostics.push(self.diagnostic(
                     source,
                     line,
-                    column,
+                    col,
                     "Use 0 for octal literals.".to_string(),
                 ));
             }
