@@ -51,27 +51,40 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: cargo clippy --profile ci -- -D warnings
 
+      # On ubuntu, clippy verifies compilation and corpus-smoke-test builds --release
+      # (same settings as --profile ci), so an explicit build step here is redundant.
+      # On macos, we still build --profile ci to catch cross-platform linking issues.
       - name: Build
+        if: matrix.os == 'macos-latest'
         run: cargo build --profile ci
+
+      # Compile test binaries in debug mode (dev profile, opt-level=1) rather than
+      # --profile ci (release + thin LTO). Test compilation with LTO was the main
+      # bottleneck: ~4m on ubuntu vs ~1.5m in debug. Test runtime stays under 30s.
+      # --no-run compiles all test binaries once up front so the per-filter steps
+      # below are instant and their step names show up clearly in the CI UI.
+      - name: Compile tests
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo test --no-run
 
       - name: NodePattern verifier
         if: matrix.os == 'ubuntu-24.04'
-        run: cargo test --profile ci verifier -- --nocapture
+        run: cargo test verifier -- --nocapture
 
       - name: Config audit
         if: matrix.os == 'ubuntu-24.04'
-        run: cargo test --profile ci config_audit -- --nocapture
+        run: cargo test config_audit -- --nocapture
 
       - name: Prism pitfalls
         if: matrix.os == 'ubuntu-24.04'
-        run: cargo test --profile ci prism_pitfalls -- --nocapture
+        run: cargo test prism_pitfalls -- --nocapture
 
       - name: File discovery sync
         if: matrix.os == 'ubuntu-24.04'
-        run: cargo test --profile ci file_discovery_sync -- --nocapture
+        run: cargo test file_discovery_sync -- --nocapture
 
       - name: Test
-        run: cargo test --profile ci
+        run: cargo test
 
   # Corpus smoke test: run nitrocop + rubocop on a few cheap sentinel repos to
   # catch systemic regressions (file discovery, config, plugin loading, directives)
