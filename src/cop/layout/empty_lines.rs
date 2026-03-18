@@ -110,14 +110,18 @@ impl Cop for EmptyLines {
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // RuboCop uses token-based gap detection: it collects line numbers from
-        // ALL tokens (including comments), then checks gaps between consecutive
-        // token-bearing lines. Files with no tokens at all get early return,
-        // and blank lines after the last token line are never checked.
+        // ALL tokens (including inline `#` comments via `:tCOMMENT`), then
+        // checks gaps between consecutive token-bearing lines. Files with no
+        // tokens at all get early return, and blank lines after the last
+        // token line are never checked.
         //
-        // In the Parser gem, `processed_source.tokens` includes `:tCOMMENT`
-        // tokens for comments. So comment lines ARE token-bearing lines.
-        // We replicate this by finding the last token line as the max of the
-        // last code line (from the Program node) and the last comment line.
+        // IMPORTANT: `=begin`/`=end` (embdoc) block comments are NOT in the
+        // Parser gem's token stream — they're captured separately as
+        // `Parser::Source::Comment` objects. So embdoc lines are NOT
+        // token-bearing. This means blank lines inside `=begin`/`=end` are
+        // checked only if they fall within a gap between code token lines.
+        // If there's no code after `=end`, the block's blank lines are
+        // naturally skipped because they're past the last token line.
         let program_node = parse_result.node();
         let program_loc = program_node.location();
 
@@ -131,19 +135,38 @@ impl Cop for EmptyLines {
             0
         };
 
-        // Find the last comment line (1-indexed), or 0 if no comments.
+        // Find the last inline (#) comment line (1-indexed), or 0 if none.
+        // Exclude =begin/=end block comments — they don't produce tokens in
+        // RuboCop's Parser gem and should not extend the token range.
         let mut last_comment_line: usize = 0;
         for comment in parse_result.comments() {
             let loc = comment.location();
+            // Skip =begin/=end block comments (embdoc).
+            if loc.as_slice().starts_with(b"=begin") {
+                continue;
+            }
             let (line, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
             if line > last_comment_line {
                 last_comment_line = line;
             }
         }
 
-        // The last token line is the max of code and comment lines.
-        // If both are 0, there are no tokens at all — early return.
-        let last_token_line = last_code_line.max(last_comment_line);
+        // Find the __END__ marker line (1-indexed), or 0 if no __END__.
+        // In RuboCop's Parser gem, `__END__` is a `k__END__` token, so its
+        // line is in the token set. Blank lines between code/comments and
+        // `__END__` are checked for consecutive blanks.
+        let end_marker_line = if let Some(data_loc) = parse_result.data_loc() {
+            // data_loc starts at `__END__\n`, so the line of the marker itself
+            // is at the start offset.
+            let (line, _) = source.offset_to_line_col(data_loc.start_offset());
+            line
+        } else {
+            0
+        };
+
+        // The last token line is the max of code, inline comment, and __END__ lines.
+        // If all are 0, there are no tokens at all — early return.
+        let last_token_line = last_code_line.max(last_comment_line).max(end_marker_line);
         if last_token_line == 0 {
             return;
         }
@@ -518,6 +541,44 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should NOT fire on consecutive blank CRLF lines: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn fire_blanks_before_end_marker() {
+        // RuboCop's parser gem includes `__END__` as a `k__END__` token,
+        // so its line number is in the token set. Blank lines between the
+        // last code/comment and `__END__` are checked for consecutive blanks.
+        let source = b"x = 1\n\n\n__END__\ndata here\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert!(
+            !diags.is_empty(),
+            "Should fire on consecutive blank lines before __END__: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn skip_blanks_after_end_marker() {
+        // Blank lines inside the __END__ data section should NOT be checked.
+        let source = b"x = 1\n__END__\n\n\ndata\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert!(
+            diags.is_empty(),
+            "Should not fire on blank lines inside __END__ data: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn fire_single_blank_ok_before_end_marker() {
+        // Single blank line before __END__ is fine (not consecutive).
+        let source = b"x = 1\n\n__END__\ndata\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert!(
+            diags.is_empty(),
+            "Should not fire on single blank line before __END__: {:?}",
             diags
         );
     }
