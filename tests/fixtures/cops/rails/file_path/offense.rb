@@ -42,3 +42,12 @@ File.join(Rails.root.to_s, "lib", "captcha")
 
 File.join(::Rails.root.to_s, "app", "models")
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+File.join(flag.present? ? flag : Rails.root.to_s, "lib", "captcha")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+Pathname.new(Rails.root).join("db", "migrate_sql")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to')`.
+
+"#{path.relative_path_from(Rails.root)}.png"
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to')`.

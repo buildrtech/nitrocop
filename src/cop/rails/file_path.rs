@@ -61,6 +61,18 @@ use crate::parse::source::SourceFile;
 /// RuboCop's `rails_root_nodes?` is a tree search (`def_node_search`) that traverses the
 /// full subtree. Fixed by making `contains_rails_root` recursively check call receivers
 /// and call arguments, matching the tree-search semantics.
+///
+/// ## Investigation findings (2026-03-18, batch 2)
+///
+/// **FN root causes (4 FNs)**:
+/// 1. `File.join(ternary_with_rails_root, ...)` — ternary expressions (IfNode/ElseNode in Prism)
+///    were not traversed by `contains_rails_root`. Fixed by adding IfNode and ElseNode handling.
+/// 2. `Pathname.new(Rails.root).join('a', 'b')` — receiver of `.join` was checked with
+///    `is_rails_root` (exact match) instead of `contains_rails_root` (tree search).
+///    RuboCop's `rails_root_join_nodes?` uses `#rails_root_nodes?` predicate which does a
+///    deep tree search on the receiver. Fixed by using `contains_rails_root` for receiver check.
+/// 3. `"#{path.relative_path_from(Rails.root)}.png"` — `contains_rails_root_deep` (used in dstr
+///    detection) didn't recurse into call arguments. Fixed by adding argument traversal.
 pub struct FilePath;
 
 /// Check if a constant node is top-level (bare `Foo` or `::Foo`), not namespaced (`A::Foo`).
@@ -124,6 +136,27 @@ fn contains_rails_root(node: &ruby_prism::Node<'_>) -> bool {
     // Check array arguments: [Rails.root, ...]
     if let Some(arr) = node.as_array_node() {
         return arr.elements().iter().any(|e| contains_rails_root(&e));
+    }
+    // Check ternary/if expressions: condition ? then : else
+    if let Some(if_node) = node.as_if_node() {
+        if let Some(stmts) = if_node.statements() {
+            if stmts.body().iter().any(|s| contains_rails_root(&s)) {
+                return true;
+            }
+        }
+        if let Some(subsequent) = if_node.subsequent() {
+            if contains_rails_root(&subsequent) {
+                return true;
+            }
+        }
+    }
+    // Check else node: unwrap statements inside an ElseNode
+    if let Some(else_node) = node.as_else_node() {
+        if let Some(stmts) = else_node.statements() {
+            if stmts.body().iter().any(|s| contains_rails_root(&s)) {
+                return true;
+            }
+        }
     }
     false
 }
@@ -228,8 +261,11 @@ impl Cop for FilePath {
             return;
         }
 
-        // Pattern 2: Rails.root.join('path', 'to') — receiver is Rails.root
-        if !is_rails_root(&recv) {
+        // Pattern 2: Rails.root.join('path', 'to') — receiver contains Rails.root
+        // RuboCop uses `rails_root_nodes?` (def_node_search), a tree search that matches
+        // any node in the receiver subtree. This catches Pathname.new(Rails.root).join(...)
+        // and similar wrapper patterns.
+        if !contains_rails_root(&recv) {
             return;
         }
 
@@ -414,6 +450,7 @@ impl FilePath {
 }
 
 /// Recursively check if a node contains Rails.root (deep check for dstr).
+/// Matches RuboCop's `rails_root_nodes?` (def_node_search) which traverses the full subtree.
 fn contains_rails_root_deep(node: &ruby_prism::Node<'_>) -> bool {
     if is_rails_root(node) {
         return true;
@@ -421,10 +458,21 @@ fn contains_rails_root_deep(node: &ruby_prism::Node<'_>) -> bool {
     if is_rails_root_join(node) {
         return true;
     }
-    // Check call receiver chain
+    // Check call receiver chain and arguments
     if let Some(call) = node.as_call_node() {
         if let Some(recv) = call.receiver() {
-            return contains_rails_root_deep(&recv);
+            if contains_rails_root_deep(&recv) {
+                return true;
+            }
+        }
+        if let Some(args) = call.arguments() {
+            if args
+                .arguments()
+                .iter()
+                .any(|a| contains_rails_root_deep(&a))
+            {
+                return true;
+            }
         }
     }
     false
