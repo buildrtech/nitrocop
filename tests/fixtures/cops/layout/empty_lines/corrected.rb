@@ -17,3 +17,17 @@ b = 2
 # frozen_string_literal: true
 
 # Another comment
+
+# Consecutive blank lines inside =begin/=end with code after =end
+=begin
+docs
+
+more docs
+=end
+c = 3
+
+# Consecutive blank lines before __END__ marker
+d = 4
+
+__END__
+data after end marker

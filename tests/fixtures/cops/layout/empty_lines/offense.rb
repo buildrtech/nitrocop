@@ -29,3 +29,21 @@ b = 2
 
 ^ Layout/EmptyLines: Extra blank line detected.
 # Another comment
+
+# Consecutive blank lines inside =begin/=end with code after =end
+=begin
+docs
+
+
+^ Layout/EmptyLines: Extra blank line detected.
+more docs
+=end
+c = 3
+
+# Consecutive blank lines before __END__ marker
+d = 4
+
+
+^ Layout/EmptyLines: Extra blank line detected.
+__END__
+data after end marker

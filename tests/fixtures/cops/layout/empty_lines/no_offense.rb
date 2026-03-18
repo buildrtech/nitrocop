@@ -30,15 +30,6 @@ more documentation
 =end
 x = 1
 
-# Consecutive blank lines inside =begin/=end are NOT flagged by RuboCop.
-=begin
-docs
-
-
-more docs
-=end
-y = 2
-
 # Single blank line between code and comment is fine.
 puts "last code"
 
