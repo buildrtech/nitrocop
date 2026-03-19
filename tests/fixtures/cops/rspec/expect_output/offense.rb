@@ -56,3 +56,25 @@ around do |example|
   $stderr = STDERR
   ^^^^^^^ RSpec/ExpectOutput: Use `expect { ... }.to output(...).to_stderr` instead of mutating $stderr.
 end
+
+# Multi-write with $stdout as target
+it 'reassigns stdout via multi-write' do
+  @old, $stdout = $stdout, StringIO.new
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ExpectOutput: Use `expect { ... }.to output(...).to_stdout` instead of mutating $stdout.
+  $stdout = @old
+  ^^^^^^^ RSpec/ExpectOutput: Use `expect { ... }.to output(...).to_stdout` instead of mutating $stdout.
+end
+
+# Multi-write with $stderr as target
+it 'reassigns stderr via multi-write' do
+  @old, $stderr = $stderr, StringIO.new
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ExpectOutput: Use `expect { ... }.to output(...).to_stderr` instead of mutating $stderr.
+  $stderr = @old
+  ^^^^^^^ RSpec/ExpectOutput: Use `expect { ... }.to output(...).to_stderr` instead of mutating $stderr.
+end
+
+# Multi-write with $stdout as first target
+it 'reassigns stdout as first target' do
+  $stdout, @old = StringIO.new, $stdout
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ExpectOutput: Use `expect { ... }.to output(...).to_stdout` instead of mutating $stdout.
+end

@@ -38,3 +38,16 @@ end
 
 # $stdout/$stderr at root scope are NOT flagged
 $stderr = StringIO.new
+
+# Multi-write at root scope is NOT flagged
+@old, $stdout = $stdout, StringIO.new
+
+# Multi-write in method definition is NOT flagged
+def swap_streams
+  @old, $stderr = $stderr, StringIO.new
+end
+
+# Multi-write in before(:all) is NOT flagged
+before(:all) do
+  @old, $stdout = $stdout, StringIO.new
+end

@@ -9,6 +9,12 @@ use crate::parse::source::SourceFile;
 /// example blocks and per-example hooks. Uses Prism `Visit` trait for generic
 /// AST traversal so all intermediate node types (rescue, case, loops, etc.)
 /// are automatically handled without explicit enumeration.
+///
+/// ## Investigation notes
+/// - Handles both `GlobalVariableWriteNode` (simple `$stdout = ...`) and
+///   `MultiWriteNode` with `GlobalVariableTargetNode` targets (parallel
+///   assignment like `@old, $stdout = $stdout, StringIO.new`).
+/// - The multi-write pattern accounts for all 19 corpus FNs (jruby, natalie).
 pub struct ExpectOutput;
 
 impl Cop for ExpectOutput {
@@ -88,6 +94,65 @@ impl<'pr> Visit<'pr> for ExpectOutputVisitor<'_> {
             }
         }
         // Don't recurse into value (no need, and default would)
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        if self.in_example_scope {
+            for target in node.lefts().iter() {
+                if let Some(gt) = target.as_global_variable_target_node() {
+                    let name = gt.name().as_slice();
+                    let stream = if name == b"$stdout" {
+                        Some("stdout")
+                    } else if name == b"$stderr" {
+                        Some("stderr")
+                    } else {
+                        None
+                    };
+                    if let Some(stream) = stream {
+                        let loc = node.location();
+                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                        self.diagnostics.push(Diagnostic {
+                            path: self.source.path_str().to_string(),
+                            location: crate::diagnostic::Location { line, column },
+                            severity: Severity::Convention,
+                            cop_name: "RSpec/ExpectOutput".to_string(),
+                            message: format!(
+                                "Use `expect {{ ... }}.to output(...).to_{stream}` instead of mutating ${stream}."
+                            ),
+                            corrected: false,
+                        });
+                    }
+                }
+            }
+            // Also check rest target (splat position)
+            if let Some(rest) = node.rest() {
+                if let Some(gt) = rest.as_global_variable_target_node() {
+                    let name = gt.name().as_slice();
+                    let stream = if name == b"$stdout" {
+                        Some("stdout")
+                    } else if name == b"$stderr" {
+                        Some("stderr")
+                    } else {
+                        None
+                    };
+                    if let Some(stream) = stream {
+                        let loc = node.location();
+                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                        self.diagnostics.push(Diagnostic {
+                            path: self.source.path_str().to_string(),
+                            location: crate::diagnostic::Location { line, column },
+                            severity: Severity::Convention,
+                            cop_name: "RSpec/ExpectOutput".to_string(),
+                            message: format!(
+                                "Use `expect {{ ... }}.to output(...).to_{stream}` instead of mutating ${stream}."
+                            ),
+                            corrected: false,
+                        });
+                    }
+                }
+            }
+        }
+        // Don't recurse — no nested multi-writes to check
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
