@@ -6,9 +6,8 @@ use crate::parse::source::SourceFile;
 /// - 2 FN from multi-line gem declarations (git:, glob: continuation lines
 ///   were resetting prev_gem). Fixed by skipping continuation lines.
 /// - 8 FN from inline conditional gem calls (e.g., `if cond; gem 'x' else gem 'y', path: 'z' end`).
-///   These are rare edge cases where gem calls appear mid-line after `if`/`else`.
-///   RuboCop detects these via AST-based gem node search. Our line-based approach
-///   would need significant rework to handle these. Not fixed (8 FN remain).
+///   Fixed by scanning for `gem 'name'` patterns anywhere on the line (not just at start),
+///   with comment stripping and word-boundary checks.
 pub struct OrderedGems;
 
 impl Cop for OrderedGems {
@@ -130,10 +129,42 @@ fn is_continuation_line(trimmed: &str) -> bool {
 /// - `gem "foo"`
 /// - `gem('foo')`
 ///
+/// Also finds gem calls mid-line (e.g., `if cond; gem 'foo' else gem 'foo', path: 'x' end`).
 /// Lines like `gem ENV['FOO'] || 'foo'` are intentionally ignored.
 fn extract_literal_gem_name(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    let after_gem = trimmed.strip_prefix("gem")?;
+    // Strip the comment portion of the line (anything after an unquoted #)
+    let code_part = strip_comment(line);
+
+    // Scan for `gem` followed by whitespace or `(`, then a quoted string
+    let bytes = code_part.as_bytes();
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        // Find next occurrence of "gem"
+        if let Some(pos) = code_part[i..].find("gem") {
+            let abs_pos = i + pos;
+            // Check word boundary before "gem": must be start of string or non-alphanumeric
+            if abs_pos > 0 {
+                let prev = bytes[abs_pos - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    i = abs_pos + 3;
+                    continue;
+                }
+            }
+            // Check what follows "gem"
+            let after_gem = &code_part[abs_pos + 3..];
+            if let Some(name) = extract_gem_arg(after_gem) {
+                return Some(name);
+            }
+            i = abs_pos + 3;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// Extract the gem name from the portion after "gem" (whitespace/paren then quoted string).
+fn extract_gem_arg(after_gem: &str) -> Option<&str> {
     let first = after_gem.chars().next()?;
     if !first.is_whitespace() && first != '(' {
         return None;
@@ -152,6 +183,39 @@ fn extract_literal_gem_name(line: &str) -> Option<&str> {
     let content = &rest[1..];
     let end = content.find(quote as char)?;
     Some(&content[..end])
+}
+
+/// Strip the comment portion from a line of Ruby code.
+/// Returns the code portion before any unquoted `#`.
+fn strip_comment(line: &str) -> &str {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if in_single_quote {
+            if ch == b'\'' {
+                in_single_quote = false;
+            }
+            // No escape handling in single-quoted strings for this purpose
+        } else if in_double_quote {
+            if ch == b'\\' {
+                i += 1; // skip escaped char
+            } else if ch == b'"' {
+                in_double_quote = false;
+            }
+        } else {
+            match ch {
+                b'\'' => in_single_quote = true,
+                b'"' => in_double_quote = true,
+                b'#' => return &line[..i],
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    line
 }
 
 /// Create a sort key for case-insensitive comparison.

@@ -33,3 +33,8 @@ platforms :jruby do
     git: "https://github.com/jruby/activerecord-jdbc-adapter",
     glob: "activerecord-jdbcsqlite3-adapter.gemspec"
 end
+
+group :development do
+  if !ENV['RACK_SRC']; gem 'jruby-rack' else gem 'jruby-rack', path: '../../target' end
+  if !ENV['WARBLER_SRC']; gem 'warbler' else gem 'warbler', path: '../../warbler' end
+end

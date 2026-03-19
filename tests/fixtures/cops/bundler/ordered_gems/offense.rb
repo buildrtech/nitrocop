@@ -28,3 +28,11 @@ platforms :jruby do
     git: "https://github.com/jruby/activerecord-jdbc-adapter",
     glob: "activerecord-jdbcmysql-adapter.gemspec"
 end
+
+group :development do
+  if !ENV['WARBLER_SRC']; gem 'warbler' else gem 'warbler', path: '../../warbler' end
+  if !ENV['RACK_SRC']; gem 'jruby-rack' else gem 'jruby-rack', path: '../../target' end
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Bundler/OrderedGems: Gems should be sorted in an alphabetical order within their section of the Gemfile. Gem `jruby-rack` should appear before `warbler`.
+  gem 'jruby-jars', '~> 9.4.0'
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Bundler/OrderedGems: Gems should be sorted in an alphabetical order within their section of the Gemfile. Gem `jruby-jars` should appear before `jruby-rack`.
+end
