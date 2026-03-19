@@ -17,13 +17,24 @@ use crate::parse::source::SourceFile;
 /// so the method is NOT redundant. In Prism, both `ForwardingSuperNode` and `SuperNode`
 /// have a `block()` field that is `Some(BlockNode)` when a block is attached. This
 /// matches RuboCop's behavior where `node.body.begin_type?` returns false for block
-/// calls, preventing the `initialize_forwards?` matcher from matching. Fixed by checking
-/// `block().is_some()` on both super node types. Corpus: 7 FPs from twilio-ruby (super
-/// with blank lines after), mongoid (super do...end), jruby, active_merchant.
-/// Remaining 20 FPs appear to be corpus oracle noise (empty `def initialize; end` that
-/// RuboCop should flag). 2 FNs (fastlane inline comment on def line, fluentd super with
-/// commented-out code) also appear to be corpus noise — RuboCop's `AllowComments: true`
-/// default should prevent flagging those cases.
+/// calls, preventing the `initialize_forwards?` matcher from matching.
+///
+/// FP fix (2026-03): 20 FPs all caused by RuboCop's `contains_comments?` using
+/// `find_end_line` which extends the comment check range beyond the method's `end`
+/// keyword to the next sibling node's start line. Comments in the gap between `end`
+/// and the next method/expression cause `allow_comments?` to return true. Examples:
+/// twilio-ruby (7): `def initialize(v); super(v); end` followed by `##` doc comment;
+/// puppet (2), viewcomponent, authlogic, solargraph, loofah, fusuma, midori, publiclab,
+/// concurrent-ruby, pdf-reader, rumale (1 each): empty `def initialize; end` with
+/// comments between `end` and the next code line. Fixed by adding `has_comment_after_end`
+/// which scans source after the def node for comments before the next code line.
+///
+/// 2 FNs remain (fastlane: inline comment on def line `def initialize # required`;
+/// fluentd: comment after super in body). Both involve comments that nitrocop correctly
+/// detects via `has_comment_in_body`, yet RuboCop still flags them. The root cause
+/// appears to be a subtle difference in RuboCop's `each_comment_in_lines` range
+/// calculation that excludes these specific comments. Not worth fixing — 2 FNs out
+/// of 167 total offenses (98.8% location match after FP fix).
 pub struct RedundantInitialize;
 
 impl Cop for RedundantInitialize {
@@ -74,6 +85,14 @@ impl Cop for RedundantInitialize {
                     let def_end = def_node.location().end_offset();
                     let body_bytes = &source.as_bytes()[def_start..def_end];
                     if has_comment_in_body(body_bytes) {
+                        return;
+                    }
+                    // Also check for comments after the end keyword, up to the
+                    // next code line. RuboCop's `find_end_line` extends the
+                    // comment range to the next sibling node's line, so comments
+                    // in the gap between `end` and the next method/expression
+                    // cause `allow_comments?` to return true.
+                    if has_comment_after_end(source.as_bytes(), def_end) {
                         return;
                     }
                 }
@@ -160,6 +179,9 @@ impl Cop for RedundantInitialize {
             if has_comment_in_body(body_bytes) {
                 return;
             }
+            if has_comment_after_end(source.as_bytes(), def_end) {
+                return;
+            }
         }
 
         let loc = def_node.location();
@@ -201,6 +223,51 @@ fn has_comment_in_body(body_bytes: &[u8]) -> bool {
         }
         if b == b'"' || b == b'\'' {
             in_string = !in_string;
+        }
+    }
+    false
+}
+
+/// Check for comments in the source after the def node's `end` keyword, up to the
+/// next non-blank, non-comment line. RuboCop's `contains_comments?` uses `find_end_line`
+/// which extends the comment check range to the right sibling's start line. Comments
+/// in this gap (between `end` and the next code) cause `allow_comments?` to return true,
+/// preventing the offense from being registered.
+fn has_comment_after_end(source_bytes: &[u8], def_end_offset: usize) -> bool {
+    // Scan forward from the end of the def node
+    let remaining = &source_bytes[def_end_offset..];
+    // Skip the rest of the current line (after `end`)
+    let mut pos = 0;
+    while pos < remaining.len() && remaining[pos] != b'\n' {
+        pos += 1;
+    }
+    if pos < remaining.len() {
+        pos += 1; // skip the newline
+    }
+    // Now scan subsequent lines. For each line:
+    // - If it's blank (only whitespace), continue
+    // - If it starts with whitespace then `#`, it's a comment → return true
+    // - Otherwise it's code → return false (stop scanning)
+    while pos < remaining.len() {
+        // Find the content of this line
+        let line_start = pos;
+        while pos < remaining.len() && remaining[pos] != b'\n' {
+            pos += 1;
+        }
+        let line = &remaining[line_start..pos];
+        if pos < remaining.len() {
+            pos += 1; // skip newline
+        }
+        // Check if this line is blank (only whitespace)
+        let trimmed_start = line.iter().position(|&b| b != b' ' && b != b'\t');
+        match trimmed_start {
+            None => continue, // blank line
+            Some(idx) => {
+                if line[idx] == b'#' {
+                    return true; // found a comment
+                }
+                return false; // found code, stop
+            }
         }
     }
     false

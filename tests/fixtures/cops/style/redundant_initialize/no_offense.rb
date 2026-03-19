@@ -80,3 +80,41 @@ def initialize(version)
     setup
   end
 end
+
+# RuboCop's contains_comments? includes comments between end and next sibling.
+# Empty initialize followed by a comment before next code — not redundant per RuboCop.
+class MockController
+  def initialize
+  end
+
+  # Expected controller has no cookies method.
+  def cookie_domain
+    nil
+  end
+end
+
+# super-forwarding initialize followed by a comment before next sibling
+class Base
+  def initialize(page, handler)
+    super
+  end
+
+  # OPTIONAL
+  #
+  # Setup method for subclasses.
+  def setup; end
+end
+
+# super(args) with trailing blank lines (twilio-ruby pattern)
+class Resource
+  # @param [Version] version Version that contains the resource
+  # @return [ResourceInstance] ResourceInstance
+  def initialize(version)
+    super(version)
+
+
+  end
+
+  # Additional methods follow
+  def fetch; end
+end
