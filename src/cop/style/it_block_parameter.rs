@@ -39,13 +39,11 @@ use ruby_prism::Visit;
 ///    `LambdaNode` in Prism, not `CallNode`. RuboCop's `on_numblock`/`on_itblock`/`on_block`
 ///    fire for lambdas too. Fix: add `LAMBDA_NODE` to interested types and handle it.
 ///
-/// 2. **Multi-line check used block_node range instead of full expression (FN)** —
-///    For `allow_single_line` itblocks, nitrocop checked `block_node.location()` which
-///    only covers `do..end` or `{..}`. RuboCop checks the full itblock node which
-///    includes the receiver/method call. For multi-line method chains with single-line
-///    brace blocks like `foo\n  .bar { it }`, RuboCop flags it (itblock is multi-line)
-///    but nitrocop didn't (block is single-line). Fix: use call_node range for the
-///    multi-line check.
+/// 2. **Multi-line check is correct** — the `block_node.location()` check matches
+///    RuboCop v1.84.2's `node.single_line?` which checks the block portion, NOT the
+///    full expression including the receiver chain. Commit 8260fc1aa in RuboCop
+///    explicitly reverted to this behavior ("allow_single_line targets the block,
+///    not what is around it").
 pub struct ItBlockParameter;
 
 impl Cop for ItBlockParameter {
@@ -138,16 +136,13 @@ impl ItBlockParameter {
     ) {
         match style {
             "allow_single_line" => {
-                // Use the call_node (full expression) range for multi-line check,
-                // matching RuboCop's `node.single_line?` on the itblock node which
-                // includes the receiver/method chain. This correctly flags cases like:
-                //   foo
-                //     .bar { it }
-                // where the block itself is single-line but the full expression is multi-line.
-                let expr_loc = call_node.location();
-                let (start_line, _) = source.offset_to_line_col(expr_loc.start_offset());
+                // Check if the block itself is multi-line (not the full expression).
+                // This matches RuboCop v1.84.2's `node.single_line?` which checks the
+                // block portion, allowing multi-line method chains with single-line blocks.
+                let block_loc = block_node.location();
+                let (start_line, _) = source.offset_to_line_col(block_loc.start_offset());
                 let (end_line, _) =
-                    source.offset_to_line_col(expr_loc.end_offset().saturating_sub(1));
+                    source.offset_to_line_col(block_loc.end_offset().saturating_sub(1));
                 if start_line == end_line {
                     return; // single-line, OK
                 }
