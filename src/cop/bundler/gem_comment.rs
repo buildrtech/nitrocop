@@ -37,6 +37,21 @@ pub struct GemComment;
 /// `%(...)` percent-string literals. The `#` inside `%(~> #{...})` was falsely detected
 /// as an inline comment, making the gem appear "commented". Fix: `has_inline_comment()`
 /// now tracks `%(...)`/`%w(...)`/etc. paren-depth and skips `#` inside percent-strings.
+///
+/// ### Extended corpus FP=5 — FIXED (multi-line gem continuation comments)
+///
+/// 5 FPs from `dradis__dradis-legacy` (3) and `hummingbird-me__kitsu-server` (2).
+/// The kitsu-server FPs were multi-line gem declarations (`gem 'name', github: ...,\n
+///   branch: '...' # comment`). Comments on continuation lines were not detected.
+/// Fix: `has_continuation_comment()` checks subsequent lines of multi-line gem calls
+/// (lines ending with `,` or `\`) for inline comments.
+///
+/// ### Extended corpus FN=28 — FIXED (when/then/else gem calls)
+///
+/// All 28 FNs were gem calls on `when ... then` or `else` lines inside `case` statements.
+/// `extract_gem_name()` requires lines to start with `gem`, missing these patterns.
+/// Fix: `extract_inline_gem()` finds `gem 'name'` patterns anywhere on a line when
+/// preceded by whitespace, catching `when 'foo' then gem 'bar'` and `else gem 'baz'`.
 impl Cop for GemComment {
     fn name(&self) -> &'static str {
         "Bundler/GemComment"
@@ -93,7 +108,17 @@ impl Cop for GemComment {
                 continue;
             }
 
-            if let Some(gem_name) = extract_gem_name(line_str) {
+            // Try standard extraction first (line starts with `gem`)
+            // then try extracting from `when ... then gem ...` / `else gem ...` patterns
+            let (gem_name, gem_col) = if let Some(name) = extract_gem_name(line_str) {
+                (name, 0usize)
+            } else if let Some((name, col)) = extract_inline_gem(trimmed) {
+                (name, line_str.len() - line_str.trim_start().len() + col)
+            } else {
+                continue;
+            };
+
+            {
                 // Skip ignored gems
                 if ignored_gems.iter().any(|g| g == gem_name) {
                     continue;
@@ -111,6 +136,7 @@ impl Cop for GemComment {
 
                 // Check if the preceding line is a comment, or this line has an inline comment
                 let has_comment = has_inline_comment(line_str)
+                    || has_continuation_comment(&lines, i)
                     || (!is_modifier
                         && i > 0
                         && std::str::from_utf8(lines[i - 1])
@@ -125,7 +151,7 @@ impl Cop for GemComment {
                     diagnostics.push(self.diagnostic(
                         source,
                         line_num,
-                        0,
+                        gem_col,
                         "Missing gem description comment.".to_string(),
                     ));
                 }
@@ -179,6 +205,72 @@ impl<'pr> Visit<'pr> for ModifierGemVisitor<'_> {
             ruby_prism::visit_unless_node(self, node);
         }
     }
+}
+
+/// Extract a gem name from a line where `gem` is not at the start, e.g.:
+/// `when "mysql" then gem "mysql2", "~>0.2.0"`
+/// `else gem 'mongoid', '~> 7.0'`
+/// Returns (gem_name, column_offset_within_trimmed) if found.
+fn extract_inline_gem(trimmed: &str) -> Option<(&str, usize)> {
+    // Look for ` gem '` or ` gem "` or ` gem(` patterns after when/then/else
+    let mut search_from = 0;
+    while search_from < trimmed.len() {
+        let remaining = &trimmed[search_from..];
+        // Find next occurrence of "gem " or "gem("
+        let gem_pos = remaining.find("gem ").or_else(|| remaining.find("gem("));
+        let rel_pos = gem_pos?;
+        let abs_pos = search_from + rel_pos;
+
+        // Ensure `gem` is preceded by whitespace (not part of another word)
+        if abs_pos > 0 && !trimmed.as_bytes()[abs_pos - 1].is_ascii_whitespace() {
+            search_from = abs_pos + 3;
+            continue;
+        }
+
+        // Try to extract the gem name from this position
+        let gem_call = &trimmed[abs_pos..];
+        if let Some(name) = extract_gem_name(gem_call) {
+            return Some((name, abs_pos));
+        }
+
+        search_from = abs_pos + 3;
+    }
+    None
+}
+
+/// Check if a multi-line gem declaration has a comment on any continuation line.
+/// A continuation line follows a line ending with `,` or `\` and is more indented.
+fn has_continuation_comment(lines: &[&[u8]], gem_line_idx: usize) -> bool {
+    let gem_line = std::str::from_utf8(lines[gem_line_idx]).unwrap_or("");
+    let gem_trimmed = gem_line.trim_end();
+
+    // Only check continuation if the gem line ends with a comma or backslash
+    if !gem_trimmed.ends_with(',') && !gem_trimmed.ends_with('\\') {
+        return false;
+    }
+
+    // Check subsequent lines that are continuations
+    for line_bytes in &lines[(gem_line_idx + 1)..] {
+        let cont_line = std::str::from_utf8(line_bytes).unwrap_or("");
+        let cont_trimmed = cont_line.trim();
+        if cont_trimmed.is_empty() {
+            break;
+        }
+        // A continuation line should not start with `gem` (that's a new gem declaration)
+        if cont_trimmed.starts_with("gem ") || cont_trimmed.starts_with("gem(") {
+            break;
+        }
+        // Check for inline comment on the continuation line
+        if has_inline_comment(cont_line) {
+            return true;
+        }
+        // If this continuation line doesn't end with comma/backslash, it's the last one
+        let ct = cont_line.trim_end();
+        if !ct.ends_with(',') && !ct.ends_with('\\') {
+            break;
+        }
+    }
+    false
 }
 
 /// Check if a gem declaration line has a version specifier.

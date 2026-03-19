@@ -28,3 +28,19 @@ gem 'puma_alt' unless RUBY_ENGINE == 'truffleruby'
 # This comment is about the condition, not the gem; %(#) is NOT a real comment
 gem 'rouge', (ENV.fetch 'ROUGE_VERSION', %(~> #{RUBY_ENGINE == 'jruby' ? '3' : '4'}.0)), require: false unless ENV['ROUGE_VERSION'] == 'false'
 ^ Bundler/GemComment: Missing gem description comment.
+
+# gem on `when ... then` line should still be detected
+case ENV["DB"]
+when "mysql" then gem "mysql2", "~>0.2.0"
+                  ^ Bundler/GemComment: Missing gem description comment.
+when "postgres" then gem "pg"
+                     ^ Bundler/GemComment: Missing gem description comment.
+end
+
+# gem on `else` line should still be detected
+case ENV['MONGOID_VERSION']
+when 'HEAD' then gem 'mongoid', github: 'mongodb/mongoid'
+                 ^ Bundler/GemComment: Missing gem description comment.
+else gem 'mongoid', '~> 7.0'
+     ^ Bundler/GemComment: Missing gem description comment.
+end

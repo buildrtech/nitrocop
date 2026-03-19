@@ -25,3 +25,10 @@ if ENV['USE_IT']
 end
 
 gem 'inline_comment_gem' if ENV['USE_IT'] # Needed for compatibility
+
+# Multi-line gem with comment on continuation line should not be flagged
+gem 'stream_rails', github: 'GetStream/stream-rails',
+  branch: 'feature/subreference-enrichment' # Feed Enrichment
+
+gem 'stripe_mock', github: 'stripe-ruby-mock/stripe-ruby-mock',
+    require: 'stripe_mock' # Mock Stripe API
