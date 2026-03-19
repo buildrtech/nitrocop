@@ -104,11 +104,11 @@ def compute_synthetic(data: dict) -> dict[str, dict]:
 
 
 def confidence_tier(occurrences: int, unique_repos: int) -> str:
-    if occurrences == 0:
+    if occurrences == 0 and unique_repos == 0:
         return "None"
-    if occurrences >= 500 and unique_repos >= 50:
+    if unique_repos >= 100:
         return "High"
-    if occurrences >= 100 and unique_repos >= 25:
+    if unique_repos >= 25:
         return "Medium"
     return "Low"
 
@@ -149,7 +149,7 @@ def main():
         })
 
     # Sort by occurrences descending
-    rows.sort(key=lambda x: (-x["occ"], -x["synth_occ"], x["cop"]))
+    rows.sort(key=lambda x: (-x["repos"], -x["occ"], x["cop"]))
 
     # Apply filters
     if args.department:
@@ -168,10 +168,10 @@ def main():
     if args.summary:
         total_cops = sum(tier_counts.values())
         print(f"Corpus coverage summary ({total_repos} repos, {total_cops} cops):")
-        print(f"  High   (>=500 occurrences, >=50 repos): {tier_counts['High']}")
-        print(f"  Medium (>=100 occurrences, >=25 repos): {tier_counts['Medium']}")
-        print(f"  Low    (<100 occurrences or <25 repos): {tier_counts['Low']}")
-        print(f"  None   (0 occurrences):                 {tier_counts['None']}")
+        print(f"  High   (>=100 repos): {tier_counts['High']}")
+        print(f"  Medium (>=25 repos):  {tier_counts['Medium']}")
+        print(f"  Low    (<25 repos):   {tier_counts['Low']}")
+        print(f"  None   (0 repos):     {tier_counts['None']}")
         return
 
     if args.format == "csv":
@@ -201,10 +201,10 @@ def main():
     print(f"**Confidence tiers:** {tier_counts['High']} High, "
           f"{tier_counts['Medium']} Medium, {tier_counts['Low']} Low, {tier_counts['None']} None")
     print()
-    print(f"- **High**: >=500 occurrences AND >=50 repos")
-    print(f"- **Medium**: >=100 occurrences AND >=25 repos")
-    print(f"- **Low**: <100 occurrences or <25 repos")
-    print(f"- **None**: 0 occurrences in corpus")
+    print(f"- **High**: >=100 repos")
+    print(f"- **Medium**: >=25 repos")
+    print(f"- **Low**: <25 repos")
+    print(f"- **None**: 0 repos")
     print()
 
     # Build header
