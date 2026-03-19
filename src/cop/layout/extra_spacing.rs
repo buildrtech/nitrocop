@@ -110,7 +110,7 @@ impl Cop for ExtraSpacing {
 
         // Collect word/symbol array interior ranges to ignore (%w, %W, %i, %I).
         // Spaces inside these arrays are element separators, not extra spacing.
-        ignored_ranges.extend(collect_word_array_ranges(parse_result, src_bytes));
+        ignored_ranges.extend(collect_word_array_ranges(parse_result));
 
         // Build the set of aligned comment lines (1-indexed). Two consecutive
         // comments that start at the same column are both considered "aligned".
@@ -287,24 +287,17 @@ fn is_in_ignored_range(ranges: &[Range<usize>], offset: usize) -> bool {
 
 /// Collect byte ranges of word/symbol array interiors (%w, %W, %i, %I).
 /// Spaces inside these arrays are element separators, not extra spacing.
-fn collect_word_array_ranges(
-    parse_result: &ruby_prism::ParseResult<'_>,
-    src_bytes: &[u8],
-) -> Vec<Range<usize>> {
-    let mut collector = WordArrayCollector {
-        ranges: Vec::new(),
-        src_bytes,
-    };
+fn collect_word_array_ranges(parse_result: &ruby_prism::ParseResult<'_>) -> Vec<Range<usize>> {
+    let mut collector = WordArrayCollector { ranges: Vec::new() };
     collector.visit(&parse_result.node());
     collector.ranges
 }
 
-struct WordArrayCollector<'a> {
+struct WordArrayCollector {
     ranges: Vec<Range<usize>>,
-    src_bytes: &'a [u8],
 }
 
-impl<'pr> Visit<'pr> for WordArrayCollector<'_> {
+impl<'pr> Visit<'pr> for WordArrayCollector {
     fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
         if let Some(opening) = node.opening_loc() {
             let opener = opening.as_slice();
@@ -878,6 +871,99 @@ mod tests {
             diags.is_empty(),
             "Aligned trailing comments should be allowed, got {} offenses",
             diags.len()
+        );
+    }
+
+    #[test]
+    fn tabs_between_tokens_flagged() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // Multiple tabs between tokens should be flagged as extra spacing
+        let src = b"filter_data('<KEY>')\t\t\t\t{ ENV['KEY'] }\n";
+        let diags = run_cop_full(&cop, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag tabs between tokens, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("L{}:C{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn space_plus_tabs_between_tokens_flagged() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // Space followed by tabs should be flagged
+        let src = b"data[\"cpu\"]    =  temp[\"VCPU\"] \tunless temp[\"VCPU\"].nil?\n";
+        let diags = run_cop_full(&cop, src);
+        // The `    ` before `=` (4 spaces), `  ` before `temp` (2 spaces),
+        // and ` \t` before `unless` (space+tab) should all be offenses
+        assert!(
+            diags.len() >= 3,
+            "Should flag space+tab runs, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("L{}:C{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn word_array_spaces_not_flagged() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // Spaces inside %w() are element separators, not extra spacing
+        let src = b"builtins = %w(\n  foo  bar  baz\n  one  two  three\n)\n";
+        let diags = run_cop_full(&cop, src);
+        assert!(
+            diags.is_empty(),
+            "Should not flag spaces inside %w(), got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("L{}:C{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn symbol_array_spaces_not_flagged() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        let src = b"syms = %i(foo  bar  baz)\n";
+        let diags = run_cop_full(&cop, src);
+        assert!(
+            diags.is_empty(),
+            "Should not flag spaces inside %i(), got {} offenses",
+            diags.len()
+        );
+    }
+
+    #[test]
+    fn multibyte_alignment_allowed() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // CJK characters take 3 bytes each but the commas should align visually
+        let src = "[\n  {id: 1, name: '\u{5F88}\u{96BE}'    , code: 'a'},\n  {id: 2, name: '\u{9700}\u{8981}\u{5176}\u{5B83}', code: 'b'},\n]\n";
+        let diags = run_cop_full(&cop, src.as_bytes());
+        assert!(
+            diags.is_empty(),
+            "Aligned tokens with multibyte chars should not be flagged, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("L{}:C{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
         );
     }
 
