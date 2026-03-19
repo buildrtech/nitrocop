@@ -76,3 +76,12 @@ schedule (Time.now - 60).to_f, arg2
 
 expect(val).to eq (Time.now + 7.days).to_i
                         ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+# Grouping paren inside method call: begin node breaks chain in RuboCop AST
+# (Time.now - 3600) creates a begin node, stopping the chain walk at .httpdate
+Time.httpdate((Time.now - 3600).httpdate)
+                    ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+# String interpolation: literal parens in string text are not Ruby method calls
+"tolerance zone (#{Time.at(ts)})"
+                        ^^ Rails/TimeZone: Use `Time.zone.at` instead of `Time.at`.

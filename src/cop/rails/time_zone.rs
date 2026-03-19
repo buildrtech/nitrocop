@@ -147,6 +147,39 @@ use crate::parse::source::SourceFile;
 ///
 /// Remaining FN after spaced-paren fix: ~4-6 (2+ from `&.` pattern, plus possible
 /// other patterns in rack-contrib, rack-cache, TracksApp, flippercloud, hackclub).
+///
+/// ## Investigation (2026-03-19): FN=7 (corpus oracle)
+///
+/// Investigated all 7 FN across 5 repos. Two fixes applied:
+///
+/// **1. Grouping paren recursion (2 FN in rack-cache — FIXED):**
+/// `Time.httpdate((Time.now - (60**2)).httpdate)` — the inner `(Time.now - ...)`
+/// is a grouping paren. Previously, `enclosing_call_is_safe_recursive` recursed
+/// past it and found the outer `Time.httpdate(` whose method `httpdate` was in
+/// SAFE_METHODS, incorrectly suppressing the offense. In RuboCop, grouping parens
+/// create a `begin` AST node which stops `extract_method_chain`'s parent walk.
+/// Fix: when `is_grouping_paren` is true, return false immediately instead of
+/// recursing. This matches RuboCop's chain-breaking `begin` node semantics.
+///
+/// **2. String interpolation boundary (1 FN in flippercloud — FIXED):**
+/// `"tolerance zone (#{Time.at(ts)})"` — `find_enclosing_open_paren` scanned
+/// backward through the `#{` interpolation boundary and found the literal `(`
+/// from the string text `zone (`. The word `zone` before it matched SAFE_METHODS,
+/// incorrectly suppressing the offense. Fix: stop backward scan at `#{` boundaries
+/// (return None when `bytes[i] == b'{'` and `bytes[i-1] == b'#'`).
+///
+/// **Remaining 4 FN (not fixed):**
+/// - feedbin (2): `Time.at(...)&.utc` — safe-navigation `&.` pattern. Previously
+///   attempted removing `&.` support, reverted due to 405 FP regression.
+/// - TracksApp (1): `Time.zone.local(year, month, Time.days_in_month(month))` —
+///   corpus artifact. RuboCop's `on_const` fires on `Time`, but `Time.zone.local`
+///   has `:zone` in GOOD_METHODS → `not_danger_chain?` returns true → no offense.
+///   RuboCop should not flag this; likely a stale corpus data point.
+/// - hackclub (1): `Duration.build(Time.now).seconds.to_i` — `.to_i` is on a
+///   Duration object, not Time. RuboCop's `method_from_time_class?` returns false
+///   for non-Time receivers, so `.to_i` isn't in the chain. Attempted fix with
+///   `is_time_class_receiver` gate caused 675-offense regression (reason unclear,
+///   possibly due to edge cases in the byte-level heuristic). Deferred.
 pub struct TimeZone;
 
 impl Cop for TimeZone {
@@ -521,26 +554,31 @@ fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -
     // enclosing call. We must not check chain_contains_tz_safe_method after `)`.
     let is_spaced_paren = has_space && !is_grouping_paren;
 
-    if !is_grouping_paren {
-        if SAFE_METHODS.contains(&method_name) {
-            return true;
-        }
+    // Grouping parens (no method name, keyword parens, etc.) act as chain-breaking
+    // boundaries, analogous to RuboCop's `begin` AST node which stops the chain walk.
+    // Do not recurse past them or check chains through them.
+    if is_grouping_paren {
+        return false;
+    }
 
-        // The enclosing function itself isn't safe, but check if the CHAIN AFTER
-        // the enclosing call's closing `)` contains a safe method.
-        // E.g., `Time.to_mongo(Time.local(...)).zone` — `to_mongo` is not safe,
-        // but `.zone` after `Time.to_mongo(...)` IS safe.
-        // Find the closing `)` that matches the `(` at paren_pos, then scan forward.
-        //
-        // Skip this check when there's a space between method name and `(`:
-        // `schedule (Time.now - 60).to_f` — `.to_f` chains on the grouped
-        // expression `(Time.now - 60)`, not on the `schedule` call.
-        if !is_spaced_paren {
-            let closing_paren = find_matching_close_paren(bytes, paren_pos);
-            if let Some(close_pos) = closing_paren {
-                if chain_contains_tz_safe_method(bytes, close_pos + 1) {
-                    return true;
-                }
+    if SAFE_METHODS.contains(&method_name) {
+        return true;
+    }
+
+    // The enclosing function itself isn't safe, but check if the CHAIN AFTER
+    // the enclosing call's closing `)` contains a safe method.
+    // E.g., `Time.to_mongo(Time.local(...)).zone` — `to_mongo` is not safe,
+    // but `.zone` after `Time.to_mongo(...)` IS safe.
+    // Find the closing `)` that matches the `(` at paren_pos, then scan forward.
+    //
+    // Skip this check when there's a space between method name and `(`:
+    // `schedule (Time.now - 60).to_f` — `.to_f` chains on the grouped
+    // expression `(Time.now - 60)`, not on the `schedule` call.
+    if !is_spaced_paren {
+        let closing_paren = find_matching_close_paren(bytes, paren_pos);
+        if let Some(close_pos) = closing_paren {
+            if chain_contains_tz_safe_method(bytes, close_pos + 1) {
+                return true;
             }
         }
     }
@@ -564,6 +602,10 @@ fn find_enclosing_open_paren(bytes: &[u8], pos: usize) -> Option<usize> {
             b'(' if depth == 0 => return Some(i),
             b'(' => depth -= 1,
             b')' => depth += 1,
+            // Stop at string interpolation boundary #{...}
+            // The `{` from `#{` is an expression boundary — any `(` outside it
+            // is literal string content, not a Ruby method-call paren.
+            b'{' if i > 0 && bytes[i - 1] == b'#' => return None,
             b'\'' | b'"' => {
                 // Skip backward past string literals
                 if i == 0 {
