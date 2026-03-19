@@ -32,6 +32,12 @@ use crate::parse::source::SourceFile;
 /// phrases. A string like `"404 AWOL"` doesn't match any Rack status mapping, so RuboCop skips
 /// it. Fix: when a string status contains whitespace, validate that it exactly matches a known
 /// Rack "code reason-phrase" pair. Strings with unknown/custom reason phrases are not flagged.
+///
+/// **FP root cause (21 FP, 2026-03-19):** RuboCop's NodePattern for `head` and `assert_response`
+/// only matches direct positional arguments (`${int sym}`), NOT keyword `status:` args from a
+/// hash. Nitrocop was calling `keyword_arg_value` for all methods including `head`/`assert_response`,
+/// incorrectly flagging patterns like `head status: 204` and `head(status: 304)`.
+/// Fix: skip keyword arg extraction for `DIRECT_STATUS_METHODS` (head, assert_response).
 pub struct HttpStatus;
 
 fn status_code_to_symbol(code: i64) -> Option<&'static str> {
@@ -292,9 +298,15 @@ impl Cop for HttpStatus {
         }
 
         let method_name = call.name().as_slice();
+        let is_direct_method = DIRECT_STATUS_METHODS.contains(&method_name);
 
-        // Try keyword arg first, then direct arg for head/assert_response
-        let keyword_status = keyword_arg_value(&call, b"status");
+        // For head/assert_response, RuboCop only checks direct positional args — not keyword status:.
+        // For render/redirect_to/assert_redirected_to, check keyword status: arg.
+        let keyword_status = if is_direct_method {
+            None
+        } else {
+            keyword_arg_value(&call, b"status")
+        };
 
         let check_status = |status_value: &ruby_prism::Node<'_>| -> Option<Diagnostic> {
             match style {
@@ -389,8 +401,8 @@ impl Cop for HttpStatus {
             }
         }
 
-        // For head and assert_response, also check first direct argument
-        if keyword_status.is_none() && DIRECT_STATUS_METHODS.contains(&method_name) {
+        // For head and assert_response, check first direct positional argument
+        if is_direct_method {
             if let Some(args) = call.arguments() {
                 for first in args.arguments().iter().take(1) {
                     if first.as_integer_node().is_some()
