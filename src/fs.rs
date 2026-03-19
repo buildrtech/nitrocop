@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ignore::WalkBuilder;
 
 use crate::config::ResolvedConfig;
@@ -58,7 +58,10 @@ fn walk_directory(dir: &Path, _config: &ResolvedConfig) -> Result<Vec<PathBuf>> 
 
     let mut files = Vec::new();
     for entry in builder.build() {
-        let entry = entry.context("error walking directory")?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue, // skip broken symlinks / permission errors
+        };
         let path = entry.path();
         if path.is_file() && is_ruby_file(path) {
             files.push(path.to_path_buf());
@@ -478,6 +481,27 @@ mod tests {
             paths.contains(&"app/models/user.rb".to_string()),
             "Should find symlink path: {paths:?}"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn skips_broken_symlinks() {
+        let dir = setup_dir("broken_symlinks");
+        fs::write(dir.join("good.rb"), "# ok\n").unwrap();
+        // Create a broken symlink: bad.rb -> nonexistent.rb
+        std::os::unix::fs::symlink("nonexistent.rb", dir.join("bad.rb")).unwrap();
+
+        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
+        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+
+        let names: Vec<String> = discovered
+            .files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"good.rb".to_string()), "Should find good.rb: {names:?}");
+        assert!(!names.contains(&"bad.rb".to_string()), "Should skip broken symlink: {names:?}");
         fs::remove_dir_all(&dir).ok();
     }
 
