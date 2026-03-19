@@ -7,6 +7,13 @@ use crate::parse::source::SourceFile;
 ///
 /// Checks that uniqueness validations have a corresponding unique index
 /// on the database column(s). Requires schema analysis (db/schema.rb).
+///
+/// ## Synthetic corpus note
+/// RuboCop's SchemaLoader crashes on `t.timestamps` (no arguments) in
+/// db/schema.rb because `Column.new` calls `node.first_argument.str_content`
+/// which raises NoMethodError on nil. When schema loading fails, both RuboCop
+/// and nitrocop silently skip schema-dependent cops. The synthetic schema was
+/// fixed to use explicit `t.datetime "created_at"` columns instead.
 pub struct UniqueValidationWithoutIndex;
 
 const MSG: &str = "Uniqueness validation should have a unique index on the database column.";

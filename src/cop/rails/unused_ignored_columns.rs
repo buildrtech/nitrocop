@@ -7,6 +7,13 @@ use crate::parse::source::SourceFile;
 ///
 /// Checks that columns listed in `ignored_columns` actually exist in the schema.
 /// Reports offense on each column string/symbol that doesn't exist in the table.
+///
+/// ## Synthetic corpus note
+/// RuboCop's SchemaLoader crashes on `t.timestamps` (no arguments) in
+/// db/schema.rb because `Column.new` calls `node.first_argument.str_content`
+/// which raises NoMethodError on nil. When schema loading fails, both RuboCop
+/// and nitrocop silently skip schema-dependent cops. The synthetic schema was
+/// fixed to use explicit `t.datetime "created_at"` columns instead.
 pub struct UnusedIgnoredColumns;
 
 impl Cop for UnusedIgnoredColumns {
