@@ -34,6 +34,30 @@ Status.find_by_sql(<<-SQL.squish)
       SELECT id FROM search_tree
 SQL
 
+# <<- with .squish on separate line after closing delimiter
+query = <<-SQL
+  SELECT MAX(title)
+^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/HeredocIndentation: Use 2 spaces for indentation in a heredoc by using `<<~` instead of `<<-`.
+    FROM articles
+SQL
+.squish
+
+join = <<-SQL
+  LEFT OUTER JOIN (
+^^^^^^^^^^^^^^^^^^^^^^ Layout/HeredocIndentation: Use 2 spaces for indentation in a heredoc by using `<<~` instead of `<<-`.
+      SELECT comments.*
+    FROM comments
+  ) AS latest_comment
+SQL
+.squish
+
+# <<- with .squish! on separate line after closing delimiter
+value = <<-TEXT
+  some content here
+^^^^^^^^^^^^^^^^^^^^^^ Layout/HeredocIndentation: Use 2 spaces for indentation in a heredoc by using `<<~` instead of `<<-`.
+TEXT
+.squish!
+
 # Bare <<WORD heredocs with body at column 0 should be flagged
 a = <<RUBY
 something

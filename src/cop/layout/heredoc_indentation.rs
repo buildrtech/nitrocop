@@ -3,6 +3,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Layout/HeredocIndentation: checks heredoc body indentation.
+///
+/// FN=3 fix (2026-03): All 3 FNs were `<<-` heredocs in ransack repo where `.squish`
+/// was called on a separate line after the closing delimiter (e.g., `SQL\n.squish`).
+/// Root cause: `is_squish_heredoc` only checked bytes after the opening (`<<-SQL.squish`)
+/// but not after the closing delimiter. Added `is_squish_after_closing` to also detect
+/// `.squish`/`.squish!` on the line following the closing delimiter.
+///
+/// Note: squish detection fires unconditionally (without checking
+/// `ActiveSupportExtensionsEnabled`) matching the corpus oracle behavior where
+/// rubocop-rails enables it by default.
 pub struct HeredocIndentation;
 
 impl Cop for HeredocIndentation {
@@ -183,9 +194,15 @@ impl Cop for HeredocIndentation {
             ));
         }
 
-        // Check if the heredoc opening is followed by .squish or .squish!
-        // e.g., <<-SQL.squish or <<-SQL.squish!
-        if is_squish_heredoc(bytes, opening_loc.end_offset()) {
+        // Check if the heredoc has .squish/.squish! called on it.
+        // This can appear either:
+        // 1. After the opening: <<-SQL.squish
+        // 2. On a separate line after the closing delimiter:
+        //    SQL
+        //    .squish
+        if is_squish_heredoc(bytes, opening_loc.end_offset())
+            || is_squish_after_closing(bytes, closing_loc.end_offset())
+        {
             // Check if adjusting indentation would make lines too long
             let base_indent = base_indent_level(source, opening_loc.start_offset());
             let expected = base_indent + indentation_width;
@@ -211,6 +228,35 @@ fn is_squish_heredoc(bytes: &[u8], opening_end: usize) -> bool {
         return false;
     }
     let rest = &bytes[opening_end..];
+    rest.starts_with(b".squish!")
+        || rest.starts_with(b".squish)")
+        || rest.starts_with(b".squish\n")
+        || rest.starts_with(b".squish\r")
+        || rest.starts_with(b".squish ")
+        || (rest.len() >= 7
+            && &rest[..7] == b".squish"
+            && (rest.len() == 7 || !rest[7].is_ascii_alphanumeric()))
+}
+
+/// Check if `.squish` or `.squish!` appears on the line after the closing delimiter.
+/// Handles the pattern:
+///   SQL
+///   .squish
+/// Note: Prism's closing_loc for heredocs includes the trailing newline,
+/// so closing_end points to the start of the next line.
+fn is_squish_after_closing(bytes: &[u8], closing_end: usize) -> bool {
+    let mut pos = closing_end;
+
+    // Skip leading whitespace on the line after the closing delimiter
+    while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
+        pos += 1;
+    }
+
+    // Check for .squish or .squish!
+    if pos >= bytes.len() {
+        return false;
+    }
+    let rest = &bytes[pos..];
     rest.starts_with(b".squish!")
         || rest.starts_with(b".squish)")
         || rest.starts_with(b".squish\n")
@@ -299,6 +345,37 @@ mod tests {
             "Expected no offense for bare <<SQL with indented body, got: {:?}",
             diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn squish_after_closing_delimiter() {
+        // .squish on a separate line after the closing SQL delimiter
+        let source = b"query = <<-SQL\n  SELECT * FROM users\nSQL\n.squish\n";
+        let diags = run_cop_full(&HeredocIndentation, source);
+        assert!(
+            !diags.is_empty(),
+            "Expected offense for <<-SQL with .squish on separate line"
+        );
+    }
+
+    #[test]
+    fn test_is_squish_after_closing() {
+        // Prism's closing_loc includes the trailing newline, so closing_end
+        // points to the start of the line after the delimiter.
+        let bytes = b"SQL\n.squish\n";
+        assert!(is_squish_after_closing(bytes, 4)); // "SQL\n" ends at 4
+
+        let bytes2 = b"SQL\n  .squish\n";
+        assert!(is_squish_after_closing(bytes2, 4)); // with leading whitespace
+
+        let bytes3 = b"SQL\n.squish!\n";
+        assert!(is_squish_after_closing(bytes3, 4)); // .squish!
+
+        let bytes4 = b"SQL\nfoo\n";
+        assert!(!is_squish_after_closing(bytes4, 4)); // no .squish
+
+        let bytes5 = b"SQL\n";
+        assert!(!is_squish_after_closing(bytes5, 4)); // no next line
     }
 
     #[test]
