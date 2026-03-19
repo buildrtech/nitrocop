@@ -97,3 +97,16 @@ def self.class_method
   ^^^^^^^^^^^^^ Style/RedundantAssignment: Redundant assignment before returning detected.
   x
 end
+
+# Inside unless branches
+def with_unless
+  unless condition
+    x = 1
+    ^^^^^ Style/RedundantAssignment: Redundant assignment before returning detected.
+    x
+  else
+    x = 2
+    ^^^^^ Style/RedundantAssignment: Redundant assignment before returning detected.
+    x
+  end
+end

@@ -14,3 +14,9 @@ block { do_something(_2) }
 # Multi-line method chain with single-line it block is fine
 collection.each
           .foo { puts it }
+# Single-line lambda with implicit `it` is OK
+-> { do_something(it) }
+# Lambda with multiple numbered params is fine
+-> { _1 + _2 }
+# Lambda with single _2 is fine
+-> { _2 }

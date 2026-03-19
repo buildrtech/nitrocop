@@ -1,4 +1,4 @@
-use crate::cop::node_type::CALL_NODE;
+use crate::cop::node_type::{CALL_NODE, LAMBDA_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -30,6 +30,20 @@ use ruby_prism::Visit;
 /// - `on_block` (always) → `BlockNode` with `BlockParametersNode` (single required param)
 /// - `ItLocalVariableReadNode` = implicit `it` reference
 /// - `LocalVariableReadNode` with name `_1` = numbered param reference
+///
+/// ## Investigation findings (2026-03-19)
+///
+/// FP=21, FN=43 remaining. Root causes:
+///
+/// 1. **Lambda blocks not handled (FN)** — `-> { _1 }` and `-> do it end` create
+///    `LambdaNode` in Prism, not `CallNode`. RuboCop's `on_numblock`/`on_itblock`/`on_block`
+///    fire for lambdas too. Fix: add `LAMBDA_NODE` to interested types and handle it.
+///
+/// 2. **Multi-line check is correct** — the `block_node.location()` check matches
+///    RuboCop v1.84.2's `node.single_line?` which checks the block portion, NOT the
+///    full expression including the receiver chain. Commit 8260fc1aa in RuboCop
+///    explicitly reverted to this behavior ("allow_single_line targets the block,
+///    not what is around it").
 pub struct ItBlockParameter;
 
 impl Cop for ItBlockParameter {
@@ -38,7 +52,7 @@ impl Cop for ItBlockParameter {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[CALL_NODE, LAMBDA_NODE]
     }
 
     fn check_node(
@@ -61,6 +75,12 @@ impl Cop for ItBlockParameter {
         }
 
         let style = config.get_str("EnforcedStyle", "allow_single_line");
+
+        // Handle LambdaNode (-> { _1 }, -> { it }, -> { |x| x })
+        if let Some(lambda) = node.as_lambda_node() {
+            self.check_lambda(source, node, &lambda, style, diagnostics);
+            return;
+        }
 
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -116,7 +136,9 @@ impl ItBlockParameter {
     ) {
         match style {
             "allow_single_line" => {
-                // Flag multi-line it blocks
+                // Check if the block itself is multi-line (not the full expression).
+                // This matches RuboCop v1.84.2's `node.single_line?` which checks the
+                // block portion, allowing multi-line method chains with single-line blocks.
                 let block_loc = block_node.location();
                 let (start_line, _) = source.offset_to_line_col(block_loc.start_offset());
                 let (end_line, _) =
@@ -154,6 +176,143 @@ impl ItBlockParameter {
             }
             // only_numbered_parameters, always: no offense for itblocks
             _ => {}
+        }
+    }
+
+    /// Check lambda nodes (`-> { _1 }`, `-> { it }`, `-> { |x| x }`).
+    /// In Prism, lambdas are `LambdaNode` (not `CallNode`), but RuboCop's
+    /// `on_numblock`/`on_itblock`/`on_block` callbacks fire for lambdas too.
+    fn check_lambda(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        lambda: &ruby_prism::LambdaNode<'_>,
+        style: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let params = match lambda.parameters() {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Handle itblock (implicit `it` parameter in lambda)
+        if params.as_it_parameters_node().is_some() {
+            match style {
+                "allow_single_line" => {
+                    // For lambdas, use the lambda node's location for multi-line check.
+                    // The lambda body is the block portion.
+                    let loc = node.location();
+                    let (start_line, _) = source.offset_to_line_col(loc.start_offset());
+                    let (end_line, _) =
+                        source.offset_to_line_col(loc.end_offset().saturating_sub(1));
+                    if start_line == end_line {
+                        return;
+                    }
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Avoid using `it` block parameter for multi-line blocks.".to_string(),
+                    ));
+                }
+                "disallow" => {
+                    if let Some(body) = lambda.body() {
+                        let mut finder = ItReferenceFinder {
+                            locations: Vec::new(),
+                        };
+                        finder.visit(&body);
+                        for (start_offset, _end_offset) in finder.locations {
+                            let (line, column) = source.offset_to_line_col(start_offset);
+                            diagnostics.push(self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Avoid using `it` block parameter.".to_string(),
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Handle numblock (numbered parameters in lambda)
+        if let Some(numbered) = params.as_numbered_parameters_node() {
+            if style == "disallow" {
+                return;
+            }
+            if numbered.maximum() != 1 {
+                return;
+            }
+            if let Some(body) = lambda.body() {
+                let mut finder = NumberedParamFinder {
+                    locations: Vec::new(),
+                };
+                finder.visit(&body);
+                for (start_offset, _end_offset) in finder.locations {
+                    let (line, column) = source.offset_to_line_col(start_offset);
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use `it` block parameter.".to_string(),
+                    ));
+                }
+            }
+            return;
+        }
+
+        // Handle regular lambda with named params (only for `always` style)
+        if style != "always" {
+            return;
+        }
+        if let Some(block_params) = params.as_block_parameters_node() {
+            let parameters = match block_params.parameters() {
+                Some(p) => p,
+                None => return,
+            };
+            let requireds = parameters.requireds();
+            if requireds.len() != 1 {
+                return;
+            }
+            if !parameters.optionals().is_empty()
+                || parameters.rest().is_some()
+                || !parameters.posts().is_empty()
+                || !parameters.keywords().is_empty()
+                || parameters.keyword_rest().is_some()
+                || parameters.block().is_some()
+            {
+                return;
+            }
+            let param = match requireds.iter().next() {
+                Some(p) => p,
+                None => return,
+            };
+            let req_param = match param.as_required_parameter_node() {
+                Some(rp) => rp,
+                None => return,
+            };
+            let param_name = req_param.name();
+            let body = match lambda.body() {
+                Some(b) => b,
+                None => return,
+            };
+            let mut finder = NamedParamFinder {
+                name: param_name.as_slice(),
+                locations: Vec::new(),
+            };
+            finder.visit(&body);
+            for (start_offset, _end_offset) in finder.locations {
+                let (line, column) = source.offset_to_line_col(start_offset);
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Use `it` block parameter.".to_string(),
+                ));
+            }
         }
     }
 
