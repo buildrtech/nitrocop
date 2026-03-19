@@ -87,6 +87,29 @@ use crate::parse::source::SourceFile;
 /// shows massive FN. Needs deeper investigation of which specific patterns are lost.
 /// Until then, FP=17 remains as a known gap. The proper fix is likely a migration
 /// context check (`within_change_method?`) rather than arg-count filtering.
+///
+/// **Separate issue (infrastructure regression, 2026-03-19):** Even after fully
+/// reverting the arg-count gate to identical original code, `check-cop.py --rerun`
+/// shows 18,727 offenses vs CI baseline of 21,225 (a gap of ~2,498). This gap is
+/// NOT caused by SchemaComment code changes — it exists in the current main codebase
+/// regardless. Possible causes:
+/// - Config loading regression from other agents' commits since baseline (668e5733).
+///   SchemaComment has `default_enabled: false`, so any config resolution failure
+///   silently disables it on affected repos.
+/// - `--rerun` mode (batch `--corpus-check` or per-repo subprocess) may differ
+///   systematically from the CI corpus oracle execution path.
+/// - File discovery or Include-pattern matching changes in shared infrastructure.
+///
+/// **Next steps for anyone investigating:**
+/// 1. Add debug logging to `parser_arg_count` to trace which `create_table` calls
+///    the 1-2 gate rejects. The mystery is why argc=1-2 filters ~2,500 calls that
+///    should have argc=2 (sym + keyword_hash). Maybe `parser_arg_count` miscounts
+///    some Prism AST shapes.
+/// 2. Build from the CI baseline commit (668e5733) and run `check-cop.py --rerun`
+///    to determine if the 18,727 vs 21,225 gap is code-related or mode-related.
+/// 3. Consider a migration context check instead: only flag `create_table` inside
+///    `def change`, `def up`, `def self.up` methods, or classes inheriting from
+///    `ActiveRecord::Migration`. This would fix the 17 FPs without arg-count gating.
 pub struct SchemaComment;
 
 const TABLE_MSG: &str = "New database table without `comment`.";
