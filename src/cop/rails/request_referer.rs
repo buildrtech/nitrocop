@@ -3,6 +3,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/RequestReferer — enforces consistent use of `request.referer` vs `request.referrer`.
+///
+/// ## Investigation (2026-03-19)
+///
+/// **FP root cause (1 FP):** `Rakismet.request.referrer` was flagged because the cop
+/// only checked that the inner method is `request` and outer method is `referrer`, without
+/// verifying that `request` is receiverless. RuboCop's NodePattern
+/// `(send (send nil? :request) {:referer :referrer})` requires `request` to have no receiver
+/// (`send nil? :request`). `Rakismet.request` has `Rakismet` as receiver.
+///
+/// Fix: Added `chain.inner_call.receiver().is_some()` check to skip calls where `request`
+/// has a receiver.
 pub struct RequestReferer;
 
 impl Cop for RequestReferer {
@@ -31,6 +43,13 @@ impl Cop for RequestReferer {
         };
 
         if chain.inner_method != b"request" {
+            return;
+        }
+
+        // RuboCop's NodePattern `(send (send nil? :request) ...)` requires `request`
+        // to be receiverless. `Rakismet.request.referrer` has a receiver on `request`,
+        // so it should NOT be flagged.
+        if chain.inner_call.receiver().is_some() {
             return;
         }
 
