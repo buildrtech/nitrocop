@@ -4,10 +4,20 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-pub struct BeforeAfterAll;
-
 /// Flags `before(:all)`, `before(:context)`, `after(:all)`, `after(:context)`.
 /// These hooks can cause state to leak between tests.
+///
+/// ## Corpus investigation (2026-03-19)
+/// FP=0, FN=12. Root cause: implementation required receiverless calls with
+/// a block, but RuboCop's `def_node_matcher` uses `_` for receiver (matches
+/// any, including present receivers like `config.before(:all)`) and does not
+/// require a block. Calls like `@state.before(:all)`, `context.after(:context)`,
+/// and `config.before :all do ... end` were all missed.
+/// Fix: removed receiver and block guards, extract hook source text from byte
+/// range (start of call to end of closing paren or last argument) to match
+/// RuboCop's `hook.source` output.
+pub struct BeforeAfterAll;
+
 impl Cop for BeforeAfterAll {
     fn name(&self) -> &'static str {
         "RSpec/BeforeAfterAll"
@@ -44,17 +54,7 @@ impl Cop for BeforeAfterAll {
             return;
         }
 
-        // Must be receiverless
-        if call.receiver().is_some() {
-            return;
-        }
-
-        // Must have a block (or block pass)
-        if call.block().is_none() {
-            return;
-        }
-
-        // Check for :all or :context argument
+        // Check for :all or :context as first argument
         let args = match call.arguments() {
             Some(a) => a,
             None => return,
@@ -75,12 +75,21 @@ impl Cop for BeforeAfterAll {
             return;
         }
 
-        let method_str = std::str::from_utf8(method_name).unwrap_or("before");
-        let scope_str = std::str::from_utf8(&scope).unwrap_or("all");
-        let hook = format!("{method_str}(:{scope_str})");
+        // Build hook source text matching RuboCop's `hook.source` — the send
+        // node text from start of receiver (or method) through closing paren
+        // or end of last argument.
+        let call_start = call.location().start_offset();
+        let hook_end = if let Some(close) = call.closing_loc() {
+            // Parenthesized: `before(:all)` or `config.before(:all)`
+            close.end_offset()
+        } else {
+            // No parens: `config.before :all` — end at last argument
+            let last_arg = &arg_list[arg_list.len() - 1];
+            last_arg.location().end_offset()
+        };
+        let hook = String::from_utf8_lossy(&source.as_bytes()[call_start..hook_end]);
 
-        let loc = call.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let (line, column) = source.offset_to_line_col(call_start);
         diagnostics.push(self.diagnostic(
             source,
             line,

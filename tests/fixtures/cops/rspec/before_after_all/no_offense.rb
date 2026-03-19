@@ -4,3 +4,5 @@ after(:each) { do_something }
 after(:example) { do_something }
 before { do_something }
 after { do_something }
+config.before(:each) { do_something }
+config.after(:example) { do_something }
