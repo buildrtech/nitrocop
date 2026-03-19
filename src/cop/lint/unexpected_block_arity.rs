@@ -5,7 +5,16 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 /// Checks for blocks that are known to need more positional arguments than given.
-/// By default checks `reduce`/`inject` which need 2 arguments.
+/// By default checks methods like `reduce`, `inject`, `sort`, `each_with_index`,
+/// `each_with_object`, `chunk_while`, `slice_when`, `max`, `min`, `minmax`
+/// which all expect 2 positional block arguments.
+///
+/// Root cause of 93 FN (corpus 0.0% match): The `Methods` config from
+/// vendor/rubocop/config/default.yml has integer values (e.g., `inject: 2`),
+/// which serde_yml loads as `Value::Number`. The `get_string_hash` helper
+/// was using `v.as_str()` which returns `None` for numbers, silently producing
+/// an empty methods list and causing the cop to report zero offenses. Fixed by
+/// extending `get_string_hash` to convert numeric YAML values to strings.
 pub struct UnexpectedBlockArity;
 
 impl Cop for UnexpectedBlockArity {
@@ -50,8 +59,19 @@ fn get_methods(config: &CopConfig) -> Vec<(String, usize)> {
             })
             .collect();
     }
-    // Defaults
-    vec![("reduce".to_string(), 2), ("inject".to_string(), 2)]
+    // Defaults from vendor/rubocop/config/default.yml
+    vec![
+        ("chunk_while".to_string(), 2),
+        ("each_with_index".to_string(), 2),
+        ("each_with_object".to_string(), 2),
+        ("inject".to_string(), 2),
+        ("max".to_string(), 2),
+        ("min".to_string(), 2),
+        ("minmax".to_string(), 2),
+        ("reduce".to_string(), 2),
+        ("slice_when".to_string(), 2),
+        ("sort".to_string(), 2),
+    ]
 }
 
 struct ArityVisitor<'a, 'src> {
@@ -144,4 +164,38 @@ fn count_block_args(block: &ruby_prism::BlockNode<'_>) -> usize {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UnexpectedBlockArity, "cops/lint/unexpected_block_arity");
+
+    /// Verify the cop works when `Methods` config has integer values (as loaded
+    /// from vendor/rubocop/config/default.yml via serde_yml). Integer YAML values
+    /// are `Value::Number`, not `Value::String`, so `get_string_hash` must
+    /// convert them. Without this, the cop silently gets an empty methods list
+    /// and reports zero offenses.
+    #[test]
+    fn methods_config_with_integer_values() {
+        use serde_yml::Value;
+        use std::collections::HashMap;
+
+        let mut methods = serde_yml::Mapping::new();
+        methods.insert(Value::String("reduce".into()), Value::Number(2.into()));
+        methods.insert(
+            Value::String("each_with_index".into()),
+            Value::Number(2.into()),
+        );
+        methods.insert(Value::String("sort".into()), Value::Number(2.into()));
+
+        let config = CopConfig {
+            options: HashMap::from([("Methods".into(), Value::Mapping(methods))]),
+            ..CopConfig::default()
+        };
+
+        let methods = get_methods(&config);
+        assert_eq!(methods.len(), 3);
+        assert!(methods.iter().any(|(n, a)| n == "reduce" && *a == 2));
+        assert!(
+            methods
+                .iter()
+                .any(|(n, a)| n == "each_with_index" && *a == 2)
+        );
+        assert!(methods.iter().any(|(n, a)| n == "sort" && *a == 2));
+    }
 }

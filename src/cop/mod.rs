@@ -103,14 +103,27 @@ impl CopConfig {
     }
 
     /// Get a string→string hash option. Returns None if the key is absent.
+    /// Integer and float values are automatically converted to strings (e.g.,
+    /// `Methods: inject: 2` yields `{"inject": "2"}`).
     pub fn get_string_hash(&self, key: &str) -> Option<HashMap<String, String>> {
         self.options.get(key).and_then(|v| {
             v.as_mapping().map(|m| {
                 m.iter()
                     .filter_map(|(k, v)| {
                         let ks = k.as_str()?;
-                        let vs = v.as_str()?;
-                        Some((ks.to_string(), vs.to_string()))
+                        // Try string first, then integer/float for numeric YAML values
+                        let vs = if let Some(s) = v.as_str() {
+                            s.to_string()
+                        } else if let Some(n) = v.as_u64() {
+                            n.to_string()
+                        } else if let Some(n) = v.as_i64() {
+                            n.to_string()
+                        } else if let Some(n) = v.as_f64() {
+                            n.to_string()
+                        } else {
+                            return None;
+                        };
+                        Some((ks.to_string(), vs))
                     })
                     .collect()
             })
@@ -639,6 +652,34 @@ mod tests {
     fn autocorrect_setting_missing_is_always() {
         let cfg = config_with(HashMap::new());
         assert_eq!(cfg.autocorrect_setting(), "always");
+    }
+
+    #[test]
+    fn get_string_hash_converts_integer_values() {
+        use serde_yml::Value;
+        let mut methods = serde_yml::Mapping::new();
+        methods.insert(Value::String("inject".into()), Value::Number(2.into()));
+        methods.insert(Value::String("reduce".into()), Value::Number(2.into()));
+        methods.insert(Value::String("max_by".into()), Value::Number(1.into()));
+        let cfg = config_with(HashMap::from([("Methods".into(), Value::Mapping(methods))]));
+        let hash = cfg.get_string_hash("Methods").unwrap();
+        assert_eq!(hash.len(), 3);
+        assert_eq!(hash.get("inject").unwrap(), "2");
+        assert_eq!(hash.get("reduce").unwrap(), "2");
+        assert_eq!(hash.get("max_by").unwrap(), "1");
+    }
+
+    #[test]
+    fn get_string_hash_handles_string_values() {
+        use serde_yml::Value;
+        let mut mapping = serde_yml::Mapping::new();
+        mapping.insert(Value::String("collect".into()), Value::String("map".into()));
+        let cfg = config_with(HashMap::from([(
+            "PreferredMethods".into(),
+            Value::Mapping(mapping),
+        )]));
+        let hash = cfg.get_string_hash("PreferredMethods").unwrap();
+        assert_eq!(hash.get("collect").unwrap(), "map");
     }
 
     mod prop_tests {
