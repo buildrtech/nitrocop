@@ -500,8 +500,14 @@ mod tests {
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert!(names.contains(&"good.rb".to_string()), "Should find good.rb: {names:?}");
-        assert!(!names.contains(&"bad.rb".to_string()), "Should skip broken symlink: {names:?}");
+        assert!(
+            names.contains(&"good.rb".to_string()),
+            "Should find good.rb: {names:?}"
+        );
+        assert!(
+            !names.contains(&"bad.rb".to_string()),
+            "Should skip broken symlink: {names:?}"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
