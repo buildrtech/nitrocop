@@ -164,3 +164,35 @@ a ||= items.map do |_|
 rescue StandardError => _
 end
 
+# Method chain with leading dot: rescue aligned with dot on do line
+Fiber
+  .new do
+    future.resolve block.call
+  rescue => e
+    future.reject wrap(e)
+  end
+
+# Method chain with leading dot: ensure aligned with dot on do line
+SiteSetting
+  .blocked_ip_blocks
+  .split(/[|\n]/)
+  .filter_map do |r|
+    IPAddr.new(r.strip)
+  rescue IPAddr::InvalidAddressError
+    nil
+  end
+
+# Method selector on same line as do: rescue aligned with selector
+OT.with_diagnostics do
+    Sentry.close
+  rescue ThreadError => ex
+    warn "Shutdown interrupted"
+end
+
+# Method selector on same line as do: ensure aligned with dot
+Logger.with_context do
+    perform_work
+      ensure
+        flush_buffer
+end
+

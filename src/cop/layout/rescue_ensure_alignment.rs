@@ -38,6 +38,15 @@ use crate::parse::source::SourceFile;
 /// alignment — compute the line's leading whitespace indent, and if it differs
 /// from call_col, use indent as align_col.
 ///
+/// ## FP investigation (2026-03-19)
+/// 21 FPs caused by rescue/ensure in do..end blocks aligned with the
+/// leading dot or method selector on the `do` keyword's line. RuboCop has
+/// `aligned_with_line_break_method?` which accepts this alignment pattern
+/// for multi-line method chains. Fix: Before checking implicit begin in
+/// block bodies, check if any rescue/ensure column matches the call
+/// operator (dot) or message (selector) column on the do line. If so,
+/// skip the entire block's alignment check.
+///
 /// ## FP investigation (2026-03-17)
 /// 78 FPs caused by `private def` / `protected def` modifier alignment:
 /// When a method is defined with a visibility modifier (`private def foo`),
@@ -49,6 +58,59 @@ use crate::parse::source::SourceFile;
 pub struct RescueEnsureAlignment;
 
 impl RescueEnsureAlignment {
+    /// RuboCop's aligned_with_line_break_method? equivalent.
+    /// Returns true if any rescue/ensure in the block is aligned with:
+    /// 1. The call operator (`.` or `&.`) on the `do` keyword's line, or
+    /// 2. The method name (message/selector) on the `do` keyword's line.
+    fn aligned_with_line_break_method(
+        &self,
+        source: &SourceFile,
+        call_node: &ruby_prism::CallNode<'_>,
+        begin_node: &ruby_prism::BeginNode<'_>,
+        do_line: usize,
+    ) -> bool {
+        // Collect candidate columns from dot and message on the do line
+        let mut candidate_cols: Vec<usize> = Vec::new();
+
+        if let Some(dot_loc) = call_node.call_operator_loc() {
+            let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+            if dot_line == do_line {
+                candidate_cols.push(dot_col);
+            }
+        }
+        if let Some(msg_loc) = call_node.message_loc() {
+            let (msg_line, msg_col) = source.offset_to_line_col(msg_loc.start_offset());
+            if msg_line == do_line {
+                candidate_cols.push(msg_col);
+            }
+        }
+
+        if candidate_cols.is_empty() {
+            return false;
+        }
+
+        // Check if ANY rescue/ensure is aligned with a candidate column
+        let mut rescue_opt = begin_node.rescue_clause();
+        while let Some(rescue_node) = rescue_opt {
+            let rescue_kw_loc = rescue_node.keyword_loc();
+            let (_, rescue_col) = source.offset_to_line_col(rescue_kw_loc.start_offset());
+            if candidate_cols.contains(&rescue_col) {
+                return true;
+            }
+            rescue_opt = rescue_node.subsequent();
+        }
+
+        if let Some(ensure_node) = begin_node.ensure_clause() {
+            let ensure_kw_loc = ensure_node.ensure_keyword_loc();
+            let (_, ensure_col) = source.offset_to_line_col(ensure_kw_loc.start_offset());
+            if candidate_cols.contains(&ensure_col) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Check rescue/ensure alignment in an implicit BeginNode body.
     /// `align_col` is the column the rescue/ensure should align to.
     /// `align_line` is the line of the enclosing keyword (for same-line checks).
@@ -330,6 +392,17 @@ impl Cop for RescueEnsureAlignment {
             if let Some(body) = block_node.body() {
                 if let Some(begin_node) = body.as_begin_node() {
                     if begin_node.begin_keyword_loc().is_none() {
+                        // RuboCop's aligned_with_line_break_method? check:
+                        // If rescue/ensure is aligned with the leading dot or
+                        // method selector on the `do` keyword's line, skip.
+                        if self.aligned_with_line_break_method(
+                            source,
+                            &call_node,
+                            &begin_node,
+                            do_line,
+                        ) {
+                            return;
+                        }
                         self.check_implicit_begin(
                             source,
                             &begin_node,
@@ -478,12 +551,26 @@ mod tests {
 
     #[test]
     fn block_multiline_chain_rescue_misaligned() {
-        let src = b"      Foo.where(id: 1)\n         .find_each do |item|\n        item.process\n         rescue StandardError\n        handle\n      end\n";
+        // rescue at col 8, chain start (Foo) at col 6, dot at col 9, selector at col 10
+        // Not aligned with any valid target → should fire
+        let src = b"      Foo.where(id: 1)\n         .find_each do |item|\n        item.process\n        rescue StandardError\n        handle\n      end\n";
         let diags = run_cop_full(&RescueEnsureAlignment, src);
         assert_eq!(
             diags.len(),
             1,
             "rescue misaligned with chain start should fire"
+        );
+    }
+
+    #[test]
+    fn block_multiline_chain_rescue_aligned_with_dot_no_offense() {
+        // rescue at col 9, aligned with the dot on the do line → skip (RuboCop behavior)
+        let src = b"      Foo.where(id: 1)\n         .find_each do |item|\n        item.process\n         rescue StandardError\n        handle\n      end\n";
+        let diags = run_cop_full(&RescueEnsureAlignment, src);
+        assert!(
+            diags.is_empty(),
+            "rescue aligned with dot on do line should not fire: {:?}",
+            diags
         );
     }
 }
