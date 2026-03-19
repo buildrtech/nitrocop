@@ -108,7 +108,7 @@ def confidence_tier(occurrences: int, unique_repos: int) -> str:
         return "None"
     if unique_repos >= 500:
         return "High"
-    if unique_repos >= 100:
+    if unique_repos >= 50:
         return "Medium"
     return "Low"
 
@@ -169,8 +169,8 @@ def main():
         total_cops = sum(tier_counts.values())
         print(f"Corpus coverage summary ({total_repos} repos, {total_cops} cops):")
         print(f"  High   (>=500 repos): {tier_counts['High']}")
-        print(f"  Medium (>=100 repos): {tier_counts['Medium']}")
-        print(f"  Low    (<100 repos):  {tier_counts['Low']}")
+        print(f"  Medium (>=50 repos):  {tier_counts['Medium']}")
+        print(f"  Low    (<50 repos):   {tier_counts['Low']}")
         print(f"  None   (0 repos):     {tier_counts['None']}")
         return
 
@@ -202,8 +202,8 @@ def main():
           f"{tier_counts['Medium']} Medium, {tier_counts['Low']} Low, {tier_counts['None']} None")
     print()
     print(f"- **High**: >=500 repos")
-    print(f"- **Medium**: >=100 repos")
-    print(f"- **Low**: <100 repos")
+    print(f"- **Medium**: >=50 repos")
+    print(f"- **Low**: <50 repos")
     print(f"- **None**: 0 repos")
     print()
 
