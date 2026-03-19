@@ -1,6 +1,4 @@
-use crate::cop::node_type::{
-    LOCAL_VARIABLE_TARGET_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, SPLAT_NODE,
-};
+use crate::cop::node_type::MULTI_WRITE_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -43,12 +41,7 @@ impl Cop for TrailingUnderscoreVariable {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            LOCAL_VARIABLE_TARGET_NODE,
-            MULTI_WRITE_NODE,
-            SPLAT_NODE,
-            MULTI_TARGET_NODE,
-        ]
+        &[MULTI_WRITE_NODE]
     }
 
     fn check_node(
@@ -120,10 +113,20 @@ fn check_multi_assignment(
         }
     }
 
-    // If ALL rights are trailing underscores, check rest
+    // If ALL rights are trailing underscores, check rest and lefts
     if trailing_count == rights.len() {
         if let Some(r) = rest {
-            if is_underscore_var(r, allow_named) {
+            if r.as_implicit_rest_node().is_some() {
+                // ImplicitRestNode (trailing comma like `a, _, = foo`) — skip it
+                // and continue counting from lefts. It's not a variable.
+                for target in lefts.iter().rev() {
+                    if is_underscore_var(target, allow_named) {
+                        trailing_count += 1;
+                    } else {
+                        break;
+                    }
+                }
+            } else if is_underscore_var(r, allow_named) {
                 trailing_count += 1;
 
                 // If rest is also underscore, continue counting from lefts
@@ -196,8 +199,9 @@ fn has_non_underscore_splat_before(
     }
 
     // Check if rest is a non-underscore splat (and is NOT part of the trailing underscores)
+    // Skip ImplicitRestNode (trailing comma) — it's not a real splat variable.
     if let Some(r) = rest {
-        if !is_underscore_var(r, allow_named) {
+        if r.as_implicit_rest_node().is_none() && !is_underscore_var(r, allow_named) {
             return true;
         }
     }
@@ -212,13 +216,16 @@ fn find_first_trailing<'a>(
     rights: &'a [ruby_prism::Node<'a>],
     trailing_count: usize,
 ) -> Option<&'a ruby_prism::Node<'a>> {
-    // Build a flat list: lefts, rest, rights
+    // Build a flat list: lefts, rest (excluding ImplicitRestNode), rights
     let mut all: Vec<&ruby_prism::Node<'a>> = Vec::new();
     for l in lefts {
         all.push(l);
     }
     if let Some(r) = rest {
-        all.push(r);
+        // Skip ImplicitRestNode — it's not a real variable node
+        if r.as_implicit_rest_node().is_none() {
+            all.push(r);
+        }
     }
     for p in rights {
         all.push(p);
@@ -290,11 +297,6 @@ fn is_underscore_var(node: &ruby_prism::Node<'_>, allow_named: bool) -> bool {
             // bare * (implicit rest)
             return true;
         }
-    }
-    // ImplicitRestNode — trailing comma like `_, = foo` or `a, b, = foo`
-    // This is an implicit discard, treated as underscore-like.
-    if node.as_implicit_rest_node().is_some() {
-        return true;
     }
     false
 }

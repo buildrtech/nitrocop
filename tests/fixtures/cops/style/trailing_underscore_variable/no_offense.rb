@@ -14,3 +14,5 @@ a, b, _c = foo
 a, *_b = foo
 a, *_b, _ = foo
 a, *_b, _, _ = foo
+a, (_, (b,), c, (d, e),) = foo
+a, *b, _c = foo

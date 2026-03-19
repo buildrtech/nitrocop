@@ -32,11 +32,13 @@ use crate::parse::source::SourceFile;
 ///   (including inside strings on the same line). nitrocop was filtering by `is_code()`,
 ///   missing semicolons inside strings on expression separator lines. Fix: on expr_sep
 ///   lines, scan raw source for all `;` characters, matching RuboCop's `find_semicolon_positions`.
+/// - Semicolons after `#{` in string interpolation (`"#{;foo}"`) were not detected.
+///   Fix: added `is_semicolon_after_interpolation_open` check.
 /// - Semicolons after opening `{` in blocks (`foo {; bar }`) are only caught by RuboCop
 ///   when `{` is at specific token positions (position 1 for regular blocks, position 2
-///   for lambda blocks). This is hard to replicate with byte scanning. Fix: added
-///   `is_semicolon_after_opening_brace` check that's slightly broader than RuboCop's
-///   but matches the semantic intent.
+///   for lambda blocks). This is inherently positional and hard to replicate with byte
+///   scanning without introducing FPs (e.g., `items.each {; bar }` is NOT flagged by
+///   RuboCop). These cases remain as known FN gaps.
 pub struct Semicolon;
 
 impl Cop for Semicolon {
@@ -174,7 +176,6 @@ impl Cop for Semicolon {
                 ));
                 continue;
             }
-
         }
     }
 }

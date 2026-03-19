@@ -33,6 +33,9 @@ arr.map { baz; }
 x = "#{foo;}"
           ^ Style/Semicolon: Do not use semicolons to terminate expressions.
 
+"prefix #{foo;}"
+             ^ Style/Semicolon: Do not use semicolons to terminate expressions.
+
 "#{;foo}"
    ^ Style/Semicolon: Do not use semicolons to terminate expressions.
 
