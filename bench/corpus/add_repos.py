@@ -62,9 +62,9 @@ def graphql(query: str, variables: dict | None = None) -> dict:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             stderr_lower = result.stderr.lower()
-            if "502" in result.stderr or "503" in result.stderr:
+            if "502" in result.stderr or "503" in result.stderr or "stream error" in stderr_lower or "cancel" in stderr_lower:
                 wait = 2 ** attempt
-                print(f"  Retrying in {wait}s (HTTP error)...", file=sys.stderr)
+                print(f"  Retrying in {wait}s (transient error)...", file=sys.stderr)
                 time.sleep(wait)
                 continue
             if result.returncode == 4 or "403" in result.stderr or "secondary rate limit" in stderr_lower:
@@ -118,7 +118,9 @@ def search_repos_graphql(count: int, existing_urls: set[str], min_stars: int = 5
     for star_range in star_queries:
         if len(results) >= count:
             break
+        print(f"  Searching {star_range}...", file=sys.stderr)
         cursor = None
+        empty_pages = 0  # consecutive pages with no new repos
         while len(results) < count:
             after_clause = f', after: "{cursor}"' if cursor else ""
             query = f"""{{
@@ -143,12 +145,13 @@ def search_repos_graphql(count: int, existing_urls: set[str], min_stars: int = 5
   }}
 }}"""
             data = graphql(query)
-            time.sleep(1.0)
+            time.sleep(2.0)
             search = data.get("data", {}).get("search", {})
             edges = search.get("edges", [])
             if not edges:
                 break
 
+            found_new = False
             for edge in edges:
                 node = edge.get("node", {})
                 if not node:
@@ -163,7 +166,6 @@ def search_repos_graphql(count: int, existing_urls: set[str], min_stars: int = 5
                 if archived:
                     continue
                 if slug in DENYLIST:
-                    print(f"  Skipping {slug} (denylisted)", file=sys.stderr)
                     continue
                 normalized = url.rstrip("/").lower()
                 if normalized in seen:
@@ -185,12 +187,21 @@ def search_repos_graphql(count: int, existing_urls: set[str], min_stars: int = 5
                 }
                 results.append(entry)
                 seen.add(normalized)
+                found_new = True
                 if resume_path is not None:
                     with open(resume_path, "a") as rf:
                         rf.write(json.dumps(entry) + "\n")
-                    if len(results) % 50 == 0:
-                        print(f"  Progress: {len(results)} repos saved so far", file=sys.stderr)
+                if len(results) % 50 == 0:
+                    print(f"  Progress: {len(results)} repos found", file=sys.stderr)
                 if len(results) >= count:
+                    break
+
+            if found_new:
+                empty_pages = 0
+            else:
+                empty_pages += 1
+                if empty_pages >= 3:
+                    print(f"  Skipping rest of {star_range} (3 consecutive pages with no new repos)", file=sys.stderr)
                     break
 
             page_info = search.get("pageInfo", {})
