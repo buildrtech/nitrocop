@@ -22,6 +22,22 @@ use crate::parse::source::SourceFile;
 ///
 /// Also added support for `rubocop\s*:` (space before colon) to match RuboCop's regex,
 /// though this is extremely rare in practice.
+///
+/// ## Investigation findings (2026-03-19)
+///
+/// **Root cause of 46 FNs:** The cop only checked for `:` as a department/cop separator
+/// (e.g., `Layout:LineLength`) but missed many other malformed cop name patterns found
+/// in the corpus:
+///   - `Rails::SkipsModelValidations` (double colon separator)
+///   - `Rails/SkipsModelValidations:` (trailing colon)
+///   - `Metrics/BlockLength(RuboCop)` (parenthetical text)
+///   - `Rails/FindEach.` (trailing period)
+///   - `Naming/PredicatePrefix?` (trailing question mark)
+///   - `/BlockLength` or `Metrics/` (leading/trailing slash)
+///   - `Discourse/NoChdir because ...` (comment without `--` prefix, caught by multi-word check)
+///
+/// Fixed by replacing `has_colon_separator` with `has_invalid_cop_name` that validates
+/// each cop name token contains only `[A-Za-z0-9/_]` and doesn't start/end with `/`.
 pub struct CopDirectiveSyntax;
 
 impl Cop for CopDirectiveSyntax {
@@ -227,11 +243,53 @@ fn is_malformed_cop_list(cops_str: &str) -> bool {
         }
     }
 
+    // Check for invalid cop name tokens.
+    // Valid cop names contain only letters, digits, `/`, and `_` (e.g., `Layout/LineLength`).
+    // Common malformed patterns:
+    //   - `:` separator: `Layout:LineLength` (should be `/`)
+    //   - `::` separator: `Rails::SkipsModelValidations`
+    //   - trailing colon: `Metrics/BlockLength:`
+    //   - trailing punctuation: `Rails/FindEach.`, `Naming/PredicatePrefix?`
+    //   - parenthetical: `Metrics/BlockLength(RuboCop)`
+    //   - leading/trailing slash: `/BlockLength`, `Metrics/`
+    for part in &parts {
+        if part.is_empty() || *part == "all" {
+            continue;
+        }
+        if has_invalid_cop_name(part) {
+            return true;
+        }
+    }
+
     // Check for duplicate `# rubocop:` within the remaining text
     if cop_part.contains("# rubocop:") || cop_part.contains("#rubocop:") {
         return true;
     }
 
+    false
+}
+
+/// Check if a cop name token is malformed (contains invalid characters).
+/// Valid cop names match `[A-Za-z][A-Za-z0-9]*(/[A-Za-z][A-Za-z0-9]*)*` — i.e.,
+/// PascalCase identifiers optionally separated by `/`.
+/// Returns true if the token contains characters outside `[A-Za-z0-9/_]`,
+/// or starts/ends with `/`.
+fn has_invalid_cop_name(token: &str) -> bool {
+    // Must not be empty (caller already checks)
+    if token.is_empty() {
+        return false;
+    }
+    // Must not start or end with `/`
+    if token.starts_with('/') || token.ends_with('/') {
+        return true;
+    }
+    // Every character must be alphanumeric, `/`, or `_`
+    if token
+        .chars()
+        .any(|c| !c.is_ascii_alphanumeric() && c != '/' && c != '_')
+    {
+        return true;
+    }
     false
 }
 
