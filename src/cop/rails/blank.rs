@@ -81,6 +81,15 @@ use ruby_prism::Visit;
 ///
 /// Fix: Re-added `!` method name to `nil_check_receiver`. Now correctly extracts the receiver
 /// of `!` (i.e., `foo` from `!foo`) as the variable, matching RuboCop's `(send $_ :!)` capture.
+///
+/// ## Investigation (2026-03-19)
+///
+/// **FP root cause (1 FP):** `!pkey_cols&.present?` uses safe navigation on `present?`.
+/// RuboCop's `not_present?` NodePattern `(send (send $_ :present?) :!)` only matches `send`,
+/// not `csend`. When `pkey_cols` is nil, `nil&.present?` returns `nil` and `!nil` is `true`,
+/// but `pkey_cols&.blank?` would return `nil` (falsy). So the replacement changes semantics.
+///
+/// Fix: Added `call_operator_loc() == &.` check in `check_not_present` to skip safe navigation.
 pub struct Blank;
 
 /// Extract the receiver source text from a CallNode, returning None if absent.
@@ -245,6 +254,16 @@ impl<'pr> BlankVisitor<'_, '_> {
         };
 
         if inner_call.name().as_slice() != b"present?" {
+            return;
+        }
+
+        // RuboCop's NodePattern `(send (send $_ :present?) :!)` only matches `send`, not `csend`.
+        // `!pkey_cols&.present?` uses safe navigation — semantics differ from `!pkey_cols.blank?`
+        // because `nil&.present?` returns `nil`, `!nil` is `true`, but `nil&.blank?` returns `nil`.
+        if inner_call
+            .call_operator_loc()
+            .is_some_and(|loc| loc.as_slice() == b"&.")
+        {
             return;
         }
 

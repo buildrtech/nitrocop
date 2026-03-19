@@ -39,3 +39,10 @@ case element.name
 in "div" unless element.at("div").present?
   element.name = "p"
 end
+
+# safe navigation with !present? — semantics differ:
+# !pkey_cols&.present? when pkey_cols is nil → !nil → true
+# pkey_cols&.blank? when pkey_cols is nil → nil (falsy)
+# RuboCop skips this pattern because `(send (send $_ :present?) :!)` doesn't
+# match csend (safe navigation).
+id_option = if pk_is_also_fk || !pkey_cols&.present?
