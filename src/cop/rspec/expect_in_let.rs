@@ -14,6 +14,17 @@ use crate::parse::source::SourceFile;
 ///
 /// **Fix:** Expanded `find_expects_in_node` to recurse into all common container node types,
 /// matching RuboCop's `def_node_search` deep traversal behavior.
+///
+/// ## Corpus investigation (2026-03-19)
+///
+/// FP=0, FN=11 (7 from toptal/chewy, 2 from pakyow, 2 from shoes4).
+///
+/// FN=11: All FNs were nested `expect` calls inside outer `expect` blocks within
+/// let bodies, e.g., `let(:expectation) { expect { expect { ... }.to ... } }`.
+/// The function returned early after finding the outer `expect`, preventing
+/// detection of inner nested `expect` calls. RuboCop's `def_node_search` finds
+/// ALL matching nodes in the subtree. Fix: continue recursion after reporting
+/// an offense instead of returning early.
 pub struct ExpectInLet;
 
 /// Expectation methods to flag inside let blocks.
@@ -98,8 +109,9 @@ fn find_expects_in_node(
                     column,
                     format!("Do not use `{method_str}` in let"),
                 ));
-                // Don't recurse further — we've already reported this expect call
-                return;
+                // Continue recursion to find nested expect calls (RuboCop's
+                // def_node_search finds ALL matching nodes in the subtree).
+                // Fall through to the CallNode handler below.
             }
         }
     }

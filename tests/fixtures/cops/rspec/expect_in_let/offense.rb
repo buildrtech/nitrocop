@@ -36,3 +36,12 @@ let(:rescue_block) do
     nil
   end
 end
+let(:nested_expect) do
+  expect do
+  ^^^^^^ RSpec/ExpectInLet: Do not use `expect` in let
+    expect do
+    ^^^^^^ RSpec/ExpectInLet: Do not use `expect` in let
+      DummiesIndex.bulk body: [{index: {_id: 42}}]
+    end.not_to update_index(DummiesIndex)
+  end
+end
