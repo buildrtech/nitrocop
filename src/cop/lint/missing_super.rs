@@ -68,6 +68,17 @@ use ruby_prism::Visit;
 /// `node.const_name` which returns the full path — so `Synchronization::Object`
 /// does NOT match "Object". Fixed by comparing the full parent name instead
 /// of just the last segment.
+///
+/// ## Corpus investigation round 5 (2026-03-19)
+///
+/// Corpus oracle reported FP=3, FN=0. All 3 FPs from classes inheriting
+/// `::BasicObject` (with leading `::` root scope prefix).
+///
+/// FP root cause: source bytes for the superclass expression include the
+/// `::` prefix (`::BasicObject`), which doesn't match `b"BasicObject"` in
+/// STATELESS_CLASSES. Fixed by stripping the `::` prefix from the parent
+/// name in both `visit_class_node` and `visit_call_node` before storing
+/// in ClassContext.
 pub struct MissingSuper;
 
 /// Lifecycle callback method names that require `super`.
@@ -151,6 +162,12 @@ struct MissingSuperVisitor<'a, 'src> {
 }
 
 impl MissingSuperVisitor<'_, '_> {
+    /// Strip leading `::` prefix from a constant name.
+    /// `::BasicObject` → `BasicObject`, `BasicObject` → `BasicObject`.
+    fn strip_root_prefix(name: &[u8]) -> &[u8] {
+        name.strip_prefix(b"::").unwrap_or(name)
+    }
+
     fn is_stateless_or_allowed(&self, parent_name: &[u8]) -> bool {
         // RuboCop's allowed_class? compares the full const_name (e.g.
         // "Synchronization::Object") against the allowed list. Only bare
@@ -265,7 +282,8 @@ impl<'pr> Visit<'pr> for MissingSuperVisitor<'_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         let ctx = if let Some(superclass) = node.superclass() {
             let loc = superclass.location();
-            let parent_name = self.source.as_bytes()[loc.start_offset()..loc.end_offset()].to_vec();
+            let raw = &self.source.as_bytes()[loc.start_offset()..loc.end_offset()];
+            let parent_name = Self::strip_root_prefix(raw).to_vec();
             ClassContext::ClassWithParent(parent_name)
         } else {
             ClassContext::ClassWithoutParent
@@ -306,9 +324,9 @@ impl<'pr> Visit<'pr> for MissingSuperVisitor<'_, '_> {
                                 if !arg_list.is_empty() {
                                     let first = &arg_list[0];
                                     let loc = first.location();
-                                    let parent = self.source.as_bytes()
-                                        [loc.start_offset()..loc.end_offset()]
-                                        .to_vec();
+                                    let raw = &self.source.as_bytes()
+                                        [loc.start_offset()..loc.end_offset()];
+                                    let parent = Self::strip_root_prefix(raw).to_vec();
                                     ClassContext::ClassNewWithParent(parent)
                                 } else {
                                     ClassContext::ClassNewWithoutParent

@@ -218,3 +218,24 @@ Class.new(Parent) do
     do_something
   end
 end
+
+# FP fix: ::BasicObject with leading :: prefix should match stateless class
+class NullObject < ::BasicObject
+  def initialize
+    do_something
+  end
+end
+
+# FP fix: ::Object with leading :: prefix should match stateless class
+class Wrapper < ::Object
+  def initialize
+    do_something
+  end
+end
+
+# FP fix: Class.new(::BasicObject) with leading :: prefix
+Class.new(::BasicObject) do
+  def initialize
+    do_something
+  end
+end
