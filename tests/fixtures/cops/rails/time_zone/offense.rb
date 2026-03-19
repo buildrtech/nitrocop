@@ -57,3 +57,14 @@ Time.at(x).utc?
 
 Time.now.gmtime.utc?
      ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+# Time.now inside Time.at(..., in:) — the in: makes the OUTER call safe,
+# but the inner Time.now still needs timezone awareness
+Time.at(Time.now, in: 'UTC')
+            ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+Time.at(Time.now, in: 'Z')
+            ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+Time.at(Time.now, in: '-00:00')
+            ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.

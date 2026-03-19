@@ -57,11 +57,13 @@ use crate::parse::source::SourceFile;
 /// Fix: removed `localtime` from `chain_contains_tz_safe_method` SAFE_METHODS and added
 /// special handling that only treats it as safe when followed by `(` with arguments.
 ///
-/// **2. `Time.now` inside `Time.at(..., in:)` no longer flagged (FP fix, ~10 FPs):**
-/// `Time.at(Time.now, in: 'UTC')` — the inner `Time.now` was flagged because
-/// `enclosing_call_is_safe` only checked SAFE_METHODS (utc, in_time_zone, etc.), not
-/// dangerous methods that become safe via `in:` keyword. Fix: added `IN_KEYWORD_METHODS`
-/// list (at, new, now) and `enclosing_parens_have_in_keyword` byte scanner.
+/// **2. `Time.now` inside `Time.at(..., in:)` — REVERTED (was FP fix, ~10 FPs):**
+/// Previously added `IN_KEYWORD_METHODS` check in `enclosing_call_is_safe_recursive` to
+/// suppress inner `Time.now` when the outer call had `in:` keyword. This was incorrect:
+/// RuboCop's `in:` keyword only makes the OUTER `Time.at` call safe (handled at line 250
+/// via `has_in_keyword_arg`), but inner `Time.now` arguments should still be flagged.
+/// The original "FP" was actually correct behavior — removed the IN_KEYWORD_METHODS check
+/// and `enclosing_parens_have_in_keyword` function. Fixes 26 FN in corpus.
 ///
 /// ## Investigation (2026-03-14): FP=25
 ///
@@ -419,9 +421,6 @@ fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -
         b"current",
     ];
 
-    // Methods that become safe when called with `in:` keyword argument
-    const IN_KEYWORD_METHODS: &[&[u8]] = &[b"at", b"new", b"now"];
-
     if start == 0 || max_depth == 0 {
         return false;
     }
@@ -497,14 +496,6 @@ fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -
 
     if !is_grouping_paren {
         if SAFE_METHODS.contains(&method_name) {
-            return true;
-        }
-
-        // For Time.at/new/now, check if the enclosing call has `in:` keyword argument.
-        // E.g., `Time.at(Time.now, in: 'UTC')` — the `in:` makes the outer call safe.
-        if IN_KEYWORD_METHODS.contains(&method_name)
-            && enclosing_parens_have_in_keyword(bytes, paren_pos)
-        {
             return true;
         }
 
@@ -598,51 +589,6 @@ fn find_matching_close_paren(bytes: &[u8], open_pos: usize) -> Option<usize> {
         pos += 1;
     }
     None
-}
-
-/// Check if the parenthesized argument list starting at `paren_pos` contains
-/// an `in:` keyword argument. Scans forward from the opening `(` looking for
-/// the pattern `in:` preceded by a non-identifier character.
-fn enclosing_parens_have_in_keyword(bytes: &[u8], paren_pos: usize) -> bool {
-    let mut pos = paren_pos + 1; // skip '('
-    let mut depth = 1u32;
-
-    while pos < bytes.len() && depth > 0 {
-        match bytes[pos] {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return false;
-                }
-            }
-            b'\'' | b'"' => {
-                // Skip string literals
-                let quote = bytes[pos];
-                pos += 1;
-                while pos < bytes.len() && bytes[pos] != quote {
-                    if bytes[pos] == b'\\' {
-                        pos += 1;
-                    }
-                    pos += 1;
-                }
-            }
-            b'i' if depth == 1 => {
-                // Check for `in:` pattern (keyword argument)
-                if pos + 2 < bytes.len() && bytes[pos + 1] == b'n' && bytes[pos + 2] == b':' {
-                    // Verify it's not part of a longer identifier
-                    let before_ok = pos == 0
-                        || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_');
-                    if before_ok {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-        pos += 1;
-    }
-    false
 }
 
 /// Scan forward through a method chain starting at `pos` in `bytes`, returning
