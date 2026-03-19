@@ -33,6 +33,15 @@ use std::collections::HashMap;
 ///
 /// Note: check-cop reports FAIL against the CI nitrocop baseline because this fix restores
 /// many previously-missed detections (large FN reduction), increasing total offense count.
+///
+/// ## Corpus investigation (2026-03-19)
+///
+/// FP=0, FN=7.
+///
+/// FN=7: Descriptions with same content but different quote styles (single vs double
+/// quotes) were not matched. The signature used raw source bytes including quotes.
+/// Fix: use `unescaped()` content for StringNode args to normalize quote style,
+/// matching RuboCop's `doc_string` which returns the string value.
 pub struct RepeatedDescription;
 
 #[derive(Clone)]
@@ -184,8 +193,12 @@ impl Cop for RepeatedDescription {
     }
 }
 
-/// Build a signature for an example call based on the source text of its arguments
+/// Build a signature for an example call based on the content of its arguments
 /// (description + metadata), excluding the block body.
+///
+/// Uses unescaped string content for description strings so that `'foo'` and
+/// `"foo"` produce the same signature (matching RuboCop's `doc_string` which
+/// returns the string value, not the raw source with quotes).
 fn example_signature(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
     let args = call.arguments()?;
     let arg_list: Vec<_> = args.arguments().iter().collect();
@@ -193,9 +206,20 @@ fn example_signature(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Op
         return None; // No description = one-liner, skip
     }
 
-    // Build signature from the source text of all arguments
-    let args_loc = args.location();
-    let sig = source.as_bytes()[args_loc.start_offset()..args_loc.end_offset()].to_vec();
+    let mut sig = Vec::new();
+    for (i, arg) in arg_list.iter().enumerate() {
+        if i > 0 {
+            sig.push(0); // separator
+        }
+        // For string nodes, use the unescaped content to normalize quote style
+        if let Some(s) = arg.as_string_node() {
+            sig.extend_from_slice(s.unescaped().as_ref());
+        } else {
+            // For non-string args (symbols, hashes, etc.), use raw source
+            let loc = arg.location();
+            sig.extend_from_slice(&source.as_bytes()[loc.start_offset()..loc.end_offset()]);
+        }
+    }
     Some(sig)
 }
 

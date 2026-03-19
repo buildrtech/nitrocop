@@ -23,6 +23,17 @@ describe 'doing y' do
   end
 end
 
+# Different quote styles should still match (same content)
+describe 'quote normalization' do
+  it 'handles invalid byte sequences' do
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedDescription: Don't repeat descriptions within an example group.
+  end
+
+  it "handles invalid byte sequences" do
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedDescription: Don't repeat descriptions within an example group.
+  end
+end
+
 describe 'iterator examples' do
   %i[foo bar].each do |type|
     it "does a thing #{type}" do
