@@ -56,3 +56,14 @@ FileUtils.cd(dir) do
     ^^^^^^^^^^^^ RSpec/Output: Do not write to stdout in specs.
   end
 end
+
+# Output calls inside array arguments (parent is ArrayNode, not CallNode)
+result = [p, 42]
+          ^ RSpec/Output: Do not write to stdout in specs.
+
+expect(e.relatives).to match_array [p, c]
+                                    ^ RSpec/Output: Do not write to stdout in specs.
+
+# Output calls inside hash values (parent is AssocNode, not CallNode)
+{ key: puts("hello") }
+       ^^^^^^^^^^^^^^ RSpec/Output: Do not write to stdout in specs.

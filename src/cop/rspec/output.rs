@@ -28,6 +28,14 @@ use ruby_prism::Visit;
 /// visiting block bodies of CallNodes, (2) overriding `visit_lambda_node` and
 /// `visit_def_node` to reset the flag. This matches RuboCop's `node.parent&.call_type?`
 /// which only checks the immediate parent, not transitive ancestors.
+///
+/// Fix (2 FP, 11 FN): Two issues: (1) Hash argument skip only checked
+/// `KeywordHashNode` but not `HashNode` — `ap({ a: 1 })` has a `HashNode` arg.
+/// Added `as_hash_node()` to the skip condition. (2) `parent_is_call` propagated
+/// through intermediate container nodes (Array, Hash, Begin, Parentheses, etc.)
+/// to nested calls. E.g., `match_array [p, c]` — `p` is inside an ArrayNode
+/// argument, but `p`'s parent is Array not Call, so RuboCop flags it. Added
+/// visitor overrides for container nodes to reset `parent_is_call = false`.
 pub struct Output;
 
 /// Output methods without a receiver (Kernel print methods)
@@ -98,7 +106,8 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
                     let mut skip = false;
                     if let Some(args) = node.arguments() {
                         for arg in args.arguments().iter() {
-                            if arg.as_keyword_hash_node().is_some()
+                            if arg.as_hash_node().is_some()
+                                || arg.as_keyword_hash_node().is_some()
                                 || arg.as_block_argument_node().is_some()
                             {
                                 skip = true;
@@ -186,6 +195,103 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
         let was = self.parent_is_call;
         self.parent_is_call = false;
         ruby_prism::visit_def_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    // Intermediate container nodes reset parent_is_call so that output calls
+    // nested inside arrays, hashes, begin/rescue, etc. are not suppressed.
+    // RuboCop checks `node.parent&.call_type?` (immediate parent only), so
+    // `[p, 42]` as an argument should still flag `p` because p's parent is
+    // ArrayNode, not CallNode.
+
+    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_array_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_hash_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_keyword_hash_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_begin_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_parentheses_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_if_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_unless_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_case_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_rescue_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_ensure_node(&mut self, node: &ruby_prism::EnsureNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_ensure_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_interpolated_string_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_interpolated_symbol_node(&mut self, node: &ruby_prism::InterpolatedSymbolNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_interpolated_symbol_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    fn visit_embedded_statements_node(&mut self, node: &ruby_prism::EmbeddedStatementsNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_embedded_statements_node(self, node);
         self.parent_is_call = was;
     }
 }

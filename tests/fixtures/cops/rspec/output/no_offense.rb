@@ -18,3 +18,7 @@ do_something(p("value"))
 do_something(puts("value"))
 do_something(print("value"))
 do_something(pp("value"))
+
+# Output calls with explicit hash arguments (HashNode, not just KeywordHashNode)
+ap({ key: 'value' })
+p({ a: 1, b: 2 })
