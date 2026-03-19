@@ -106,7 +106,8 @@ def search_repos_graphql(count: int, existing_urls: set[str], min_stars: int = 5
         "stars:150..200",
         "stars:100..150",
         "stars:75..100",
-        "stars:50..75",
+        "stars:60..75",
+        "stars:50..60",
     ]
 
     # Filter star ranges by min_stars (approximate: skip ranges whose lower bound < min_stars)
