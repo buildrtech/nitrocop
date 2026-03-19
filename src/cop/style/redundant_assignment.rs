@@ -20,10 +20,10 @@ use crate::parse::source::SourceFile;
 ///   present because ensure runs unconditionally and the semantics differ.
 ///
 /// Fix: Rewrote to use RuboCop's recursive `check_branch` approach that dispatches on
-/// the last expression's type (if → check each branch, case → check each when + else,
-/// begin → check for pattern or recurse, rescue → check each resbody, ensure → only
-/// check the ensure body not the main body). Also added `visit_def_s_node` for class
-/// methods.
+/// the last expression's type (if/unless → check each branch, case → check each
+/// when + else, case/in → check each in + else, begin → check for pattern or recurse,
+/// rescue → check each resbody, ensure → skip entirely). In Prism, `def self.foo` is
+/// also a `DefNode` (with `receiver().is_some()`), so no separate handler needed.
 pub struct RedundantAssignment;
 
 impl Cop for RedundantAssignment {
