@@ -25,6 +25,14 @@ use crate::parse::source::SourceFile;
 /// - FN fix: Directive regex in `directives.rs` was not anchored, causing nested
 ///   comments like `#   # rubocop:disable all` (YARD doc examples) to suppress
 ///   offenses for entire files.
+/// - FN fix (3 FNs in thor encoding_other.thor): Non-UTF-8 files with encoding
+///   magic comments (e.g., `# encoding: iso-8859-7`) were skipping `check_source`
+///   and `check_node` because the linter gated these on `code_map` being `Some`
+///   (which was `None` for non-UTF8 files). Fixed in `linter.rs` to always build
+///   `CodeMap` and run all cop phases for files that pass the encoding check.
+/// - FN (1 FN in linguist rexpl): File `samples/Ruby/rexpl` has no `.rb`
+///   extension (shebang script). This is a file-discovery issue — nitrocop may not
+///   process extensionless files — not a cop logic bug. Deferred.
 pub struct ConstantResolution;
 
 impl Cop for ConstantResolution {
@@ -397,6 +405,25 @@ mod tests {
     fn only_with_no_match_produces_no_offenses() {
         let config = config_with_only(vec!["Baz"]);
         assert_cop_no_offenses_with_config(&ConstantResolution, b"Foo\nBar\n", config);
+    }
+
+    #[test]
+    fn non_utf8_source_with_encoding_comment() {
+        // Non-UTF-8 files (e.g., ISO-8859-7) with encoding magic comments should
+        // still have constants flagged. This exercises the cop logic; the linter-level
+        // fix ensures check_source is called for such files.
+        let mut source = b"# encoding: iso-8859-7\n".to_vec();
+        source.extend_from_slice(b"SOME_STRING = \"data\"\n");
+        source.extend_from_slice(b"puts SOME_STRING\n");
+        let diags = crate::testutil::run_cop_full(&ConstantResolution, &source);
+        // SOME_STRING at line 2 is a ConstantWriteNode (definition) — not flagged.
+        // SOME_STRING at line 3 is a ConstantReadNode — flagged.
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for read of SOME_STRING, got: {:?}",
+            diags
+        );
     }
 
     #[test]
