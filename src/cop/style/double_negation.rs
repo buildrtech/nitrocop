@@ -51,6 +51,37 @@ use crate::parse::source::SourceFile;
 /// Reset to false when entering CallNode children. Only apply the `stmts_last_line`
 /// check when true. (2) Added `parser_last_child()` to dig into single-statement
 /// method bodies (CallNode → last arg), matching RuboCop's `child_nodes.last`.
+///
+/// Corpus investigation (round 5): 20 FPs, 17 FNs.
+///
+/// FP root cause: (1) `parent_is_statements` leaked through assignment nodes.
+/// When `!!` was inside an assignment (e.g., `@reversed = !!expr`) within a
+/// multi-statement conditional branch, the flag remained true from the enclosing
+/// StatementsNode, causing the stmts_last_line check to fire and incorrectly
+/// flag the `!!`. RuboCop's `find_parent_not_enumerable` stops at the assignment
+/// node (not begin_type?), skipping the strict line check. (2) `parser_last_child`
+/// returned None for block calls (CallNode with block), causing the entire block
+/// call node to be used as last_child. This made `last_child_last_line` too large,
+/// so `last_child_last_line <= cond_last_line` failed for conditionals inside
+/// blocks (e.g., `catch_exceptions do if ... !!result ... end end`).
+///
+/// FN root cause: (1) `parser_last_child` didn't handle OrNode/AndNode, so
+/// single-statement methods like `def foo?; !!x && y; end` used the entire
+/// and/or expression as last_child instead of the right-hand side. This made
+/// `last_child_first_line` too early, allowing `!!` on earlier lines to be
+/// incorrectly treated as return position. (2) `parser_last_child` didn't handle
+/// `*OrWriteNode`/`*AndWriteNode` (e.g., `@x ||= { ... }`), so the hash value
+/// wasn't detected as last_child, missing the hash_or_pair offense path.
+///
+/// Fix (round 5): (1) Changed `visit_statements_node` to iterate children
+/// manually, only setting `parent_is_statements = true` when the direct child
+/// IS a CallNode. Assignment nodes and other non-call children get false,
+/// preventing the flag from leaking into their subtrees. (2) Updated
+/// `parser_last_child` to dig into block bodies (returning the last child of
+/// the block's StatementsNode), matching Parser's `child_nodes.last` for blocks.
+/// (3) Added OrNode/AndNode handling in `parser_last_child` (returns right side).
+/// (4) Added `*OrWriteNode`, `*AndWriteNode`, and other compound assignment
+/// handlers to `parser_last_child`.
 pub struct DoubleNegation;
 
 impl Cop for DoubleNegation {
@@ -320,23 +351,26 @@ impl DoubleNegationVisitor<'_> {
     /// Returns the "last child" in Parser AST terms, which for call nodes is
     /// the last argument (or block body), for assignments is the value, etc.
     fn parser_last_child<'n>(&self, node: &ruby_prism::Node<'n>) -> Option<ruby_prism::Node<'n>> {
-        // CallNode: last argument (keyword hash or positional)
+        // CallNode: last argument (keyword hash or positional), or block body
         if let Some(call) = node.as_call_node() {
             // In Parser AST, blocks wrap the send: (block (send ...) (args) body).
-            // child_nodes.last of a block is the body. But for
-            // find_last_child purposes, we want the send's last arg because
-            // RuboCop calls find_last_child(def_node.body) where def_node.body
-            // is the send (for non-block) or the block (for block calls).
-            // For block calls in Parser: child_nodes.last = body of block.
-            // For regular calls: child_nodes.last = last argument.
-            if call.block().is_some() {
-                // Block call: in Parser AST, the block node wraps the send.
-                // child_nodes.last of the block = block body.
-                // For our purposes, treat block body as the last child.
-                // But RuboCop only gets here if the block IS the body expression,
-                // and child_nodes.last of a block = its body.
-                // We can just return None to fall through to the default behavior.
-                return None;
+            // child_nodes.last of a block is the body.
+            if let Some(block) = call.block() {
+                if let Some(block_node) = block.as_block_node() {
+                    // Block call: child_nodes.last of a Parser block = body.
+                    // In Parser AST, single-statement body = the expression,
+                    // multi-statement = begin wrapper. child_nodes.last of
+                    // begin = last statement. In Prism, body is always a
+                    // StatementsNode; get its last child to match Parser.
+                    if let Some(body) = block_node.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            let children: Vec<_> = stmts.body().iter().collect();
+                            return children.into_iter().last();
+                        }
+                        return Some(body);
+                    }
+                    return None;
+                }
             }
             if let Some(args) = call.arguments() {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
@@ -344,6 +378,16 @@ impl DoubleNegationVisitor<'_> {
             }
             // No arguments: last child is receiver (if any)
             return call.receiver();
+        }
+
+        // OrNode: child_nodes.last = right side
+        if let Some(or_node) = node.as_or_node() {
+            return Some(or_node.right());
+        }
+
+        // AndNode: child_nodes.last = right side
+        if let Some(and_node) = node.as_and_node() {
+            return Some(and_node.right());
         }
 
         // LocalVariableWriteNode: value is the last child
@@ -354,6 +398,70 @@ impl DoubleNegationVisitor<'_> {
         // InstanceVariableWriteNode
         if let Some(ivar) = node.as_instance_variable_write_node() {
             return Some(ivar.value());
+        }
+
+        // InstanceVariableOrWriteNode (||=)
+        if let Some(ivar_or) = node.as_instance_variable_or_write_node() {
+            return Some(ivar_or.value());
+        }
+
+        // InstanceVariableAndWriteNode (&&=)
+        if let Some(ivar_and) = node.as_instance_variable_and_write_node() {
+            return Some(ivar_and.value());
+        }
+
+        // LocalVariableOrWriteNode (||=)
+        if let Some(lvar_or) = node.as_local_variable_or_write_node() {
+            return Some(lvar_or.value());
+        }
+
+        // LocalVariableAndWriteNode (&&=)
+        if let Some(lvar_and) = node.as_local_variable_and_write_node() {
+            return Some(lvar_and.value());
+        }
+
+        // ClassVariableOrWriteNode / AndWriteNode
+        if let Some(cv_or) = node.as_class_variable_or_write_node() {
+            return Some(cv_or.value());
+        }
+        if let Some(cv_and) = node.as_class_variable_and_write_node() {
+            return Some(cv_and.value());
+        }
+
+        // GlobalVariableOrWriteNode / AndWriteNode
+        if let Some(gv_or) = node.as_global_variable_or_write_node() {
+            return Some(gv_or.value());
+        }
+        if let Some(gv_and) = node.as_global_variable_and_write_node() {
+            return Some(gv_and.value());
+        }
+
+        // ConstantOrWriteNode / AndWriteNode
+        if let Some(c_or) = node.as_constant_or_write_node() {
+            return Some(c_or.value());
+        }
+        if let Some(c_and) = node.as_constant_and_write_node() {
+            return Some(c_and.value());
+        }
+
+        // ConstantPathWriteNode
+        if let Some(cpw) = node.as_constant_path_write_node() {
+            return Some(cpw.value());
+        }
+
+        // ClassVariableWriteNode
+        if let Some(cvw) = node.as_class_variable_write_node() {
+            return Some(cvw.value());
+        }
+
+        // GlobalVariableWriteNode
+        if let Some(gvw) = node.as_global_variable_write_node() {
+            return Some(gvw.value());
+        }
+
+        // ConstantWriteNode
+        if let Some(cw) = node.as_constant_write_node() {
+            return Some(cw.value());
         }
 
         None
@@ -513,12 +621,27 @@ impl<'pr> Visit<'pr> for DoubleNegationVisitor<'_> {
             // Single-statement bodies are unwrapped. Prism always wraps in
             // StatementsNode. To match RuboCop's `begin_type?` check, only set
             // parent_is_statements when there are multiple statements.
+            //
+            // IMPORTANT: parent_is_statements must only be true for DIRECT
+            // children of this StatementsNode. When a child (e.g., assignment)
+            // visits its own subtree, parent_is_statements must be false.
+            // We achieve this by visiting each child manually: set the flag
+            // true before each direct child, then restore it after.
             let stmt_count = node.body().iter().count();
+            let is_multi = stmt_count > 1;
             let saved = self.parent_is_statements;
-            self.parent_is_statements = stmt_count > 1;
-            ruby_prism::visit_statements_node(self, node);
-            self.parent_is_statements = saved;
 
+            for child in node.body().iter() {
+                // Only set parent_is_statements true when the direct child
+                // IS a CallNode (the only type that checks the flag via
+                // check_double_negation). For non-CallNode children
+                // (assignments, etc.), set false so nested CallNodes in
+                // their subtrees don't incorrectly see the flag as true.
+                self.parent_is_statements = is_multi && child.as_call_node().is_some();
+                self.visit(&child);
+            }
+
+            self.parent_is_statements = saved;
             self.statements_last_line_stack.pop();
         } else {
             ruby_prism::visit_statements_node(self, node);

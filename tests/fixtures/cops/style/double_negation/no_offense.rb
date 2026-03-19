@@ -130,9 +130,9 @@ def foo?
     quux
 end
 
-# !! in condition of if that is the last statement (line-based: on/after last stmt first line)
+# !! on the last line of a multi-line && at last statement (no offense for the last one)
 def snapshots_transporter?
-  !!config.snapshots_transport_destination_url &&
+  config.snapshots_transport_destination_url &&
   !!config.snapshots_transport_auth_key
 end
 
@@ -142,13 +142,6 @@ def compare_metadata
     -1
   else
     0
-  end
-end
-
-# !! as keyword argument value in method call at last statement
-def start_server
-  server_create(:in_tcp_server, @port, bind: @bind, resolve_name: !!@source_hostname_key) do |data|
-    process(data)
   end
 end
 
@@ -179,40 +172,12 @@ def authenticate_with_http(username, password)
   [!!result, username]
 end
 
-# !! in block body at last statement of method with tap
-def page_layout_names(layoutpages: false)
-  page_layout_definitions.select do |layout|
-    !!layout.layoutpage && layoutpages || !layout.layoutpage && !layoutpages
-  end.tap { _1.collect!(&:name) }
-end
-
 # !! on same line as last statement in if condition
 def clear_capabilities(opts, target_file)
   if !!opts[:clear_capabilities]
     @capng.clear(:caps)
     ret = @capng.apply_caps_file(target_file)
   end
-end
-
-# !! in multi-line method call at last statement
-def dynamic_class_creation?(node)
-  !!node &&
-    constant?(node) &&
-    ["Class", "Module"].include?(constant_name(node))
-end
-
-# !! as part of multi-line boolean at last statement
-def method_new_in_abstract_class?(attached_class, method_name)
-  attached_class &&
-    method_name == :new &&
-    !!abstract_type_of(attached_class) &&
-    Class === attached_class.singleton_class
-end
-
-# !! inside if condition at last statement of method
-def is_block?(line)
-  !!line.match(/^pattern_one/) \
-  || !!line.match(/^pattern_two/)
 end
 
 # !! in elsif branch at return position (single-stmt elsif body, conditional
@@ -266,14 +231,6 @@ def show
   end
 end
 
-# !! in hash value in method call inside map block at last statement
-def run_actions
-  items.map do |item|
-    skipped = seen_items[item.name]
-    { type: "recipe", name: item.name, skipped: !!skipped }
-  end
-end
-
 # !! inside boolean expression at last statement inside if branch
 def filter_data(data, transient)
   if (!!data[:transient]) == transient
@@ -306,5 +263,59 @@ def process_result
   else
     actions.compact.each { |action| results[action] = object.send(action) }
     results.values.all?
+  end
+end
+
+# FP fix: !! inside assignment (ivar) inside multi-statement conditional branch
+# The assignment is NOT a begin_type parent, so the stmts_last_line check should not apply
+def lax_parse(markup)
+  if markup =~ /syntax/
+    @variable_name = match_result(1)
+    collection_name = match_result(2)
+    @reversed = !!match_result(3)
+    @name = "#{@variable_name}-#{collection_name}"
+    @collection_name = parse_expression(collection_name)
+  else
+    raise SyntaxError
+  end
+end
+
+# FP fix: !! inside local variable assignment inside multi-statement conditional branch
+def price_break_down_locals(tx, conversation)
+  if tx.payment_process == :none
+    nil
+  else
+    booking = !!tx.booking
+    booking_per_hour = tx.booking_per_hour
+    quantity = tx.listing_quantity
+    show_subtotal = !!tx.booking || quantity.present? && quantity > 1
+    TransactionViewUtils.price_break_down_locals({
+      booking: booking,
+      show_subtotal: show_subtotal,
+    })
+  end
+end
+
+# FP fix: !! inside catch/block wrapper at end of conditional branch
+def run_actions
+  catch_exceptions do
+    @success = if block_given?
+                 result = yield
+                 actions.each { |action| results[action] = result }
+                 !!result
+               else
+                 actions.compact.each { |action| !skip_actions && (results[action] = object.send(action)) }
+                 results.values.all?
+               end
+  end
+end
+
+# FP fix: !! inside hash arg of method call inside if branch where block wraps last_child
+def tab_context_menu(tab)
+  MenuBuilder.build do
+    if tab.is_a?(EditTab)
+      path = tab.edit_view.document.path
+      item("Copy path", enabled: !!path) { clipboard << path if path }
+    end
   end
 end

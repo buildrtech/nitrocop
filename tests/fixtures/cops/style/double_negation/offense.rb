@@ -114,3 +114,66 @@ def create_migration
              ^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
   )
 end
+
+# FN fix: !! as first element in multi-line || chain (single-statement body)
+# parser_last_child digs into OrNode/AndNode, so last_child = right side on a later line
+def has_interaction_matching?(request)
+  !!matching_index_for(request) ||
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+  !!matching_used_for(request) ||
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+  @parent_list.has_matching?(request)
+end
+
+# FN fix: !! as first element in multi-line && chain (single-statement body)
+def snapshots_transporter?
+  !!config.snapshots_transport_destination_url &&
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+  !!config.snapshots_transport_auth_key
+end
+
+# FN fix: !! in multi-line && chain (single-statement body, not on last line)
+def dynamic_class_creation?(node)
+  !!node &&
+  ^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+    constant?(node) &&
+    ["Class", "Module"].include?(constant_name(node))
+end
+
+# FN fix: !! in tap block call (single-statement body, block dig-in finds later last_child)
+def page_layout_names(layoutpages: false)
+  page_layout_definitions.select do |layout|
+    !!layout.layoutpage && layoutpages || !layout.layoutpage && !layoutpages
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+  end.tap { _1.collect!(&:name) }
+end
+
+# FN fix: !! in hash value of ||= assignment (single-statement body)
+# RuboCop digs into child_nodes.last of or_asgn, finding the hash
+def devcontainer_options
+  @devcontainer_options ||= {
+    app_name: "myapp",
+    database: !!defined?(ActiveRecord),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+    active_storage: !!defined?(ActiveStorage),
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+  }
+end
+
+# !! in keyword arg of block call (single-statement body, block dig-in makes
+# last_child = block body which is past the !! line)
+def start_server
+  server_create(:in_tcp_server, @port, bind: @bind, resolve_name: !!@source_hostname_key) do |data|
+                                                                  ^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+    process(data)
+  end
+end
+
+# !! in hash value inside map block (block dig-in finds hash as last_child)
+def run_actions
+  items.map do |item|
+    skipped = seen_items[item.name]
+    { type: "recipe", name: item.name, skipped: !!skipped }
+                                                ^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+  end
+end
