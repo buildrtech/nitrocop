@@ -43,7 +43,11 @@ pub fn discover_files(paths: &[PathBuf], config: &ResolvedConfig) -> Result<Disc
 /// Exposed for testing only.
 fn walk_directory(dir: &Path, _config: &ResolvedConfig) -> Result<Vec<PathBuf>> {
     let mut builder = WalkBuilder::new(dir);
-    builder.hidden(true).git_ignore(true).git_global(true);
+    builder
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .follow_links(true);
 
     // NOTE: We intentionally do NOT use the `ignore` crate's OverrideBuilder
     // for AllCops.Exclude patterns. The OverrideBuilder uses gitignore-style
@@ -441,6 +445,40 @@ mod tests {
         );
 
         assert!(found_bin_console, "Walker must yield bin/console");
+    }
+
+    #[test]
+    fn follows_symlinked_directories() {
+        let dir = setup_dir("symlinks");
+        // Create real directory with a Ruby file
+        let shared = dir.join("shared").join("models");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("user.rb"), "class User; end\n").unwrap();
+
+        // Create symlinked directory: app/models -> ../../shared/models
+        let app = dir.join("app");
+        fs::create_dir_all(&app).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../shared/models", app.join("models")).unwrap();
+
+        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
+        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+
+        // Should discover user.rb via both the real path AND the symlink path
+        let paths: Vec<String> = discovered
+            .files
+            .iter()
+            .map(|f| f.strip_prefix(&dir).unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            paths.contains(&"shared/models/user.rb".to_string()),
+            "Should find real path: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"app/models/user.rb".to_string()),
+            "Should find symlink path: {paths:?}"
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -39,11 +39,17 @@ use ruby_prism::Visit;
 /// ## Corpus investigation (2026-03-19)
 ///
 /// Corpus oracle reported FP=0, FN=1. The FN was in `nesquena__rabl__50ebc12`
-/// at `fixtures/ashared/models/user.rb:2`. Verified locally that RuboCop also
-/// produces 0 offenses for this file — the Include pattern `**/app/models/**/*.rb`
-/// correctly filters it out. The FN=1 was a stale corpus oracle artifact.
-/// `verify-cop-locations.py` confirms all FP/FN are resolved.
-/// This cop is at effective 100% conformance (2,143 matches, 0 FP, 0 FN).
+/// at `fixtures/ashared/models/user.rb:2` — `has_many :phone_numbers` inside
+/// `class User < ActiveRecord::Base`.
+///
+/// Root cause: The rabl repo has 7 symlinks (`fixtures/rails{2..6}/app/models`
+/// → `../../ashared/models`). RuboCop follows symlinks via `Dir.glob`, so it
+/// discovers `fixtures/rails4/app/models/user.rb` which matches the Include
+/// pattern `**/app/models/**/*.rb`. But nitrocop's `ignore::WalkBuilder`
+/// defaulted to `follow_links(false)`, only finding the canonical path
+/// `fixtures/ashared/models/user.rb` which doesn't match Include.
+///
+/// Fixed by enabling `follow_links(true)` in `src/fs.rs` WalkBuilder.
 pub struct HasManyOrHasOneDependent;
 
 impl Cop for HasManyOrHasOneDependent {
