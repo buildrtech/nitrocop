@@ -69,11 +69,14 @@ impl Cop for SharedContext {
             None => return,
         };
 
-        // Accept receiverless calls or RSpec. receiver (matches RuboCop's #rspec? predicate)
+        // Accept receiverless calls or RSpec./::RSpec. receiver (matches RuboCop's #rspec? predicate)
         if let Some(recv) = call.receiver() {
             let is_rspec = recv
                 .as_constant_read_node()
-                .is_some_and(|c| c.name().as_slice() == b"RSpec");
+                .is_some_and(|c| c.name().as_slice() == b"RSpec")
+                || recv.as_constant_path_node().is_some_and(|cp| {
+                    cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"RSpec")
+                });
             if !is_rspec {
                 return;
             }
