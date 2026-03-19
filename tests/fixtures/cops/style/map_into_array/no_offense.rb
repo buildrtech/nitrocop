@@ -43,3 +43,13 @@ end
 values = []
 values ||= defaults
 src.each { |e| values << e }
+# binding inside each block captures destination variable implicitly
+linespecs = []
+acl.grants.each do |grant|
+  linespecs.push(ERB.new(template, trim_mode: '-').result(binding))
+end
+# [].tap with multiple statements in tap block (not pure map)
+[].tap do |items|
+  setup_context
+  src.each { |e| items << e }
+end

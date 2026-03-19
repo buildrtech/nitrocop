@@ -24,6 +24,22 @@ use ruby_prism::Visit;
 ///   RuboCop accepts `Array.new`, `Array.new([])`, `Array[]`, and `Array([])`.
 ///   Added detection for `Array.new` (no args or empty array arg) and `Array[]`
 ///   (no args) as `CallNode` patterns.
+///
+/// ## Investigation Notes (2026-03-19)
+///
+/// **FP root cause (1 FP):**
+/// - `binding` inside the each block body implicitly captures all local variables
+///   in scope (including the destination array variable). RuboCop's `VariableForce`
+///   counts `binding` calls as implicit references, so `dest_var.references.one?`
+///   returns false and the cop doesn't flag it. Fixed by checking for `binding`
+///   calls inside the each block body and skipping if found.
+///
+/// **FN root causes (7 FN):**
+/// - The `[].tap { |dest| src.each { |e| dest << expr } }` pattern was not
+///   handled at all. RuboCop supports this via `empty_array_tap` node matcher.
+///   Fixed by adding `visit_block_node` to detect `[].tap` blocks where the
+///   only body statement is an `each` with push into the tap block parameter.
+///   The tap block must contain only the each call (no other statements).
 pub struct MapIntoArray;
 
 impl Cop for MapIntoArray {
@@ -249,6 +265,15 @@ impl MapIntoArrayVisitor<'_> {
                 }
             }
 
+            // Skip if the block body contains a `binding` call, which implicitly
+            // captures all local variables (including the dest array). RuboCop's
+            // VariableForce counts these as implicit references.
+            if let Some(ref block_body) = block_node.body() {
+                if contains_binding_call(block_body) {
+                    continue;
+                }
+            }
+
             let loc = call.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
             self.diagnostics.push(self.cop.diagnostic(
@@ -258,6 +283,181 @@ impl MapIntoArrayVisitor<'_> {
                 "Use `map` instead of `each` to map elements into an array.".to_string(),
             ));
         }
+    }
+}
+
+impl MapIntoArrayVisitor<'_> {
+    /// Check for tap pattern on a call node: `[].tap { |dest| src.each { |e| dest << expr } }`
+    fn check_tap_call(&mut self, call: &ruby_prism::CallNode<'_>) {
+        // Must be `.tap` with an empty array receiver
+        if call.name().as_slice() != b"tap" {
+            return;
+        }
+        if call.arguments().is_some() {
+            return;
+        }
+        // Receiver must be an empty array literal `[]`
+        let receiver = match call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
+        if let Some(arr) = receiver.as_array_node() {
+            if arr.elements().iter().count() != 0 {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        // Must have a block
+        let block = match call.block() {
+            Some(b) => b,
+            None => return,
+        };
+        let block_node = match block.as_block_node() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Block must have exactly one parameter
+        let params = match block_node.parameters() {
+            Some(p) => p,
+            None => return,
+        };
+        let block_params = match params.as_block_parameters_node() {
+            Some(bp) => bp,
+            None => return,
+        };
+        let param_list = match block_params.parameters() {
+            Some(pl) => pl,
+            None => return,
+        };
+        let requireds: Vec<_> = param_list.requireds().iter().collect();
+        if requireds.len() != 1 {
+            return;
+        }
+        let param_node = match requireds[0].as_required_parameter_node() {
+            Some(p) => p,
+            None => return,
+        };
+        // Get the block parameter name
+        let block_param_name = param_node.name();
+
+        // Block body must have exactly one statement: the each call
+        let body = match block_node.body() {
+            Some(b) => b,
+            None => return,
+        };
+        let body_stmts = match body.as_statements_node() {
+            Some(s) => s,
+            None => return,
+        };
+        let body_nodes: Vec<_> = body_stmts.body().iter().collect();
+        if body_nodes.len() != 1 {
+            return;
+        }
+
+        // The single statement must be an `each` call
+        let each_call = match body_nodes[0].as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
+        if each_call.name().as_slice() != b"each" {
+            return;
+        }
+        if each_call.receiver().is_none() {
+            return;
+        }
+        // Skip safe navigation
+        if each_call
+            .call_operator_loc()
+            .is_some_and(|op: ruby_prism::Location<'_>| op.as_slice() == b"&.")
+        {
+            return;
+        }
+        if each_call.arguments().is_some() {
+            return;
+        }
+
+        // each must have a block
+        let each_block = match each_call.block() {
+            Some(b) => b,
+            None => return,
+        };
+        let each_block_node = match each_block.as_block_node() {
+            Some(b) => b,
+            None => return,
+        };
+        let each_body = match each_block_node.body() {
+            Some(b) => b,
+            None => return,
+        };
+        let each_body_stmts = match each_body.as_statements_node() {
+            Some(s) => s,
+            None => return,
+        };
+        let each_body_nodes: Vec<_> = each_body_stmts.body().iter().collect();
+        if each_body_nodes.len() != 1 {
+            return;
+        }
+
+        // Check for dest << expr or dest.push(expr) or dest.append(expr)
+        let push_call = match each_body_nodes[0].as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
+        let push_method = push_call.name().as_slice();
+        if push_method != b"<<" && push_method != b"push" && push_method != b"append" {
+            return;
+        }
+
+        // Push receiver must be the tap block parameter
+        let push_receiver = match push_call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
+        let lvar = match push_receiver.as_local_variable_read_node() {
+            Some(l) => l,
+            None => return,
+        };
+        if lvar.name().as_slice() != block_param_name.as_slice() {
+            return;
+        }
+
+        // Check push has exactly one non-splat argument
+        if let Some(args) = push_call.arguments() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() != 1 {
+                return;
+            }
+            if arg_list[0].as_splat_node().is_some() {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        // Receiver of `each` must not be `self`
+        if let Some(each_receiver) = each_call.receiver() {
+            if each_receiver.as_self_node().is_some() {
+                return;
+            }
+        }
+
+        // Skip if the block body contains a `binding` call
+        if contains_binding_call(&each_body) {
+            return;
+        }
+
+        // Report offense on the each call
+        let loc = each_call.location();
+        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+        self.diagnostics.push(self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            "Use `map` instead of `each` to map elements into an array.".to_string(),
+        ));
     }
 }
 
@@ -275,6 +475,34 @@ impl<'pr> Visit<'pr> for MapIntoArrayVisitor<'_> {
         }
         ruby_prism::visit_begin_node(self, node);
     }
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        self.check_tap_call(node);
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+/// Check if a node (recursively) contains a call to `binding` (no receiver, no args).
+/// `binding` implicitly captures all local variables in scope, so the destination
+/// variable gets additional implicit references that prevent the map transformation.
+fn contains_binding_call(node: &ruby_prism::Node<'_>) -> bool {
+    struct BindingFinder {
+        found: bool,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for BindingFinder {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none()
+                && node.name().as_slice() == b"binding"
+                && node.arguments().is_none()
+            {
+                self.found = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let mut finder = BindingFinder { found: false };
+    ruby_prism::Visit::visit(&mut finder, node);
+    finder.found
 }
 
 /// Check if a node is a `LocalVariableOperatorWriteNode` (e.g., `x += y`) for the given var name.
