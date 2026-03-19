@@ -114,15 +114,28 @@ use ruby_prism::Visit;
 ///   distinct keys because `#<Class:X>::Nested` humanizes to `X.Nested` while
 ///   `X::#<Class:X>::Nested` humanizes to `X.::Nested`. (11 FN fixed, 0 FP)
 ///
-/// Remaining FN not addressed (edge cases, ~26 total):
-/// - `def VCR.version` at top level in Rake tasks (inside DSL blocks)
-/// - `def FakeModel.method` inside test describe blocks (plain_block_depth > 0)
-/// - `def response.body` inside `class << @reflex.controller.response`
-/// - One-liner singleton classes (`class << Object.new; def m; end; end`)
-/// - Delegate-related FN where ActiveSupportExtensionsEnabled may not resolve
-///   correctly for specific corpus repos (config resolution issue, not cop logic)
-/// - `delegate` listing same symbol twice in one call (e.g., `:promoting_committee_enabled?`
-///   listed twice in same delegate line)
+/// ### Round 8 (FP=0, FN=26)
+/// Root causes of FN:
+/// - `ActiveSupportExtensionsEnabled` was not being injected from AllCops config
+///   into `Lint/DuplicateMethods` cop config. The config injection code in
+///   `src/config/mod.rs` only listed `Style/CollectionQuerying` and
+///   `Style/RedundantFilterChain`, not `Lint/DuplicateMethods`. This meant
+///   `delegate` tracking was disabled for all corpus repos despite rubocop-rails
+///   setting `AllCops.ActiveSupportExtensionsEnabled: true`. Fixed by adding
+///   `Lint/DuplicateMethods` to the injection list. (20+ delegate-related FN fixed)
+/// - `def ConstName.method` inside DSL blocks (plain_block_depth > 0) was being
+///   skipped. RuboCop's `on_defs` handler for const-receiver defs uses
+///   `check_const_receiver` which resolves via AST ancestors,
+///   not `parent_module_name`. It works inside blocks as long as the constant is
+///   in scope. Fixed by only applying the `plain_block_depth > 0` early return
+///   to instance methods and `def self.method`, not `def ConstName.method`.
+///
+/// Remaining FN not addressed (edge cases, ~3 total):
+/// - `def VCR.version` at top level in Rake tasks — constant not in scope stack
+///   (defined in separate module, no class/module ancestor wrapping the def).
+/// - `def FakeModel.calling_let!` inside test describe blocks — same issue.
+/// - `def response.body` inside `class << @reflex.controller.response` — sclass
+///   expression is a method call chain, not a constant, so methods are invisible.
 pub struct DuplicateMethods;
 
 impl Cop for DuplicateMethods {
@@ -309,8 +322,19 @@ impl DupMethodVisitor<'_, '_> {
     }
 
     /// Process a def node (instance or singleton method).
+    ///
+    /// RuboCop's `on_defs` handler for `def ConstName.method` uses `check_const_receiver`
+    /// which resolves the constant via `lookup_constant` and does NOT check
+    /// `parent_module_name` — so it works even inside DSL blocks. In contrast,
+    /// `on_def` (instance methods) and `check_self_receiver` (`def self.method`)
+    /// use `parent_module_name` which returns nil inside blocks, effectively
+    /// ignoring those definitions.
+    ///
+    /// We match this by only applying the `plain_block_depth > 0` early return
+    /// for instance methods and `def self.method`, but NOT for `def ConstName.method`.
     fn process_def(&mut self, node: &ruby_prism::DefNode<'_>) {
-        if self.if_depth > 0 || self.plain_block_depth > 0 {
+        // if/unless always suppresses duplicate detection
+        if self.if_depth > 0 {
             return;
         }
 
@@ -322,9 +346,16 @@ impl DupMethodVisitor<'_, '_> {
         if let Some(receiver) = node.receiver() {
             // def self.method or def ConstName.method
             if receiver.as_self_node().is_some() {
+                // def self.method inside blocks: parent_module_name returns nil in RuboCop,
+                // so these are not tracked. Skip when in a plain block.
+                if self.plain_block_depth > 0 {
+                    return;
+                }
                 let keyword_offset = node.def_keyword_loc().start_offset();
                 self.found_method(name, true, def_line, keyword_offset);
             } else if let Some(const_read) = receiver.as_constant_read_node() {
+                // def ConstName.method: RuboCop's check_const_receiver resolves the constant
+                // independently of parent_module_name, so it works inside blocks too.
                 let const_name = std::str::from_utf8(const_read.name().as_slice()).unwrap_or("");
                 if let Some(qualified_scope) = self.lookup_constant(const_name) {
                     // Save current scope, temporarily replace with resolved scope
@@ -338,9 +369,15 @@ impl DupMethodVisitor<'_, '_> {
                     self.found_method(name, true, def_line, keyword_offset);
                     self.scope_stack = saved_scopes;
                 }
+            } else {
+                // def expr.method (non-const, non-self receiver) — not tracked
             }
         } else {
             // Instance method (or singleton method if inside `class << self`)
+            // Inside blocks: parent_module_name returns nil, so not tracked.
+            if self.plain_block_depth > 0 {
+                return;
+            }
             let is_singleton = self.in_singleton_scope();
             let keyword_offset = node.def_keyword_loc().start_offset();
             self.found_method(name, is_singleton, def_line, keyword_offset);
@@ -1432,6 +1469,83 @@ mod tests {
         assert_eq!(
             n, 1,
             "class << Const should cross-reference with def self.method"
+        );
+    }
+
+    #[test]
+    fn test_def_const_method_inside_block_with_scope() {
+        // `def ConstName.method` inside a block within the module that defines ConstName
+        // should detect duplicates — the constant resolves through the scope stack.
+        let n = count_offenses(
+            b"module M\n  def self.foo; 1; end\n  dsl_block do\n    def M.foo; 2; end\n  end\nend\n",
+        );
+        assert_eq!(
+            n, 1,
+            "def ConstName.method inside block within same module should detect dup"
+        );
+    }
+
+    #[test]
+    fn test_def_const_method_inside_nested_blocks() {
+        // `def ConstName.method` inside deeply nested blocks should still resolve
+        // the constant if it's in the scope stack.
+        let n = count_offenses(
+            b"class Base\n  class << self\n    def all; []; end\n    namespace do\n      task do\n        def Base.all; 1; end\n      end\n    end\n  end\nend\n",
+        );
+        assert_eq!(
+            n, 1,
+            "def ConstName.method inside nested blocks should detect dup"
+        );
+    }
+
+    #[test]
+    fn test_def_self_method_inside_block_ignored() {
+        // def self.method inside a DSL block is ignored (parent_module_name returns nil)
+        let n = count_offenses(
+            b"class Foo\n  def self.bar; 1; end\nend\ndsl_block do\n  def self.bar; 2; end\nend\n",
+        );
+        assert_eq!(n, 0, "def self.method inside block should be ignored");
+    }
+
+    #[test]
+    fn test_delegate_then_def_with_active_support() {
+        // delegate :method then def method should be an offense
+        let n = count_offenses_with_active_support(
+            b"class Foo\n  delegate :run, to: :target\n  def run; end\nend\n",
+        );
+        assert_eq!(n, 1, "delegate then def should be offense");
+    }
+
+    #[test]
+    fn test_delegate_then_delegate_same_method() {
+        // Two delegate calls defining same method via different targets
+        let n = count_offenses_with_active_support(
+            b"class Foo\n  delegate :status, to: :adapter\n  delegate :status, to: :model\nend\n",
+        );
+        assert_eq!(n, 1, "two delegates defining same method should be offense");
+    }
+
+    #[test]
+    fn test_attr_accessor_then_delegate_same_method() {
+        // attr_accessor defines reader+writer, delegate defines reader — dup on reader
+        let n = count_offenses_with_active_support(
+            b"class Foo\n  attr_accessor :changes, :errors\n  delegate :changes, :errors, to: :@value\nend\n",
+        );
+        assert_eq!(
+            n, 2,
+            "attr_accessor then delegate same methods should be offense"
+        );
+    }
+
+    #[test]
+    fn test_delegate_inside_sclass_self() {
+        // delegate inside class << self should work with ActiveSupport
+        let n = count_offenses_with_active_support(
+            b"class Foo\n  class << self\n    delegate :all, :find, to: :resource\n    def all; []; end\n  end\nend\n",
+        );
+        assert_eq!(
+            n, 1,
+            "delegate then def inside class << self should detect dup"
         );
     }
 }

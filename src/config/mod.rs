@@ -2204,7 +2204,10 @@ impl ResolvedConfig {
             }
         }
         // Inject ActiveSupportExtensionsEnabled from AllCops for cops that need it
-        if name == "Style/CollectionQuerying" || name == "Style/RedundantFilterChain" {
+        if name == "Lint/DuplicateMethods"
+            || name == "Style/CollectionQuerying"
+            || name == "Style/RedundantFilterChain"
+        {
             config
                 .options
                 .entry("ActiveSupportExtensionsEnabled".to_string())
