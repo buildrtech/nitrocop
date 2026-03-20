@@ -261,9 +261,50 @@ content, content_type = Formatter.create do |r|
   r.attach name: :data
 end
 
+# Multi-write with create inside block inside local variable assignment
+# The outer `d3 = c.time_delta do ... end` sets in_local_assignment for d3,
+# but the block body's multi-write should NOT inherit that flag.
+d3 = c.time_delta do
+  content, content_type = Taps::Multipart.create do |r|
+    r.attach name: :encoded_data, payload: "data"
+  end
+end
+
 # MODIFY method in operator-write assignment (+=, &=, etc.)
 # RuboCop's return_value_assigned? checks assignable_node.parent.assignment?
 # and op_asgn is in SHORTHAND_ASSIGNMENTS, so assignment? returns true.
 success &= record.update(v: params[:v])
 packet += @cipher.update(data)
 total -= record.save
+
+# MODIFY method in if-body structurally identical to if-condition (RuboCop value equality)
+# RuboCop's in_condition_or_compound_boolean? uses == (not equal?) to compare nodes.
+# When `save` appears both as the if-condition and in the if-body, RuboCop considers
+# the body statement as being in condition context (exempted for modify methods).
+def copy_from(project)
+  Project.transaction do
+    if save
+      reload
+      do_stuff
+      save
+    else
+      false
+    end
+  end
+end
+
+# CREATE method with persisted? on different var in if-condition (RuboCop call_to_persisted? quirk)
+# RuboCop's call_to_persisted? replaces node with if-condition when the reference is a
+# parenthesized call in an if-body. So `user_export.update_columns(...)` inside
+# `if upload.persisted?` triggers suppression even though persisted? is on `upload`, not `user_export`.
+def execute
+  user_export = UserExport.create(name: "x")
+  user_export.id
+
+  File.open("f") do |file|
+    upload = UploadCreator.new(file).create_for(1)
+    if upload.persisted?
+      user_export.update_columns(upload_id: upload.id)
+    end
+  end
+end

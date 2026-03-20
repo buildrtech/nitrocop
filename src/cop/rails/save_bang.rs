@@ -311,6 +311,43 @@ use ruby_prism::Visit;
 /// **Fix:** Changed all `*OperatorWriteNode` visitors back to Assignment context.
 ///
 /// **Remaining (4 FP, 0 FN):** Same 4 corpus config artifacts from batch 5.
+///
+/// ## Corpus investigation (2026-03-20, batch 7)
+///
+/// Oracle: FP=4, FN=0 (99.99% match rate on 32,756 offenses).
+///
+/// Deep investigation revealed these are NOT config artifacts — they are genuine
+/// RuboCop quirks that must be replicated:
+///
+/// **FP fix 1: RuboCop value equality in condition check (2 FP fixed).**
+/// redmine project.rb:928/953: `if save; ...; save; end` — the second `save` in the
+/// if-body is structurally identical (by Parser AST ==) to the if-condition `save`.
+/// RuboCop's `in_condition_or_compound_boolean?` uses `node == deparenthesize(parent.condition)`
+/// which is VALUE equality, not identity. Both `save` nodes are `(send nil :save)` with
+/// identical structure, so == returns true. RuboCop exempts the body statement as
+/// if it were in condition context.
+/// **Fix:** In `visit_if_node`, compare each body statement's source bytes against the
+/// predicate's source bytes. Statements matching the predicate get Condition context
+/// instead of VoidStatement.
+///
+/// **FP fix 2: RuboCop call_to_persisted? if-condition substitution (1 FP fixed).**
+/// discourse export_csv_file.rb:85: `user_export = UserExport.create(...)` with
+/// `user_export.update_columns(...)` inside an `if upload.persisted?` body. RuboCop's
+/// `call_to_persisted?` replaces node with `node.parent.condition` when
+/// `node.parenthesized_call? && node.parent.if_type?`. This means a variable reference
+/// in a parenthesized call inside an if-body triggers persisted? suppression if the
+/// if-condition is ANY `.persisted?` call, even on a different variable.
+/// **Fix:** Extended `PersistedFinder` to detect if-nodes where the condition is
+/// `.persisted?` and the if-body references the target variable.
+///
+/// **FP fix 3: in_local_assignment leaked through block boundaries (1 FP fixed).**
+/// taps operation.rb:510: `d3 = c.time_delta do; content, ct = X.create do ... end; end` —
+/// the outer `d3 = ...` set `in_local_assignment = true`, which leaked through the
+/// block boundary into the multi-write's create call.
+/// **Fix:** Reset `in_local_assignment` to false when entering block/lambda/def bodies,
+/// since these create new scope boundaries in RuboCop's VariableForce.
+///
+/// **Remaining (0 FP, 0 FN).** All known FP/FN locations are fixed.
 pub struct SaveBang;
 
 /// Modify-type persistence methods whose return value indicates success/failure.
@@ -975,9 +1012,36 @@ impl SaveBangVisitor<'_, '_> {
 /// of finding persisted? references anywhere in a scope, not just the next statement.
 /// NOTE: Only matches `.persisted?` (send), NOT `&.persisted?` (csend).
 /// RuboCop's call_to_persisted? checks `node.send_type?` which excludes csend.
+///
+/// Also matches RuboCop's `call_to_persisted?` quirk: when a reference to the variable
+/// is a parenthesized call inside an if-body whose condition is ANY `.persisted?` call,
+/// the reference is treated as having a persisted? check. This is because RuboCop's
+/// `call_to_persisted?` replaces the node with `node.parent.condition` when
+/// `node.parenthesized_call? && node.parent.if_type?`, effectively checking the
+/// if-condition instead of the reference itself.
 struct PersistedFinder<'v> {
     var_name: &'v [u8],
     found: bool,
+}
+
+impl PersistedFinder<'_> {
+    /// Check if a node is a `.persisted?` call (regular send, not csend).
+    fn is_persisted_call(node: &ruby_prism::CallNode<'_>) -> bool {
+        let is_csend = node
+            .call_operator_loc()
+            .is_some_and(|loc| loc.end_offset() - loc.start_offset() == 2);
+        !is_csend && node.name().as_slice() == b"persisted?"
+    }
+
+    /// Check if a subtree contains any reference to the target variable.
+    fn subtree_has_var_ref(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
+        let mut finder = VarRefFinder {
+            var_name,
+            found: false,
+        };
+        finder.visit(node);
+        finder.found
+    }
 }
 
 impl<'pr> Visit<'pr> for PersistedFinder<'_> {
@@ -985,14 +1049,7 @@ impl<'pr> Visit<'pr> for PersistedFinder<'_> {
         if self.found {
             return;
         }
-        // Only match `.persisted?` (regular send), not `&.persisted?` (csend).
-        // RuboCop's call_to_persisted? checks node.send_type? which excludes csend.
-        // In Prism, csend (safe navigation) has call_operator "&." with length 2,
-        // while regular send has "." with length 1 (or None for implicit receiver).
-        let is_csend = node
-            .call_operator_loc()
-            .is_some_and(|loc| loc.end_offset() - loc.start_offset() == 2);
-        if !is_csend && node.name().as_slice() == b"persisted?" {
+        if Self::is_persisted_call(node) {
             if let Some(recv) = node.receiver() {
                 if SaveBangVisitor::node_is_var(&recv, self.var_name) {
                     self.found = true;
@@ -1002,6 +1059,50 @@ impl<'pr> Visit<'pr> for PersistedFinder<'_> {
         }
         // Continue visiting children
         ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        if self.found {
+            return;
+        }
+        // RuboCop's call_to_persisted? quirk: when a variable reference is a parenthesized
+        // call inside an if-body, and the if-condition is ANY `.persisted?` call, the
+        // reference is treated as having a persisted? check. Check if the if-condition
+        // contains `.persisted?` and the if-body references our target variable.
+        let condition_has_persisted = {
+            let pred = node.predicate();
+            if let Some(call) = pred.as_call_node() {
+                Self::is_persisted_call(&call)
+            } else {
+                false
+            }
+        };
+        if condition_has_persisted {
+            if let Some(stmts) = node.statements() {
+                for stmt in stmts.body().iter() {
+                    if Self::subtree_has_var_ref(&stmt, self.var_name) {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+        }
+        // Continue visiting children (visit condition, body, else)
+        ruby_prism::visit_if_node(self, node);
+    }
+}
+
+/// Simple visitor that checks if a subtree contains a reference to a variable name.
+struct VarRefFinder<'v> {
+    var_name: &'v [u8],
+    found: bool,
+}
+
+impl<'pr> Visit<'pr> for VarRefFinder<'_> {
+    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        if node.name().as_slice() == self.var_name {
+            self.found = true;
+        }
     }
 }
 
@@ -1124,6 +1225,13 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         if let Some(params) = node.parameters() {
             self.visit(&params);
         }
+        // Reset in_local_assignment at block boundaries. Blocks create new scopes
+        // in RuboCop's VariableForce. An outer `d3 = expr do ... end` sets
+        // in_local_assignment for `d3`, but the block body's statements are in a
+        // different scope — multi-write or other assignments inside the block should
+        // not inherit the outer in_local_assignment flag.
+        let saved_local = self.in_local_assignment;
+        self.in_local_assignment = false;
         if let Some(body) = node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 self.visit_statements_with_context(&stmts, true);
@@ -1131,12 +1239,15 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
                 self.visit(&body);
             }
         }
+        self.in_local_assignment = saved_local;
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         if let Some(params) = node.parameters() {
             self.visit(&params);
         }
+        let saved_local = self.in_local_assignment;
+        self.in_local_assignment = false;
         if let Some(body) = node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 self.visit_statements_with_context(&stmts, true);
@@ -1144,6 +1255,7 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
                 self.visit(&body);
             }
         }
+        self.in_local_assignment = saved_local;
     }
 
     // ── DefNode: body has implicit return semantics ──────────────────────
@@ -1156,6 +1268,8 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         // (singleton methods like `def self.foo`). In Prism, singleton methods are DefNode
         // with a receiver. Only instance methods (no receiver) get implicit return semantics.
         let is_instance_method = node.receiver().is_none();
+        let saved_local = self.in_local_assignment;
+        self.in_local_assignment = false;
         if let Some(body) = node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 self.visit_statements_with_context(&stmts, is_instance_method);
@@ -1163,6 +1277,7 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
                 self.visit(&body);
             }
         }
+        self.in_local_assignment = saved_local;
     }
 
     // ── StatementsNode: default (not in method/block) ────────────────────
@@ -1199,14 +1314,43 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         self.visit(&predicate);
         self.context_stack.pop();
 
+        // Get predicate source bytes for RuboCop value-equality comparison.
+        // RuboCop's in_condition_or_compound_boolean? uses `node == deparenthesize(parent.condition)`
+        // which compares by structural equality (==), not identity (equal?). When a persist call
+        // in the if-body is structurally identical to the if-condition (e.g., both are bare `save`),
+        // RuboCop treats the body statement as being in condition context, exempting modify methods.
+        let pred_src = &self.source.as_bytes()
+            [predicate.location().start_offset()..predicate.location().end_offset()];
+
         // The then-body and else-body do NOT inherit ImplicitReturn from
         // outer scopes. RuboCop's implicit_return? only recognizes statements
         // that are direct children of def/block bodies — not statements nested
         // inside if/else branches. Push VoidStatement to prevent leakage.
+        // Exception: statements matching the predicate source get Condition context.
         if let Some(stmts) = node.statements() {
-            self.context_stack.push(Context::VoidStatement);
-            self.visit_statements_node(&stmts);
-            self.context_stack.pop();
+            let body: Vec<_> = stmts.body().iter().collect();
+            for (i, stmt) in body.iter().enumerate() {
+                let stmt_src = &self.source.as_bytes()
+                    [stmt.location().start_offset()..stmt.location().end_offset()];
+                let ctx = if stmt_src == pred_src {
+                    Context::Condition
+                } else {
+                    Context::VoidStatement
+                };
+
+                let suppress = self.should_suppress_create(stmt, &body, i);
+                if suppress {
+                    self.suppress_create_assignment = true;
+                }
+
+                self.context_stack.push(ctx);
+                self.visit(stmt);
+                self.context_stack.pop();
+
+                if suppress {
+                    self.suppress_create_assignment = false;
+                }
+            }
         }
 
         if let Some(subsequent) = node.subsequent() {
