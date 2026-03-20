@@ -12,6 +12,7 @@ use crate::parse::source::SourceFile;
 /// 2. `caller.first(n)` / `caller_locations.first(n)` — `first` with arguments returns an array,
 ///    not a single element. RuboCop's pattern `(send #slow_caller? :first)` only matches
 ///    zero-argument `first`.
+///
 /// Fixed by checking `call_operator_loc()` for `&.` and rejecting `first` with arguments.
 pub struct Caller;
 
