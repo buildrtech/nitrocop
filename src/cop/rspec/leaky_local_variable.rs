@@ -317,7 +317,7 @@ fn check_file_level_vars(
     // Collect file-level variable assignments (not inside describe blocks)
     let mut file_level_assigns: Vec<VarAssign> = Vec::new();
     for stmt in stmts.body().iter() {
-        collect_file_level_assignments(&stmt, &mut file_level_assigns);
+        collect_file_level_assignments(&stmt, &mut file_level_assigns, false);
     }
 
     if file_level_assigns.is_empty() {
@@ -360,13 +360,19 @@ fn check_file_level_vars(
 
 /// Collect variable assignments at file level, stopping at describe blocks,
 /// class/module definitions, and method definitions.
-fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec<VarAssign>) {
+/// `in_conditional` is true when recursing inside if/elsif/else/unless branches,
+/// making assignments there conditional (they may not execute at runtime).
+fn collect_file_level_assignments(
+    node: &ruby_prism::Node<'_>,
+    assigns: &mut Vec<VarAssign>,
+    in_conditional: bool,
+) {
     // Direct assignment
     if let Some(lw) = node.as_local_variable_write_node() {
         assigns.push(VarAssign {
             name: lw.name().as_slice().to_vec(),
             offset: lw.location().start_offset(),
-            is_unconditional: true,
+            is_unconditional: !in_conditional,
         });
         return;
     }
@@ -408,7 +414,7 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
                 assigns.push(VarAssign {
                     name: lt.name().as_slice().to_vec(),
                     offset: lt.location().start_offset(),
-                    is_unconditional: true,
+                    is_unconditional: !in_conditional,
                 });
             }
         }
@@ -436,7 +442,7 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
                 if let Some(body) = bn.body() {
                     if let Some(stmts) = body.as_statements_node() {
                         for s in stmts.body().iter() {
-                            collect_file_level_assignments(&s, assigns);
+                            collect_file_level_assignments(&s, assigns, in_conditional);
                         }
                     }
                 }
@@ -445,15 +451,15 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
         return;
     }
 
-    // Recurse through control flow
+    // Recurse through control flow — assignments inside if/elsif/else are conditional
     if let Some(if_node) = node.as_if_node() {
         if let Some(stmts) = if_node.statements() {
             for s in stmts.body().iter() {
-                collect_file_level_assignments(&s, assigns);
+                collect_file_level_assignments(&s, assigns, true);
             }
         }
         if let Some(subsequent) = if_node.subsequent() {
-            collect_file_level_assignments(&subsequent, assigns);
+            collect_file_level_assignments(&subsequent, assigns, true);
         }
         return;
     }
@@ -461,7 +467,54 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
     if let Some(begin_node) = node.as_begin_node() {
         if let Some(stmts) = begin_node.statements() {
             for s in stmts.body().iter() {
-                collect_file_level_assignments(&s, assigns);
+                collect_file_level_assignments(&s, assigns, in_conditional);
+            }
+        }
+    }
+
+    // ElseNode (from if/elsif/else chain)
+    if let Some(else_node) = node.as_else_node() {
+        if let Some(stmts) = else_node.statements() {
+            for s in stmts.body().iter() {
+                collect_file_level_assignments(&s, assigns, true);
+            }
+        }
+        return;
+    }
+
+    // UnlessNode
+    if let Some(unless_node) = node.as_unless_node() {
+        if let Some(stmts) = unless_node.statements() {
+            for s in stmts.body().iter() {
+                collect_file_level_assignments(&s, assigns, true);
+            }
+        }
+        if let Some(else_clause) = unless_node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                for s in stmts.body().iter() {
+                    collect_file_level_assignments(&s, assigns, true);
+                }
+            }
+        }
+        return;
+    }
+
+    // CaseNode
+    if let Some(case_node) = node.as_case_node() {
+        for cond in case_node.conditions().iter() {
+            if let Some(when_node) = cond.as_when_node() {
+                if let Some(stmts) = when_node.statements() {
+                    for s in stmts.body().iter() {
+                        collect_file_level_assignments(&s, assigns, true);
+                    }
+                }
+            }
+        }
+        if let Some(else_clause) = case_node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                for s in stmts.body().iter() {
+                    collect_file_level_assignments(&s, assigns, true);
+                }
             }
         }
     }
@@ -650,7 +703,7 @@ fn var_value_reaches_example_scope_in_stmts(
         // (a) example scopes that reassign the variable before reading it (kills value)
         // (b) example scopes that read the variable (uses value, if not killed)
         // (c) nested example groups (recurse with the same flow logic)
-        match stmt_example_scope_var_interaction(&stmt, var_name) {
+        match stmt_example_scope_var_interaction(&stmt, var_name, assign_offset) {
             VarInteraction::ReadOnly => {
                 if !value_killed {
                     return true;
@@ -692,9 +745,15 @@ enum VarInteraction {
 
 /// Analyze how a statement's example scopes interact with a variable.
 /// Returns the combined interaction across all example scopes in the statement.
+///
+/// `assign_offset` is the byte offset of the assignment we're tracking. When
+/// recursing into non-RSpec blocks, we skip blocks that don't contain the
+/// assignment AND have their own local assignment to the same variable name,
+/// because such blocks create a new local binding that shadows the outer one.
 fn stmt_example_scope_var_interaction(
     node: &ruby_prism::Node<'_>,
     var_name: &[u8],
+    assign_offset: usize,
 ) -> VarInteraction {
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
@@ -713,10 +772,25 @@ fn stmt_example_scope_var_interaction(
                                 return VarInteraction::WriteBeforeRead;
                             }
                             // Check if the variable is referenced at all
-                            for s in stmts.body().iter() {
-                                if node_references_var(&s, var_name) {
-                                    return VarInteraction::ReadOnly;
-                                }
+                            let has_read = stmts
+                                .body()
+                                .iter()
+                                .any(|s| node_references_var(&s, var_name));
+                            if has_read {
+                                return VarInteraction::ReadOnly;
+                            }
+                            // Deep write check: even if node_references_var
+                            // didn't find a read, the block may write the
+                            // variable inside a nested call (e.g., `expect do
+                            // response = ... end`). A write without a prior
+                            // read means the outer value is dead for this scope.
+                            // This matches RuboCop's VariableForce behavior.
+                            if stmts
+                                .body()
+                                .iter()
+                                .any(|s| node_writes_var_deep(&s, var_name))
+                            {
+                                return VarInteraction::WriteBeforeRead;
                             }
                         }
                     }
@@ -775,7 +849,8 @@ fn stmt_example_scope_var_interaction(
                             // Recurse: check nested group's statements
                             let mut result = VarInteraction::None;
                             for s in stmts.body().iter() {
-                                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                                let inner =
+                                    stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                                 result = combine_var_interactions(result, inner);
                             }
                             return result;
@@ -787,16 +862,29 @@ fn stmt_example_scope_var_interaction(
         }
 
         // Other calls with blocks: recurse into block body, respecting block param shadowing
+        // and Ruby's block-local variable scoping.
         if let Some(blk) = call.block() {
             if let Some(bn) = blk.as_block_node() {
                 if block_has_param(&bn, var_name) {
                     return VarInteraction::None; // shadowed by block param
                 }
+                // Ruby block scoping: if this block does NOT contain the
+                // assignment we're tracking but has its own local assignment
+                // to the same variable name, then references inside this
+                // block refer to the block-local variable, not ours. Skip it.
+                // This handles the discourse/rswag pattern where sibling
+                // blocks (get/post/put) each have their own local copy of
+                // a variable like `expected_request_schema`.
+                let block_contains_assignment = stmt_contains_offset(node, assign_offset);
+                if !block_contains_assignment && block_body_assigns_var(&bn, var_name) {
+                    return VarInteraction::None;
+                }
                 if let Some(body) = bn.body() {
                     if let Some(stmts) = body.as_statements_node() {
                         let mut result = VarInteraction::None;
                         for s in stmts.body().iter() {
-                            let inner = stmt_example_scope_var_interaction(&s, var_name);
+                            let inner =
+                                stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                             result = combine_var_interactions(result, inner);
                         }
                         return result;
@@ -812,12 +900,12 @@ fn stmt_example_scope_var_interaction(
         let mut result = VarInteraction::None;
         if let Some(stmts) = if_node.statements() {
             for s in stmts.body().iter() {
-                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                 result = combine_var_interactions(result, inner);
             }
         }
         if let Some(subsequent) = if_node.subsequent() {
-            let inner = stmt_example_scope_var_interaction(&subsequent, var_name);
+            let inner = stmt_example_scope_var_interaction(&subsequent, var_name, assign_offset);
             result = combine_var_interactions(result, inner);
         }
         return result;
@@ -826,14 +914,14 @@ fn stmt_example_scope_var_interaction(
         let mut result = VarInteraction::None;
         if let Some(stmts) = unless_node.statements() {
             for s in stmts.body().iter() {
-                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                 result = combine_var_interactions(result, inner);
             }
         }
         if let Some(else_clause) = unless_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
                 for s in stmts.body().iter() {
-                    let inner = stmt_example_scope_var_interaction(&s, var_name);
+                    let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                     result = combine_var_interactions(result, inner);
                 }
             }
@@ -844,7 +932,7 @@ fn stmt_example_scope_var_interaction(
         let mut result = VarInteraction::None;
         if let Some(stmts) = else_node.statements() {
             for s in stmts.body().iter() {
-                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                 result = combine_var_interactions(result, inner);
             }
         }
@@ -856,7 +944,7 @@ fn stmt_example_scope_var_interaction(
             if let Some(when_node) = cond.as_when_node() {
                 if let Some(stmts) = when_node.statements() {
                     for s in stmts.body().iter() {
-                        let inner = stmt_example_scope_var_interaction(&s, var_name);
+                        let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                         result = combine_var_interactions(result, inner);
                     }
                 }
@@ -865,7 +953,7 @@ fn stmt_example_scope_var_interaction(
         if let Some(else_clause) = case_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
                 for s in stmts.body().iter() {
-                    let inner = stmt_example_scope_var_interaction(&s, var_name);
+                    let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                     result = combine_var_interactions(result, inner);
                 }
             }
@@ -876,18 +964,18 @@ fn stmt_example_scope_var_interaction(
         let mut result = VarInteraction::None;
         if let Some(stmts) = begin_node.statements() {
             for s in stmts.body().iter() {
-                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                 result = combine_var_interactions(result, inner);
             }
         }
         if let Some(rescue_clause) = begin_node.rescue_clause() {
-            let inner = rescue_var_interaction(&rescue_clause, var_name);
+            let inner = rescue_var_interaction(&rescue_clause, var_name, assign_offset);
             result = combine_var_interactions(result, inner);
         }
         if let Some(else_clause) = begin_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
                 for s in stmts.body().iter() {
-                    let inner = stmt_example_scope_var_interaction(&s, var_name);
+                    let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                     result = combine_var_interactions(result, inner);
                 }
             }
@@ -895,7 +983,7 @@ fn stmt_example_scope_var_interaction(
         if let Some(ensure_clause) = begin_node.ensure_clause() {
             if let Some(stmts) = ensure_clause.statements() {
                 for s in stmts.body().iter() {
-                    let inner = stmt_example_scope_var_interaction(&s, var_name);
+                    let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
                     result = combine_var_interactions(result, inner);
                 }
             }
@@ -904,7 +992,7 @@ fn stmt_example_scope_var_interaction(
     }
     if let Some(paren) = node.as_parentheses_node() {
         if let Some(body) = paren.body() {
-            return stmt_example_scope_var_interaction(&body, var_name);
+            return stmt_example_scope_var_interaction(&body, var_name, assign_offset);
         }
     }
 
@@ -915,16 +1003,17 @@ fn stmt_example_scope_var_interaction(
 fn rescue_var_interaction(
     rescue_node: &ruby_prism::RescueNode<'_>,
     var_name: &[u8],
+    assign_offset: usize,
 ) -> VarInteraction {
     let mut result = VarInteraction::None;
     if let Some(stmts) = rescue_node.statements() {
         for s in stmts.body().iter() {
-            let inner = stmt_example_scope_var_interaction(&s, var_name);
+            let inner = stmt_example_scope_var_interaction(&s, var_name, assign_offset);
             result = combine_var_interactions(result, inner);
         }
     }
     if let Some(subsequent) = rescue_node.subsequent() {
-        let inner = rescue_var_interaction(&subsequent, var_name);
+        let inner = rescue_var_interaction(&subsequent, var_name, assign_offset);
         result = combine_var_interactions(result, inner);
     }
     result
@@ -1638,9 +1727,140 @@ fn check_var_in_rescue_scopes_inner(
     false
 }
 
+/// Deep recursive check: does any node in the subtree WRITE to the variable?
+/// Unlike `node_references_var` (which only checks reads/RHS), this checks for
+/// write nodes (`LocalVariableWriteNode`, operator-write, or-write, multi-write).
+/// Recurses through all node types including call receivers and block bodies.
+/// Used to detect writes nested inside `expect do ... end` and similar constructs.
+fn node_writes_var_deep(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
+    if let Some(lw) = node.as_local_variable_write_node() {
+        if lw.name().as_slice() == var_name {
+            return true;
+        }
+        return node_writes_var_deep(&lw.value(), var_name);
+    }
+    if let Some(ow) = node.as_local_variable_or_write_node() {
+        if ow.name().as_slice() == var_name {
+            return true;
+        }
+        return node_writes_var_deep(&ow.value(), var_name);
+    }
+    if let Some(aw) = node.as_local_variable_and_write_node() {
+        if aw.name().as_slice() == var_name {
+            return true;
+        }
+        return node_writes_var_deep(&aw.value(), var_name);
+    }
+    if let Some(opw) = node.as_local_variable_operator_write_node() {
+        if opw.name().as_slice() == var_name {
+            return true;
+        }
+        return node_writes_var_deep(&opw.value(), var_name);
+    }
+    if let Some(mw) = node.as_multi_write_node() {
+        for target in mw.lefts().iter() {
+            if let Some(lt) = target.as_local_variable_target_node() {
+                if lt.name().as_slice() == var_name {
+                    return true;
+                }
+            }
+        }
+        return node_writes_var_deep(&mw.value(), var_name);
+    }
+    // For call nodes, check receiver, args, and block body
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            if node_writes_var_deep(&recv, var_name) {
+                return true;
+            }
+        }
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                if node_writes_var_deep(&arg, var_name) {
+                    return true;
+                }
+            }
+        }
+        if let Some(block) = call.block() {
+            if let Some(bn) = block.as_block_node() {
+                if !block_has_param(&bn, var_name) {
+                    if let Some(body) = bn.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            for s in stmts.body().iter() {
+                                if node_writes_var_deep(&s, var_name) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    // Recurse through common node types
+    if let Some(stmts) = node.as_statements_node() {
+        return stmts
+            .body()
+            .iter()
+            .any(|s| node_writes_var_deep(&s, var_name));
+    }
+    if let Some(if_node) = node.as_if_node() {
+        if let Some(stmts) = if_node.statements() {
+            if stmts
+                .body()
+                .iter()
+                .any(|s| node_writes_var_deep(&s, var_name))
+            {
+                return true;
+            }
+        }
+        if let Some(sub) = if_node.subsequent() {
+            return node_writes_var_deep(&sub, var_name);
+        }
+        return false;
+    }
+    if let Some(begin_node) = node.as_begin_node() {
+        if let Some(stmts) = begin_node.statements() {
+            return stmts
+                .body()
+                .iter()
+                .any(|s| node_writes_var_deep(&s, var_name));
+        }
+        return false;
+    }
+    if let Some(paren) = node.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            return node_writes_var_deep(&body, var_name);
+        }
+    }
+    false
+}
+
 /// Check if a node is an interpolated string or symbol.
 fn is_interpolated_string_or_symbol(node: &ruby_prism::Node<'_>) -> bool {
     node.as_interpolated_string_node().is_some() || node.as_interpolated_symbol_node().is_some()
+}
+
+/// Check if a block body contains any assignment to the given variable name.
+/// This is a shallow check at the block body's top-level statements only
+/// (including recursing through control flow but NOT into nested blocks).
+/// Used for block-local variable scoping: if a block assigns a variable that
+/// wasn't defined in its enclosing scope, Ruby creates a block-local binding.
+fn block_body_assigns_var(block: &ruby_prism::BlockNode<'_>, var_name: &[u8]) -> bool {
+    let body = match block.body() {
+        Some(b) => b,
+        None => return false,
+    };
+    let stmts = match body.as_statements_node() {
+        Some(s) => s,
+        None => return false,
+    };
+    let mut assigns = Vec::new();
+    for s in stmts.body().iter() {
+        collect_assignments_in_scope(&s, &mut assigns);
+    }
+    assigns.iter().any(|a| a.name == var_name)
 }
 
 /// Check if the body of a block references a variable. Does a deep recursive
@@ -2321,6 +2541,137 @@ fn is_includes_method(name: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(LeakyLocalVariable, "cops/rspec/leaky_local_variable");
+
+    #[test]
+    fn test_no_fp_iterator_var_only_in_description() {
+        // jruby pattern: format = "%" + f inside .each, used only in it description
+        let source = br#"describe SomeClass do
+  %w(d i).each do |f|
+    format = "%" + f
+
+    it "supports integer formats using #{format}" do
+      ("%#{f}" % 10).should == "10"
+    end
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Expected 0 offenses for var used only in description, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_fp_sibling_block_scope() {
+        // discourse rswag pattern: variable assigned in one block, reference in sibling block
+        let source = br#"describe SomeClass do
+  path "/api" do
+    get "List" do
+      expected_schema = nil
+      response "200" do
+        it_behaves_like "endpoint" do
+          let(:schema) { expected_schema }
+        end
+      end
+    end
+
+    post "Create" do
+      expected_schema = load_schema("create")
+      parameter name: :params, schema: expected_schema
+    end
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        // Only the get block's expected_schema should be flagged (it leaks into it_behaves_like).
+        // The post block's expected_schema should NOT be flagged (used only at DSL level, not in example scopes).
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense (get block only), got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_fp_var_reassigned_in_nested_expect_block() {
+        // excon pattern: response = nil at group scope, reassigned inside it > expect do end
+        let source = br#"describe SomeClass do
+  response = nil
+
+  it 'returns a response' do
+    expect do
+      response = make_request()
+    end.to_not raise_error
+  end
+
+  it 'has status' do
+    expect(response.status).to eq(200)
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        // RuboCop doesn't flag this because the first it block's write kills the group-level value.
+        // The second it block reads from the first it block's assignment (linear flow).
+        // The deep write check detects the nested write inside expect do end.
+        assert_eq!(
+            diags.len(),
+            0,
+            "Expected 0 offenses (nested write kills value), got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_fn_file_level_var_in_if_elsif() {
+        // inspec pattern: variable assigned at file level, conditionally reassigned,
+        // then used in describe block inside an if.
+        // RuboCop flags all 4 assignments (initial + 3 conditional).
+        let source = br#"root_group = 'root'
+
+if os == 'aix'
+  root_group = 'system'
+elsif os == 'freebsd'
+  root_group = 'wheel'
+elsif os == 'suse'
+  root_group = 'sfcb'
+end
+
+if true
+  describe SomeClass do
+    its('groups') { should include root_group }
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        // RuboCop flags ALL assignments because any one of them could be the value
+        // that reaches the example scope (it depends on the runtime `os` value).
+        assert_eq!(
+            diags.len(),
+            4,
+            "Expected 4 offenses (initial + 3 conditional), got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn test_fp_file_level_var_reassigned_at_group_scope() {

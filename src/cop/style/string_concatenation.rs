@@ -3,11 +3,25 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// Corpus investigation (FP=119): nitrocop was flagging string concatenation where one
-/// operand is a heredoc (e.g., `<<EOM + code`, `@conf + <<CONF`). RuboCop does not flag
-/// these because heredocs cannot be converted to string interpolation. Fixed by checking
-/// if either operand is a heredoc (StringNode or InterpolatedStringNode with `<<` opening)
-/// and skipping the offense.
+/// Corpus investigation (FP=119→96→0, FN=454→0):
+///
+/// FP fix 1 (FP=119): Heredoc concatenation (e.g., `<<EOM + code`) — RuboCop doesn't flag
+/// because heredocs can't be converted to interpolation. Fixed by checking opening `<<`.
+///
+/// FP fix 2 (FP=96): Percent literal concatenation (e.g., `config + %[...]`, `header + %{...}`).
+/// In Prism, percent literals without interpolation parse as StringNode, but in Parser they're
+/// dstr (not str_type?). RuboCop's `str_type?` matcher excludes dstr, so it doesn't flag these.
+/// Fixed by checking if the StringNode's opening starts with `%`.
+///
+/// FN fix (FN=454): Two root causes:
+/// 1. Multiline skip was too broad — skipped all multiline `str + str` regardless of where `+`
+///    appeared. RuboCop only skips "line-end concatenation" where `+\s*\n` pattern exists (the `+`
+///    is at the end of the line). With backslash continuation (`"str" \` + newline + `"str"`), the
+///    `+` is at the start of the next line, so RuboCop flags it. Fixed by checking for `+\s*\n`.
+/// 2. Dedup was inverted — skipped outer nodes when receiver was a concat chain, meaning only the
+///    innermost was flagged. But inner nodes often get skipped by line-end-concat check while the
+///    middle/outer nodes (with CallNode receivers, not str_type?) should still fire. Changed to
+///    skip inner nodes when they're part of a larger chain (argument-side dedup).
 pub struct StringConcatenation;
 
 impl StringConcatenation {
@@ -15,7 +29,19 @@ impl StringConcatenation {
         // Only match plain StringNode (str_type? in RuboCop), NOT InterpolatedStringNode (dstr).
         // RuboCop's node matcher uses str_type? which excludes dstr, so `foo + "#{bar}"`
         // is not flagged when neither side is a plain string literal.
-        node.as_string_node().is_some()
+        // Also exclude percent literals (%[...], %{...}, %(...), %Q[...], %q[...]) — in Prism
+        // these are StringNode but in Parser they're dstr (not str_type?).
+        if let Some(s) = node.as_string_node() {
+            if let Some(opening) = s.opening_loc() {
+                let slice = opening.as_slice();
+                // Exclude heredocs (opening starts with <<) and percent literals (opening starts with %)
+                if slice.starts_with(b"<<") || slice.starts_with(b"%") {
+                    return false;
+                }
+            }
+            return true;
+        }
+        false
     }
 
     /// Check if either operand is a heredoc. In Prism, heredocs are StringNode or
@@ -35,24 +61,55 @@ impl StringConcatenation {
         false
     }
 
-    /// Check if the + call spans multiple lines (line-end concatenation)
-    fn is_multiline(source: &SourceFile, node: &ruby_prism::CallNode<'_>) -> bool {
-        if let Some(receiver) = node.receiver() {
-            let (recv_line, _) = source.offset_to_line_col(receiver.location().start_offset());
-            if let Some(args) = node.arguments() {
-                let args_list: Vec<_> = args.arguments().iter().collect();
-                if !args_list.is_empty() {
-                    let (arg_line, _) =
-                        source.offset_to_line_col(args_list[0].location().start_offset());
-                    return recv_line != arg_line;
-                }
-            }
+    /// Check if this is a line-end concatenation: both sides are string literals, the
+    /// expression spans multiple lines, and the `+` is at the end of a line (followed
+    /// by whitespace and newline). Matches RuboCop's `line_end_concatenation?` which
+    /// checks `node.source.match?(/\+\s*\n/)`.
+    fn is_line_end_concatenation(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> bool {
+        let receiver = match call.receiver() {
+            Some(r) => r,
+            None => return false,
+        };
+        let args = match call.arguments() {
+            Some(a) => a,
+            None => return false,
+        };
+        let arg_list: Vec<_> = args.arguments().iter().collect();
+        if arg_list.is_empty() {
+            return false;
+        }
+
+        // Both sides must be string literals
+        if !Self::is_string_literal(&receiver) || !Self::is_string_literal(&arg_list[0]) {
+            return false;
+        }
+
+        // Must be multiline
+        let (recv_line, _) = source.offset_to_line_col(receiver.location().start_offset());
+        let (arg_line, _) = source.offset_to_line_col(arg_list[0].location().start_offset());
+        if recv_line == arg_line {
+            return false;
+        }
+
+        // The `+` must be at the end of a line (followed by optional whitespace and newline).
+        // Extract the source text between receiver end and argument start.
+        let msg_loc = match call.message_loc() {
+            Some(loc) => loc,
+            None => return false,
+        };
+        let plus_offset = msg_loc.start_offset();
+        let arg_start = arg_list[0].location().start_offset();
+        // Check bytes after the `+` up to the argument
+        let src = source.as_bytes();
+        if plus_offset < arg_start.min(src.len()) {
+            let between = &src[plus_offset + 1..arg_start.min(src.len())];
+            // Must contain a newline (meaning `+` is at end of line, not start of next line)
+            return between.contains(&b'\n');
         }
         false
     }
 
-    /// Walk up the tree to find the topmost + node in a chain
-    /// Since we can't walk up from a node, we just report on each + individually
+    /// Check if this `+` call is a string concatenation (at least one side is a string literal)
     fn is_string_concat(call: &ruby_prism::CallNode<'_>) -> bool {
         if call.name().as_slice() != b"+" {
             return false;
@@ -109,26 +166,23 @@ impl Cop for StringConcatenation {
             }
         }
 
-        // Skip line-end concatenation (handled by Style/LineEndConcatenation)
-        if Self::is_multiline(source, &call) {
-            if let Some(receiver) = call.receiver() {
-                if let Some(args) = call.arguments() {
-                    let arg_list: Vec<_> = args.arguments().iter().collect();
-                    if !arg_list.is_empty()
-                        && Self::is_string_literal(&receiver)
-                        && Self::is_string_literal(&arg_list[0])
-                    {
-                        return;
-                    }
-                }
-            }
+        // Skip line-end concatenation where both sides are string literals, the
+        // expression spans multiple lines, and the `+` is at the end of a line.
+        // This is handled by Style/LineEndConcatenation instead.
+        if Self::is_line_end_concatenation(source, &call) {
+            return;
         }
 
-        // Skip if this node's receiver is already a + call with string
-        // (avoid duplicate reports for chains; only report the topmost)
+        // Dedup chains: skip this node if the receiver is a `+` concat that would
+        // itself be flagged (i.e., not skipped by line-end-concatenation). This
+        // avoids duplicate reports within chains while still ensuring at least one
+        // node in the chain fires. When the inner is line-end-concat (skipped), the
+        // outer/middle must still fire.
         if let Some(receiver) = call.receiver() {
             if let Some(recv_call) = receiver.as_call_node() {
-                if Self::is_string_concat(&recv_call) {
+                if Self::is_string_concat(&recv_call)
+                    && !Self::is_line_end_concatenation(source, &recv_call)
+                {
                     return;
                 }
             }

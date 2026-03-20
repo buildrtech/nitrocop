@@ -189,18 +189,18 @@ impl FocusVisitor<'_> {
                     for elem in hash.elements().iter() {
                         if let Some(pair) = elem.as_assoc_node() {
                             if let Some(key) = pair.key().as_symbol_node() {
-                                if key.unescaped() == b"focus" {
-                                    if pair.value().as_true_node().is_some() {
-                                        let start = key.location().start_offset();
-                                        let (line, column) = self.source.offset_to_line_col(start);
-                                        self.diagnostics.push(self.cop.diagnostic(
-                                            self.source,
-                                            line,
-                                            column,
-                                            "Focused spec found.".to_string(),
-                                        ));
-                                        return;
-                                    }
+                                if key.unescaped() == b"focus"
+                                    && pair.value().as_true_node().is_some()
+                                {
+                                    let start = key.location().start_offset();
+                                    let (line, column) = self.source.offset_to_line_col(start);
+                                    self.diagnostics.push(self.cop.diagnostic(
+                                        self.source,
+                                        line,
+                                        column,
+                                        "Focused spec found.".to_string(),
+                                    ));
+                                    return;
                                 }
                             }
                         }

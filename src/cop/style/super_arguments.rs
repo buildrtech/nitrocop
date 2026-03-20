@@ -3,6 +3,22 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Style/SuperArguments: flags `super(args)` when the arguments match the
+/// enclosing method's parameters exactly, since bare `super` already forwards
+/// them.
+///
+/// ## Root causes of prior FP/FN:
+/// - FP: super inside a block (do...end / { }) was flagged. RuboCop skips
+///   super calls inside blocks because the block may be evaluated in a
+///   different method context (e.g. define_method, DSL blocks).
+/// - FN: `super(&block)` — Prism puts the `&block` argument in SuperNode's
+///   `block` field, not in `arguments`. The old code treated any `block()` as
+///   a literal block and excluded the def's block param from matching, causing
+///   block-only forwarding to be missed entirely.
+/// - FN: `super(...)` forwarding — ForwardingArgumentsNode was not handled.
+/// - FN: `super()` with no-arg def — early return on "both empty" skipped it.
+/// - FN: Ruby 3.1 hash value omission `super(type:, hash:)` — ImplicitNode
+///   wrapping LocalVariableReadNode was not unwrapped.
 pub struct SuperArguments;
 
 impl Cop for SuperArguments {
@@ -48,6 +64,8 @@ enum DefParam {
     KeywordRest(Vec<u8>),
     /// Block param: `&block`
     Block(Vec<u8>),
+    /// Forwarding parameter: `...`
+    Forwarding,
 }
 
 /// Extract the ordered list of def parameters with their kinds.
@@ -98,7 +116,10 @@ fn extract_def_params(params: &ruby_prism::ParametersNode<'_>) -> Vec<DefParam> 
         }
     }
     if let Some(kw_rest) = params.keyword_rest() {
-        if let Some(kwr) = kw_rest.as_keyword_rest_parameter_node() {
+        // `...` forwarding parameter is stored in keyword_rest
+        if kw_rest.as_forwarding_parameter_node().is_some() {
+            result.push(DefParam::Forwarding);
+        } else if let Some(kwr) = kw_rest.as_keyword_rest_parameter_node() {
             if let Some(name) = kwr.name() {
                 result.push(DefParam::KeywordRest(name.as_slice().to_vec()));
             }
@@ -157,17 +178,30 @@ fn super_arg_matches_def_param(arg: &ruby_prism::Node<'_>, def_param: &DefParam)
             }
             false
         }
+        DefParam::Forwarding => arg.as_forwarding_arguments_node().is_some(),
     }
 }
 
 /// Check if an AssocNode is `name: name` (symbol key matching a local variable value).
+/// Also handles Ruby 3.1+ hash value omission (`name:`) where Prism wraps the
+/// value in an ImplicitNode.
 fn keyword_pair_matches(assoc: &ruby_prism::AssocNode<'_>, name: &[u8]) -> bool {
     let key = assoc.key();
     let value = assoc.value();
     if let Some(sym) = key.as_symbol_node() {
+        let sym_name: &[u8] = sym.unescaped();
+        if sym_name != name {
+            return false;
+        }
+        // Direct: `name: name`
         if let Some(lv) = value.as_local_variable_read_node() {
-            let sym_name: &[u8] = sym.unescaped();
-            return sym_name == name && lv.name().as_slice() == name;
+            return lv.name().as_slice() == name;
+        }
+        // Ruby 3.1+ shorthand `name:` — value is an ImplicitNode wrapping LocalVariableReadNode
+        if let Some(implicit) = value.as_implicit_node() {
+            if let Some(lv) = implicit.value().as_local_variable_read_node() {
+                return lv.name().as_slice() == name;
+            }
         }
     }
     false
@@ -192,7 +226,8 @@ fn flatten_super_args<'a>(
 
 struct SuperChecker<'a> {
     def_params: &'a [DefParam],
-    offsets: Vec<usize>,
+    has_forwarding: bool,
+    offsets: Vec<(usize, &'static str)>,
 }
 
 impl<'pr> Visit<'pr> for SuperChecker<'_> {
@@ -203,10 +238,21 @@ impl<'pr> Visit<'pr> for SuperChecker<'_> {
             Vec::new()
         };
 
-        let has_explicit_block = node.block().is_some();
+        // Determine block situation:
+        // - BlockArgumentNode (&block) → forwarding block arg, should be matched
+        // - BlockNode ({ } / do...end) → literal block, exclude def's block param
+        // - None → no block at super call site
+        let has_block_arg = node
+            .block()
+            .is_some_and(|b| b.as_block_argument_node().is_some());
+        let has_block_literal = node
+            .block()
+            .is_some_and(|b| b.as_block_argument_node().is_none());
 
-        // Build effective def params (exclude block param if super has explicit block)
-        let effective_def_params: Vec<&DefParam> = if has_explicit_block {
+        // Build effective def params:
+        // - If super has a block literal, exclude Block param (the block is overridden)
+        // - Otherwise, include all params
+        let effective_def_params: Vec<&DefParam> = if has_block_literal {
             self.def_params
                 .iter()
                 .filter(|p| !matches!(p, DefParam::Block(_)))
@@ -215,13 +261,55 @@ impl<'pr> Visit<'pr> for SuperChecker<'_> {
             self.def_params.iter().collect()
         };
 
-        let flat_args = flatten_super_args(super_args_raw.into_iter());
+        let mut flat_args = flatten_super_args(super_args_raw.into_iter());
 
-        if flat_args.is_empty() && effective_def_params.is_empty() {
-            return; // Both empty — no offense
+        // If the super call has a BlockArgumentNode (&block), add it to flat_args
+        // so it can be matched against the def's Block param.
+        if has_block_arg {
+            flat_args.push(node.block().unwrap());
+        }
+
+        // Handle forwarding: def method(...) / super(...)
+        if self.has_forwarding
+            && flat_args.len() == 1
+            && flat_args[0].as_forwarding_arguments_node().is_some()
+            && effective_def_params.len() == 1
+            && matches!(effective_def_params[0], DefParam::Forwarding)
+        {
+            self.offsets.push((
+                node.location().start_offset(),
+                "Call `super` without arguments and parentheses when the signature is identical.",
+            ));
+            return;
         }
 
         if flat_args.len() != effective_def_params.len() {
+            // Special case: super has a block literal AND a non-forwarded block arg in def.
+            // If positional/keyword args match (excluding block), RuboCop flags with a
+            // different message: "when all positional and keyword arguments are forwarded."
+            if has_block_literal {
+                let non_block_params: Vec<&DefParam> = self
+                    .def_params
+                    .iter()
+                    .filter(|p| !matches!(p, DefParam::Block(_)))
+                    .collect();
+                let has_block_param = self
+                    .def_params
+                    .iter()
+                    .any(|p| matches!(p, DefParam::Block(_)));
+                if has_block_param
+                    && flat_args.len() == non_block_params.len()
+                    && flat_args
+                        .iter()
+                        .zip(non_block_params.iter())
+                        .all(|(arg, param)| super_arg_matches_def_param(arg, param))
+                {
+                    self.offsets.push((
+                        node.location().start_offset(),
+                        "Call `super` without arguments and parentheses when all positional and keyword arguments are forwarded.",
+                    ));
+                }
+            }
             return;
         }
 
@@ -231,13 +319,83 @@ impl<'pr> Visit<'pr> for SuperChecker<'_> {
             .all(|(arg, param)| super_arg_matches_def_param(arg, param));
 
         if all_match {
-            self.offsets.push(node.location().start_offset());
+            // Use a different message when the def has a block param that's being
+            // replaced by a block literal (super(a) { x } with def(a, &blk))
+            let has_unreplaced_block = has_block_literal
+                && self
+                    .def_params
+                    .iter()
+                    .any(|p| matches!(p, DefParam::Block(_)));
+            let message = if has_unreplaced_block {
+                "Call `super` without arguments and parentheses when all positional and keyword arguments are forwarded."
+            } else {
+                "Call `super` without arguments and parentheses when the signature is identical."
+            };
+            self.offsets.push((node.location().start_offset(), message));
         }
     }
 
     fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {
         // Don't recurse into nested defs
     }
+
+    fn visit_block_node(&mut self, _node: &ruby_prism::BlockNode<'pr>) {
+        // Don't recurse into blocks — super inside a block refers to the
+        // block's enclosing method context, not the def we're checking
+    }
+
+    fn visit_lambda_node(&mut self, _node: &ruby_prism::LambdaNode<'pr>) {
+        // Don't recurse into lambdas
+    }
+}
+
+/// Check if any parameter in the def body has been reassigned (LocalVariableWriteNode,
+/// LocalVariableOrWriteNode, etc.) for a given name.
+fn has_param_reassignment(body: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
+    struct ReassignChecker<'n> {
+        name: &'n [u8],
+        found: bool,
+    }
+    impl<'pr> Visit<'pr> for ReassignChecker<'_> {
+        fn visit_local_variable_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableWriteNode<'pr>,
+        ) {
+            if node.name().as_slice() == self.name {
+                self.found = true;
+            }
+        }
+        fn visit_local_variable_or_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableOrWriteNode<'pr>,
+        ) {
+            if node.name().as_slice() == self.name {
+                self.found = true;
+            }
+        }
+        fn visit_local_variable_and_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableAndWriteNode<'pr>,
+        ) {
+            if node.name().as_slice() == self.name {
+                self.found = true;
+            }
+        }
+        fn visit_local_variable_operator_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+        ) {
+            if node.name().as_slice() == self.name {
+                self.found = true;
+            }
+        }
+        fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {
+            // Don't recurse into nested defs
+        }
+    }
+    let mut checker = ReassignChecker { name, found: false };
+    checker.visit(body);
+    checker.found
 }
 
 impl<'pr> Visit<'pr> for SuperArgumentsVisitor<'_> {
@@ -253,6 +411,15 @@ impl<'pr> Visit<'pr> for SuperArgumentsVisitor<'_> {
                     return;
                 }
             }
+            // Also skip anonymous rest (*) and anonymous block (&) — Ruby 3.2+
+            if let Some(rest) = params.rest() {
+                if rest
+                    .as_rest_parameter_node()
+                    .is_some_and(|r| r.name().is_none())
+                {
+                    return;
+                }
+            }
         }
 
         let def_params = if let Some(params) = node.parameters() {
@@ -261,25 +428,69 @@ impl<'pr> Visit<'pr> for SuperArgumentsVisitor<'_> {
             Vec::new()
         };
 
+        let has_forwarding = def_params.iter().any(|p| matches!(p, DefParam::Forwarding));
+
+        // Check for block param reassignment — if the block arg is reassigned,
+        // super(&block) is not a trivial forwarding
+        let has_block_reassignment = if let Some(body) = node.body() {
+            def_params.iter().any(|p| {
+                if let DefParam::Block(name) = p {
+                    has_param_reassignment(&body, name)
+                } else {
+                    false
+                }
+            })
+        } else {
+            false
+        };
+
         if let Some(body) = node.body() {
+            // Filter out block param if it's been reassigned
+            let effective_params: Vec<DefParam> = if has_block_reassignment {
+                def_params
+                    .into_iter()
+                    .filter(|p| !matches!(p, DefParam::Block(_)))
+                    .collect()
+            } else {
+                def_params
+            };
+
             let mut checker = SuperChecker {
-                def_params: &def_params,
+                def_params: &effective_params,
+                has_forwarding,
                 offsets: Vec::new(),
             };
             checker.visit(&body);
 
-            for offset in checker.offsets {
+            for (offset, message) in checker.offsets {
                 let (line, column) = self.source.offset_to_line_col(offset);
                 self.diagnostics.push(self.cop.diagnostic(
                     self.source,
                     line,
                     column,
-                    "Call `super` without arguments and parentheses when the signature is identical.".to_string(),
+                    message.to_string(),
                 ));
             }
         }
 
-        // Don't recurse into nested defs
+        // Recurse into the body to find nested defs (which we process independently)
+        if let Some(body) = node.body() {
+            let mut finder = NestedDefFinder { parent: self };
+            finder.visit(&body);
+        }
+    }
+}
+
+/// Traverses a subtree looking for nested DefNodes and delegates them to
+/// SuperArgumentsVisitor for independent processing.
+struct NestedDefFinder<'a, 'b> {
+    parent: &'a mut SuperArgumentsVisitor<'b>,
+}
+
+impl<'pr> Visit<'pr> for NestedDefFinder<'_, '_> {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        // Delegate to the main visitor
+        self.parent.visit_def_node(node);
     }
 }
 
