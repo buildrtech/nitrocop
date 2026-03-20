@@ -6,6 +6,21 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/CollectionCompact
+///
+/// ## Investigation findings (2026-03-20)
+///
+/// **FP root cause:** The cop was checking if the nil-checked variable was ANY block
+/// parameter, but RuboCop only flags when it's the LAST parameter. For multi-param
+/// blocks like `reject { |key, _builds| key.nil? }` or `reject { |_, val, _| val.nil? }`,
+/// the nil check is on a non-last parameter which means it's destructuring, not a
+/// simple element check — not equivalent to `.compact`.
+///
+/// **FN root cause:** The cop only handled `reject`/`reject!` patterns but was missing
+/// `select`/`select!`/`filter`/`filter!` with `!param.nil?` negation patterns.
+///
+/// **Fix:** Added last-parameter check for reject blocks, implemented select/filter
+/// support with `!param.nil?` negation detection.
 pub struct CollectionCompact;
 
 impl Cop for CollectionCompact {
@@ -45,100 +60,153 @@ impl Cop for CollectionCompact {
 
         let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
 
-        // Pattern: array.reject { |e| e.nil? } or array.reject(&:nil?)
-        if method_name == "reject" || method_name == "reject!" {
-            if call.receiver().is_none() {
-                return;
+        match method_name {
+            "reject" | "reject!" => {
+                self.check_reject(source, &call, method_name, &allowed_receivers, diagnostics);
             }
+            "select" | "select!" | "filter" | "filter!" => {
+                self.check_select_filter(
+                    source,
+                    &call,
+                    method_name,
+                    &allowed_receivers,
+                    diagnostics,
+                );
+            }
+            _ => {}
+        }
+    }
+}
 
-            // Check AllowedReceivers
-            if let Some(receiver) = call.receiver() {
-                let recv_src = std::str::from_utf8(receiver.location().as_slice()).unwrap_or("");
-                if allowed_receivers.iter().any(|ar| recv_src == ar.as_str()) {
-                    return;
+impl CollectionCompact {
+    /// Check reject { |e| e.nil? } and reject(&:nil?) patterns
+    fn check_reject(
+        &self,
+        source: &SourceFile,
+        call: &ruby_prism::CallNode<'_>,
+        method_name: &str,
+        allowed_receivers: &[String],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if call.receiver().is_none() {
+            return;
+        }
+
+        if self.is_allowed_receiver(call, allowed_receivers) {
+            return;
+        }
+
+        let bang = if method_name.ends_with('!') { "!" } else { "" };
+
+        // Check for block pass &:nil?
+        if let Some(block_arg) = call.block() {
+            if let Some(block_arg_node) = block_arg.as_block_argument_node() {
+                if let Some(expr) = block_arg_node.expression() {
+                    if let Some(sym) = expr.as_symbol_node() {
+                        let sym_name = std::str::from_utf8(sym.unescaped()).unwrap_or("");
+                        if sym_name == "nil?" {
+                            let loc = call.message_loc().unwrap_or(call.location());
+                            let (line, column) = source.offset_to_line_col(loc.start_offset());
+                            diagnostics.push(self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                format!("Use `compact{bang}` instead of `{method_name}(&:nil?)`."),
+                            ));
+                        }
+                    }
                 }
             }
+        }
 
-            // Check for block pass &:nil?
-            if let Some(block_arg) = call.block() {
-                if let Some(block_arg_node) = block_arg.as_block_argument_node() {
-                    if let Some(expr) = block_arg_node.expression() {
-                        if let Some(sym) = expr.as_symbol_node() {
-                            let sym_name = std::str::from_utf8(sym.unescaped()).unwrap_or("");
-                            if sym_name == "nil?" {
-                                let bang = if method_name == "reject!" { "!" } else { "" };
-                                let loc = call.message_loc().unwrap_or(call.location());
-                                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                                diagnostics.push(self.diagnostic(
-                                    source,
-                                    line,
-                                    column,
-                                    format!(
-                                        "Use `compact{}` instead of `{}(&:nil?)`.",
-                                        bang, method_name
-                                    ),
-                                ));
+        // Check for block { |e| e.nil? } — receiver of nil? must be the LAST block param
+        if let Some(block) = call.block() {
+            if let Some(block_node) = block.as_block_node() {
+                if let Some((last_param_name, _param_count)) = self.get_last_param_name(&block_node)
+                {
+                    if let Some(body) = block_node.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            let stmts_list: Vec<_> = stmts.body().iter().collect();
+                            if stmts_list.len() == 1 {
+                                if let Some(inner_call) = stmts_list[0].as_call_node() {
+                                    if self.is_nil_check_on_var(&inner_call, &last_param_name) {
+                                        let loc = call.message_loc().unwrap_or(call.location());
+                                        let (line, column) =
+                                            source.offset_to_line_col(loc.start_offset());
+                                        diagnostics.push(self.diagnostic(
+                                            source,
+                                            line,
+                                            column,
+                                            format!(
+                                                "Use `compact{bang}` instead of `{method_name} {{ |e| e.nil? }}`."
+                                            ),
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+    }
 
-            // Check for block { |e| e.nil? } or { |k, v| v.nil? }
-            if let Some(block) = call.block() {
-                if let Some(block_node) = block.as_block_node() {
-                    // Collect all block parameter names
-                    let param_names: Vec<Vec<u8>> = block_node
-                        .parameters()
-                        .and_then(|p| p.as_block_parameters_node())
-                        .and_then(|bp| bp.parameters())
-                        .map(|params| {
-                            params
-                                .requireds()
-                                .iter()
-                                .filter_map(|r| {
-                                    r.as_required_parameter_node()
-                                        .map(|rp| rp.name().as_slice().to_vec())
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+    /// Check select/filter { |e| !e.nil? } patterns (negated nil check)
+    fn check_select_filter(
+        &self,
+        source: &SourceFile,
+        call: &ruby_prism::CallNode<'_>,
+        method_name: &str,
+        allowed_receivers: &[String],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if call.receiver().is_none() {
+            return;
+        }
 
-                    if !param_names.is_empty() {
-                        if let Some(body) = block_node.body() {
-                            if let Some(stmts) = body.as_statements_node() {
-                                let stmts_list: Vec<_> = stmts.body().iter().collect();
-                                if stmts_list.len() == 1 {
-                                    if let Some(inner_call) = stmts_list[0].as_call_node() {
-                                        let inner_method =
-                                            std::str::from_utf8(inner_call.name().as_slice())
-                                                .unwrap_or("");
-                                        if inner_method == "nil?" {
-                                            // Verify the receiver is one of the block parameters directly
-                                            // (not a method chain like `notification.target_status.nil?`)
-                                            let receiver_is_param = inner_call
-                                                .receiver()
-                                                .and_then(|r| r.as_local_variable_read_node())
-                                                .map(|lv| {
-                                                    param_names.iter().any(|p| {
-                                                        lv.name().as_slice() == p.as_slice()
-                                                    })
-                                                })
-                                                .unwrap_or(false);
+        if self.is_allowed_receiver(call, allowed_receivers) {
+            return;
+        }
 
-                                            if receiver_is_param {
-                                                let bang =
-                                                    if method_name == "reject!" { "!" } else { "" };
-                                                let loc =
-                                                    call.message_loc().unwrap_or(call.location());
-                                                let (line, column) =
-                                                    source.offset_to_line_col(loc.start_offset());
-                                                diagnostics.push(self.diagnostic(
-                                                    source,
-                                                    line,
-                                                    column,
-                                                    format!("Use `compact{}` instead of `{} {{ |e| e.nil? }}`.", bang, method_name),
-                                                ));
+        let bang = if method_name.ends_with('!') { "!" } else { "" };
+
+        // Check for block { |e| !e.nil? } — the body is a `!` call on `e.nil?`
+        if let Some(block) = call.block() {
+            if let Some(block_node) = block.as_block_node() {
+                if let Some((last_param_name, _param_count)) = self.get_last_param_name(&block_node)
+                {
+                    if let Some(body) = block_node.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            let stmts_list: Vec<_> = stmts.body().iter().collect();
+                            if stmts_list.len() == 1 {
+                                // Pattern: !e.nil? is parsed as a CallNode with method `!`
+                                // whose receiver is `e.nil?`
+                                if let Some(not_call) = stmts_list[0].as_call_node() {
+                                    let not_method =
+                                        std::str::from_utf8(not_call.name().as_slice())
+                                            .unwrap_or("");
+                                    if not_method == "!" {
+                                        // The receiver of `!` should be `e.nil?`
+                                        if let Some(receiver) = not_call.receiver() {
+                                            if let Some(nil_call) = receiver.as_call_node() {
+                                                if self.is_nil_check_on_var(
+                                                    &nil_call,
+                                                    &last_param_name,
+                                                ) {
+                                                    let loc = call
+                                                        .message_loc()
+                                                        .unwrap_or(call.location());
+                                                    let (line, column) = source
+                                                        .offset_to_line_col(loc.start_offset());
+                                                    diagnostics.push(self.diagnostic(
+                                                        source,
+                                                        line,
+                                                        column,
+                                                        format!(
+                                                            "Use `compact{bang}` instead of `{method_name} {{ |e| !e.nil? }}`."
+                                                        ),
+                                                    ));
+                                                }
                                             }
                                         }
                                     }
@@ -149,6 +217,57 @@ impl Cop for CollectionCompact {
                 }
             }
         }
+    }
+
+    /// Get the name of the last block parameter. Returns (name, param_count).
+    fn get_last_param_name(
+        &self,
+        block_node: &ruby_prism::BlockNode<'_>,
+    ) -> Option<(Vec<u8>, usize)> {
+        let params = block_node
+            .parameters()
+            .and_then(|p| p.as_block_parameters_node())
+            .and_then(|bp| bp.parameters())?;
+
+        let requireds: Vec<_> = params
+            .requireds()
+            .iter()
+            .filter_map(|r| r.as_required_parameter_node())
+            .collect();
+
+        if requireds.is_empty() {
+            return None;
+        }
+
+        let last = requireds.last().unwrap();
+        Some((last.name().as_slice().to_vec(), requireds.len()))
+    }
+
+    /// Check if a call node is `var.nil?` where var is a local variable read
+    /// matching the given name (not a method chain like `obj.field.nil?`)
+    fn is_nil_check_on_var(&self, call: &ruby_prism::CallNode<'_>, var_name: &[u8]) -> bool {
+        let method = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
+        if method != "nil?" {
+            return false;
+        }
+        call.receiver()
+            .and_then(|r| r.as_local_variable_read_node())
+            .map(|lv| lv.name().as_slice() == var_name)
+            .unwrap_or(false)
+    }
+
+    fn is_allowed_receiver(
+        &self,
+        call: &ruby_prism::CallNode<'_>,
+        allowed_receivers: &[String],
+    ) -> bool {
+        if let Some(receiver) = call.receiver() {
+            let recv_src = std::str::from_utf8(receiver.location().as_slice()).unwrap_or("");
+            if allowed_receivers.iter().any(|ar| recv_src == ar.as_str()) {
+                return true;
+            }
+        }
+        false
     }
 }
 
