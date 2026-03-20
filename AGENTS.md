@@ -303,6 +303,7 @@ python3 scripts/investigate-cop.py Department/CopName --context      # show sour
 python3 scripts/investigate-cop.py Department/CopName --fp-only      # only false positives
 python3 scripts/investigate-cop.py Department/CopName --fn-only      # only false negatives
 python3 scripts/investigate-cop.py Department/CopName --input f.json # use local corpus-results.json
+python3 scripts/investigate-cop.py Department/CopName --extended     # use extended corpus (5k+ repos)
 ```
 
 Use this as the **first step** when investigating a cop — it's instant (reads cached JSON) and shows every FP/FN location with source context from `vendor/corpus/`. No need to re-run nitrocop.
@@ -317,6 +318,7 @@ python3 scripts/investigate-repo.py rails --limit 10         # top 10 (default 2
 python3 scripts/investigate-repo.py --list                   # list all repos by match rate
 python3 scripts/investigate-repo.py --input f.json rails     # use local corpus-results.json
 python3 scripts/investigate-repo.py rails --no-git-exclude       # skip auto-exclusion of fixed cops
+python3 scripts/investigate-repo.py rails --extended             # use extended corpus (5k+ repos)
 ```
 
 To **reduce a corpus mismatch to a minimal reproduction**, use `reduce-mismatch.py`. It takes a specific FP/FN example (from `investigate-cop.py` output) and automatically shrinks the source file using delta debugging until only the triggering pattern remains:
@@ -339,6 +341,7 @@ python3 scripts/check-cop.py Department/CopName --verbose                     # 
 python3 scripts/check-cop.py Department/CopName --verbose --rerun             # force re-execution after a fix (uses batch mode)
 python3 scripts/check-cop.py Department/CopName --verbose --rerun --quick     # fast iteration: only repos with baseline activity
 python3 scripts/check-cop.py Department/CopName --input results.json          # use local corpus-results.json
+python3 scripts/check-cop.py Department/CopName --extended                    # use extended corpus (5k+ repos)
 ```
 
 `check-cop.py` compares aggregate nitrocop offense counts against the RuboCop baseline from the latest CI corpus oracle run. It reports two things:

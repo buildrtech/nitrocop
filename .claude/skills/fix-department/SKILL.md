@@ -22,6 +22,11 @@ Final stop condition:
 - The target shows 100.0% / 0 FP / 0 FN in the generated corpus reports
   (`README.md`, `docs/corpus.md`, and related artifacts), never via manual edits.
 - Linux CI/corpus oracle agrees with the local result.
+- **When `--extended` is passed:** the acceptance target is the extended corpus
+  (~5k repos), not just the standard corpus (~1k repos). Fix ALL divergences
+  shown by `gem_progress.py --extended`, even if the standard corpus already
+  shows 100%. The extended corpus reveals real bugs in edge-case repos that the
+  standard corpus misses.
 
 Per-cop `check-cop.py --rerun` results are intermediate count-based gates only.
 They are necessary, but they are NOT sufficient to end `/fix-department`.
@@ -46,7 +51,9 @@ Ephemeral cloud VMs typically run as `root` or a CI-specific user, not `vscode`.
    ```bash
    python3 .claude/skills/fix-department/scripts/gem_progress.py --summary
    ```
-   If the user passed `--extended`, add `--extended` to all `gem_progress.py` invocations:
+   If the user passed `--extended`, add `--extended` to all `gem_progress.py` invocations
+   **and** to all `investigate-cop.py`, `investigate-repo.py`, `check-cop.py`, and
+   `verify-cop-locations.py` invocations throughout the entire workflow:
    ```bash
    python3 .claude/skills/fix-department/scripts/gem_progress.py --summary --extended
    ```
