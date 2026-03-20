@@ -2789,7 +2789,68 @@ end
         );
     }
 
-    // TODO: FN patterns not yet implemented:
-    // - def body vars leaking into describe blocks (chef pattern)
-    // - block param reassignment leaking into examples (arachni/ManageIQ pattern)
+    #[test]
+    #[ignore] // FN not yet implemented — def body vars leaking into describe blocks
+    fn test_fn_def_body_vars_leak_into_describe() {
+        // chef pattern: variables assigned inside def body, then used in describe/let/it blocks
+        let source = br#"def static_provider_resolution(opts = {})
+  action         = opts[:action]
+  provider_class = opts[:provider]
+  resource_class = opts[:resource]
+
+  describe resource_class, "static provider" do
+    let(:node) do
+      node = Object.new
+      node
+    end
+
+    it "resolves the provider" do
+      expect(provider_class).to eq(action)
+    end
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        // All 3 variables should be flagged: action, provider_class, resource_class
+        // resource_class is used in describe args AND it description is allowed,
+        // but provider_class and action are used inside example scopes (let and it blocks)
+        assert!(
+            diags.len() >= 2,
+            "Expected at least 2 offenses for def body vars, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore] // FN not yet implemented — block param reassignment leaking into examples
+    fn test_fn_each_block_param_reassignment() {
+        // arachni/ManageIQ pattern: block param reassigned then used in example
+        let source = br#"describe SomeClass do
+  items.each do |k|
+    k = k.to_s
+
+    it "includes the '#{k}' group" do
+      expect(data[k]).to eq(subject.send(k))
+    end
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        // k = k.to_s should be flagged since the reassignment creates a new local
+        // that leaks into the example scope
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for block param reassignment, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
 }
