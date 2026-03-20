@@ -27,6 +27,22 @@ use crate::parse::source::SourceFile;
 /// and finding these dynamically-created examples, treating the group as non-empty.
 /// RuboCop's `examples?` matcher only checks immediate children and blocks, not
 /// def bodies. Fix: override `visit_def_node` in ExampleFinder to skip def bodies.
+///
+/// ## Corpus investigation (2026-03-20)
+///
+/// FP=0, FN=4.
+///
+/// FN patterns:
+/// - Lambda args: `each_attribute -> (a, b) do it(...) end` — Prism parses the
+///   `do...end` as the lambda body (LambdaNode), not a block on the call. ExampleFinder
+///   was descending into LambdaNode and finding `it` inside. RuboCop's
+///   `examples_inside_block?` only matches `(block ...)` nodes, not lambdas.
+///   Fix: override `visit_lambda_node` in ExampleFinder to skip.
+/// - Explicit begin..end: `context do begin; it(...); end; end` — RuboCop's AST uses
+///   `kwbegin` for explicit begin..end, and `examples?` only matches implicit `begin`
+///   (multi-statement block bodies). Prism uses `BeginNode`. ExampleFinder descended
+///   into it. Fix: override `visit_begin_node` in ExampleFinder to skip.
+/// - Constant-only groups and conditional-skip patterns also matched these root causes.
 pub struct EmptyExampleGroup;
 
 impl Cop for EmptyExampleGroup {
@@ -215,6 +231,22 @@ impl<'pr> Visit<'pr> for ExampleFinder {
     fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {
         // Skip — examples inside defs don't make the group non-empty
     }
+
+    // Don't descend into lambda nodes — examples inside lambdas passed as
+    // arguments (e.g., `each_attribute -> (a, b) do it(...) end`) are not
+    // statically visible to RuboCop. RuboCop's `examples_inside_block?` only
+    // matches `(block ...)` nodes, not lambda arguments.
+    fn visit_lambda_node(&mut self, _node: &ruby_prism::LambdaNode<'pr>) {
+        // Skip — examples inside lambdas don't make the group non-empty
+    }
+
+    // Don't descend into explicit begin..end blocks. In RuboCop's AST these
+    // are `kwbegin` nodes, and `examples?` only matches implicit `begin`
+    // (multi-statement block bodies). Prism represents explicit begin..end
+    // as `BeginNode`.
+    fn visit_begin_node(&mut self, _node: &ruby_prism::BeginNode<'pr>) {
+        // Skip — examples inside explicit begin..end don't count
+    }
 }
 
 #[cfg(test)]
@@ -228,5 +260,7 @@ mod tests {
         scenario_hooks_only = "hooks_only.rb",
         scenario_qualified_rspec = "qualified_rspec.rb",
         scenario_def_self_example_factory = "def_self_example_factory.rb",
+        scenario_lambda_with_examples = "lambda_with_examples.rb",
+        scenario_begin_block_with_examples = "begin_block_with_examples.rb",
     );
 }
