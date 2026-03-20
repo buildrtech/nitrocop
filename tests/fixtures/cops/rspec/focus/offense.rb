@@ -16,3 +16,12 @@ end
 ::RSpec.describe 'test', :focus do
                          ^^^^^^ RSpec/Focus: Focused spec found.
 end
+focus 'test' do
+^^^^^^^^^^^^ RSpec/Focus: Focused spec found.
+end
+described_class.new(name:, focus:)
+                           ^^^^^ RSpec/Focus: Focused spec found.
+subject { described_class.new(command_runner:, focus:) }
+                                               ^^^^^ RSpec/Focus: Focused spec found.
+Pane.new(commands: commands, focus: focus, layout: layout)
+                                    ^^^^^ RSpec/Focus: Focused spec found.

@@ -4,6 +4,23 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RSpec/Focus: Checks if examples are focused.
+///
+/// FN investigation (2026-03): 7 FNs all from Ruby 3.1+ keyword argument
+/// shorthand `focus:` (equivalent to `focus: focus`). In Parser gem AST, the
+/// value of `focus:` shorthand is `(send nil? :focus)` — a bare method call.
+/// RuboCop's `focused_block?` pattern matches ANY `(send nil? :focus)` that is
+/// not chained and not inside a method definition. In Prism, the shorthand
+/// produces `ImplicitNode { CallNode(focus) }`, and the explicit `focus: focus`
+/// produces a bare `CallNode(focus)`. Both are visited by the walker.
+///
+/// Root cause: the cop previously required `call.block().is_some()` for focused
+/// method detection, which excluded the blockless implicit/explicit `focus` calls
+/// from shorthand keyword args.
+///
+/// Fix: removed the block requirement for focused methods. Added a chaining check
+/// (source text peek for `.` / `&.` after the call) to match RuboCop's
+/// `node.chained?` guard, preventing FPs on patterns like `fit.id`.
 pub struct Focus;
 
 /// All RSpec methods that can have focus metadata or be f-prefixed.
@@ -33,6 +50,26 @@ const RSPEC_FOCUSABLE: &[&str] = &[
 fn is_focusable_method(name: &[u8]) -> bool {
     let s = std::str::from_utf8(name).unwrap_or("");
     RSPEC_FOCUSABLE.contains(&s)
+}
+
+/// Check if a call node is "chained" — i.e., used as the receiver of another
+/// method call. Detects `.` or `&.` immediately following the call expression
+/// in the source text (after optional whitespace on the same line).
+fn is_chained_call(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> bool {
+    let end = call.location().end_offset();
+    let src = source.as_bytes();
+    let mut i = end;
+    // Skip horizontal whitespace only (not newlines)
+    while i < src.len() && (src[i] == b' ' || src[i] == b'\t') {
+        i += 1;
+    }
+    if i < src.len() && src[i] == b'.' {
+        return true;
+    }
+    if i + 1 < src.len() && src[i] == b'&' && src[i + 1] == b'.' {
+        return true;
+    }
+    false
 }
 
 impl Cop for Focus {
@@ -69,9 +106,13 @@ impl Cop for Focus {
         let method_name = call.name().as_slice();
 
         // Check for f-prefixed methods (fit, fdescribe, fcontext, etc.)
+        // Also matches bare `focus` calls from Ruby 3.1+ shorthand `focus:` (which
+        // desugars to `focus: focus` where the value is `(send nil? :focus)`).
         if is_rspec_focused(method_name) {
-            // Must have a block to be an RSpec call (not just a method call inside def)
-            if call.block().is_some() {
+            // Skip chained calls like `fit.id` — RuboCop's `node.chained?` guard.
+            // A call is chained when it serves as the receiver of another call
+            // (i.e., `.` or `&.` follows immediately after the call expression).
+            if !is_chained_call(source, &call) {
                 let loc = call.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(Diagnostic {
