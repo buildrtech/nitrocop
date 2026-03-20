@@ -463,8 +463,25 @@ fn build_expected_path(
     path_parts.join("/")
 }
 
+/// Convert CamelCase to snake_case using the same algorithm as RuboCop's
+/// DefaultInflector:
+///   string.gsub(/([^A-Z])([A-Z]+)/, '\1_\2')
+///         .gsub(/([A-Z])([A-Z][^A-Z\d]+)/, '\1_\2')
+///         .downcase
+///
+/// This differs from `schema::camel_to_snake` for constants containing
+/// underscores (e.g., `RSA_AES_CBC` → `rs_a__ae_s__cbc` not `rsa_aes_cbc`).
 fn camel_to_snake(s: &str) -> String {
-    crate::schema::camel_to_snake(s)
+    // Step 1: gsub(/([^A-Z])([A-Z]+)/, '\1_\2')
+    let re1 = regex::Regex::new(r"([^A-Z])([A-Z]+)").unwrap();
+    let step1 = re1.replace_all(s, "${1}_${2}");
+
+    // Step 2: gsub(/([A-Z])([A-Z][^A-Z\d]+)/, '\1_\2')
+    let re2 = regex::Regex::new(r"([A-Z])([A-Z][^A-Z\d]+)").unwrap();
+    let step2 = re2.replace_all(&step1, "${1}_${2}");
+
+    // Step 3: downcase
+    step2.to_lowercase()
 }
 
 /// Match the file path against the expected regex pattern.
@@ -613,6 +630,27 @@ mod tests {
         assert_eq!(camel_to_snake("Foo"), "foo");
         assert_eq!(camel_to_snake("API"), "api");
         assert_eq!(camel_to_snake("HTMLParser"), "html_parser");
+        // Constants with underscores: RuboCop's DefaultInflector inserts _
+        // between uppercase sequences and existing underscores
+        assert_eq!(camel_to_snake("RSA_AES_CBC"), "rs_a__ae_s__cbc");
+    }
+
+    #[test]
+    fn underscore_constant_name_matches_rubocop_inflector() {
+        // Arachni::Support::Crypto::RSA_AES_CBC should produce path ending
+        // with support/crypto/rs_a__ae_s__cbc
+        let source = b"describe Arachni::Support::Crypto::RSA_AES_CBC do\nend\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &SpecFilePathFormat,
+            source,
+            CopConfig::default(),
+            "arachni/support/crypto/rs_a__ae_s__cbc_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when path matches RuboCop's DefaultInflector for underscored constants, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
