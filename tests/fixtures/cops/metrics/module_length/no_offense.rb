@@ -467,3 +467,20 @@ module OuterWithIfClass
   CONST_J = 10
 end
 
+# Module.new do ... end with short body should not be flagged
+ShortAnon = Module.new do
+  def foo
+    1
+  end
+
+  def bar
+    2
+  end
+end
+
+# ::Module.new do ... end with short body should not be flagged
+QualifiedShortAnon = ::Module.new do
+  def baz
+    3
+  end
+end

@@ -1,5 +1,10 @@
-use crate::cop::node_type::{CLASS_NODE, MODULE_NODE, STATEMENTS_NODE};
-use crate::cop::util::{collect_foldable_ranges, count_body_lines_full, inner_classlike_ranges};
+use crate::cop::node_type::{
+    CLASS_NODE, CONSTANT_OR_WRITE_NODE, CONSTANT_PATH_OR_WRITE_NODE, CONSTANT_PATH_WRITE_NODE,
+    CONSTANT_WRITE_NODE, MODULE_NODE, MULTI_WRITE_NODE, STATEMENTS_NODE,
+};
+use crate::cop::util::{
+    collect_foldable_ranges, count_body_lines_ex, count_body_lines_full, inner_classlike_ranges,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -14,7 +19,77 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix applied in this batch: short cop name resolution in
 /// `parse::directives` (framework-level), which this cop now benefits from.
+///
+/// ## Corpus investigation (2026-03-20)
+///
+/// FN=1 from `Module.new do ... end` anonymous module blocks not being counted.
+/// RuboCop's `on_casgn` handler matches `(casgn nil? _ (any_block (send (const
+/// {nil? cbase} :Module) :new) ...))` — constant assignments where the value is
+/// `Module.new do ... end`. Added handling for all constant assignment forms
+/// (`ConstantWriteNode`, `ConstantPathWriteNode`, `ConstantOrWriteNode`,
+/// `ConstantPathOrWriteNode`, `MultiWriteNode`) mirroring the ClassLength
+/// pattern.
 pub struct ModuleLength;
+
+fn is_top_level_module_const(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(read) = node.as_constant_read_node() {
+        return read.name().as_slice() == b"Module";
+    }
+    if let Some(path) = node.as_constant_path_node() {
+        return path.parent().is_none()
+            && path
+                .name()
+                .map(|n| n.as_slice() == b"Module")
+                .unwrap_or(false);
+    }
+    false
+}
+
+fn is_module_constructor(call: &ruby_prism::CallNode<'_>) -> bool {
+    if call.name().as_slice() != b"new" {
+        return false;
+    }
+    match call.receiver() {
+        Some(r) => is_top_level_module_const(&r),
+        None => false,
+    }
+}
+
+fn assignment_module_constructor_call<'pr>(
+    node: &ruby_prism::Node<'pr>,
+) -> Option<ruby_prism::CallNode<'pr>> {
+    let value = if let Some(n) = node.as_constant_write_node() {
+        n.value()
+    } else if let Some(n) = node.as_constant_path_write_node() {
+        n.value()
+    } else if let Some(n) = node.as_constant_or_write_node() {
+        n.value()
+    } else if let Some(n) = node.as_constant_path_or_write_node() {
+        n.value()
+    } else if let Some(n) = node.as_multi_write_node() {
+        let has_constant_target = n.lefts().iter().any(|t| {
+            t.as_constant_target_node().is_some() || t.as_constant_path_target_node().is_some()
+        });
+        if !has_constant_target {
+            return None;
+        }
+        n.value()
+    } else {
+        return None;
+    };
+
+    let call = value.as_call_node()?;
+    if !is_module_constructor(&call) {
+        return None;
+    }
+
+    let has_block = call.block().and_then(|b| b.as_block_node()).is_some();
+    if !has_block {
+        return None;
+    }
+
+    Some(call)
+}
 
 /// Check if a module's body is exactly one class or module node (namespace module).
 /// RuboCop skips namespace modules entirely (reports 0 length).
@@ -41,7 +116,16 @@ impl Cop for ModuleLength {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CLASS_NODE, MODULE_NODE, STATEMENTS_NODE]
+        &[
+            CLASS_NODE,
+            CONSTANT_OR_WRITE_NODE,
+            CONSTANT_PATH_OR_WRITE_NODE,
+            CONSTANT_PATH_WRITE_NODE,
+            CONSTANT_WRITE_NODE,
+            MODULE_NODE,
+            MULTI_WRITE_NODE,
+            STATEMENTS_NODE,
+        ]
     }
 
     fn check_node(
@@ -53,50 +137,84 @@ impl Cop for ModuleLength {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let module_node = match node.as_module_node() {
-            Some(m) => m,
-            None => return,
-        };
-
-        // Skip namespace modules (body is exactly one class or module)
-        if is_namespace_module(&module_node) {
-            return;
-        }
-
         let max = config.get_usize("Max", 100);
         let count_comments = config.get_bool("CountComments", false);
         let count_as_one = config.get_string_array("CountAsOne");
 
-        let start_offset = module_node.module_keyword_loc().start_offset();
-        let end_offset = module_node.end_keyword_loc().start_offset();
+        // Handle regular `module Foo ... end`
+        if let Some(module_node) = node.as_module_node() {
+            if is_namespace_module(&module_node) {
+                return;
+            }
 
-        // Collect foldable ranges from CountAsOne config
+            let start_offset = module_node.module_keyword_loc().start_offset();
+            let end_offset = module_node.end_keyword_loc().start_offset();
+
+            let mut foldable_ranges = Vec::new();
+            if let Some(cao) = &count_as_one {
+                if !cao.is_empty() {
+                    if let Some(body) = module_node.body() {
+                        foldable_ranges.extend(collect_foldable_ranges(source, &body, cao));
+                    }
+                }
+            }
+
+            let mut inner_ranges = Vec::new();
+            if let Some(body) = module_node.body() {
+                inner_ranges = inner_classlike_ranges(source, &body);
+            }
+
+            let count = count_body_lines_full(
+                source,
+                start_offset,
+                end_offset,
+                count_comments,
+                &foldable_ranges,
+                &inner_ranges,
+            );
+
+            if count > max {
+                let (line, column) = source.offset_to_line_col(start_offset);
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!("Module has too many lines. [{count}/{max}]"),
+                ));
+            }
+            return;
+        }
+
+        // Handle `Foo = Module.new do ... end` (and variants)
+        let Some(call_node) = assignment_module_constructor_call(node) else {
+            return;
+        };
+        let Some(block_node) = call_node.block().and_then(|b| b.as_block_node()) else {
+            return;
+        };
+
+        let start_offset = call_node.location().start_offset();
+        let end_offset = block_node.closing_loc().start_offset();
+
         let mut foldable_ranges = Vec::new();
         if let Some(cao) = &count_as_one {
             if !cao.is_empty() {
-                if let Some(body) = module_node.body() {
+                if let Some(body) = block_node.body() {
                     foldable_ranges.extend(collect_foldable_ranges(source, &body, cao));
                 }
             }
         }
 
-        // Collect inner class/module line ranges to fully exclude from the count
-        let mut inner_ranges = Vec::new();
-        if let Some(body) = module_node.body() {
-            inner_ranges = inner_classlike_ranges(source, &body);
-        }
-
-        let count = count_body_lines_full(
+        let count = count_body_lines_ex(
             source,
             start_offset,
             end_offset,
             count_comments,
             &foldable_ranges,
-            &inner_ranges,
         );
 
         if count > max {
-            let (line, column) = source.offset_to_line_col(start_offset);
+            let (line, column) = source.offset_to_line_col(node.location().start_offset());
             diagnostics.push(self.diagnostic(
                 source,
                 line,
