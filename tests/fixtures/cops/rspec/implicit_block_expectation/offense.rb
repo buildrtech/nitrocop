@@ -104,3 +104,26 @@ describe 'inherited subject' do
                        ^^^^^^^^^^^ RSpec/ImplicitBlockExpectation: Avoid implicit block expectations.
   end
 end
+
+# RSpec.describe with explicit receiver — top-level example group with RSpec. prefix
+RSpec.describe 'with receiver' do
+  subject { ->(source) { process(source) } }
+  its_call('value') { is_expected.to ret([result]) }
+                      ^^^^^^^^^^^ RSpec/ImplicitBlockExpectation: Avoid implicit block expectations.
+end
+
+# RSpec.describe with lambda subject and regular it block
+RSpec.describe 'receiver with it' do
+  subject { -> { boom } }
+  it { is_expected.to change { something }.to(new_value) }
+       ^^^^^^^^^^^ RSpec/ImplicitBlockExpectation: Avoid implicit block expectations.
+end
+
+# RSpec.describe with nested context inheriting lambda subject
+RSpec.describe 'receiver nested' do
+  subject { -> { execute } }
+  context 'inner' do
+    it { is_expected.to terminate }
+         ^^^^^^^^^^^ RSpec/ImplicitBlockExpectation: Avoid implicit block expectations.
+  end
+end

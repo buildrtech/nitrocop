@@ -44,3 +44,9 @@ end
 is_expected.to change { something }.to(new_value)
 is_expected.to raise_error(StandardError)
 is_expected.to throw_symbol(:halt)
+
+# RSpec.describe with non-lambda subject — should not flag
+RSpec.describe 'receiver non-lambda' do
+  subject { User.new }
+  it { is_expected.to be_valid }
+end

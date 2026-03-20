@@ -1,4 +1,4 @@
-use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example_group};
+use crate::cop::util::{self, RSPEC_DEFAULT_INCLUDE, is_rspec_example_group};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -36,6 +36,12 @@ use ruby_prism::Visit;
 /// group that has a lambda subject — including custom methods like `its_call`.
 /// Fixed by checking all non-subject, non-example-group child blocks when a
 /// lambda subject is in scope, matching RuboCop's ancestor-walking behavior.
+///
+/// Additional FN fix (FN=12→0, 2026-03-20): the visitor only entered
+/// `process_example_group` for bare `describe`/`context` calls (no receiver).
+/// `RSpec.describe` (with explicit `RSpec` receiver) was missed, falling
+/// through to default recursion without lambda-subject tracking. Fixed by
+/// also recognizing `RSpec.describe` as an example group entry point.
 pub struct ImplicitBlockExpectation;
 
 impl Cop for ImplicitBlockExpectation {
@@ -80,7 +86,17 @@ impl<'pr> Visit<'pr> for ImplicitBlockVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Look for top-level example groups (describe/context/etc.)
         let name = node.name().as_slice();
-        if node.receiver().is_none() && is_rspec_example_group(name) {
+        let is_example_group = if node.receiver().is_none() {
+            is_rspec_example_group(name)
+        } else {
+            // Handle RSpec.describe (explicit receiver)
+            name == b"describe"
+                && node
+                    .receiver()
+                    .and_then(|r| util::constant_name(&r))
+                    .is_some_and(|n| n == b"RSpec")
+        };
+        if is_example_group {
             if let Some(block) = node.block().and_then(|b| b.as_block_node()) {
                 self.process_example_group(&block, false);
                 return; // Don't recurse further — we handle children manually
