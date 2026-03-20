@@ -615,8 +615,12 @@ fn var_value_reaches_example_scope_in_stmts(
         if !past_assignment {
             if stmt_contains_offset(&stmt, assign_offset) {
                 past_assignment = true;
+                // Fall through to check this statement too — it may contain
+                // example scopes after the assignment (e.g., .each blocks
+                // with nested context/it inside the same block).
+            } else {
+                continue;
             }
-            continue;
         }
 
         // Check this statement for example-scope interactions with the variable.

@@ -233,3 +233,16 @@ describe '/proc/cpuinfo' do
     expect(flags).to include('nx')
   end
 end
+
+# Variables inside .each blocks used in nested example scopes
+describe "iterator block" do
+  [1, 2].each do |v|
+    val = v.to_s
+    ^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+    context "when val=#{val}" do
+      it "works" do
+        expect(val).to eq(v.to_s)
+      end
+    end
+  end
+end
