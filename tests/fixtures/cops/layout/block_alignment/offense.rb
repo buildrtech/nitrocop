@@ -122,3 +122,7 @@ end
   type_check(subvalue)
 end
 ^^^ Layout/BlockAlignment: Align `end` with the start of the line where the block is defined.
+# FN: chained }.to_json in assignment should still align with the assignment LHS
+result = items.map { |item|
+         }.to_json
+         ^ Layout/BlockAlignment: Align `}` with the start of the line where the block is defined.

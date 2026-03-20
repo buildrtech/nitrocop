@@ -201,3 +201,16 @@ end
                                                        margin: [0, 1, -2, 0]) do |cv, box|
                 cv.image("icon.png", at: [0, 0], width: box.content_width)
               end
+
+# FP fix: rescue modifier around assignment RHS in logical operand
+if (command = ENV["DOT"] || "dot") &&
+   (result = build_value { |value|
+               value
+             } rescue false)
+  puts result
+end
+
+# FP fix: splat wrapper aligns } with the splat, not the call start
+wrap *items.map { |item|
+     item
+     }

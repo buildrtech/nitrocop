@@ -173,6 +173,37 @@ use crate::parse::source::SourceFile;
 /// 5. Existing unfixable: chained `.to_json` in assignment (diaspora, 1 FN).
 ///
 /// Remaining gaps: 2 FP (paren/rescue, splat-arg) + 1 FN (chained closer in assignment).
+///
+/// ## Corpus investigation findings (2026-03-20)
+///
+/// Root causes of the final oracle-known gaps:
+/// 1. **Rescue modifier wrapper** (automaticmode, 1 FP) — `foo { ... } rescue false`
+///    should stop the ancestor walk at the current block expression, so the closer
+///    aligns with the block call start rather than the outer assignment LHS.
+/// 2. **Splat wrapper** (flyerhzm, 1 FP) — `wrap *items.map { ... }` aligns the
+///    closer with the `*` column because RuboCop stops at the `splat` ancestor.
+/// 3. **Plain chained call in assignment** (diaspora, 1 FN) — `result = items.map { ... }.to_json`
+///    must NOT accept the inner call start. RuboCop walks through the normal send
+///    chain to the assignment, so the closer aligns with the assignment LHS.
+///
+/// Fixes applied:
+/// - Added `find_same_line_splat_col` so splat-wrapped block calls align to `*`
+/// - Replaced the broad chained-closer escape with `accept_intermediate_call_start`,
+///   which only keeps the inner call start for rescue wrappers, safe-navigation
+///   chains (`&.`), and chained calls that immediately open another block
+///
+/// Verification:
+/// - `cargo test --lib -- block_alignment` passes with new fixture coverage for all
+///   three patterns
+/// - `scripts/verify-cop-locations.py Layout/BlockAlignment` reports all CI-known
+///   FP/FN fixed
+/// - `scripts/check-cop.py Layout/BlockAlignment --verbose --rerun` still reports
+///   15 excess in local batch `--corpus-check` mode, but a direct per-repo
+///   nitrocop vs RuboCop sweep over all 188 active repos shows 0 count delta on
+///   the 180 repos that were locally comparable. The 8 remaining repos failed
+///   local RuboCop/json validation (`devdocs`, `jruby`, and 6 repos with local
+///   JSON/tooling issues), so the residual batch excess is likely validation noise
+///   rather than a confirmed cop-logic mismatch.
 pub struct BlockAlignment;
 
 impl Cop for BlockAlignment {
@@ -247,10 +278,13 @@ impl Cop for BlockAlignment {
         // When there's an assignment, the alignment target is the LHS (matching RuboCop's
         // behavior where `block_end_align_target` walks past assignment nodes).
         let assignment_col = find_assignment_lhs_col(bytes, call_start_offset);
+        let splat_col = find_same_line_splat_col(bytes, call_start_offset);
 
         // The expression start column: if there's an assignment on the same line as
-        // the call start, use the LHS column. Otherwise use the CallNode's column.
-        let expression_start_col = assignment_col.unwrap_or(call_start_col);
+        // the call start, use the LHS column. If the block call is wrapped in a
+        // same-line splat (`wrap *items.map { ... }`), align with the `*` column.
+        // Otherwise use the CallNode's column.
+        let expression_start_col = splat_col.or(assignment_col).unwrap_or(call_start_col);
 
         // Also compute the expression start line's indent.
         let expression_start_indent = line_indent(bytes, call_start_offset);
@@ -315,16 +349,23 @@ impl Cop for BlockAlignment {
                 // valid alignment targets. RuboCop's `disqualified_parent?` stops the
                 // ancestry walk when the parent is on a different line (except for masgn).
                 let same_line_operator_col = find_same_line_operator_lhs(bytes, call_start_offset);
-                // Accept call_start_col when: (a) no assignment (original behavior), or
-                // (b) the closer is followed by a chained method call on the same line
-                // (e.g., `end.check_request`), or (c) the closer is followed by `&.`
-                // (safe navigation chain like `end&.path`).
-                let closer_is_chained = is_closer_chained(
-                    bytes,
-                    closing_loc.start_offset(),
-                    closing_loc.as_slice().len(),
-                );
-                let accept_call_start = assignment_col.is_none() || closer_is_chained;
+                // Accept call_start_col as an extra target only when the block is on the
+                // RHS of an assignment and RuboCop would stop its ancestor walk before the
+                // assignment target. That happens for:
+                // - rescue modifier wrappers: `result = foo { ... } rescue false`
+                // - safe-navigation chains: `result = foo { ... }&.path`
+                // - chained calls that immediately open another block:
+                //   `result = foo { ... }.check do ... end`
+                //
+                // Plain chained calls like `result = foo { ... }.to_json` do NOT qualify:
+                // RuboCop walks through the normal send node to the assignment and aligns
+                // the closer with the LHS.
+                let accept_call_start = assignment_col.is_some()
+                    && accept_intermediate_call_start(
+                        bytes,
+                        closing_loc.start_offset(),
+                        closing_loc.as_slice().len(),
+                    );
                 // Only accept expression_start_indent when the call actually starts
                 // at the line's indent position (i.e., the call is the first thing on
                 // the line). When the call is mid-line (e.g., inside parens like
@@ -755,50 +796,104 @@ fn skip_assignment_backward(bytes: &[u8], line_start: usize, pos: usize) -> usiz
     pos
 }
 
-/// Check if a closing keyword (end/}) is followed by a chained method call.
-/// Returns true for patterns like `end.check_request`, `end&.path`, `}.sort_by`,
-/// and also next-line dot chains like:
-///   }
-///   .sort_by { |r| ... }
-/// This indicates the block is an intermediate part of a method chain, not the final closer.
-fn is_closer_chained(bytes: &[u8], closer_offset: usize, closer_len: usize) -> bool {
+/// Check if the block call on this line is immediately wrapped in a splat:
+///   wrap *items.map { |item| ... }
+///         ^
+/// When RuboCop's ancestor walk stops at `splat`, the closing `}` must align with
+/// the `*`, not with the call receiver.
+fn find_same_line_splat_col(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
+    let mut line_start = call_start_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+
+    if call_start_offset > line_start && bytes[call_start_offset - 1] == b'*' {
+        return Some(call_start_offset - 1 - line_start);
+    }
+
+    None
+}
+
+/// When the block sits on the RHS of an assignment, accept the inner call start
+/// as an alternate target only for the cases where RuboCop's ancestor walk stops
+/// before reaching the assignment node.
+fn accept_intermediate_call_start(bytes: &[u8], closer_offset: usize, closer_len: usize) -> bool {
     let after = closer_offset + closer_len;
     if after >= bytes.len() {
         return false;
     }
-    // Check for `.method` or `&.method` immediately after the closer (same line)
-    if bytes[after] == b'.' {
-        return true;
-    }
-    if bytes[after] == b'&' && after + 1 < bytes.len() && bytes[after + 1] == b'.' {
-        return true;
-    }
-    // Check for next-line dot chain: skip to the next non-empty line and check
-    // if it starts with `.` or `&.` (after whitespace)
+
     let mut pos = after;
-    // Skip rest of current line
-    while pos < bytes.len() && bytes[pos] != b'\n' {
-        // If there's non-whitespace content after the closer on this line
-        // (like ` rescue false)` or `.to_json`), don't look at next line
-        if bytes[pos] != b' ' && bytes[pos] != b'\t' && bytes[pos] != b'\r' {
+    while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t' || bytes[pos] == b'\r') {
+        pos += 1;
+    }
+
+    if pos < bytes.len() && bytes[pos] != b'\n' {
+        if bytes[pos] == b'&' && pos + 1 < bytes.len() && bytes[pos + 1] == b'.' {
+            // Safe-navigation (`&.`) is a csend in RuboCop, so the ancestor walk
+            // stops at the current block rather than walking through to assignment.
+            return true;
+        }
+        if keyword_at(bytes, pos, b"rescue") {
+            return true;
+        }
+        if bytes[pos] == b'.' {
+            return chained_call_opens_block(bytes, pos + 1);
+        }
+        return false;
+    }
+
+    while pos < bytes.len() {
+        if bytes[pos] == b'\n' {
+            pos += 1;
+        }
+        while pos < bytes.len()
+            && (bytes[pos] == b' ' || bytes[pos] == b'\t' || bytes[pos] == b'\r')
+        {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
             return false;
         }
+        if bytes[pos] == b'\n' {
+            continue;
+        }
+        if bytes[pos] == b'&' && pos + 1 < bytes.len() && bytes[pos + 1] == b'.' {
+            return true;
+        }
+        if bytes[pos] == b'.' {
+            return chained_call_opens_block(bytes, pos + 1);
+        }
+        return false;
+    }
+
+    false
+}
+
+fn keyword_at(bytes: &[u8], pos: usize, keyword: &[u8]) -> bool {
+    let Some(rest) = bytes.get(pos..) else {
+        return false;
+    };
+    if !rest.starts_with(keyword) {
+        return false;
+    }
+
+    let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_';
+    let after_pos = pos + keyword.len();
+    let after_ok = after_pos >= bytes.len()
+        || (!bytes[after_pos].is_ascii_alphanumeric() && bytes[after_pos] != b'_');
+    before_ok && after_ok
+}
+
+fn chained_call_opens_block(bytes: &[u8], mut pos: usize) -> bool {
+    while pos < bytes.len() && bytes[pos] != b'\n' {
+        if bytes[pos] == b'{' {
+            return true;
+        }
+        if keyword_at(bytes, pos, b"do") {
+            return true;
+        }
         pos += 1;
-    }
-    // Skip newline
-    if pos < bytes.len() && bytes[pos] == b'\n' {
-        pos += 1;
-    }
-    // Skip whitespace on next line
-    while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
-        pos += 1;
-    }
-    // Check if next line starts with `.` or `&.`
-    if pos < bytes.len() && bytes[pos] == b'.' {
-        return true;
-    }
-    if pos < bytes.len() && bytes[pos] == b'&' && pos + 1 < bytes.len() && bytes[pos + 1] == b'.' {
-        return true;
     }
     false
 }
