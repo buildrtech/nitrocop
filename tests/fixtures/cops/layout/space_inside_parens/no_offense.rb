@@ -10,3 +10,6 @@ foo(
   bar,
   baz
 )
+build(
+)
+check ( value)
