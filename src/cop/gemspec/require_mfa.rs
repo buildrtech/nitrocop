@@ -4,9 +4,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// ## Corpus investigation (2026-03-03)
+/// ## Corpus investigation (2026-03-20)
 ///
-/// Corpus oracle (run 22651309591) reported FP=0, FN=0. 100% conformance.
+/// FP=1, FN=1 in extended corpus, both from `openai__openai-ruby/openai.gemspec`.
+/// Root cause: `s.metadata["rubygems_mfa_required"] = false.to_s` — a dynamic
+/// expression, not a string literal. The Phase 2 bracket-style check treated any
+/// non-'true' value as `Some(false)` (reporting at the value line = FP), when it
+/// should return `None` for non-literal values so the offense is reported at the
+/// `Gem::Specification.new` line (= correct FN fix).
 pub struct RequireMfa;
 
 const MSG: &str = "`metadata['rubygems_mfa_required']` must be set to `'true'`.";
@@ -151,7 +156,11 @@ impl GemSpecVisitor<'_> {
                 if trimmed.contains("'true'") || trimmed.contains("\"true\"") {
                     return Some(true);
                 }
-                return Some(false);
+                if trimmed.contains("'false'") || trimmed.contains("\"false\"") {
+                    return Some(false);
+                }
+                // Dynamic expression (e.g. `false.to_s`) — treat as MFA not set
+                return None;
             }
         }
 
@@ -279,5 +288,6 @@ mod tests {
         preamble = "preamble.rb",
         metadata_hash_then_bracket = "metadata_hash_then_bracket.rb",
         dynamic_metadata_then_bracket = "dynamic_metadata_then_bracket.rb",
+        dynamic_mfa_value = "dynamic_mfa_value.rb",
     );
 }
