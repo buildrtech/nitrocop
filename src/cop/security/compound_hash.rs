@@ -314,6 +314,21 @@ mod tests {
     }
 
     #[test]
+    fn bare_hash_in_array_is_redundant() {
+        // Bare `hash` (no receiver) inside hashed array should be flagged
+        let src = b"[name, id, hash, updated_at].hash\n";
+        let diags = crate::testutil::run_cop_full(&CompoundHash, src);
+        assert!(
+            !diags.is_empty(),
+            "Expected a REDUNDANT offense for bare hash"
+        );
+        assert!(
+            diags[0].message.contains("redundant"),
+            "Expected REDUNDANT message"
+        );
+    }
+
+    #[test]
     fn define_method_hash_combinator() {
         let source = b"define_method(:hash) do\n  1.hash ^ 2.hash\nend\n";
         crate::testutil::assert_cop_offenses_full(
