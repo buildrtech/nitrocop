@@ -34,10 +34,9 @@ shared_context "scattered in shared context" do
   let(:other) { create(:other) }
 end
 
-# let with &proc block argument is not a standard let block (RuboCop's `lets?`
-# requires a BlockNode, not BlockArgumentNode). Should not be flagged.
+# let with &proc block argument counts as a let declaration — no scatter here
 describe Connection do
   let(:connection) { described_class.new }
-  before { setup }
   let :fresh_connection, &NEW_PG_CONNECTION
+  it { expect(connection).to be_valid }
 end
