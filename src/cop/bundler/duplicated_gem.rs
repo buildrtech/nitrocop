@@ -11,22 +11,20 @@ pub struct DuplicatedGem;
 
 /// ## Corpus investigation (2026-03-20)
 ///
-/// ### Round 6 — Standard corpus FP=0, FN=5
+/// ### Round 7 — Standard corpus FP=30
 ///
-/// **FN=5**: All from sentry-rails, `gem "sqlite3"` duplicated across 4+
-/// if/elsif/else branches with different version constraints and multi-statement
-/// bodies. Root cause: the old `accessible_sources` approach collected ALL gem
-/// sources from the conditional chain, so every gem matched itself. RuboCop's
-/// `within_conditional?` checks `branch == node || branch.child_nodes.include?(node)`
-/// against only the ROOT conditional's branches — one level deep. For multi-statement
-/// branches, gems are wrapped in `begin` nodes and NOT direct child_nodes of the
-/// elsif IfNode. Fixed by pre-computing a "matchable source set" per conditional root
-/// that replicates the Parser gem's branch/child_node semantics: all statements from
-/// the if_body, and child_node-equivalent sources from the else_branch.
+/// **FP=30**: All 30 FPs from gems in multi-branch if/elsif/else conditionals
+/// (3+ branches). Root cause: `collect_if_matchable_sources` only processed one
+/// level of the elsif chain (if_body + first elsif's child_nodes), missing bodies
+/// of subsequent elsifs. RuboCop's `IfNode#branches` iterates the ENTIRE chain,
+/// collecting each body separately. For multi-statement bodies (begin nodes),
+/// `branch.child_nodes.include?(node)` finds individual statements. Fixed by
+/// rewriting to iterate the full chain, also handling `else { single if }` which
+/// Parser gem merges into the elsif chain (identical AST to `elsif`).
 ///
-/// Also corrected a wrong no_offense test: the "nested if inside else of if/elsif"
-/// with different versions across 4+ branches is NOT exempt in RuboCop — gems at
-/// depth 2+ are not direct child_nodes of the root's branches.
+/// Round 6 was incorrect: it treated multi-statement elsif bodies as non-matchable
+/// (begin.child_nodes of the IfNode, not the branch body). The key insight is that
+/// `branches` returns the BODY of each branch, not the IfNode itself.
 ///
 /// ### Round 5 — Extended corpus FP=3, FN=7
 ///
@@ -236,36 +234,63 @@ impl GemDeclarationVisitor<'_> {
 /// Collect the set of source byte slices that RuboCop's `within_conditional?`
 /// would match against for an `if` root conditional.
 ///
-/// In Parser gem, `if` branches = [if_body, else_body]:
-/// - For the if_body (single stmt or begin): all statements are matchable
-/// - For the else_body:
-///   - If it's an elsif IfNode: it's a branch, and `branch.child_nodes` =
-///     [predicate, if_body_or_begin, else_or_next]. Only these 3 are checked.
-///   - If it's a plain else with single IfNode: same as elsif (Parser merges them)
-///   - If it's a plain else with other content: all statements are matchable
+/// RuboCop's `IfNode#branches` iterates the entire if/elsif/else chain,
+/// collecting each body as a separate branch. `within_conditional?` then
+/// checks `branch == node || branch.child_nodes.include?(node)`:
+/// - Single-statement body: the statement IS the branch → `branch == node` matches
+/// - Multi-statement body (begin): individual statements are `child_nodes` → matched
+///
+/// In Parser gem, `else { single if }` is merged into the elsif chain
+/// (identical AST to `elsif`), so we unwrap through it the same way.
 fn collect_if_matchable_sources(bytes: &[u8], if_node: &ruby_prism::IfNode<'_>) -> Vec<Vec<u8>> {
     let mut matchable = Vec::new();
 
-    // Branch 0: if_body — all statements are matchable (begin.child_nodes = all stmts)
-    if let Some(stmts) = if_node.statements() {
+    // if body
+    add_all_branch_statements(bytes, if_node.statements(), &mut matchable);
+
+    // Walk the elsif/else chain
+    let mut subsequent = if_node.subsequent();
+    while let Some(sub) = subsequent {
+        if let Some(elsif_node) = sub.as_if_node() {
+            add_all_branch_statements(bytes, elsif_node.statements(), &mut matchable);
+            subsequent = elsif_node.subsequent();
+        } else if let Some(else_node) = sub.as_else_node() {
+            if let Some(stmts) = else_node.statements() {
+                let body: Vec<_> = stmts.body().iter().collect();
+                // In Parser gem, else { single if } merges into the elsif chain
+                if body.len() == 1 {
+                    if let Some(nested_if) = body[0].as_if_node() {
+                        add_all_branch_statements(bytes, nested_if.statements(), &mut matchable);
+                        subsequent = nested_if.subsequent();
+                        continue;
+                    }
+                }
+                // Regular else body: all statements are matchable
+                for stmt in body {
+                    let loc = stmt.location();
+                    matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
+                }
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+
+    matchable
+}
+
+fn add_all_branch_statements(
+    bytes: &[u8],
+    stmts: Option<ruby_prism::StatementsNode<'_>>,
+    matchable: &mut Vec<Vec<u8>>,
+) {
+    if let Some(stmts) = stmts {
         for stmt in stmts.body().iter() {
             let loc = stmt.location();
             matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
         }
     }
-
-    // Branch 1: subsequent
-    if let Some(subsequent) = if_node.subsequent() {
-        if let Some(elsif_node) = subsequent.as_if_node() {
-            // elsif: branch IS the IfNode. Add child_node equivalents.
-            collect_if_node_child_sources(bytes, &elsif_node, &mut matchable);
-        } else if let Some(else_node) = subsequent.as_else_node() {
-            // else clause
-            collect_else_branch_sources(bytes, &else_node, &mut matchable);
-        }
-    }
-
-    matchable
 }
 
 /// Collect matchable sources for an `unless` root conditional.
@@ -330,85 +355,6 @@ fn collect_case_matchable_sources(
     }
 
     matchable
-}
-
-/// Add the "child_node" source equivalents for a Parser `if` node.
-/// In Parser gem, `if_node.child_nodes` = [predicate, if_body, else_body].
-/// Single-statement bodies are the statement itself; multi-statement use begin.
-fn collect_if_node_child_sources(
-    bytes: &[u8],
-    if_node: &ruby_prism::IfNode<'_>,
-    matchable: &mut Vec<Vec<u8>>,
-) {
-    // predicate
-    let pred_loc = if_node.predicate().location();
-    matchable.push(bytes[pred_loc.start_offset()..pred_loc.end_offset()].to_vec());
-
-    // if_body: single stmt → stmt source (matchable). Multi stmt → StatementsNode source
-    // (acts as begin, won't match individual gems but satisfies the API contract).
-    if let Some(stmts) = if_node.statements() {
-        let body: Vec<_> = stmts.body().iter().collect();
-        if body.len() == 1 {
-            let loc = body[0].location();
-            matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
-        } else if !body.is_empty() {
-            let loc = stmts.location();
-            matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
-        }
-    }
-
-    // subsequent: In Parser gem, child_nodes of an `if` include the else_body content,
-    // not the ElseNode wrapper. For elsif (IfNode), the child is the entire IfNode.
-    // For else (ElseNode), the child is the body content (single stmt or begin).
-    if let Some(sub) = if_node.subsequent() {
-        if sub.as_if_node().is_some() {
-            // elsif: the entire IfNode is a child (like Parser's nested if)
-            let loc = sub.location();
-            matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
-        } else if let Some(else_node) = sub.as_else_node() {
-            // else: extract the body content (not the ElseNode wrapper)
-            if let Some(stmts) = else_node.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                if body.len() == 1 {
-                    let loc = body[0].location();
-                    matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
-                } else if !body.is_empty() {
-                    let loc = stmts.location();
-                    matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
-                }
-            }
-        }
-    }
-}
-
-/// Collect matchable sources from an else clause that is a direct branch.
-/// In Parser, `else` with a single IfNode statement produces the same AST as `elsif`,
-/// so we treat it the same way (add child_node sources of the IfNode).
-/// Otherwise, all statements are matchable (like any begin branch).
-fn collect_else_branch_sources(
-    bytes: &[u8],
-    else_node: &ruby_prism::ElseNode<'_>,
-    matchable: &mut Vec<Vec<u8>>,
-) {
-    if let Some(stmts) = else_node.statements() {
-        let body: Vec<_> = stmts.body().iter().collect();
-        if body.len() == 1 {
-            if let Some(nested_if) = body[0].as_if_node() {
-                // Single IfNode in else → same as elsif in Parser AST
-                collect_if_node_child_sources(bytes, &nested_if, matchable);
-            } else {
-                // Single non-if statement → it IS the branch, add its source
-                let loc = body[0].location();
-                matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
-            }
-        } else {
-            // Multi statement → begin branch, all statements are child_nodes
-            for stmt in body {
-                let loc = stmt.location();
-                matchable.push(bytes[loc.start_offset()..loc.end_offset()].to_vec());
-            }
-        }
-    }
 }
 
 fn gem_name_from_call(call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {

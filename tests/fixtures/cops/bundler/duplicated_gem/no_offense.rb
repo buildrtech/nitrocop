@@ -86,3 +86,42 @@ else
     gem 'sass-rails'
   end
 end
+
+# Multi-statement if/elsif/else branches — RuboCop's IfNode#branches
+# iterates the entire chain and collects each body. For multi-statement
+# bodies (begin nodes), branch.child_nodes includes individual statements.
+# So all gems across all branches are matchable.
+if rails_version >= '8.1'
+  gem "minitest", "~> 5.20"
+  gem "pg_ext", "~> 2.1.1", platform: :ruby
+elsif rails_version >= '7.1'
+  gem "minitest", "~> 5.18"
+  gem "pg_ext", "~> 1.7.3", platform: :ruby
+else
+  gem "pg_ext", "~> 1.3.0", platform: :ruby
+end
+
+# 4+ branches with single-statement bodies (phonelib pattern)
+if RUBY_VERSION < '2.3.0'
+  gem 'parslet', '~> 1.8.2'
+elsif RUBY_VERSION > '3.0.0'
+  gem 'parslet', '~> 1.16'
+elsif RUBY_VERSION > '2.7.0'
+  gem 'parslet', '~> 1.15'
+else
+  gem 'parslet', '~> 1.10'
+end
+
+# Nested if inside else — Parser gem merges else { single if } into
+# the elsif chain, so all branches are treated as one conditional.
+if ENV['RAILS'] >= "8.0"
+  gem 'mysql2', '~> 2.1'
+elsif ENV['RAILS'] >= "7.1"
+  gem 'mysql2', '~> 1.7'
+else
+  if ENV['RAILS'] >= "6.0"
+    gem 'mysql2', '~> 1.4'
+  else
+    gem 'mysql2', '~> 1.3'
+  end
+end

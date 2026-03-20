@@ -118,36 +118,3 @@ elsif RUBY_VERSION =~ /^1\.?8/
 else
   gem 'code-check'
   ^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `code-check` requirements already given on line 99 of the Gemfile.
-
-# Nested if inside else of if/elsif — gems at depth 2+ have different versions,
-# so they do NOT match any direct child of the root conditional's branches.
-# In Parser gem, `within_conditional?` only checks one level of child_nodes.
-if ENV['RAILS'] >= "8.0"
-  gem 'mysql2', '~> 2.1'
-elsif ENV['RAILS'] >= "7.1"
-  gem 'mysql2', '~> 1.7'
-  ^^^^^^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `mysql2` requirements already given on line 109 of the Gemfile.
-else
-  if ENV['RAILS'] >= "6.0"
-    gem 'mysql2', '~> 1.4'
-    ^^^^^^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `mysql2` requirements already given on line 109 of the Gemfile.
-  else
-    gem 'mysql2', '~> 1.3'
-    ^^^^^^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `mysql2` requirements already given on line 109 of the Gemfile.
-  end
-end
-
-# Multi-statement if/elsif branches with different gem versions — the
-# sentry-rails pattern. Multi-statement branches wrap gems in begin nodes,
-# making them NOT direct children of the elsif IfNode's child_nodes.
-if rails_version >= '8.1'
-  gem "rspec-rails", "~> 8.0.0"
-  gem "sqlite3", "~> 2.1.1", platform: :ruby
-elsif rails_version >= '7.1'
-  gem "rspec-rails", "~> 7.0"
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `rspec-rails` requirements already given on line 124 of the Gemfile.
-  gem "sqlite3", "~> 1.7.3", platform: :ruby
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `sqlite3` requirements already given on line 125 of the Gemfile.
-else
-  gem "sqlite3", "~> 1.3.0", platform: :ruby
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Bundler/DuplicatedGem: Gem `sqlite3` requirements already given on line 125 of the Gemfile.
