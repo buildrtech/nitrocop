@@ -215,3 +215,67 @@ records.transaction do
   a4 = 4
   a5 = 5
 end
+
+# Qualified Struct.new: BenchmarkDriver::Struct.new is NOT a class constructor.
+# RuboCop's class_constructor? uses (const {nil? cbase} :Struct), which only
+# matches bare Struct or ::Struct, not qualified paths like Foo::Struct.
+WarmupScript = BenchmarkDriver::Struct.new(:preludes, :script, :teardown) do
+               ^ Metrics/BlockLength: Block has too many lines. [26/25]
+  def render(result:)
+    x1 = 1
+    x2 = 2
+    x3 = 3
+    x4 = 4
+    x5 = 5
+    x6 = 6
+    x7 = 7
+    x8 = 8
+    x9 = 9
+    x10 = 10
+    x11 = 11
+    x12 = 12
+    x13 = 13
+    x14 = 14
+    x15 = 15
+    x16 = 16
+    x17 = 17
+    x18 = 18
+    x19 = 19
+    x20 = 20
+    x21 = 21
+    x22 = 22
+    x23 = 23
+    x24 = 24
+  end
+end
+
+# proc do...end blocks are regular blocks, NOT exempt.
+display = proc do |code|
+          ^^^^ Metrics/BlockLength: Block has too many lines. [26/25]
+  tree = nil
+  p1 = 1
+  p2 = 2
+  p3 = 3
+  p4 = 4
+  p5 = 5
+  p6 = 6
+  p7 = 7
+  p8 = 8
+  p9 = 9
+  p10 = 10
+  p11 = 11
+  p12 = 12
+  p13 = 13
+  p14 = 14
+  p15 = 15
+  p16 = 16
+  p17 = 17
+  p18 = 18
+  p19 = 19
+  p20 = 20
+  p21 = 21
+  p22 = 22
+  p23 = 23
+  p24 = 24
+  p25 = 25
+end

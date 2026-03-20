@@ -92,6 +92,23 @@ use crate::parse::source::SourceFile;
 /// Result: accepted. The fix recovered 65 missing offenses vs the prior CI
 /// baseline (193 -> 128) without introducing false-positive regressions.
 ///
+/// ## Corpus investigation (2026-03-20)
+///
+/// Corpus oracle reported FN=3 in the extended corpus.
+///
+/// FN #1/#2: `BenchmarkDriver::Struct.new` blocks in benchmark-driver repo.
+/// Root cause: `is_class_constructor()` used `constant_name()` which returns
+/// just the last segment of a constant path — `BenchmarkDriver::Struct`
+/// returned `Struct`, incorrectly matching the class constructor exemption.
+/// RuboCop's `class_constructor?` uses `(const {nil? cbase} :Struct)` which
+/// only matches bare `Struct` or `::Struct`, not qualified paths.
+/// Fix: replaced `constant_name()` with `is_simple_constant()` calls.
+///
+/// FN #3: `proc do ... end` block in `bin/reak` (rkh/Reak repo). This file
+/// has no `.rb` extension (shebang-only script). The cop logic correctly
+/// counts proc blocks — this is a file discovery issue, not a cop logic bug.
+/// Confirmed by test: `proc do ... end` blocks ARE detected in `.rb` files.
+///
 /// ## Corpus investigation (2026-03-09, second pass)
 ///
 /// Investigated the remaining 128 FN without corpus repo access. Compared
@@ -653,17 +670,24 @@ fn is_heredoc_node(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
 
 /// Check if a call is a class constructor like `Struct.new`, `Class.new`, `Module.new`, etc.
 /// RuboCop's Metrics/BlockLength does not count these blocks.
+///
+/// RuboCop's `class_constructor?` uses `#global_const?({:Class :Module :Struct})`
+/// which is `(const {nil? cbase} :Struct)` — only bare `Struct` or `::Struct`,
+/// NOT qualified paths like `Foo::Struct` or `BenchmarkDriver::Struct`.
 fn is_class_constructor(call: &ruby_prism::CallNode<'_>) -> bool {
     let recv = match call.receiver() {
         Some(r) => r,
         None => return false,
     };
-    let recv_name = crate::cop::util::constant_name(&recv).unwrap_or_default();
 
     match call.name().as_slice() {
-        b"new" => matches!(recv_name, b"Struct" | b"Class" | b"Module"),
+        b"new" => {
+            crate::cop::util::is_simple_constant(&recv, b"Struct")
+                || crate::cop::util::is_simple_constant(&recv, b"Class")
+                || crate::cop::util::is_simple_constant(&recv, b"Module")
+        }
         // Data.define is also a class constructor in RuboCop.
-        b"define" => recv_name == b"Data",
+        b"define" => crate::cop::util::is_simple_constant(&recv, b"Data"),
         _ => false,
     }
 }
