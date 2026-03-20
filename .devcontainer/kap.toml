@@ -27,6 +27,12 @@ allow = [
   "*.openai.com",
   "generativelanguage.googleapis.com",
   "storage.googleapis.com",
+  "minimax.io",
+  "*.minimax.io",
+  "cursor.com",
+  "*.cursor.com",
+  "kilo.ai",
+  "*.kilo.ai",
 
   # APT
   "*.ubuntu.com",

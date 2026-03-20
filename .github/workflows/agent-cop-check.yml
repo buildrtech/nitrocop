@@ -1,0 +1,69 @@
+name: Agent Cop Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/cop/**'
+      - 'tests/fixtures/cops/**'
+
+jobs:
+  cop-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0  # need full history for diff against main
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Detect changed cops
+        id: cops
+        run: |
+          python3 scripts/agent/detect_changed_cops.py \
+            --base origin/main --head HEAD > /tmp/changed_cops.txt
+          echo "Changed cops:"
+          cat /tmp/changed_cops.txt
+          # Set output (newline-separated list)
+          {
+            echo "list<<COPS_EOF"
+            cat /tmp/changed_cops.txt
+            echo "COPS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # This does NOT run nitrocop against 5000+ repos. It downloads the
+      # pre-computed corpus-results.json from the latest CI corpus oracle run
+      # and compares offense counts. Fast (~30s per cop) but uses cached data.
+      # For full re-validation, trigger the corpus-oracle workflow after merging.
+      - name: Check each changed cop against corpus baseline
+        if: steps.cops.outputs.list != ''
+        env:
+          NITROCOP_BIN: ${{ github.workspace }}/target/release/nitrocop
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          failed=0
+          while IFS= read -r cop; do
+            [ -z "$cop" ] && continue
+            echo ""
+            echo "=============================="
+            echo "Checking: $cop (vs cached corpus oracle baseline)"
+            echo "=============================="
+            if ! python3 scripts/check-cop.py "$cop" --extended --verbose; then
+              echo "WARN: $cop check reported issues"
+              failed=$((failed + 1))
+            fi
+          done < /tmp/changed_cops.txt
+
+          if [ "$failed" -gt 0 ]; then
+            echo ""
+            echo "WARNING: $failed cop(s) had check issues. Review above output."
+            # Advisory only — check-cop.py without --rerun compares against
+            # cached CI data, not a live re-run. Trigger the full corpus
+            # oracle after merging a batch of PRs for definitive validation.
+          fi

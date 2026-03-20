@@ -1,0 +1,99 @@
+name: Agent Cop Fix
+
+on:
+  workflow_dispatch:
+    inputs:
+      cop:
+        description: 'Cop to fix (e.g. Style/NegatedWhile)'
+        required: true
+        type: string
+      model:
+        description: 'Model profile: minimax (cheap, Tier 1), claude-sonnet (Tier 2), claude-opus (Tier 3)'
+        type: choice
+        options:
+          - minimax
+          - claude-sonnet
+          - claude-opus
+        default: minimax
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Compute branch name
+        id: branch
+        run: |
+          BRANCH=$(python3 -c "
+          import re, sys
+          cop = sys.argv[1]
+          dept, name = cop.split('/', 1)
+          def snake(s):
+              s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', s)
+              s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
+              return s.lower()
+          # Use same overrides as detect_changed_cops.py
+          dept_map = {'RSpec': 'rspec', 'RSpecRails': 'rspec_rails', 'FactoryBot': 'factory_bot'}
+          dept_dir = dept_map.get(dept, snake(dept))
+          print(f'fix/{dept_dir}-{snake(name)}')
+          " "${{ github.event.inputs.cop }}")
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Branch: $BRANCH"
+
+      - name: Generate task packet
+        run: |
+          python3 scripts/agent/generate-cop-task.py \
+            "${{ github.event.inputs.cop }}" \
+            --extended \
+            --output /tmp/task.md
+          echo "Generated task packet for ${{ github.event.inputs.cop }}"
+          wc -l /tmp/task.md
+
+      # Create a clean branch for the agent. We DON'T delete AGENTS.md or
+      # .claude/skills/ here because those deletions would merge into main.
+      # Instead, Kilo's startup commands handle the cleanup ephemerally.
+      - name: Prepare agent branch
+        run: |
+          BRANCH="${{ steps.branch.outputs.name }}"
+
+          # Delete old branch if it exists (from a prior failed attempt)
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+
+          git checkout -b "$BRANCH"
+
+          # Replace CLAUDE.md with focused agent instructions.
+          # This IS safe to commit — when merged, main gets a CLAUDE.md
+          # that just says "see task prompt", which we'll revert in CI
+          # or the merge will be a squash that only includes cop changes.
+          #
+          # Actually — safest approach: push the branch as-is (identical
+          # to main) and let Kilo's startup commands do the cleanup.
+          # The agent's commits will only contain cop file changes.
+          git push -u origin "$BRANCH"
+
+      # Select the right webhook URL based on model profile.
+      # Each Kilo webhook trigger is linked to an environment profile
+      # with different BYOK credentials (MiniMax vs Anthropic API key).
+      - name: Dispatch to Kilo
+        env:
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          KILO_WEBHOOK_MINIMAX: ${{ secrets.KILO_WEBHOOK_MINIMAX }}
+          KILO_WEBHOOK_CLAUDE_SONNET: ${{ secrets.KILO_WEBHOOK_CLAUDE_SONNET }}
+          KILO_WEBHOOK_CLAUDE_OPUS: ${{ secrets.KILO_WEBHOOK_CLAUDE_OPUS }}
+        run: |
+          MODEL="${{ github.event.inputs.model }}"
+          case "$MODEL" in
+            minimax)        WEBHOOK_URL="$KILO_WEBHOOK_MINIMAX" ;;
+            claude-sonnet)  WEBHOOK_URL="$KILO_WEBHOOK_CLAUDE_SONNET" ;;
+            claude-opus)    WEBHOOK_URL="$KILO_WEBHOOK_CLAUDE_OPUS" ;;
+          esac
+
+          python3 scripts/agent/kilo_dispatch.py \
+            --task /tmp/task.md \
+            --cop "${{ github.event.inputs.cop }}" \
+            --webhook-url "$WEBHOOK_URL" \
+            --branch "${{ steps.branch.outputs.name }}"

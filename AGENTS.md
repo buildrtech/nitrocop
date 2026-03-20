@@ -300,6 +300,19 @@ resume in the same turn, say so explicitly and tell the user to run
 
 Use `/triage` to just view the ranked cop list without fixing. See `.claude/skills/triage/SKILL.md`.
 
+### Remote Agent Dispatch
+
+Use `/dispatch-cops` to parallelize cop fixes at scale via Kilo Cloud Agents. Each agent fixes one cop and pushes to a branch validated by CI. See `.claude/skills/dispatch-cops/SKILL.md` and [docs/KILO_AGENT_DISPATCH.md](docs/KILO_AGENT_DISPATCH.md) for full setup.
+
+```
+/dispatch-cops              # start from triage
+/dispatch-cops pilot        # 10-cop pilot
+/dispatch-cops tier1        # batch dispatch Tier 1 (~319 cops)
+/dispatch-cops retry        # retry failed cops with stronger model
+/dispatch-cops status       # check PR status
+/dispatch-cops validate     # trigger corpus oracle
+```
+
 ## Corpus Investigation
 
 **IMPORTANT:** `investigate-cop.py` and `investigate-repo.py` auto-download corpus results from the latest CI corpus oracle run. Do NOT manually download artifacts with `gh run download` — just run the scripts directly, they handle fetching. When given a corpus oracle run URL, use these scripts instead of manually downloading.

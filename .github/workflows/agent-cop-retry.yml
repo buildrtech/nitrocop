@@ -1,0 +1,104 @@
+name: Agent Cop Retry
+
+# Re-dispatch a cop fix task with context from ALL prior failed attempts.
+# Automatically discovers all closed/failed PRs for this cop and includes
+# their diffs and CI failure logs so the agent doesn't repeat mistakes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cop:
+        description: 'Cop to retry (e.g. Style/NegatedWhile)'
+        required: true
+        type: string
+      model:
+        description: 'Model profile'
+        type: choice
+        options:
+          - minimax
+          - claude-sonnet
+          - claude-opus
+        default: claude-sonnet
+      extra_context:
+        description: 'Additional instructions (optional)'
+        required: false
+        type: string
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Generate base task packet
+        run: |
+          python3 scripts/agent/generate-cop-task.py \
+            "${{ github.event.inputs.cop }}" \
+            --extended \
+            --output /tmp/task.md
+
+      # Collect context from prior attempts BEFORE closing them
+      - name: Collect all prior failed attempts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COP: ${{ github.event.inputs.cop }}
+        run: |
+          python3 scripts/agent/collect_prior_attempts.py \
+            --cop "$COP" \
+            --output /tmp/prior_attempts.md
+
+      - name: Append failure context to task
+        env:
+          EXTRA_CONTEXT: ${{ github.event.inputs.extra_context }}
+        run: |
+          ATTEMPTS="/tmp/prior_attempts.md"
+          if [ -s "$ATTEMPTS" ]; then
+            echo "" >> /tmp/task.md
+            cat "$ATTEMPTS" >> /tmp/task.md
+          fi
+
+          if [ -n "$EXTRA_CONTEXT" ]; then
+            echo "" >> /tmp/task.md
+            echo "## Additional Instructions" >> /tmp/task.md
+            echo "" >> /tmp/task.md
+            echo "$EXTRA_CONTEXT" >> /tmp/task.md
+          fi
+
+          echo "" >> /tmp/task.md
+          echo "**CRITICAL:** Do NOT repeat approaches that already failed. Read the prior attempts carefully and try a DIFFERENT strategy." >> /tmp/task.md
+
+      # Close any open PRs for this cop so we don't accumulate stale PRs.
+      # The new attempt will create a fresh branch/PR.
+      - name: Close prior open PRs for this cop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COP: ${{ github.event.inputs.cop }}
+        run: |
+          # Find open PRs matching this cop
+          OPEN_PRS=$(gh pr list --state open --search "$COP in:title" --json number --jq '.[].number' 2>/dev/null || true)
+          for pr in $OPEN_PRS; do
+            echo "Closing stale PR #$pr"
+            gh pr close "$pr" --comment "Superseded by retry attempt. See new PR." 2>/dev/null || true
+          done
+
+      - name: Dispatch to Kilo
+        env:
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          KILO_WEBHOOK_MINIMAX: ${{ secrets.KILO_WEBHOOK_MINIMAX }}
+          KILO_WEBHOOK_CLAUDE_SONNET: ${{ secrets.KILO_WEBHOOK_CLAUDE_SONNET }}
+          KILO_WEBHOOK_CLAUDE_OPUS: ${{ secrets.KILO_WEBHOOK_CLAUDE_OPUS }}
+        run: |
+          MODEL="${{ github.event.inputs.model }}"
+          case "$MODEL" in
+            minimax)        WEBHOOK_URL="$KILO_WEBHOOK_MINIMAX" ;;
+            claude-sonnet)  WEBHOOK_URL="$KILO_WEBHOOK_CLAUDE_SONNET" ;;
+            claude-opus)    WEBHOOK_URL="$KILO_WEBHOOK_CLAUDE_OPUS" ;;
+          esac
+
+          python3 scripts/agent/kilo_dispatch.py \
+            --task /tmp/task.md \
+            --cop "${{ github.event.inputs.cop }}" \
+            --webhook-url "$WEBHOOK_URL"
