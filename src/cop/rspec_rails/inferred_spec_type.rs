@@ -4,6 +4,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-20)
+///
+/// Extended corpus oracle reported FP=14, FN=0.
+///
+/// FP=14: All from `RSpec.describe type: :model do` (no described class).
+/// RuboCop's `describe_with_type` NodePattern requires at least one positional
+/// argument (class/string) before the `type:` hash. Without a described class,
+/// the `type:` keyword is the primary identifier and is not redundant.
+/// Fixed by requiring at least one non-hash positional argument before flagging.
 pub struct InferredSpecType;
 
 /// Default directory-to-type inferences (matching RuboCop's defaults).
@@ -99,8 +108,19 @@ impl Cop for InferredSpecType {
             None => return,
         };
 
+        // RuboCop requires at least one positional argument (described class/string)
+        // before the hash containing `type:`. `RSpec.describe type: :model do` (no
+        // described class) is NOT flagged — the type is the primary identifier there.
+        let arg_list: Vec<_> = args.arguments().iter().collect();
+        let has_positional_arg = arg_list
+            .iter()
+            .any(|a| a.as_hash_node().is_none() && a.as_keyword_hash_node().is_none());
+        if !has_positional_arg {
+            return;
+        }
+
         // Find a hash argument containing `type: :something`
-        for arg in args.arguments().iter() {
+        for arg in arg_list {
             if let Some(diag) = self.check_hash_arg(source, &arg, config) {
                 diagnostics.push(diag);
             }

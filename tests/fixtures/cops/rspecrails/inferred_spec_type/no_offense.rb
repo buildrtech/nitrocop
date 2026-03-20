@@ -7,3 +7,10 @@ end
 
 RSpec.describe User, type: :controller do
 end
+
+# No described class — type: is the primary identifier, not redundant
+RSpec.describe type: :model do
+end
+
+describe type: :model do
+end
