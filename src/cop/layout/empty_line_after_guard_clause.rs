@@ -107,6 +107,16 @@ use crate::parse::source::SourceFile;
 /// string literals made the raise look like an unterminated expression and the
 /// sibling guard block was missed. Fix: reuse `count_bracket_depth_change()`
 /// there as well so bracket counting ignores string and regex content.
+///
+/// A remaining FN pattern came from normal expression lines that happened to
+/// contain an embedded `return ... if ...` inside a block, e.g.
+/// `items.each { |x| return true if predicate(x) }`. The old
+/// `contains_modifier_guard()` helper matched any line containing a guard
+/// keyword plus `if`/`unless`, even when both were nested inside a block body.
+/// RuboCop only suppresses offenses when the next sibling itself is a guard
+/// clause, not when the line merely contains an embedded guard expression.
+/// Fix: require the guard keyword and modifier keyword to appear at top level
+/// on the line (outside strings and bracketed subexpressions).
 pub struct EmptyLineAfterGuardClause;
 
 /// Guard clause keywords that appear at the start of an expression.
@@ -1174,14 +1184,90 @@ fn contains_word_outside_strings(haystack: &[u8], word: &[u8]) -> bool {
 }
 
 fn contains_modifier_guard(content: &[u8]) -> bool {
-    if !contains_word(content, b"if") && !contains_word(content, b"unless") {
+    if !contains_word_at_top_level(content, b"if")
+        && !contains_word_at_top_level(content, b"unless")
+    {
         return false;
     }
     for keyword in GUARD_METHODS {
-        if contains_word(content, keyword) {
+        if contains_word_at_top_level(content, keyword) {
             return true;
         }
     }
+    false
+}
+
+fn contains_word_at_top_level(haystack: &[u8], word: &[u8]) -> bool {
+    let wlen = word.len();
+    if haystack.len() < wlen {
+        return false;
+    }
+
+    let mut depth: i32 = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut i = 0;
+
+    while i < haystack.len() {
+        let b = haystack[i];
+
+        if in_single_quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            } else if b == b'\'' {
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double_quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            } else if b == b'"' {
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => {
+                in_single_quote = true;
+                i += 1;
+                continue;
+            }
+            b'"' => {
+                in_double_quote = true;
+                i += 1;
+                continue;
+            }
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' | b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if depth == 0 && i + wlen <= haystack.len() && &haystack[i..i + wlen] == word {
+            let before_ok = i == 0 || !is_ident_char(haystack[i - 1]);
+            let after_ok = i + wlen >= haystack.len() || !is_ident_char(haystack[i + wlen]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+
+        i += 1;
+    }
+
     false
 }
 

@@ -217,3 +217,11 @@ def namespace
 
   return (name == 'Class' || name == 'Module') && !subtypes.empty? ? subtypes.first.name : name
 end
+
+# FN fix: next line contains an embedded guard inside a block, not a guard sibling
+def update?(cookies)
+  return true if cached.empty?
+
+  cookies.each { |key, value| return true if previous_cookie(key) != value }
+  false
+end
