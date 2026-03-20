@@ -30,6 +30,24 @@ When the corpus oracle has concrete FP/FN examples for a cop, use
 as done locally.
 Run fix work from a dedicated git worktree by default.
 
+## Persistence
+
+Default behavior for this skill is to keep iterating until the target is
+actually done or truly blocked. Do not stop just because a batch was committed,
+landed onto `main`, or pushed.
+
+`$fix-department --loop` makes this explicit:
+- Keep looping back to Phase 1 after each accepted cop fix, integration step,
+  or checkpoint.
+- Do not ask non-blocking clarifying questions. Make the reasonable default
+  assumption and continue.
+- Only stop for:
+  - target complete (`README.md` / `docs/corpus.md` CI-owned scorecard at 100%)
+  - a real blocker or risky ambiguity that could damage unrelated work
+  - an explicit user interrupt, redirect, or wrap-up request
+- If the user asks for an intermediate action such as commit / land / push,
+  treat that as a sub-step inside the loop, then resume the fix workflow.
+
 ## Workflow
 
 ### Phase 0: Assess
@@ -294,6 +312,9 @@ Do not leave retained progress only in a worktree branch.
 
 5. If there is truly no repo-retained progress, explicitly report that no commit was made.
 
+6. In `--loop` mode, after integration/reporting, return to Phase 1 unless the
+   target is done or the user explicitly stopped the run.
+
 ## Notes
 
 - Prefer a dedicated git worktree for code-editing runs of this skill, but worktree isolation
@@ -342,6 +363,7 @@ Do not leave retained progress only in a worktree branch.
 
 - `$fix-department` — show scoreboard and choose a gem
 - `$fix-department Naming` — complete the `Naming` department and keep going until its generated corpus-report rows hit 100%
+- `$fix-department Layout --loop` — persistent run: keep fixing, integrating, and resuming until the department is actually done or truly blocked
 - `$fix-department rubocop-performance` — focus that gem
 - `$fix-department rubocop-rspec` — focus that gem
 - `$fix-department rubocop-rails` — focus that gem

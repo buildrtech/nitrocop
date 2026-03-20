@@ -5,7 +5,9 @@ description: Signal running fix-department agents to wrap up after the current p
 
 # Fix Wrapup — Signal Fix Agents to Stop
 
-This skill tells a running `/fix-department` session to wrap up. Use the team messaging tools to communicate with teammates.
+This skill tells a running `/fix-department` session to wrap up. It applies
+equally to `/fix-department --loop` runs. Use the team messaging tools to
+communicate with teammates.
 
 ## Default: `/fix-wrapup` (graceful)
 
