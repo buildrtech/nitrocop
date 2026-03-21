@@ -32,9 +32,12 @@ if [ ! -d "vendor/rubocop/.git" ] && [ -f ".gitmodules" ]; then
   git submodule update --init --recursive
 fi
 
-# Build
-echo "--- Building ($(date)) ---"
-cargo build 2>&1 || echo "WARNING: cargo build failed, agent will need to build"
+# Pre-compile the test binary (what the agent actually runs).
+# cargo test --no-run compiles without executing, so subsequent
+# cargo test --lib -- <filter> is near-instant.
+echo "--- Building test binary ($(date)) ---"
+cargo test --lib --no-run 2>&1 || echo "WARNING: build failed, agent will need to build"
+echo "--- Build done ($(date)) ---"
 
 # Remove files that would confuse the agent
 rm -f CLAUDE.md AGENTS.md

@@ -31,6 +31,9 @@ cargo test --lib -- cop::<department>::<cop_name>
 
 Use debug builds only. Do not run `cargo test` without a filter.
 
+If the first test run is slow (compiling), that is normal — wait for it.
+Subsequent runs will be near-instant due to incremental compilation.
+
 ## How you format
 
 ```bash
