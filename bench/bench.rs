@@ -227,6 +227,29 @@ fn needs_mise(repo_dir: &Path) -> bool {
         && has_command("mise")
 }
 
+/// Build a `Command` for `bundle install [args...]`, using `mise exec --`
+/// when the repo has a `.ruby-version`/`.tool-versions` that may differ from the
+/// current shell's Ruby.
+fn bundle_install_command(repo_dir: &Path, extra_args: &[&str]) -> Command {
+    if needs_mise(repo_dir) {
+        let mut cmd = Command::new("mise");
+        cmd.arg("exec")
+            .arg("--")
+            .arg("bundle")
+            .arg("install")
+            .args(["--jobs", "4"]);
+        cmd.args(extra_args);
+        cmd.current_dir(repo_dir);
+        cmd
+    } else {
+        let mut cmd = Command::new("bundle");
+        cmd.args(["install", "--jobs", "4"]);
+        cmd.args(extra_args);
+        cmd.current_dir(repo_dir);
+        cmd
+    }
+}
+
 /// Build a `Command` for `bundle exec <tool> [args...]`, using `mise exec --`
 /// when the repo has a `.ruby-version`/`.tool-versions` that may differ from the
 /// current shell's Ruby.
@@ -423,10 +446,7 @@ fn setup_repos() {
         }
 
         eprintln!("Installing {} bundle...", repo.name);
-        let status = Command::new("bundle")
-            .args(["install", "--jobs", "4"])
-            .current_dir(&repo_path)
-            .status();
+        let status = bundle_install_command(&repo_path, &[]).status();
 
         match status {
             Ok(s) if s.success() => eprintln!("  Bundle install OK."),
@@ -435,18 +455,14 @@ fn setup_repos() {
                 // Remove the lockfile and re-resolve to self-heal.
                 eprintln!("  Bundle install failed. Removing Gemfile.lock and retrying...");
                 let _ = fs::remove_file(repo_path.join("Gemfile.lock"));
-                let retry = Command::new("bundle")
-                    .args(["install", "--jobs", "4"])
-                    .current_dir(&repo_path)
-                    .status();
+                let retry = bundle_install_command(&repo_path, &[]).status();
                 match retry {
                     Ok(s) if s.success() => eprintln!("  Bundle install OK (fresh resolve)."),
                     _ => {
                         eprintln!("  Trying with --without production...");
-                        let retry2 = Command::new("bundle")
-                            .args(["install", "--jobs", "4", "--without", "production"])
-                            .current_dir(&repo_path)
-                            .status();
+                        let retry2 =
+                            bundle_install_command(&repo_path, &["--without", "production"])
+                                .status();
                         match retry2 {
                             Ok(s) if s.success() => {
                                 eprintln!("  Bundle install OK (without production).")
@@ -743,10 +759,17 @@ fn run_quick_bench(args: &Args) {
     );
 
     let nitrocop_cmd = format!("{} {} --no-color", nitrocop.display(), repo_dir.display());
-    let rubocop_cmd = format!(
-        "cd {} && bundle exec rubocop --no-color",
-        repo_dir.display()
-    );
+    let rubocop_cmd = if needs_mise(&repo_dir) {
+        format!(
+            "cd {} && mise exec -- bundle exec rubocop --no-color",
+            repo_dir.display()
+        )
+    } else {
+        format!(
+            "cd {} && bundle exec rubocop --no-color",
+            repo_dir.display()
+        )
+    };
 
     // Pre-flight check
     if !preflight_check("nitrocop", &nitrocop_cmd, repo_name) {

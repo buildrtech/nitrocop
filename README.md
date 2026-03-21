@@ -5,12 +5,12 @@ Fast Ruby linter in Rust targeting RuboCop compatibility.
 > [!NOTE]
 > 🚧 Early-stage: Detection is high-fidelity on most codebases but edge cases remain. Autocorrect is not yet complete. Expect bugs.
 
-Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (1,222 files), Apple Silicon:
+Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (1,227 files, Ruby 4.0), Apple Silicon:
 
 | Scenario | nitrocop | RuboCop | Speedup |
 |----------|-------:|--------:|--------:|
-| Local dev (50 files changed) | **64ms** | 1.39s | **21.7x** |
-| CI (no cache) | **207ms** | 18.21s | **87.8x** |
+| Local dev (50 files changed) | **75ms** | 1.30s | **17.3x** |
+| CI (no cache) | **279ms** | 14.86s | **53.4x** |
 
 **Features**
 
