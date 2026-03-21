@@ -103,10 +103,28 @@ jobs:
           CODEX_AUTH_JSON: ${{ github.event.inputs.backend == 'codex' && secrets.CODEX_AUTH_JSON || '' }}
         run: |
           if [ "${{ github.event.inputs.backend }}" = "minimax" ]; then
+            # Background progress watcher — tails JSONL logs every 30s
+            (
+              sleep 10
+              while true; do
+                LOGFILE=$(find ~/.claude/projects -name '*.jsonl' -newer /tmp/task.md 2>/dev/null | head -1)
+                if [ -n "$LOGFILE" ]; then
+                  LINES=$(wc -l < "$LOGFILE")
+                  LAST=$(tail -1 "$LOGFILE" | jq -r '.type // .role // "?" ' 2>/dev/null || echo "?")
+                  echo "[progress] $(date +%H:%M:%S) | $LINES events | last: $LAST"
+                fi
+                sleep 30
+              done
+            ) &
+            WATCHER_PID=$!
+
             claude -p --dangerously-skip-permissions \
               --output-format json \
               "$(cat /tmp/task.md)" > /tmp/agent-result.json 2>/tmp/agent.log
-            # Show summary in GHA log
+
+            kill $WATCHER_PID 2>/dev/null || true
+
+            # Show summary
             echo "Agent finished. Cost: $(jq -r '.total_cost_usd // "?"' /tmp/agent-result.json)"
             echo "Turns: $(jq -r '.num_turns // "?"' /tmp/agent-result.json)"
             echo "Result: $(jq -r '.result // "no result"' /tmp/agent-result.json | head -20)"
