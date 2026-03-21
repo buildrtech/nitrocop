@@ -25,9 +25,16 @@
   },
   "rubocop__rubocop-rspec__51dab28": {
     "fn": 474,
-    "fp": 15,
+    "fp": 13,
     "matches": 4167,
     "nc_files": 288,
+    "overlay_divergence": {
+      "fn": 1889,
+      "fp": 10,
+      "fp_delta": -3,
+      "match_delta": 1415,
+      "matches": 2752
+    },
     "rate": 89.5,
     "rc_files": 288
   },
