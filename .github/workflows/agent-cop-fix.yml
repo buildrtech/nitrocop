@@ -116,7 +116,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent-log-${{ github.event.inputs.cop }}
+          name: agent-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/agent.log
             /tmp/agent-result.md
