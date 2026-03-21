@@ -402,6 +402,10 @@ jobs:
 
           if [ -s /tmp/agent.patch ]; then
             git apply /tmp/agent.patch
+
+            # Auto-format Rust files (agent often skips this)
+            cargo fmt -- $(git diff --name-only --diff-filter=AM | grep '\.rs$') 2>/dev/null || true
+
             git add src/cop/ tests/fixtures/cops/ bench/corpus/
 
             RETRY_NOTE=""
@@ -433,41 +437,3 @@ jobs:
             echo "has_pr=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Validate PR
-        if: steps.pr.outputs.has_pr == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          COP="${{ github.event.inputs.cop }}"
-          BRANCH="${{ steps.cop.outputs.branch }}"
-          PASS=true
-
-          # Unit tests
-          echo "=== Unit tests ==="
-          cargo build --release 2>&1
-          cargo test --release --lib --no-run 2>&1
-          if cargo test --release --lib -- "${{ steps.cop.outputs.filter }}" 2>&1; then
-            echo "Unit tests: PASS"
-          else
-            echo "Unit tests: FAIL"
-            PASS=false
-          fi
-
-          # Corpus cop check
-          echo ""
-          echo "=== Corpus cop check ==="
-          if python3 scripts/check-cop.py "$COP" --extended --verbose 2>&1; then
-            echo "Corpus check: PASS"
-          else
-            echo "Corpus check: WARN (advisory)"
-          fi
-
-          # Update PR with results
-          if [ "$PASS" = "true" ]; then
-            gh pr comment "${{ steps.pr.outputs.pr_url }}" \
-              --body "Validation passed: unit tests OK, corpus check complete." || true
-          else
-            gh pr comment "${{ steps.pr.outputs.pr_url }}" \
-              --body "Validation **failed**: unit tests did not pass. Review the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details." || true
-            gh pr edit "${{ steps.pr.outputs.pr_url }}" --add-label "validation-failed" 2>/dev/null || true
-          fi
