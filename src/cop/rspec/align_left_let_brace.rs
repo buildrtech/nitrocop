@@ -46,17 +46,18 @@ use crate::parse::source::SourceFile;
 ///
 /// FP=2, FN=0. Both FPs on weird_rspec_spec.rb:47 in rubocop-rspec and rubocop-rspec_rails.
 ///
-/// Root cause: nitrocop's single-line check compared block opening/closing brace
-/// lines, while RuboCop's `node.single_line?` checks the entire node (call + block).
-/// Multi-line calls like `let('foo' \ 'bar') { 1 }` (lines 40-41 and 44-45) had
-/// their blocks on one line, so nitrocop included them as single-line lets. This
-/// shifted the adjacent_let_chunks grouping: with the extra entries on lines 41 and
-/// 45, lines 47-48 ended up in the same chunk (both key=false after the gap from
-/// 45). Without them (RuboCop's view), lines 47-48 were in different chunks
-/// (47=key_true after gap from 43, 48=key_false).
+/// Root cause: the legacy parser merges backslash-continued lines, so
+/// `let('foo' \ 'bar') { 1 }` on physical lines 40-41 reports as line 40 in
+/// RuboCop. Prism preserves physical lines, so nitrocop saw the block brace on
+/// line 41. This shifted adjacent_let_chunks grouping: in RuboCop, line 40 is
+/// adjacent to line 39 (making [39,40] a group), then line 44 is adjacent to
+/// nothing, then line 47 starts a new singleton chunk (key=T). In nitrocop,
+/// lines 41 and 45 created different chunking, causing lines 47-48 to form a
+/// group (key=F) with differing brace columns → false alarm.
 ///
-/// Fix: changed single-line check to compare call start line vs block close line,
-/// matching RuboCop's whole-node single_line? behavior.
+/// Fix: use the CALL's start line (not the block opening line) for grouping
+/// position. This matches the legacy parser's line-merging behavior for
+/// backslash continuations.
 pub struct AlignLeftLetBrace;
 
 impl Cop for AlignLeftLetBrace {
@@ -93,18 +94,20 @@ impl Cop for AlignLeftLetBrace {
             return;
         }
 
-        // Step 2: Resolve offsets to (line, column) and filter to single-line lets.
-        // RuboCop's `node.single_line?` checks the entire node (call + block),
-        // not just the block braces. Multi-line calls like `let('foo' \ 'bar') { 1 }`
-        // have the call starting on one line and the block on the next — these must
-        // be excluded to match RuboCop's adjacent_let_chunks grouping.
+        // Step 2: Resolve offsets to (line, column) and filter to single-line blocks.
+        // Use the CALL's start line for grouping position (not the block's opening
+        // line). The legacy parser merges backslash-continued lines, so
+        // `let('foo' \ 'bar') { 1 }` (lines 40-41 in Prism) reports as line 40 in
+        // RuboCop. Using call_line for grouping matches this behavior.
         let mut lets: Vec<(usize, usize)> = Vec::new();
         for (call_start, open_offset, close_offset) in &collector.blocks {
             let (call_line, _) = source.offset_to_line_col(*call_start);
             let (open_line, open_col) = source.offset_to_line_col(*open_offset);
             let (close_line, _) = source.offset_to_line_col(*close_offset);
-            if call_line == close_line && open_line == close_line {
-                lets.push((open_line, open_col));
+            if open_line == close_line {
+                // Block braces on same line → single-line let.
+                // Use call_line for grouping (matches legacy parser line merging).
+                lets.push((call_line, open_col));
             }
         }
 

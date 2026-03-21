@@ -52,12 +52,12 @@ use crate::parse::source::SourceFile;
 ///
 /// FP=2, FN=0. Both FPs on weird_rspec_spec.rb:47 in rubocop-rspec and rubocop-rspec_rails.
 ///
-/// Root cause: same as AlignLeftLetBrace — nitrocop's single-line check only
-/// compared block brace lines, while RuboCop's `node.single_line?` checks the
-/// entire node. Multi-line calls shifted adjacent_let_chunks grouping, causing
-/// lines 47-48 to be grouped together in nitrocop but not in RuboCop.
+/// Root cause: same as AlignLeftLetBrace — the legacy parser merges backslash-
+/// continued lines, so `let('foo' \ 'bar') { 1 }` reports as line 40 (not 41).
+/// Using the block opening line instead of the call start line for grouping
+/// shifted adjacent_let_chunks chunking, causing lines 47-48 to form a group.
 ///
-/// Fix: changed single-line check to compare call start line vs block close line.
+/// Fix: use call start line for grouping position, matching legacy parser.
 pub struct AlignRightLetBrace;
 
 impl Cop for AlignRightLetBrace {
@@ -138,18 +138,18 @@ impl<'a, 'pr> Visit<'pr> for LetCollector<'a> {
                     let open_loc = block_node.opening_loc();
                     let close_loc = block_node.closing_loc();
 
-                    let (call_line, _) =
-                        self.source.offset_to_line_col(call_loc.start_offset());
+                    let (call_line, _) = self.source.offset_to_line_col(call_loc.start_offset());
                     let (open_line, _) = self.source.offset_to_line_col(open_loc.start_offset());
                     let (close_line, close_col) =
                         self.source.offset_to_line_col(close_loc.start_offset());
 
-                    // Single-line check: entire expression (call + block) on same line.
-                    // RuboCop's `node.single_line?` checks the whole node, not just
-                    // the block braces. Multi-line calls like `let('foo' \ 'bar') { 1 }`
-                    // must be excluded.
-                    if call_line == close_line && open_line == close_line {
-                        self.lets.push((open_line, close_col));
+                    // Single-line check: block braces on same line.
+                    // Use call_line for grouping position (not block opening line).
+                    // The legacy parser merges backslash-continued lines, so
+                    // `let('foo' \ 'bar') { 1 }` (Prism lines 40-41) reports as
+                    // line 40 in RuboCop. Using call_line matches this behavior.
+                    if open_line == close_line {
+                        self.lets.push((call_line, close_col));
                     }
                 }
             }
