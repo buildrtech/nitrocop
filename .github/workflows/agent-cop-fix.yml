@@ -104,7 +104,6 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.backend }}" = "minimax" ]; then
             claude -p --dangerously-skip-permissions \
-              --output-last-message /tmp/agent-result.md \
               "$(cat /tmp/task.md)" 2>&1 | tee /tmp/agent.log
           else
             mkdir -p ~/.codex
@@ -119,7 +118,6 @@ jobs:
           name: agent-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/agent.log
-            /tmp/agent-result.md
             /tmp/task.md
             ~/.claude/projects/**/conversations/**/*.jsonl
           retention-days: 7
