@@ -37,8 +37,8 @@ Go to https://github.com/6/nitrocop/settings/secrets/actions and create:
 
 | Secret | Value |
 |--------|-------|
-| `GITHUB_APP_ID` | The numeric App ID from step 3 |
-| `GITHUB_APP_PRIVATE_KEY` | The entire contents of the `.pem` file |
+| `GH_APP_ID` | The numeric App ID from step 3 |
+| `GH_APP_PRIVATE_KEY` | The entire contents of the `.pem` file |
 
 ### 5. Verify
 
@@ -56,8 +56,8 @@ The workflow uses [`actions/create-github-app-token`](https://github.com/actions
 - uses: actions/create-github-app-token@v1
   id: app-token
   with:
-    app-id: ${{ secrets.GITHUB_APP_ID }}
-    private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+    app-id: ${{ secrets.GH_APP_ID }}
+    private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
 - name: Create PR
   env:
@@ -72,7 +72,7 @@ The token is scoped to the repository, expires after 1 hour, and has only the pe
 
 ## Reusing across repos
 
-Since the app is owned by your GitHub account, you can install it on any repo under `github.com/6/*`. Each repo just needs the `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` secrets (or use organization-level secrets to share them).
+Since the app is owned by your GitHub account, you can install it on any repo under `github.com/6/*`. Each repo just needs the `GH_APP_ID` and `GH_APP_PRIVATE_KEY` secrets (or use organization-level secrets to share them).
 
 ## Fallback
 
