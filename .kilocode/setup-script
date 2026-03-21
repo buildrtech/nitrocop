@@ -1,23 +1,43 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 # Kilo Cloud Agent setup for nitrocop cop-fix tasks.
 # Called from Kilo startup commands: bash .kilocode/setup-script
+#
+# Logs to /tmp/setup.log for debugging if session fails.
+
+exec > >(tee -a /tmp/setup.log) 2>&1
+echo "=== Setup started at $(date) ==="
 
 # Install build tools (ruby-prism crate needs a C compiler)
-apt-get update && apt-get install -y build-essential curl
+echo "--- Installing build tools ---"
+if command -v sudo &>/dev/null; then
+  sudo apt-get update -qq && sudo apt-get install -y -qq build-essential curl
+else
+  apt-get update -qq && apt-get install -y -qq build-essential curl
+fi
 
 # Install Rust
+echo "--- Installing Rust ---"
 if ! command -v cargo &>/dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  source "$HOME/.cargo/env"
+fi
+# Source cargo env (try both common locations)
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+[ -f "/root/.cargo/env" ] && . "/root/.cargo/env"
+echo "cargo: $(which cargo 2>/dev/null || echo 'NOT FOUND')"
+
+# Ensure submodules are checked out (needed for ruby-prism build)
+echo "--- Checking submodules ---"
+if [ ! -d "vendor/rubocop/.git" ] && [ -f ".gitmodules" ]; then
+  git submodule update --init --recursive
 fi
 
 # Build the project
-cargo build
+echo "--- Building ---"
+cargo build 2>&1
 
 # Remove files that would confuse the agent.
-# The agent gets instructions from .kilocode/rules/cop-fix.md and the task prompt.
-# These deletions are ephemeral — never committed.
+echo "--- Cleaning up distracting files ---"
 rm -f CLAUDE.md AGENTS.md
 rm -rf .agents/ .claude/ .devcontainer/ .github/ bench/ docs/ gem/ scripts/
+
+echo "=== Setup complete at $(date) ==="
