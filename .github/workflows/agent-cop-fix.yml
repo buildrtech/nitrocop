@@ -284,8 +284,9 @@ jobs:
           git diff "${{ steps.prep.outputs.main_sha }}" HEAD -- \
             src/cop/ tests/fixtures/cops/ bench/corpus/ > /tmp/agent.patch
 
-          # Restore full repo from main
-          git checkout main
+          # Restore full repo to original main (cleanup commit is on main,
+          # so "git checkout main" is a no-op — must reset to main_sha)
+          git checkout "${{ steps.prep.outputs.main_sha }}"
 
           if [ -s /tmp/agent.patch ]; then
             git apply /tmp/agent.patch
