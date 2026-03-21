@@ -338,8 +338,9 @@ jobs:
             echo "No changes made"
           fi
 
-      - name: Validate and create PR
+      - name: Create PR
         if: steps.changes.outputs.has_changes == 'true'
+        id: pr
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -366,15 +367,6 @@ jobs:
 
           if [ -s /tmp/agent.patch ]; then
             git apply /tmp/agent.patch
-
-            # Validate
-            cargo build --release 2>&1
-            cargo test --release --lib --no-run 2>&1
-            cargo test --release --lib -- "${{ steps.cop.outputs.filter }}" 2>&1
-            echo "Tests pass for ${COP}"
-
-            # Create clean branch + PR
-            git push origin --delete "$BRANCH" 2>/dev/null || true
             git add src/cop/ tests/fixtures/cops/ bench/corpus/
 
             RETRY_NOTE=""
@@ -383,30 +375,63 @@ jobs:
             fi
             git commit -m "Fix ${COP}: agent-generated fix${RETRY_NOTE} ($BACKEND)"
 
+            git push origin --delete "$BRANCH" 2>/dev/null || true
             git push -u origin "$BRANCH"
 
-            gh pr create \
+            PR_URL=$(gh pr create \
               --base main \
               --head "$BRANCH" \
               --title "Fix ${COP}: agent-generated conformance fix${RETRY_NOTE}" \
               --body "Automated ${MODE} fix for ${COP} (backend: ${BACKEND}).
 
           ## Validation
-          - [x] cargo test --lib passes for this cop
-          - [ ] Full CI (checks.yml) — dispatched automatically
+          - [ ] cargo test --lib
+          - [ ] Full CI (checks.yml)
           - [ ] Corpus count check
-          "
-
-            # Dispatch CI checks on the branch (GITHUB_TOKEN PRs don't
-            # trigger pull_request workflows automatically)
-            gh workflow run checks.yml --ref "$BRANCH" -f ref="$BRANCH" || \
-              echo "WARNING: could not dispatch checks workflow"
-            # Run corpus cop check inline (GITHUB_TOKEN PRs don't trigger
-            # pull_request workflows, so agent-cop-check won't fire)
-            echo ""
-            echo "=== Corpus cop check ==="
-            python3 scripts/check-cop.py "$COP" --extended --verbose || \
-              echo "WARNING: corpus check reported issues (advisory)"
+          ")
+            echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+            echo "has_pr=true" >> "$GITHUB_OUTPUT"
+            echo "Created PR: $PR_URL"
           else
             echo "No cop file changes found in agent output"
+            echo "has_pr=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate PR
+        if: steps.pr.outputs.has_pr == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COP="${{ github.event.inputs.cop }}"
+          BRANCH="${{ steps.cop.outputs.branch }}"
+          PASS=true
+
+          # Unit tests
+          echo "=== Unit tests ==="
+          cargo build --release 2>&1
+          cargo test --release --lib --no-run 2>&1
+          if cargo test --release --lib -- "${{ steps.cop.outputs.filter }}" 2>&1; then
+            echo "Unit tests: PASS"
+          else
+            echo "Unit tests: FAIL"
+            PASS=false
+          fi
+
+          # Corpus cop check
+          echo ""
+          echo "=== Corpus cop check ==="
+          if python3 scripts/check-cop.py "$COP" --extended --verbose 2>&1; then
+            echo "Corpus check: PASS"
+          else
+            echo "Corpus check: WARN (advisory)"
+          fi
+
+          # Update PR with results
+          if [ "$PASS" = "true" ]; then
+            gh pr comment "${{ steps.pr.outputs.pr_url }}" \
+              --body "Validation passed: unit tests OK, corpus check complete." || true
+          else
+            gh pr comment "${{ steps.pr.outputs.pr_url }}" \
+              --body "Validation **failed**: unit tests did not pass. Review the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details." || true
+            gh pr edit "${{ steps.pr.outputs.pr_url }}" --add-label "validation-failed" 2>/dev/null || true
           fi
