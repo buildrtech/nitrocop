@@ -102,12 +102,22 @@ jobs:
           CODEX_AUTH_JSON: ${{ github.event.inputs.backend == 'codex' && secrets.CODEX_AUTH_JSON || '' }}
         run: |
           if [ "${{ github.event.inputs.backend }}" = "minimax" ]; then
-            claude -p --dangerously-skip-permissions "$(cat /tmp/task.md)"
+            claude -p --dangerously-skip-permissions "$(cat /tmp/task.md)" 2>&1 | tee /tmp/agent.log
           else
             mkdir -p ~/.codex
             echo "$CODEX_AUTH_JSON" > ~/.codex/auth.json
-            codex exec --full-auto -m gpt-5.4 - < /tmp/task.md
+            codex exec --full-auto -m gpt-5.4 - < /tmp/task.md 2>&1 | tee /tmp/agent.log
           fi
+
+      - name: Upload agent log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-log-${{ github.event.inputs.cop }}
+          path: |
+            /tmp/agent.log
+            /tmp/task.md
+          retention-days: 7
 
       # --- Validate + PR ---
 
