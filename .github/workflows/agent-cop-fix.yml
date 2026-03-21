@@ -40,6 +40,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          persist-credentials: false
 
       # --- Rust toolchain + cache (before any file deletions) ---
       - uses: dtolnay/rust-toolchain@stable
@@ -65,7 +66,8 @@ jobs:
           dept_map = {'RSpec': 'rspec', 'RSpecRails': 'rspec_rails', 'FactoryBot': 'factory_bot'}
           dept_dir = dept_map.get(dept, snake(dept))
           cop_snake = snake(name)
-          print(f'branch=fix/{dept_dir}-{cop_snake}')
+          print(f'branch_prefix=fix/{dept_dir}-{cop_snake}')
+          print(f'branch=fix/{dept_dir}-{cop_snake}-${{ github.run_id }}')
           print(f'filter=cop::{dept_dir}::{cop_snake}')
           " "${{ github.event.inputs.cop }}" >> "$GITHUB_OUTPUT"
 
@@ -105,8 +107,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          COP="${{ github.event.inputs.cop }}"
-          OPEN_PRS=$(gh pr list --state open --search "$COP in:title" --json number --jq '.[].number' 2>/dev/null || true)
+          BRANCH_PREFIX="${{ steps.cop.outputs.branch_prefix }}"
+          # Match on branch prefix (fix/dept-cop_name-*) not title search
+          OPEN_PRS=$(gh pr list --state open --head "$BRANCH_PREFIX" --json number --jq '.[].number' 2>/dev/null || true)
+          if [ -z "$OPEN_PRS" ]; then
+            # Fallback: search by branch prefix pattern for older runs
+            OPEN_PRS=$(gh pr list --state open --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"$BRANCH_PREFIX\")) | .number" 2>/dev/null || true)
+          fi
           for pr in $OPEN_PRS; do
             echo "Closing stale PR #$pr"
             gh pr close "$pr" --comment "Superseded by retry attempt." 2>/dev/null || true
@@ -336,6 +343,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Set up git credentials for push (persist-credentials: false on checkout)
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+
           BRANCH="${{ steps.cop.outputs.branch }}"
           COP="${{ github.event.inputs.cop }}"
           BACKEND="${{ github.event.inputs.backend }}"
@@ -358,6 +368,7 @@ jobs:
             git apply /tmp/agent.patch
 
             # Validate
+            cargo build --release 2>&1
             cargo test --release --lib --no-run 2>&1
             cargo test --release --lib -- "${{ steps.cop.outputs.filter }}" 2>&1
             echo "Tests pass for ${COP}"
@@ -385,6 +396,12 @@ jobs:
           - [ ] Full CI (checks.yml)
           - [ ] Corpus count check (agent-cop-check.yml)
           "
+            # Run corpus cop check inline (GITHUB_TOKEN PRs don't trigger
+            # pull_request workflows, so agent-cop-check won't fire)
+            echo ""
+            echo "=== Corpus cop check ==="
+            python3 scripts/check-cop.py "$COP" --extended --verbose || \
+              echo "WARNING: corpus check reported issues (advisory)"
           else
             echo "No cop file changes found in agent output"
           fi
