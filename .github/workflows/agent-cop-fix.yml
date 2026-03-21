@@ -468,5 +468,7 @@ jobs:
           echo "has_pr=true" >> "$GITHUB_OUTPUT"
           echo "Created PR: $PR_URL"
 
-          # PRs are landed via /land-agent-prs for review + correct authorship
+          # Enable auto-merge (rebase to preserve individual commits).
+          # PR will merge automatically once CI passes + review approval.
+          gh pr merge "$PR_URL" --auto --rebase --delete-branch
 

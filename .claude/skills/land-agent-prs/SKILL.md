@@ -1,10 +1,10 @@
-# land-agent-prs
+# review-agent-prs
 
-Review and merge PRs created by the agent cop fix workflow.
+Review PRs created by the agent cop fix workflow. Approve good ones (auto-merge handles the rest), fix minor issues, or close bad ones.
 
 ## Trigger
 
-User runs `/land-agent-prs` (optionally with filters like `--dry-run`, `--cop Style/*`).
+User runs `/review-agent-prs` (optionally with filters like `--cop Style/*`).
 
 ## Workflow
 
@@ -16,64 +16,63 @@ gh pr list --repo 6/nitrocop --label agent-fix --state open \
   --jq '.[] | "\(.number)\t\(.title)\t\(.labels | map(.name) | join(","))"'
 ```
 
-### 2. Categorize each PR
+### 2. Review each PR
 
-For each open PR, check:
-- **Validation status**: look for `validation-failed` label or validation comment
-- **CI status**: `gh pr checks <number>` (may be empty if checks weren't dispatched)
-- **Mergeable**: no conflicts with main
+For each PR, fetch the diff with `gh pr diff <number>` and review:
 
-Categorize into:
-- **Ready**: validation passed, no `validation-failed` label, tests OK
-- **Failed**: has `validation-failed` label or failing checks
-- **Fixable**: CI passes but code has quality nits worth fixing before merge
-- **Pending**: no validation results yet
+**Code correctness:**
+- Does the logic match the cop's intended behavior?
+- Are edge cases handled?
+- Could the fix introduce false positives or false negatives?
 
-### 2b. Review code quality and fix nits
-
-For each PR that passes CI, review the diff for quality issues common in agent-generated code:
+**Code quality:**
 - Missing explicit parentheses for operator precedence clarity
 - Overly verbose or unclear comments
 - Unnecessary complexity that could be simplified
 
-If nits are found, check out the PR branch, fix them, commit, and push before merging.
+**Tests:**
+- Are offense and no_offense fixtures adequate?
+- Does corrected.rb exist if autocorrect was added?
 
-### 3. Present summary table
+### 3. Take action on each PR
 
-Show a table like:
-```
-| PR  | Cop                        | Status  | Action     |
-|-----|----------------------------|---------|------------|
-| #102| Style/VariableInterpolation| Ready   | Will merge |
-| #105| Lint/EmptyBlock            | Failed  | Skip       |
-| #108| Style/SymbolProc           | Pending | Skip       |
-```
+For each PR, do exactly one of:
 
-### 4. Land ready PRs
-
-Use `scripts/land-branch-commits.sh` to cherry-pick each commit from the PR branch onto main, preserving individual commits (agent fix + any cleanup commits stay separate):
-
+**Approve** — code is correct and clean:
 ```bash
-bash scripts/land-branch-commits.sh <branch-name>
-git push origin main
+gh pr review <number> --approve --body "Reviewed: logic correct, tests adequate."
 ```
+Auto-merge will land it once CI passes.
 
-Then close the PR and delete the remote branch:
+**Fix then approve** — code is correct but has quality nits:
+1. Check out the PR branch
+2. Fix the issues (fmt, readability, simplification)
+3. Commit and push
+4. Approve the PR:
 ```bash
-gh pr close <number> --delete-branch
+gh pr review <number> --approve --body "Reviewed: fixed [description of nits]. Logic correct."
 ```
 
-If `--dry-run` was specified, show what would be landed but don't land.
+**Close** — code is wrong, too complex, or not worth fixing:
+```bash
+gh pr close <number> --comment "Closing: [reason]. [Specific issues found.]" --delete-branch
+```
 
-### 5. Report
+### 4. Present summary
 
-Summarize: N landed, N failed (skipped), N pending (skipped).
+Show a table of actions taken:
+```
+| PR   | Cop                         | Action          |
+|------|-----------------------------|-----------------|
+| #102 | Style/VariableInterpolation | Approved        |
+| #105 | Lint/EmptyBlock             | Fixed + approved|
+| #106 | Layout/SpaceBeforeComment   | Closed (reason) |
+```
 
 ## Rules
 
-- Only land PRs with the `agent-fix` label
-- Never land PRs with the `validation-failed` label
-- Preserve individual commits (don't squash) — keeps agent fix vs reviewer cleanup visible in history
-- Delete the remote branch after landing
-- If unsure about a PR, skip it and note why
-- Don't land PRs that have merge conflicts — note them for manual resolution
+- Only review PRs with the `agent-fix` label
+- PRs with `validation-failed` label: close with comment explaining why
+- PRs with merge conflicts: close with comment, agent can retry on fresh main
+- When fixing, commit with a clear message explaining what was changed
+- When closing, always leave a comment with the specific reason so the dispatch system can learn
