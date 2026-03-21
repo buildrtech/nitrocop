@@ -3,7 +3,6 @@ name: Corpus Oracle
 permissions:
   contents: write
   pull-requests: write
-  workflows: write
 
 concurrency:
   group: corpus-${{ github.ref }}-${{ github.event.inputs.corpus_size || 'standard' }}
