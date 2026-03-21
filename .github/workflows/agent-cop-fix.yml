@@ -248,6 +248,13 @@ jobs:
           PR_URL="${{ steps.claim.outputs.pr_url }}"
           CODE_BUGS="${{ steps.task.outputs.code_bugs }}"
 
+          # Count tokens
+          TOKENS=$(pip install -q tiktoken && python3 -c "
+          import tiktoken
+          enc = tiktoken.get_encoding('cl100k_base')
+          print(len(enc.encode(open('/tmp/task.md').read())))
+          " 2>/dev/null || echo "?")
+
           {
             echo "> **Status:** Agent is working on this fix..."
             echo ">"
@@ -255,7 +262,7 @@ jobs:
             echo "> **Code bugs:** ${CODE_BUGS} | **Run:** ${RUN_URL}"
             echo ""
             echo "<details>"
-            echo "<summary>Task prompt (click to expand)</summary>"
+            echo "<summary>Task prompt (${TOKENS} tokens)</summary>"
             echo ""
             cat /tmp/task.md
             echo ""
@@ -567,7 +574,12 @@ jobs:
             echo '```'
             echo ""
             echo "<details>"
-            echo "<summary>Task prompt</summary>"
+            TOKENS=$(python3 -c "
+            import tiktoken
+            enc = tiktoken.get_encoding('cl100k_base')
+            print(len(enc.encode(open('/tmp/task.md').read())))
+            " 2>/dev/null || echo "?")
+            echo "<summary>Task prompt (${TOKENS} tokens)</summary>"
             echo ""
             cat /tmp/task.md
             echo ""
