@@ -128,12 +128,28 @@ jobs:
       - name: Check for changes
         id: changes
         run: |
-          if git diff --quiet; then
+          # Check for uncommitted changes OR new commits since prep
+          UNCOMMITTED=false
+          NEW_COMMITS=false
+          if ! git diff --quiet; then
+            UNCOMMITTED=true
+          fi
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse ${{ steps.prep.outputs.main_sha }}~0)" ]; then
+            # HEAD moved since the cleanup commit — agent made commits
+            CLEANUP_SHA=$(git log --format=%H -1 --grep="tmp: clean workspace")
+            if [ "$(git rev-parse HEAD)" != "$CLEANUP_SHA" ]; then
+              NEW_COMMITS=true
+            fi
+          fi
+
+          if [ "$UNCOMMITTED" = "true" ] || [ "$NEW_COMMITS" = "true" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Changes detected (uncommitted=$UNCOMMITTED, new_commits=$NEW_COMMITS)"
+            git log --oneline "${{ steps.prep.outputs.main_sha }}"..HEAD 2>/dev/null || true
+            git diff --stat 2>/dev/null || true
+          else
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             echo "No changes made"
-          else
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            git diff --stat
           fi
 
       - name: Validate and create PR
@@ -145,6 +161,7 @@ jobs:
           COP="${{ github.event.inputs.cop }}"
           BACKEND="${{ github.event.inputs.backend }}"
 
+          # Commit any uncommitted changes the agent left
           git add -A
           git commit -m "agent changes" --allow-empty
 

@@ -305,12 +305,14 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 
 ### Workflow
 1. Read the FP/FN examples below to understand what pattern is wrong
-2. Add a test case:
+2. Add a test case FIRST:
    - FN fix: add the missed pattern to `tests/fixtures/cops/{dept_snake}/{snake}/offense.rb` with `^` annotation
    - FP fix: add the false-positive pattern to `tests/fixtures/cops/{dept_snake}/{snake}/no_offense.rb`
-3. Fix `src/cop/{dept_snake}/{snake}.rs`
-4. Add a `///` doc comment on the cop struct documenting what you found and fixed
-5. Commit only your cop's files
+3. Verify test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
+4. Fix `src/cop/{dept_snake}/{snake}.rs`
+5. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
+6. Add a `///` doc comment on the cop struct documenting what you found and fixed
+7. Commit only your cop's files
 
 ### Fixture Format
 Mark offenses with `^` markers on the line AFTER the offending source line:
@@ -322,7 +324,7 @@ The `^` characters must align with the offending columns. The message format is 
 
 ### Rules
 - Only modify `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`
-- Do NOT run `cargo build`, `cargo test`, or `cargo fmt` — CI will validate after push
+- Run `cargo test --lib -- cop::{dept_snake}::{snake}` to verify your fix (do NOT run the full test suite)
 - Do NOT touch unrelated files
 - Do NOT use `git stash`
 """)
