@@ -139,13 +139,20 @@ jobs:
           gh label create "$MODEL_LABEL" --color "c2e0c6" 2>/dev/null || true
 
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          DRAFT_BODY="$(cat <<EOF
+> **Status:** Agent is working on this fix...
+>
+> **Cop:** \`${COP}\` | **Backend:** ${BACKEND} | **Mode:** ${MODE}
+> **Run:** ${RUN_URL}
+EOF
+          )"
           PR_URL=$(gh pr create \
             --draft \
             --base main \
             --head "$BRANCH" \
             --label "agent-fix,${MODEL_LABEL}" \
             --title "[bot] Fix ${COP}${RETRY_NOTE}" \
-            --body "Automated ${MODE} fix for ${COP} (backend: ${BACKEND}). Agent running: ${RUN_URL}")
+            --body "$DRAFT_BODY")
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo "Created draft PR: $PR_URL"
 
@@ -490,6 +497,34 @@ jobs:
           git commit --allow-empty -m "Fix ${COP}: agent-generated fix${RETRY_NOTE} ($BACKEND)"
 
           git push origin "$BRANCH"
+
+          # Build final PR body with agent results
+          TURNS=$(jq -r '.num_turns // "?"' /tmp/agent-result.json 2>/dev/null || echo "?")
+          DIFF_STAT=$(git diff --stat origin/main..."$BRANCH" 2>/dev/null | tail -1)
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          FINAL_BODY="$(cat <<EOF
+Automated ${MODE} fix for \`${COP}\` corpus conformance.
+
+## Details
+
+| | |
+|---|---|
+| **Cop** | \`${COP}\` |
+| **Backend** | ${BACKEND} |
+| **Mode** | ${MODE} |
+| **Turns** | ${TURNS} |
+| **Run** | [#${{ github.run_number }}](${RUN_URL}) |
+
+## Changes
+
+\`\`\`
+${DIFF_STAT}
+\`\`\`
+EOF
+          )"
+
+          gh pr edit "$PR_URL" --body "$FINAL_BODY"
 
           # Mark PR as ready for review (no longer draft)
           gh pr ready "$PR_URL"
