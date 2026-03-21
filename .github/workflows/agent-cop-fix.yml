@@ -93,6 +93,7 @@ jobs:
           fi
 
       - name: Run agent
+        timeout-minutes: 20
         env:
           ANTHROPIC_BASE_URL: ${{ github.event.inputs.backend == 'minimax' && 'https://api.minimax.io/anthropic' || '' }}
           ANTHROPIC_AUTH_TOKEN: ${{ github.event.inputs.backend == 'minimax' && secrets.MINIMAX_API_KEY || '' }}
@@ -102,37 +103,43 @@ jobs:
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
           CODEX_AUTH_JSON: ${{ github.event.inputs.backend == 'codex' && secrets.CODEX_AUTH_JSON || '' }}
         run: |
-          if [ "${{ github.event.inputs.backend }}" = "minimax" ]; then
-            # Background progress watcher — tails JSONL logs every 30s
-            (
-              sleep 10
-              while true; do
-                LOGFILE=$(find ~/.claude/projects -name '*.jsonl' -newer /tmp/task.md 2>/dev/null | head -1)
-                if [ -n "$LOGFILE" ]; then
-                  LINES=$(wc -l < "$LOGFILE")
-                  LAST=$(tail -1 "$LOGFILE" | jq -r '.type // .role // "?" ' 2>/dev/null || echo "?")
-                  echo "[progress] $(date +%H:%M:%S) | $LINES events | last: $LAST"
-                fi
-                sleep 30
-              done
-            ) &
-            WATCHER_PID=$!
+          # Background progress watcher — shows what the agent is doing every 30s
+          (
+            sleep 10
+            while true; do
+              LOGFILE=$(find ~/.claude/projects -name '*.jsonl' -newer /tmp/task.md 2>/dev/null | head -1)
+              if [ -n "$LOGFILE" ]; then
+                LINES=$(wc -l < "$LOGFILE")
+                # Show last assistant message or tool use summary
+                LAST_TYPE=$(tail -1 "$LOGFILE" | jq -r '.type // "?"' 2>/dev/null || echo "?")
+                LAST_TOOL=$(tail -5 "$LOGFILE" | jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use") | .name' 2>/dev/null | tail -1)
+                LAST_TEXT=$(tail -5 "$LOGFILE" | jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' 2>/dev/null | tail -c 200)
+                echo "[progress] $(date +%H:%M:%S) | ${LINES} events | type: ${LAST_TYPE} | tool: ${LAST_TOOL:-n/a} | text: ${LAST_TEXT:-(none)}"
+              else
+                echo "[progress] $(date +%H:%M:%S) | waiting for session to start..."
+              fi
+              sleep 30
+            done
+          ) &
+          WATCHER_PID=$!
 
+          if [ "${{ github.event.inputs.backend }}" = "minimax" ]; then
             claude -p --dangerously-skip-permissions \
               --output-format json \
-              "$(cat /tmp/task.md)" > /tmp/agent-result.json 2>/tmp/agent.log
-
-            kill $WATCHER_PID 2>/dev/null || true
-
-            # Show summary
-            echo "Agent finished. Cost: $(jq -r '.total_cost_usd // "?"' /tmp/agent-result.json)"
-            echo "Turns: $(jq -r '.num_turns // "?"' /tmp/agent-result.json)"
-            echo "Result: $(jq -r '.result // "no result"' /tmp/agent-result.json | head -20)"
+              "$(cat /tmp/task.md)" > /tmp/agent-result.json 2>/tmp/agent.log || true
           else
             mkdir -p ~/.codex
             echo "$CODEX_AUTH_JSON" > ~/.codex/auth.json
-            codex exec --full-auto -m gpt-5.4 - < /tmp/task.md 2>&1 | tee /tmp/agent.log
+            codex exec --full-auto -m gpt-5.4 - < /tmp/task.md > /tmp/agent-result.json 2>/tmp/agent.log || true
           fi
+
+          kill $WATCHER_PID 2>/dev/null || true
+
+          # Show summary
+          echo "=== Agent Summary ==="
+          echo "Cost: $(jq -r '.total_cost_usd // "?"' /tmp/agent-result.json 2>/dev/null)"
+          echo "Turns: $(jq -r '.num_turns // "?"' /tmp/agent-result.json 2>/dev/null)"
+          echo "Result: $(jq -r '.result // "no result"' /tmp/agent-result.json 2>/dev/null | head -20)"
 
       - name: Upload agent log
         if: always()
