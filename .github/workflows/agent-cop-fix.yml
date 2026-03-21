@@ -495,9 +495,9 @@ jobs:
           echo "has_pr=true" >> "$GITHUB_OUTPUT"
           echo "PR ready: $PR_URL"
 
-          # Enable auto-merge (rebase to preserve individual commits).
+          # Enable auto-merge (squash).
           # PR will merge automatically once CI passes + review approval.
-          gh pr merge "$PR_URL" --auto --rebase --delete-branch
+          gh pr merge "$PR_URL" --auto --squash --delete-branch
 
       # --- Cleanup: close draft PR if agent failed ---
       - name: Close draft PR on failure
