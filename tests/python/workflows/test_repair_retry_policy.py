@@ -33,6 +33,16 @@ def test_parse_marker_fields():
     ]
 
 
+def test_parse_linked_issue():
+    body = (
+        "Closes #130\n\n"
+        "<!-- nitrocop-cop-issue: number=130 cop=Style/NegatedWhile -->\n"
+    )
+    issue_number, cop = repair_retry_policy.parse_linked_issue(body)
+    assert issue_number == 130
+    assert cop == "Style/NegatedWhile"
+
+
 def test_inspect_attempts_counts_pushes_and_codex():
     comments = [
         {
@@ -124,6 +134,7 @@ def test_policy_force_bypasses_caps():
 
 if __name__ == "__main__":
     test_parse_marker_fields()
+    test_parse_linked_issue()
     test_inspect_attempts_counts_pushes_and_codex()
     test_gate_pr_accepts_trusted_bot_pr()
     test_policy_blocks_same_head_repeat()

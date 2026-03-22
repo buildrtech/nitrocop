@@ -9,6 +9,9 @@ Public subcommands:
 - `tiers` groups diverging cops into dispatch difficulty tiers
 - `rank` finds cops that look fixable by agents
 - `prior-attempts` collects failed PR attempts for a cop
+- `backend` selects a recommended backend for a cop
+- `issues-sync` syncs one tracker issue per diverging extended-corpus cop
+- `dispatch-issues` fills the bounded active queue by dispatching tracker issues
 
 Usage:
     python3 scripts/dispatch-cops.py task Style/NegatedWhile
@@ -16,6 +19,9 @@ Usage:
     python3 scripts/dispatch-cops.py tiers --extended --tier 1 --names
     python3 scripts/dispatch-cops.py rank --json
     python3 scripts/dispatch-cops.py prior-attempts --cop Style/NegatedWhile
+    python3 scripts/dispatch-cops.py backend --cop Style/NegatedWhile --binary target/debug/nitrocop
+    python3 scripts/dispatch-cops.py issues-sync --extended --binary target/debug/nitrocop
+    python3 scripts/dispatch-cops.py dispatch-issues --max-active 5
 """
 
 import argparse
@@ -86,6 +92,32 @@ PRISM_PITFALLS = {
 MAX_DIAGNOSTIC_DETAILS_PER_KIND = 8
 MAX_ADDITIONAL_EXAMPLES_PER_KIND = 5
 
+COP_TRACKER_MARKER = "nitrocop-cop-tracker"
+PR_ISSUE_MARKER = "nitrocop-cop-issue"
+ISSUE_TITLE_PREFIX = "[cop] "
+TRACKER_LABEL = "cop-tracker"
+STATE_BACKLOG = "state:backlog"
+STATE_PR_OPEN = "state:pr-open"
+STATE_BLOCKED = "state:blocked"
+STATE_LABELS = [STATE_BACKLOG, STATE_PR_OPEN, STATE_BLOCKED]
+BACKEND_LABELS = {"minimax": "backend:minimax", "codex": "backend:codex"}
+TIER_LABELS = {1: "difficulty:tier1", 2: "difficulty:tier2", 3: "difficulty:tier3"}
+LABEL_COLORS = {
+    TRACKER_LABEL: "1d76db",
+    STATE_BACKLOG: "fbca04",
+    STATE_PR_OPEN: "0e8a16",
+    STATE_BLOCKED: "b60205",
+    "backend:minimax": "5319e7",
+    "backend:codex": "0366d6",
+    "difficulty:tier1": "0e8a16",
+    "difficulty:tier2": "fbca04",
+    "difficulty:tier3": "d73a4a",
+}
+TITLE_RE = re.compile(r"^\[bot\] Fix (?P<cop>.+?)(?: \(retry\))?$")
+TRACKER_RE = re.compile(r"<!--\s*" + re.escape(COP_TRACKER_MARKER) + r":\s*(.*?)\s*-->")
+PR_ISSUE_RE = re.compile(r"<!--\s*" + re.escape(PR_ISSUE_MARKER) + r":\s*(.*?)\s*-->")
+MAX_GH_PAGE = 500
+
 
 def pascal_to_snake(name: str) -> str:
     """Convert PascalCase to snake_case. E.g. NegatedWhile -> negated_while."""
@@ -102,6 +134,53 @@ def parse_cop_name(cop: str) -> tuple[str, str, str]:
         sys.exit(1)
     dept, name = cop.split("/", 1)
     return dept, name, pascal_to_snake(name)
+
+
+def make_issue_title(cop: str) -> str:
+    return f"{ISSUE_TITLE_PREFIX}{cop}"
+
+
+def parse_marker_fields(body: str, pattern: re.Pattern[str]) -> dict[str, str]:
+    match = pattern.search(body or "")
+    if not match:
+        return {}
+    fields: dict[str, str] = {}
+    for token in match.group(1).split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def extract_cop_from_issue(issue: dict) -> str | None:
+    body_fields = parse_marker_fields(issue.get("body", ""), TRACKER_RE)
+    cop = body_fields.get("cop")
+    if cop:
+        return cop
+    title = issue.get("title", "")
+    if title.startswith(ISSUE_TITLE_PREFIX):
+        return title[len(ISSUE_TITLE_PREFIX):].strip()
+    return None
+
+
+def extract_cop_from_pr(pr: dict) -> str | None:
+    body_fields = parse_marker_fields(pr.get("body", ""), PR_ISSUE_RE)
+    cop = body_fields.get("cop")
+    if cop:
+        return cop
+    match = TITLE_RE.match(pr.get("title", "").strip())
+    if match:
+        return match.group("cop")
+    return None
+
+
+def extract_issue_number_from_pr(pr: dict) -> int | None:
+    body_fields = parse_marker_fields(pr.get("body", ""), PR_ISSUE_RE)
+    issue_number = body_fields.get("number")
+    if issue_number and issue_number.isdigit():
+        return int(issue_number)
+    return None
 
 
 def read_file_safe(path: Path) -> str | None:
@@ -963,6 +1042,129 @@ def tier_cops(data: dict) -> tuple[list[dict], dict[int, list[dict]]]:
     return cops, tiers
 
 
+def tier_for_total(total: int) -> int:
+    for tier, (low, high) in TIER_THRESHOLDS.items():
+        if low <= total <= high:
+            return tier
+    return 3
+
+
+def total_for_entry(entry: dict) -> int:
+    return entry.get("total", entry.get("fp", 0) + entry.get("fn", 0))
+
+
+def should_consider_easy_candidate(
+    entry: dict, min_total: int = 3, max_total: int = 15, min_matches: int = 50,
+) -> bool:
+    total = total_for_entry(entry)
+    return min_total <= total <= max_total and entry.get("matches", 0) >= min_matches
+
+
+def has_failed_attempt(prs: list[dict]) -> bool:
+    return any(pr.get("state") != "OPEN" and not pr.get("mergedAt") for pr in prs)
+
+
+def select_backend_for_entry(
+    cop: str,
+    entry: dict | None,
+    *,
+    mode: str,
+    binary: Path | None,
+    prior_prs: list[dict] | None = None,
+    min_total: int = 3,
+    max_total: int = 15,
+    min_matches: int = 50,
+    min_bugs: int = 1,
+) -> dict[str, object]:
+    prior_prs = prior_prs or []
+    total = total_for_entry(entry or {})
+    tier = tier_for_total(total) if total else 3
+
+    if mode == "retry":
+        return {
+            "backend": "codex",
+            "reason": "retry mode uses codex",
+            "tier": tier,
+            "code_bugs": 0,
+            "config_issues": 0,
+            "easy": False,
+        }
+
+    if has_failed_attempt(prior_prs):
+        return {
+            "backend": "codex",
+            "reason": "cop has prior failed agent attempts",
+            "tier": tier,
+            "code_bugs": 0,
+            "config_issues": 0,
+            "easy": False,
+        }
+
+    if not entry:
+        return {
+            "backend": "codex",
+            "reason": "cop is missing from corpus data",
+            "tier": tier,
+            "code_bugs": 0,
+            "config_issues": 0,
+            "easy": False,
+        }
+
+    if not should_consider_easy_candidate(
+        entry,
+        min_total=min_total,
+        max_total=max_total,
+        min_matches=min_matches,
+    ):
+        return {
+            "backend": "codex",
+            "reason": (
+                f"cop is outside easy thresholds (total={total_for_entry(entry)}, "
+                f"matches={entry.get('matches', 0)})"
+            ),
+            "tier": tier,
+            "code_bugs": 0,
+            "config_issues": 0,
+            "easy": False,
+        }
+
+    if not binary or not binary.exists():
+        return {
+            "backend": "codex",
+            "reason": "nitrocop binary unavailable for easy-cop prediagnosis",
+            "tier": tier,
+            "code_bugs": 0,
+            "config_issues": 0,
+            "easy": False,
+        }
+
+    fn_bugs, fn_cfg = diagnose_examples(binary, cop, entry.get("fn_examples", []), "fn")
+    fp_bugs, fp_cfg = diagnose_examples(binary, cop, entry.get("fp_examples", []), "fp")
+    code_bugs = fn_bugs + fp_bugs
+    config_issues = fn_cfg + fp_cfg
+    if code_bugs >= min_bugs:
+        return {
+            "backend": "minimax",
+            "reason": (
+                f"easy cop: total={total_for_entry(entry)}, matches={entry.get('matches', 0)}, "
+                f"diagnosed_code_bugs={code_bugs}"
+            ),
+            "tier": tier,
+            "code_bugs": code_bugs,
+            "config_issues": config_issues,
+            "easy": True,
+        }
+
+    return {
+        "backend": "codex",
+        "reason": "prediagnosis did not confirm any code bugs for easy-cop routing",
+        "tier": tier,
+        "code_bugs": code_bugs,
+        "config_issues": config_issues,
+        "easy": False,
+    }
+
+
 def run_nitrocop(binary: Path, cwd: str, cop: str) -> list[dict]:
     proc = subprocess.run(
         [str(binary), "--force-default-config", "--only", cop, "--format", "json", "test.rb"],
@@ -1031,6 +1233,177 @@ def run_gh(args: list[str], check: bool = True) -> str:
         check=check,
     )
     return result.stdout.strip()
+
+
+def ensure_labels(repo: str) -> None:
+    for label, color in LABEL_COLORS.items():
+        subprocess.run(
+            ["gh", "label", "create", label, "--repo", repo, "--color", color],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
+def list_agent_fix_prs(repo: str, state: str = "all") -> list[dict]:
+    try:
+        output = run_gh([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            state,
+            "--label",
+            "agent-fix",
+            "--limit",
+            str(MAX_GH_PAGE),
+            "--json",
+            "number,title,state,url,headRefName,mergedAt,closedAt,body",
+        ])
+    except subprocess.CalledProcessError:
+        return []
+    return json.loads(output) if output else []
+
+
+def index_prs_by_cop(prs: list[dict]) -> dict[str, list[dict]]:
+    by_cop: dict[str, list[dict]] = {}
+    for pr in prs:
+        cop = extract_cop_from_pr(pr)
+        if not cop:
+            continue
+        by_cop.setdefault(cop, []).append(pr)
+    return by_cop
+
+
+def list_tracker_issues(repo: str) -> list[dict]:
+    try:
+        output = run_gh([
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--label",
+            TRACKER_LABEL,
+            "--limit",
+            str(MAX_GH_PAGE),
+            "--json",
+            "number,title,state,url,body,labels",
+        ])
+    except subprocess.CalledProcessError:
+        return []
+    return json.loads(output) if output else []
+
+
+def index_issues_by_cop(issues: list[dict]) -> dict[str, dict]:
+    by_cop: dict[str, dict] = {}
+    for issue in issues:
+        cop = extract_cop_from_issue(issue)
+        if not cop:
+            continue
+        by_cop[cop] = issue
+    return by_cop
+
+
+def issue_label_names(issue: dict) -> set[str]:
+    return {label["name"] for label in issue.get("labels", [])}
+
+
+def choose_issue_state(existing_issue: dict | None, has_open_pr: bool) -> str:
+    if has_open_pr:
+        return STATE_PR_OPEN
+    if existing_issue and STATE_BLOCKED in issue_label_names(existing_issue):
+        return STATE_BLOCKED
+    return STATE_BACKLOG
+
+
+def render_tracker_marker(
+    cop: str, fp: int, fn: int, matches: int, tier: int, backend: str,
+) -> str:
+    total = fp + fn
+    return (
+        f"<!-- {COP_TRACKER_MARKER}: cop={cop} fp={fp} fn={fn} "
+        f"total={total} matches={matches} tier={tier} backend={backend} -->"
+    )
+
+
+def render_issue_body(
+    cop: str,
+    entry: dict,
+    *,
+    repo: str,
+    backend: str,
+    tier: int,
+    state_label: str,
+    open_pr: dict | None,
+    corpus_kind: str,
+    run_id: str | None,
+    head_sha: str | None,
+) -> str:
+    fp = entry.get("fp", 0)
+    fn = entry.get("fn", 0)
+    matches = entry.get("matches", 0)
+    total = fp + fn
+    lines = [
+        f"# {make_issue_title(cop)}",
+        "",
+        "This issue is managed by the corpus dispatch backlog automation.",
+        "",
+        "## Corpus Status",
+        "",
+        f"- Cop: `{cop}`",
+        f"- Corpus: `{corpus_kind}`",
+        f"- False positives: `{fp}`",
+        f"- False negatives: `{fn}`",
+        f"- Total divergence: `{total}`",
+        f"- Matches: `{matches}`",
+        f"- Difficulty tier: `tier{tier}`",
+        f"- Recommended backend: `{backend}`",
+        f"- Current state label: `{state_label}`",
+    ]
+    if run_id:
+        lines.append(f"- Source run: [#{run_id}](https://github.com/{repo}/actions/runs/{run_id})")
+    if head_sha:
+        lines.append(f"- Corpus head SHA: `{head_sha}`")
+    if open_pr:
+        lines.append(f"- Open bot PR: #{open_pr['number']} ({open_pr['url']})")
+    lines.extend([
+        "",
+        "## Automation Notes",
+        "",
+        "- This issue stays open while the cop still diverges or a bot PR is active.",
+        "- If a later corpus run shows the cop diverging again after merge, this same issue should be reopened and reused.",
+        "",
+        render_tracker_marker(cop, fp, fn, matches, tier, backend),
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def sync_issue_labels(repo: str, issue_number: int, labels: list[str]) -> None:
+    remove = STATE_LABELS + list(BACKEND_LABELS.values()) + list(TIER_LABELS.values())
+    subprocess.run(
+        [
+            "gh", "issue", "edit", str(issue_number),
+            "--repo", repo,
+            "--remove-label", ",".join(remove),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    subprocess.run(
+        [
+            "gh", "issue", "edit", str(issue_number),
+            "--repo", repo,
+            "--add-label", ",".join([TRACKER_LABEL, *labels]),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
 
 
 def find_prior_prs(cop: str) -> list[dict]:
@@ -1166,6 +1539,286 @@ def collect_attempts(cop: str) -> str:
     return "\n".join(parts)
 
 
+def build_entry_index(data: dict) -> dict[str, dict]:
+    return {entry["cop"]: entry for entry in data.get("by_cop", [])}
+
+
+def comment_on_issue(repo: str, issue_number: int, body: str) -> None:
+    subprocess.run(
+        ["gh", "issue", "comment", str(issue_number), "--repo", repo, "--body", body],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def create_tracker_issue(repo: str, title: str, body: str, labels: list[str]) -> int:
+    output = run_gh([
+        "issue",
+        "create",
+        "--repo",
+        repo,
+        "--title",
+        title,
+        "--body",
+        body,
+        "--label",
+        ",".join([TRACKER_LABEL, *labels]),
+    ])
+    match = re.search(r"/issues/(\d+)$", output.strip())
+    if not match:
+        raise RuntimeError(f"Could not parse issue number from gh issue create output: {output}")
+    return int(match.group(1))
+
+
+def update_tracker_issue(repo: str, issue_number: int, title: str, body: str, labels: list[str]) -> None:
+    subprocess.run(
+        [
+            "gh", "issue", "edit", str(issue_number),
+            "--repo", repo,
+            "--title", title,
+            "--body", body,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    sync_issue_labels(repo, issue_number, labels)
+
+
+def close_tracker_issue(repo: str, issue_number: int, body: str) -> None:
+    subprocess.run(
+        [
+            "gh", "issue", "close", str(issue_number),
+            "--repo", repo,
+            "--comment", body,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def reopen_tracker_issue(repo: str, issue_number: int) -> None:
+    subprocess.run(
+        ["gh", "issue", "reopen", str(issue_number), "--repo", repo],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def fetch_corpus_for_sync(input_path: Path | None, extended: bool) -> tuple[dict, str | None, str | None]:
+    if input_path:
+        return json.loads(input_path.read_text()), None, None
+    prefer = "extended" if extended else "standard"
+    path, run_id, head_sha = _download_corpus(prefer=prefer)
+    return json.loads(path.read_text()), str(run_id), head_sha
+
+
+def cmd_backend(args: argparse.Namespace) -> int:
+    data = load_dispatch_corpus(args.input, args.extended)
+    entry = build_entry_index(data).get(args.cop)
+    prior_prs = index_prs_by_cop(list_agent_fix_prs(args.repo, state="all")).get(args.cop, [])
+    binary = args.binary.resolve() if args.binary else None
+    recommendation = select_backend_for_entry(
+        args.cop,
+        entry,
+        mode=args.mode,
+        binary=binary,
+        prior_prs=prior_prs,
+    )
+    print(f"backend={recommendation['backend']}")
+    print(f"reason={recommendation['reason']}")
+    print(f"tier={recommendation['tier']}")
+    print(f"code_bugs={recommendation['code_bugs']}")
+    print(f"config_issues={recommendation['config_issues']}")
+    print(f"easy={'true' if recommendation['easy'] else 'false'}")
+    return 0
+
+
+def cmd_issues_sync(args: argparse.Namespace) -> int:
+    repo = args.repo
+    ensure_labels(repo)
+    data, run_id, head_sha = fetch_corpus_for_sync(args.input, args.extended)
+    corpus_kind = "extended" if args.extended or not args.input else "custom"
+    entries = build_entry_index(data)
+    issues = list_tracker_issues(repo)
+    issues_by_cop = index_issues_by_cop(issues)
+    prs_by_cop = index_prs_by_cop(list_agent_fix_prs(repo, state="all"))
+    open_prs_by_cop = {
+        cop: next((pr for pr in prs if pr.get("state") == "OPEN"), None)
+        for cop, prs in prs_by_cop.items()
+    }
+    binary = args.binary.resolve() if args.binary else None
+    diverging_cops = {cop for cop, entry in entries.items() if total_for_entry(entry) > 0}
+
+    created = updated = reopened = closed = 0
+
+    for cop in sorted(diverging_cops):
+        entry = entries[cop]
+        prior_prs = prs_by_cop.get(cop, [])
+        recommendation = select_backend_for_entry(
+            cop,
+            entry,
+            mode="fix",
+            binary=binary,
+            prior_prs=prior_prs,
+        )
+        tier = recommendation["tier"]
+        backend = str(recommendation["backend"])
+        open_pr = open_prs_by_cop.get(cop)
+        existing_issue = issues_by_cop.get(cop)
+        state_label = choose_issue_state(existing_issue, open_pr is not None)
+        labels = [state_label, TIER_LABELS[tier], BACKEND_LABELS[backend]]
+        title = make_issue_title(cop)
+        body = render_issue_body(
+            cop,
+            entry,
+            repo=repo,
+            backend=backend,
+            tier=tier,
+            state_label=state_label,
+            open_pr=open_pr,
+            corpus_kind=corpus_kind,
+            run_id=run_id,
+            head_sha=head_sha,
+        )
+
+        if existing_issue is None:
+            create_tracker_issue(repo, title, body, labels)
+            created += 1
+            continue
+
+        if existing_issue.get("state") == "CLOSED":
+            reopen_tracker_issue(repo, existing_issue["number"])
+            comment_on_issue(
+                repo,
+                existing_issue["number"],
+                (
+                    f"Reopened from the latest {corpus_kind} corpus sync"
+                    + (f" (run #{run_id})." if run_id else ".")
+                ),
+            )
+            reopened += 1
+
+        update_tracker_issue(repo, existing_issue["number"], title, body, labels)
+        updated += 1
+
+    for cop, issue in issues_by_cop.items():
+        if cop in diverging_cops:
+            continue
+        open_pr = open_prs_by_cop.get(cop)
+        if open_pr is not None or issue.get("state") != "OPEN":
+            continue
+        close_tracker_issue(
+            repo,
+            issue["number"],
+            (
+                f"No longer diverges in the latest {corpus_kind} corpus sync"
+                + (f" (run #{run_id})." if run_id else ".")
+            ),
+        )
+        closed += 1
+
+    print(
+        json.dumps(
+            {
+                "created": created,
+                "updated": updated,
+                "reopened": reopened,
+                "closed": closed,
+                "diverging_cops": len(diverging_cops),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def active_agent_fix_count(repo: str) -> tuple[int, int, int]:
+    open_prs = list_agent_fix_prs(repo, state="open")
+    open_count = len(open_prs)
+    try:
+        runs_json = run_gh([
+            "api",
+            f"repos/{repo}/actions/workflows/agent-cop-fix.yml/runs?per_page=100",
+        ])
+    except subprocess.CalledProcessError:
+        return open_count, 0, open_count
+
+    runs = json.loads(runs_json or "{}").get("workflow_runs", [])
+    in_progress = sum(
+        1
+        for run in runs
+        if run.get("status") in {"queued", "in_progress"}
+    )
+    return open_count, in_progress, max(open_count, in_progress)
+
+
+def sorted_dispatch_candidates(issues: list[dict]) -> list[dict]:
+    def key(issue: dict) -> tuple[int, int, str]:
+        fields = parse_marker_fields(issue.get("body", ""), TRACKER_RE)
+        tier = int(fields.get("tier", "3"))
+        total = int(fields.get("total", "999999"))
+        cop = extract_cop_from_issue(issue) or issue.get("title", "")
+        return tier, total, cop
+
+    return sorted(issues, key=key)
+
+
+def cmd_dispatch_issues(args: argparse.Namespace) -> int:
+    repo = args.repo
+    issues = list_tracker_issues(repo)
+    eligible = [
+        issue for issue in issues
+        if issue.get("state") == "OPEN" and STATE_BACKLOG in issue_label_names(issue)
+    ]
+    eligible = sorted_dispatch_candidates(eligible)
+    open_count, in_progress, active = active_agent_fix_count(repo)
+    capacity = max(args.max_active - active, 0)
+    selected = eligible[:capacity]
+
+    result = {
+        "open_agent_fix_prs": open_count,
+        "in_progress_agent_fix_runs": in_progress,
+        "active_count": active,
+        "max_active": args.max_active,
+        "capacity": capacity,
+        "selected": [],
+    }
+
+    for issue in selected:
+        cop = extract_cop_from_issue(issue)
+        if not cop:
+            continue
+        labels = issue_label_names(issue)
+        backend = (
+            args.backend_override
+            if args.backend_override != "auto"
+            else ("minimax" if BACKEND_LABELS["minimax"] in labels else "codex")
+        )
+        result["selected"].append({"issue": issue["number"], "cop": cop, "backend": backend})
+        if args.dry_run:
+            continue
+        subprocess.run(
+            [
+                "gh", "workflow", "run", "agent-cop-fix.yml",
+                "--repo", repo,
+                "-f", f"cop={cop}",
+                "-f", f"backend={backend}",
+                "-f", "mode=fix",
+                "-f", f"issue_number={issue['number']}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Dispatch-related corpus tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1198,6 +1851,38 @@ def main():
     prior_parser = subparsers.add_parser("prior-attempts", help="Collect prior failed PR attempts")
     prior_parser.add_argument("--cop", required=True, help="Cop name (e.g., Style/NegatedWhile)")
     prior_parser.add_argument("--output", "-o", type=Path, help="Output file path")
+
+    backend_parser = subparsers.add_parser("backend", help="Select a backend for a cop")
+    backend_parser.add_argument("--cop", required=True, help="Cop name (e.g., Style/NegatedWhile)")
+    backend_parser.add_argument("--mode", choices=["fix", "retry"], default="fix")
+    backend_parser.add_argument("--binary", type=Path, help="Path to nitrocop binary")
+    backend_parser.add_argument("--input", type=Path, help="Path to corpus-results.json")
+    backend_parser.add_argument("--extended", action="store_true", help="Use extended corpus")
+    backend_parser.add_argument(
+        "--repo",
+        default=os.environ.get("GITHUB_REPOSITORY", ""),
+        help="GitHub repo (owner/name) for prior-attempt lookup",
+    )
+
+    issues_sync = subparsers.add_parser("issues-sync", help="Sync one tracker issue per diverging cop")
+    issues_sync.add_argument("--input", type=Path, help="Path to corpus-results.json")
+    issues_sync.add_argument("--extended", action="store_true", help="Use extended corpus")
+    issues_sync.add_argument("--binary", type=Path, help="Path to nitrocop binary for backend routing")
+    issues_sync.add_argument(
+        "--repo",
+        default=os.environ.get("GITHUB_REPOSITORY", ""),
+        help="GitHub repo (owner/name)",
+    )
+
+    dispatch_issues = subparsers.add_parser("dispatch-issues", help="Dispatch backlog issues into agent-cop-fix")
+    dispatch_issues.add_argument("--max-active", type=int, default=5)
+    dispatch_issues.add_argument("--dry-run", action="store_true")
+    dispatch_issues.add_argument("--backend-override", choices=["auto", "minimax", "codex"], default="auto")
+    dispatch_issues.add_argument(
+        "--repo",
+        default=os.environ.get("GITHUB_REPOSITORY", ""),
+        help="GitHub repo (owner/name)",
+    )
 
     args = parser.parse_args()
 
@@ -1319,6 +2004,24 @@ def main():
             else:
                 print(f"No prior attempts found for {args.cop}", file=sys.stderr)
         return
+
+    if args.command == "backend":
+        if not args.repo:
+            print("Error: --repo or GITHUB_REPOSITORY is required", file=sys.stderr)
+            raise SystemExit(1)
+        raise SystemExit(cmd_backend(args))
+
+    if args.command == "issues-sync":
+        if not args.repo:
+            print("Error: --repo or GITHUB_REPOSITORY is required", file=sys.stderr)
+            raise SystemExit(1)
+        raise SystemExit(cmd_issues_sync(args))
+
+    if args.command == "dispatch-issues":
+        if not args.repo:
+            print("Error: --repo or GITHUB_REPOSITORY is required", file=sys.stderr)
+            raise SystemExit(1)
+        raise SystemExit(cmd_dispatch_issues(args))
 
 
 if __name__ == "__main__":

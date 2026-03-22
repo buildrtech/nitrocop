@@ -319,16 +319,16 @@ Use `/triage` to just view the ranked cop list without fixing. See `.claude/skil
 
 ### Remote Agent Dispatch
 
-Use `/dispatch-cops` to parallelize cop fixes at scale via AI agents running in GitHub Actions. Each agent fixes one cop and opens a PR validated by CI. Two backends available:
+Use `/dispatch-cops` to parallelize cop fixes at scale via AI agents running in GitHub Actions. The current flow is issue-backed: sync one tracker issue per diverging cop from the extended corpus, then dispatch a bounded queue of those issues into `agent-cop-fix`. Each agent fixes one cop and opens a PR validated by CI. Two backends available:
 - **Claude Code + MiniMax** (~$0.03/cop) — [docs/agent-dispatch-minimax.md](docs/agent-dispatch-minimax.md)
 - **Codex** ($200/mo flat rate) — [docs/agent-dispatch.md](docs/agent-dispatch.md)
 
 See `.claude/skills/dispatch-cops/SKILL.md` for the `/dispatch-cops` skill.
 
 ```
-/dispatch-cops              # start from triage
-/dispatch-cops pilot        # 10-cop pilot
-/dispatch-cops tier1        # batch dispatch Tier 1 (~319 cops)
+/dispatch-cops              # start from issue sync + bounded dispatch
+/dispatch-cops sync         # sync/update cop tracker issues from extended corpus
+/dispatch-cops dispatch     # fill the active queue from backlog issues
 /dispatch-cops retry        # retry failed cops with stronger model
 /dispatch-cops status       # check PR status
 /dispatch-cops validate     # trigger corpus oracle

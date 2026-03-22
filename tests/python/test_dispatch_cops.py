@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Tests for dispatch-cops.py helper functions."""
 import importlib.util
+import io
+import json
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "dispatch-cops.py"
 SPEC = importlib.util.spec_from_file_location("dispatch_cops", SCRIPT)
@@ -185,6 +189,168 @@ def test_format_with_diagnostics_keeps_no_source_examples_when_they_are_all_we_h
     assert "(could not diagnose: no source context)" in output
 
 
+def test_select_backend_for_entry_retry_forces_codex():
+    result = gct.select_backend_for_entry(
+        "Style/Foo",
+        {"cop": "Style/Foo", "fp": 1, "fn": 1, "matches": 100},
+        mode="retry",
+        binary=None,
+        prior_prs=[],
+    )
+    assert result["backend"] == "codex"
+    assert "retry mode" in result["reason"]
+
+
+def test_has_failed_attempt_ignores_open_prs():
+    prs = [
+        {"state": "OPEN", "mergedAt": None},
+        {"state": "MERGED", "mergedAt": "2026-03-22T00:00:00Z"},
+        {"state": "CLOSED", "mergedAt": None},
+    ]
+    assert gct.has_failed_attempt(prs) is True
+    assert gct.has_failed_attempt(prs[:2]) is False
+
+
+def test_select_backend_for_entry_easy_cop_uses_minimax():
+    original = gct.diagnose_examples
+    gct.diagnose_examples = lambda *args, **kwargs: (1, 0)
+    try:
+        result = gct.select_backend_for_entry(
+            "Style/Foo",
+            {"cop": "Style/Foo", "fp": 2, "fn": 1, "matches": 120},
+            mode="fix",
+            binary=Path(__file__),
+            prior_prs=[],
+        )
+    finally:
+        gct.diagnose_examples = original
+    assert result["backend"] == "minimax"
+    assert result["easy"] is True
+    assert result["code_bugs"] == 2
+
+
+def test_choose_issue_state_preserves_blocked_without_open_pr():
+    issue = {"labels": [{"name": "state:blocked"}]}
+    assert gct.choose_issue_state(issue, has_open_pr=False) == "state:blocked"
+    assert gct.choose_issue_state(issue, has_open_pr=True) == "state:pr-open"
+
+
+def test_sorted_dispatch_candidates_orders_by_tier_then_total_then_cop():
+    issues = [
+        {"number": 3, "title": "[cop] Style/Zed", "body": "<!-- nitrocop-cop-tracker: cop=Style/Zed total=4 tier=1 backend=minimax -->", "labels": []},
+        {"number": 1, "title": "[cop] Layout/Foo", "body": "<!-- nitrocop-cop-tracker: cop=Layout/Foo total=3 tier=1 backend=minimax -->", "labels": []},
+        {"number": 2, "title": "[cop] Metrics/Bar", "body": "<!-- nitrocop-cop-tracker: cop=Metrics/Bar total=2 tier=2 backend=codex -->", "labels": []},
+    ]
+    ordered = gct.sorted_dispatch_candidates(issues)
+    assert [issue["number"] for issue in ordered] == [1, 3, 2]
+
+
+def test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue():
+    calls = []
+    original_funcs = {
+        "ensure_labels": gct.ensure_labels,
+        "fetch_corpus_for_sync": gct.fetch_corpus_for_sync,
+        "list_tracker_issues": gct.list_tracker_issues,
+        "list_agent_fix_prs": gct.list_agent_fix_prs,
+        "select_backend_for_entry": gct.select_backend_for_entry,
+        "reopen_tracker_issue": gct.reopen_tracker_issue,
+        "comment_on_issue": gct.comment_on_issue,
+        "update_tracker_issue": gct.update_tracker_issue,
+        "close_tracker_issue": gct.close_tracker_issue,
+        "create_tracker_issue": gct.create_tracker_issue,
+    }
+    gct.ensure_labels = lambda repo: calls.append(("ensure", repo))
+    gct.fetch_corpus_for_sync = lambda input_path, extended: (
+        {
+            "by_cop": [
+                {"cop": "Style/Foo", "fp": 1, "fn": 2, "matches": 55},
+                {"cop": "Layout/Done", "fp": 0, "fn": 0, "matches": 120},
+            ]
+        },
+        "123",
+        "abc",
+    )
+    gct.list_tracker_issues = lambda repo: [
+        {
+            "number": 11,
+            "title": "[cop] Style/Foo",
+            "state": "CLOSED",
+            "url": "https://example.com/issues/11",
+            "body": "<!-- nitrocop-cop-tracker: cop=Style/Foo fp=1 fn=2 total=3 matches=55 tier=1 backend=minimax -->",
+            "labels": [{"name": "cop-tracker"}],
+        },
+        {
+            "number": 12,
+            "title": "[cop] Layout/Done",
+            "state": "OPEN",
+            "url": "https://example.com/issues/12",
+            "body": "<!-- nitrocop-cop-tracker: cop=Layout/Done fp=0 fn=1 total=1 matches=120 tier=1 backend=minimax -->",
+            "labels": [{"name": "cop-tracker"}, {"name": "state:backlog"}],
+        },
+    ]
+    gct.list_agent_fix_prs = lambda repo, state="all": []
+    gct.select_backend_for_entry = lambda *args, **kwargs: {
+        "backend": "minimax",
+        "reason": "easy",
+        "tier": 1,
+        "code_bugs": 1,
+        "config_issues": 0,
+        "easy": True,
+    }
+    gct.reopen_tracker_issue = lambda repo, number: calls.append(("reopen", number))
+    gct.comment_on_issue = lambda repo, number, body: calls.append(("comment", number, body))
+    gct.update_tracker_issue = lambda repo, number, title, body, labels: calls.append(("update", number, labels))
+    gct.close_tracker_issue = lambda repo, number, body: calls.append(("close", number, body))
+    gct.create_tracker_issue = lambda repo, title, body, labels: calls.append(("create", title, labels))
+    try:
+        gct.cmd_issues_sync(
+            SimpleNamespace(repo="6/nitrocop", input=None, extended=True, binary=None)
+        )
+    finally:
+        for name, func in original_funcs.items():
+            setattr(gct, name, func)
+    assert ("reopen", 11) in calls
+    assert any(call[0] == "update" and call[1] == 11 for call in calls)
+    assert any(call[0] == "close" and call[1] == 12 for call in calls)
+
+
+def test_cmd_dispatch_issues_respects_capacity_and_issue_backend_labels():
+    original_list_tracker_issues = gct.list_tracker_issues
+    original_active_agent_fix_count = gct.active_agent_fix_count
+    original_run = gct.subprocess.run
+    gct.list_tracker_issues = lambda repo: [
+        {
+            "number": 21,
+            "title": "[cop] Layout/Foo",
+            "state": "OPEN",
+            "body": "<!-- nitrocop-cop-tracker: cop=Layout/Foo fp=1 fn=2 total=3 matches=60 tier=1 backend=minimax -->",
+            "labels": [{"name": "cop-tracker"}, {"name": "state:backlog"}, {"name": "backend:minimax"}],
+        },
+        {
+            "number": 22,
+            "title": "[cop] Style/Bar",
+            "state": "OPEN",
+            "body": "<!-- nitrocop-cop-tracker: cop=Style/Bar fp=2 fn=2 total=4 matches=80 tier=1 backend=codex -->",
+            "labels": [{"name": "cop-tracker"}, {"name": "state:backlog"}, {"name": "backend:codex"}],
+        },
+    ]
+    gct.active_agent_fix_count = lambda repo: (1, 1, 1)
+    gct.subprocess.run = lambda *args, **kwargs: None
+    stdout = io.StringIO()
+    try:
+        with redirect_stdout(stdout):
+            gct.cmd_dispatch_issues(
+                SimpleNamespace(repo="6/nitrocop", max_active=2, dry_run=True, backend_override="auto")
+            )
+    finally:
+        gct.list_tracker_issues = original_list_tracker_issues
+        gct.active_agent_fix_count = original_active_agent_fix_count
+        gct.subprocess.run = original_run
+    payload = json.loads(stdout.getvalue())
+    assert payload["capacity"] == 1
+    assert payload["selected"] == [{"issue": 21, "cop": "Layout/Foo", "backend": "minimax"}]
+
+
 if __name__ == "__main__":
     test_pascal_to_snake()
     test_parse_cop_name()
@@ -201,4 +367,11 @@ if __name__ == "__main__":
     test_detect_prism_pitfalls_none()
     test_format_with_diagnostics_omits_no_source_examples_when_diagnosed_exists()
     test_format_with_diagnostics_keeps_no_source_examples_when_they_are_all_we_have()
+    test_select_backend_for_entry_retry_forces_codex()
+    test_has_failed_attempt_ignores_open_prs()
+    test_select_backend_for_entry_easy_cop_uses_minimax()
+    test_choose_issue_state_preserves_blocked_without_open_pr()
+    test_sorted_dispatch_candidates_orders_by_tier_then_total_then_cop()
+    test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue()
+    test_cmd_dispatch_issues_respects_capacity_and_issue_backend_labels()
     print("All tests passed.")

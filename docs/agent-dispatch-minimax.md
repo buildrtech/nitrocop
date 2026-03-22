@@ -1,13 +1,14 @@
 # Agent Dispatch: Claude Code + MiniMax on GHA
 
-Alternative to the Codex-based dispatch. Runs Claude Code CLI with MiniMax M2.7 as the backend directly in GitHub Actions. Cheaper than Codex ($40/mo MiniMax plan vs $200/mo ChatGPT Pro), and uses the same Claude Code agent behavior you're familiar with.
+Alternative to the Codex-based dispatch. Runs Claude Code CLI with MiniMax M2.7 as the backend directly in GitHub Actions. The current flow is issue-backed: sync tracker issues from the corpus, then dispatch a bounded queue of those issues into `agent-cop-fix`. Cheaper than Codex ($40/mo MiniMax plan vs $200/mo ChatGPT Pro), and uses the same Claude Code agent behavior you're familiar with.
 
 ## Architecture
 
 ```
 You (any machine with gh CLI)
   │
-  │  gh workflow run agent-cop-fix.yml -f cop="Style/NegatedWhile"
+  │  gh workflow run cop-issue-sync.yml -f corpus=extended
+  │  gh workflow run cop-issue-dispatch.yml -f max_active=5
   ▼
 GitHub Actions
   │  1. Checkout repo + build Rust (cached)
@@ -54,14 +55,14 @@ Same as the Codex setup — see [agent-dispatch.md](agent-dispatch.md#step-3-bra
 Same commands as the Codex workflow, just a different workflow name:
 
 ```bash
-# Single cop
-gh workflow run agent-cop-fix.yml -f cop="Style/VariableInterpolation"
+# Sync tracker issues from the latest extended corpus
+gh workflow run cop-issue-sync.yml -f corpus=extended
 
-# Batch (Tier 1)
-python3 scripts/dispatch-cops.py tiers --extended --tier 1 --names | while read cop; do
-  gh workflow run agent-cop-fix.yml -f cop="$cop"
-  sleep 5
-done
+# Fill the queue using issue-recommended backends
+gh workflow run cop-issue-dispatch.yml -f max_active=5
+
+# Or force MiniMax across the queue
+gh workflow run cop-issue-dispatch.yml -f max_active=5 -f backend_override=minimax
 
 # Retry
 gh workflow run agent-cop-fix.yml -f cop="Style/VariableInterpolation" -f mode=retry

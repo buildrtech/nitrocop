@@ -8,6 +8,7 @@ import json
 import re
 
 MARKER_RE = re.compile(r"<!--\s*nitrocop-auto-repair:\s*(.*?)\s*-->")
+PR_ISSUE_RE = re.compile(r"<!--\s*nitrocop-cop-issue:\s*(.*?)\s*-->")
 
 
 def parse_marker_fields(body: str) -> list[dict[str, str]]:
@@ -22,6 +23,28 @@ def parse_marker_fields(body: str) -> list[dict[str, str]]:
         if fields:
             markers.append(fields)
     return markers
+
+
+def parse_single_marker(body: str, pattern: re.Pattern[str]) -> dict[str, str]:
+    match = pattern.search(body or "")
+    if not match:
+        return {}
+    fields: dict[str, str] = {}
+    for token in match.group(1).split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def parse_linked_issue(body: str) -> tuple[int | None, str]:
+    fields = parse_single_marker(body, PR_ISSUE_RE)
+    issue_number = fields.get("number", "")
+    cop = fields.get("cop", "")
+    if issue_number.isdigit():
+        return int(issue_number), cop
+    return None, cop
 
 
 def inspect_attempts(comments: list[dict], current_head_sha: str) -> dict[str, int | bool]:
@@ -99,12 +122,15 @@ def cmd_pr_state(args: argparse.Namespace) -> int:
     comments = json.loads(args.comments_json)
     should_run, reason = gate_pr(pr, args.repo, args.checks_head_sha)
     attempts = inspect_attempts(comments, pr.get("headRefOid", ""))
+    linked_issue_number, linked_cop = parse_linked_issue(pr.get("body", ""))
 
     print(f"number={pr['number']}")
     print(f"title={pr['title']}")
     print(f"url={pr['url']}")
     print(f"head_branch={pr['headRefName']}")
     print(f"head_sha={pr['headRefOid']}")
+    print(f"linked_issue_number={linked_issue_number or ''}")
+    print(f"linked_cop={linked_cop}")
     print(f"should_run={'true' if should_run else 'false'}")
     print(f"skip_reason={reason}")
     print(f"prior_pushes={attempts['prior_pushes']}")
