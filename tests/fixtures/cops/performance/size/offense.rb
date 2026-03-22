@@ -26,3 +26,6 @@ post.comments.to_a.count
               ^^^^^ Performance/Size: Use `size` instead of `count`.
 [[:foo, :bar], [1, 2]]&.to_h&.count
                               ^^^^^ Performance/Size: Use `size` instead of `count`.
+# Multi-statement block — .count is NOT the direct body, still flagged
+items.each { puts "hi"; [1, 2].count }
+                               ^^^^^ Performance/Size: Use `size` instead of `count`.

@@ -16,3 +16,7 @@ Array(1..5).count { |x| x > 3 }
 Hash(key: :value).count { |k, v| v }
 # .count with block via to_proc — don't flag
 [1, 2, 3].count(&:nil?)
+# .count as direct body of a block — skip (return value, not measuring size)
+change { mapper.all.to_a.count }.by 1
+items.each { [1, 2].count }
+expect { [1].count }

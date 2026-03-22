@@ -1,7 +1,7 @@
-use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Performance/Size flags `.count` (no args, no block) on receivers that are
 /// known to be Array or Hash values: literals, `.to_a`/`.to_h` conversions,
@@ -11,6 +11,14 @@ use crate::parse::source::SourceFile;
 /// receivers, missing `.to_a`/`.to_h` chains and `Array()`/`Hash()` calls.
 /// Fixed by checking the receiver for conversion methods and constructor
 /// patterns in addition to literals.
+///
+/// FP fix: RuboCop skips `.count` when `node.parent&.block_type?` — i.e., when
+/// the `.count` call is the direct body of a block (single-statement block body
+/// where the return value is used as the block's value). In Parser AST, a
+/// single-statement block has the statement as a direct child of the block node,
+/// while multi-statement blocks wrap in `begin`. In Prism, the body is always a
+/// `StatementsNode`, so we check statement count and set a flag only for the
+/// sole statement in a single-statement block body.
 pub struct Size;
 
 impl Cop for Size {
@@ -22,50 +30,100 @@ impl Cop for Size {
         Severity::Convention
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        if call.name().as_slice() != b"count" {
-            return;
-        }
-
-        // Must have no arguments and no block
-        if call.arguments().is_some() || call.block().is_some() {
-            return;
-        }
-
-        let recv = match call.receiver() {
-            Some(r) => r,
-            None => return,
-        };
-
-        if !is_array_or_hash_receiver(&recv) {
-            return;
-        }
-
-        let loc = call.message_loc().unwrap_or(call.location());
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut visitor = SizeVisitor {
+            cop: self,
             source,
-            line,
-            column,
-            "Use `size` instead of `count`.".to_string(),
-        ));
+            diagnostics: Vec::new(),
+            parent_is_block: false,
+        };
+        visitor.visit(&parse_result.node());
+        diagnostics.extend(visitor.diagnostics);
+    }
+}
+
+struct SizeVisitor<'a, 'src> {
+    cop: &'a Size,
+    source: &'src SourceFile,
+    diagnostics: Vec<Diagnostic>,
+    /// True when the current node is the sole statement in a block body
+    /// (matching RuboCop's `node.parent&.block_type?` for single-statement blocks).
+    parent_is_block: bool,
+}
+
+impl SizeVisitor<'_, '_> {
+    /// Visit a block-like node's body, setting parent_is_block for the sole
+    /// statement if the body has exactly one statement.
+    fn visit_block_body(&mut self, body: &ruby_prism::Node<'_>) {
+        let is_single_stmt = body
+            .as_statements_node()
+            .is_some_and(|s| s.body().iter().count() == 1);
+        let prev = self.parent_is_block;
+        self.parent_is_block = is_single_stmt;
+        self.visit(body);
+        self.parent_is_block = prev;
+    }
+}
+
+impl<'pr> Visit<'pr> for SizeVisitor<'_, '_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if node.name().as_slice() == b"count"
+            && node.arguments().is_none()
+            && node.block().is_none()
+            && !self.parent_is_block
+        {
+            if let Some(recv) = node.receiver() {
+                if is_array_or_hash_receiver(&recv) {
+                    let loc = node.message_loc().unwrap_or(node.location());
+                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                    self.diagnostics.push(self.cop.diagnostic(
+                        self.source,
+                        line,
+                        column,
+                        "Use `size` instead of `count`.".to_string(),
+                    ));
+                }
+            }
+        }
+        // Clear the flag for children — they are not direct block body statements.
+        let prev = self.parent_is_block;
+        self.parent_is_block = false;
+        ruby_prism::visit_call_node(self, node);
+        self.parent_is_block = prev;
+    }
+
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        // Visit parameters normally
+        if let Some(params) = node.parameters() {
+            let prev = self.parent_is_block;
+            self.parent_is_block = false;
+            self.visit(&params);
+            self.parent_is_block = prev;
+        }
+        // Visit body — set parent_is_block only for single-statement bodies
+        if let Some(body) = node.body() {
+            self.visit_block_body(&body);
+        }
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        if let Some(params) = node.parameters() {
+            let prev = self.parent_is_block;
+            self.parent_is_block = false;
+            self.visit(&params);
+            self.parent_is_block = prev;
+        }
+        if let Some(body) = node.body() {
+            self.visit_block_body(&body);
+        }
     }
 }
 
