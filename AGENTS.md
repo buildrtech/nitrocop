@@ -280,31 +280,6 @@ python3 bench/synthetic/run_synthetic.py --verbose  # per-cop breakdown
 
 See [`bench/synthetic/README.md`](bench/synthetic/README.md) for full details, including research findings on `railties` gem requirements, Include pattern path matching, and Ruby version gates.
 
-### RuboCop Baseline (Pre-Baked Results)
-
-The corpus oracle can use pre-computed RuboCop results to skip re-running RuboCop on every repo. Since RuboCop output is deterministic for pinned (repo SHA + rubocop version + config), the baseline only needs regeneration when these inputs change.
-
-**How it works:**
-1. `.github/workflows/rubocop-baseline.yml` runs RuboCop on all repos (both manifests) and uploads `rubocop-baseline-${CONFIG_HASH}.tar.zst` as a GitHub Release asset on the `rubocop-baseline` tag
-2. The corpus oracle (`corpus-oracle.yml`) computes the same config hash and downloads the matching baseline
-3. Each batch job extracts cached RuboCop results, skipping RuboCop for repos in the baseline
-4. The per-batch GHA cache remains as a fallback for repos not in the baseline
-
-**Config hash inputs** (must match between both workflows):
-- `bench/corpus/Gemfile` (rubocop gem version)
-- `bench/corpus/baseline_rubocop.yml` (cop config)
-- `bench/corpus/repo_excludes.json` (per-repo file exclusions)
-- `bench/corpus/rescue_parser_crashes.rb` (parser crash handling)
-- `bench/corpus/manifest.jsonl` + `bench/corpus/manifest_extended.jsonl` (repo lists)
-
-**When to regenerate:** Run the `RuboCop Baseline` workflow manually when any of the above files change. If the config hash doesn't match any existing baseline, the oracle falls back to running RuboCop fresh (existing behavior).
-
-```
-# Regenerate baseline (manual trigger via GitHub Actions UI or gh CLI)
-gh workflow run rubocop-baseline.yml
-gh workflow run rubocop-baseline.yml -f force=true   # force even if baseline exists
-```
-
 ## RubyGem Distribution
 
 See [docs/rubygem.md](docs/rubygem.md) for the gem build/release pipeline, platform variants, and build scripts.
