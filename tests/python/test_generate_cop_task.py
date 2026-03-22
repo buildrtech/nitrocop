@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Tests for generate-cop-task.py helper functions."""
+"""Tests for generate_cop_task.py helper functions."""
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "scripts" / "agent"))
 
-# The module has a hyphen in filename, use importlib
-import importlib
-gct = importlib.import_module("generate-cop-task")
+import generate_cop_task as gct
 
 
 def test_pascal_to_snake():

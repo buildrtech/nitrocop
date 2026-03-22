@@ -429,15 +429,15 @@ class TestCallerScriptImports(unittest.TestCase):
     """Verify that all caller scripts can import from corpus_download."""
 
     def test_check_cop_import(self):
-        source = (SCRIPTS_DIR / "check-cop.py").read_text()
+        source = (SCRIPTS_DIR / "corpus" / "check_cop.py").read_text()
         self.assertIn("from shared.corpus_download import", source)
 
     def test_investigate_cop_import(self):
-        source = (SCRIPTS_DIR / "investigate-cop.py").read_text()
+        source = (SCRIPTS_DIR / "corpus" / "investigate_cop.py").read_text()
         self.assertIn("from shared.corpus_download import", source)
 
     def test_investigate_repo_import(self):
-        source = (SCRIPTS_DIR / "investigate-repo.py").read_text()
+        source = (SCRIPTS_DIR / "corpus" / "investigate_repo.py").read_text()
         self.assertIn("from shared.corpus_download import", source)
 
     def test_triage_import(self):

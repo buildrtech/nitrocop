@@ -53,7 +53,7 @@ def build_section(repo_root: Path) -> str:
         "",
         "## Available Local Helper Scripts",
         "",
-        "Only these helper scripts are present in this CI workspace. Prefer them over ad hoc commands when they directly help with diagnosis or validation.",
+        "Only these helper scripts are present in this CI workspace. Prefer the stable top-level CLI paths shown below over ad hoc commands when they directly help with diagnosis or validation.",
         "",
     ]
 

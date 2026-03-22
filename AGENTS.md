@@ -14,6 +14,13 @@ This repo is developed simultaneously on macOS (native) and Linux (devcontainer)
 
 Python scripts in `scripts/` resolve the binary path via `os.environ.get("CARGO_TARGET_DIR", "target")` so they work on both platforms automatically.
 
+Top-level Python files under `scripts/` are stable CLI entrypoints and may keep
+compatibility-oriented names like `check-cop.py`. Importable implementations
+live under package directories such as `scripts/shared/`, `scripts/corpus/`,
+`scripts/agent/`, and `scripts/ci/` and should use `snake_case` filenames.
+When running helper commands from docs or prompts, prefer the stable top-level
+CLI paths unless you are editing the implementation internals.
+
 ## Commands
 
 ```
