@@ -7,6 +7,13 @@ from pathlib import Path
 
 
 def _content_blocks(ev: dict) -> list[dict]:
+    if ev.get("type") in ("item.completed", "item.started"):
+        item = ev.get("item", {})
+        if item.get("type") == "agent_message":
+            text = item.get("text", "").strip()
+            return [{"type": "text", "text": text}] if text else []
+        return []
+
     payload = ev.get("payload", ev)
     msg_type = payload.get("type", ev.get("type"))
 
@@ -46,15 +53,17 @@ def _last_text(events: list[dict]) -> str:
 
 
 def _count_turns(events: list[dict]) -> int:
-    turns = 0
-    for ev in events:
-        if _content_blocks(ev):
-            turns += 1
-    return turns
+    completed_turns = sum(1 for ev in events if ev.get("type") == "turn.completed")
+    if completed_turns:
+        return completed_turns
+    return sum(1 for ev in events if _content_blocks(ev))
 
 
 def _extract_cost(events: list[dict]):
     for ev in reversed(events):
+        usage = ev.get("usage")
+        if isinstance(usage, dict) and usage.get("total_cost_usd") is not None:
+            return usage["total_cost_usd"]
         payload = ev.get("payload", ev)
         for obj in (payload, payload.get("response", {}), payload.get("item", {})):
             if isinstance(obj, dict) and obj.get("total_cost_usd") is not None:

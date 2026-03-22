@@ -85,7 +85,7 @@ BACKENDS = {
         "log_format": "codex",
         "log_pattern": "~/.codex/sessions/**/*.jsonl",
         "run_cmd": (
-            '( codex exec --full-auto -m gpt-5.4 '
+            '( codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.4 '
             '-c model_reasoning_effort=xhigh '
             '--json '
             '-o /tmp/agent-last-message.txt '

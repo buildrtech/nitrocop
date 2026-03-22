@@ -51,9 +51,32 @@ def _parse_claude_event(ev: dict, status: dict) -> bool:
 
 def _parse_codex_event(ev: dict, status: dict) -> bool:
     """Parse a Codex rollout JSONL event. Returns True if status was updated."""
-    # Codex events use "event_msg" with a "payload" containing type/content
+    event_type = ev.get("type", "?")
+    status["last_type"] = event_type
+
+    item = ev.get("item")
+    if isinstance(item, dict):
+        item_type = item.get("type", event_type)
+        status["last_type"] = item_type
+        if item_type == "agent_message":
+            text = item.get("text", "").strip()
+            if text:
+                status["last_text"] = text[:200]
+                return True
+        if item_type == "file_change":
+            changes = item.get("changes", [])
+            if changes:
+                path = changes[0].get("path", "")
+                status["last_tool"] = f"file_change:{Path(path).name}" if path else "file_change"
+            else:
+                status["last_tool"] = "file_change"
+            return True
+        if item_type == "todo_list":
+            return False
+
+    # Older Codex event shapes use a payload containing content blocks.
     payload = ev.get("payload", ev)
-    msg_type = payload.get("type", ev.get("type", "?"))
+    msg_type = payload.get("type", event_type)
     status["last_type"] = msg_type
 
     # Assistant messages

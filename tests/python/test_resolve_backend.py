@@ -51,6 +51,7 @@ def test_codex_uses_codex():
     assert "@openai/codex@latest" in config["setup_cmd"]
     assert "chmod 700 ~/.codex" in config["setup_cmd"]
     assert "chmod 600 ~/.codex/auth.json" in config["setup_cmd"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in config["run_cmd"]
     assert "--json" in config["run_cmd"]
     assert "/tmp/agent-events.jsonl" in config["run_cmd"]
     assert "summarize_agent_result.py" in config["run_cmd"]

@@ -65,8 +65,25 @@ def test_counts_multiple_turns():
     assert summary["num_turns"] == 2
 
 
+def test_handles_current_codex_item_events():
+    events = [
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "Working through the fix."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 100, "output_tokens": 25},
+        },
+    ]
+    summary = run(events)
+    assert summary["result"] == "Working through the fix."
+    assert summary["num_turns"] == 1
+
+
 if __name__ == "__main__":
     test_uses_last_message_file()
     test_falls_back_to_last_text_event()
     test_counts_multiple_turns()
+    test_handles_current_codex_item_events()
     print("All tests passed.")

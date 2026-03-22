@@ -140,6 +140,35 @@ def test_codex_string_content():
     assert "Running cargo test" in s["last_text"]
 
 
+def test_codex_current_agent_message_event():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        write_jsonl(f.name, [
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Updating the fixture first."},
+            },
+        ])
+        s = watch_agent_progress.get_status(f.name, backend="codex")
+    assert s["last_type"] == "agent_message"
+    assert "Updating the fixture first" in s["last_text"]
+
+
+def test_codex_current_file_change_event():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        write_jsonl(f.name, [
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "file_change",
+                    "changes": [{"path": "/tmp/src/cop/style/mixin_usage.rs"}],
+                },
+            },
+        ])
+        s = watch_agent_progress.get_status(f.name, backend="codex")
+    assert s["last_type"] == "file_change"
+    assert s["last_tool"] == "file_change:mixin_usage.rs"
+
+
 def test_find_logfile_returns_none():
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as ref:
         # No JSONL files in a temp dir — should return None
@@ -158,5 +187,7 @@ if __name__ == "__main__":
     test_codex_text_event()
     test_codex_tool_event()
     test_codex_string_content()
+    test_codex_current_agent_message_event()
+    test_codex_current_file_change_event()
     test_find_logfile_returns_none()
     print("All tests passed.")
