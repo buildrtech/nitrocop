@@ -6,6 +6,7 @@ import glob
 import json
 import os
 import sys
+from pathlib import Path
 
 
 def _nonempty_string(value) -> bool:
@@ -69,6 +70,16 @@ def _expand_patterns(patterns: list[str]) -> list[str]:
             seen.add(candidate)
             expanded.append(candidate)
     return expanded
+
+
+def _read_patterns_file(path: str) -> list[str]:
+    lines = []
+    for raw in Path(path).read_text().splitlines():
+        pattern = raw.strip()
+        if not pattern or pattern.startswith("#"):
+            continue
+        lines.append(pattern)
+    return lines
 
 
 def _load_all_secrets(
@@ -150,6 +161,9 @@ def main() -> int:
     scan = subparsers.add_parser("scan-files")
     scan.add_argument("patterns", nargs="+", help="File paths or glob patterns to scan")
 
+    scan_manifest = subparsers.add_parser("scan-manifest")
+    scan_manifest.add_argument("manifest", help="Path to newline-separated file/glob manifest")
+
     args = parser.parse_args()
 
     try:
@@ -157,6 +171,12 @@ def main() -> int:
             return emit_masks(args.env_vars, args.ignore_missing)
         if args.command == "scan-files":
             return scan_files(args.env_vars, args.ignore_missing, args.patterns)
+        if args.command == "scan-manifest":
+            return scan_files(
+                args.env_vars,
+                args.ignore_missing,
+                _read_patterns_file(args.manifest),
+            )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

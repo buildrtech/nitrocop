@@ -538,6 +538,18 @@ jobs:
             fi
           } > /tmp/summary.md
 
+      - name: Build artifact manifest
+        if: always() && steps.task.outputs.code_bugs != '0'
+        id: artifact_manifest
+        run: |
+          python3 /tmp/ci-scripts/agent_artifacts.py agent-cop-fix \
+            --output /tmp/agent-artifacts.txt
+          {
+            echo "paths<<EOF"
+            cat /tmp/agent-artifacts.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Scan generated files for backend secret leakage
         if: always() && steps.task.outputs.code_bugs != '0'
         id: leak_scan
@@ -553,25 +565,8 @@ jobs:
             --from-env ANTHROPIC_API_KEY \
             --from-env CODEX_AUTH_JSON \
             --from-env GH_TOKEN_FOR_ACTIONS_READ \
-            scan-files \
-            /tmp/agent.log \
-            /tmp/agent-events.jsonl \
-            /tmp/agent-last-message.txt \
-            /tmp/agent-result.json \
-            /tmp/agent-status.txt \
-            /tmp/agent-commits.txt \
-            /tmp/agent-recovery.stat \
-            /tmp/agent-recovery.diff \
-            /tmp/agent-recovery.patch \
-            /tmp/agent-logfile.txt \
-            /tmp/git-activity-before.json \
-            /tmp/git-activity-after.json \
-            '/tmp/git-activity/**/*' \
-            /tmp/task.md \
-            /tmp/final-task.md \
-            /tmp/summary.md \
-            '~/.claude/projects/**/*.jsonl' \
-            '~/.codex/sessions/**/*.jsonl'
+            scan-manifest \
+            /tmp/agent-artifacts.txt
 
       - name: Publish summary
         if: always() && steps.task.outputs.code_bugs != '0' && steps.leak_scan.outcome == 'success'
@@ -583,25 +578,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: agent-log-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            /tmp/agent.log
-            /tmp/agent-events.jsonl
-            /tmp/agent-last-message.txt
-            /tmp/agent-result.json
-            /tmp/agent-status.txt
-            /tmp/agent-commits.txt
-            /tmp/agent-recovery.stat
-            /tmp/agent-recovery.diff
-            /tmp/agent-recovery.patch
-            /tmp/agent-logfile.txt
-            /tmp/git-activity-before.json
-            /tmp/git-activity-after.json
-            /tmp/git-activity/**/*
-            /tmp/task.md
-            /tmp/final-task.md
-            /tmp/summary.md
-            ~/.claude/projects/**/*.jsonl
-            ~/.codex/sessions/**/*.jsonl
+          path: ${{ steps.artifact_manifest.outputs.paths }}
           retention-days: 7
 
       # --- Validate + PR ---

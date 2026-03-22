@@ -97,6 +97,20 @@ def test_scan_files_fails_on_api_key_leak():
     assert "MINIMAX_API_KEY:raw" in result.stderr
 
 
+def test_scan_manifest_reads_patterns_from_file():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+        f.write("all clear")
+        f.flush()
+        manifest = Path(tempfile.mkdtemp()) / "paths.txt"
+        manifest.write_text(f"{f.name}\n")
+        result = run(
+            ["--from-env", "MINIMAX_API_KEY", "scan-manifest", str(manifest)],
+            {"MINIMAX_API_KEY": "mm-secret-key"},
+        )
+    assert result.returncode == 0
+    assert "No backend secret leakage" in result.stdout
+
+
 def test_ignore_missing_skips_absent_vars():
     result = run(
         [
@@ -119,5 +133,6 @@ if __name__ == "__main__":
     test_scan_files_passes_when_clean()
     test_scan_files_fails_on_codex_leak()
     test_scan_files_fails_on_api_key_leak()
+    test_scan_manifest_reads_patterns_from_file()
     test_ignore_missing_skips_absent_vars()
     print("All tests passed.")

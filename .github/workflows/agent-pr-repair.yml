@@ -644,6 +644,18 @@ jobs:
 
           cat /tmp/repair-summary.md >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Build artifact manifest
+        if: always() && steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
+        id: artifact_manifest
+        run: |
+          python3 /tmp/ci-scripts/agent_artifacts.py agent-pr-repair \
+            --output /tmp/agent-artifacts.txt
+          {
+            echo "paths<<EOF"
+            cat /tmp/agent-artifacts.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Scan generated files for backend secret leakage
         if: always() && steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
         id: leak_scan
@@ -659,62 +671,13 @@ jobs:
             --from-env ANTHROPIC_API_KEY \
             --from-env CODEX_AUTH_JSON \
             --from-env GH_TOKEN_FOR_ACTIONS_READ \
-            scan-files \
-            /tmp/agent.log \
-            /tmp/agent-events.jsonl \
-            /tmp/agent-last-message.txt \
-            /tmp/agent-result.json \
-            /tmp/agent-status.txt \
-            /tmp/agent-commits.txt \
-            /tmp/agent-recovery.stat \
-            /tmp/agent-recovery.diff \
-            /tmp/agent-recovery.patch \
-            /tmp/agent-logfile.txt \
-            /tmp/git-activity-before.json \
-            /tmp/git-activity-after.json \
-            '/tmp/git-activity/**/*' \
-            /tmp/pr-diff.stat \
-            /tmp/pr.diff \
-            /tmp/final-task.md \
-            /tmp/repair.json \
-            /tmp/repair-apply.patch \
-            /tmp/repair-verify.sh \
-            /tmp/repair-verify.log \
-            /tmp/repair-summary.md \
-            /tmp/final-pr-diff.stat \
-            /tmp/final-pr.diff \
-            '~/.claude/projects/**/*.jsonl' \
-            '~/.codex/sessions/**/*.jsonl'
+            scan-manifest \
+            /tmp/agent-artifacts.txt
 
       - name: Upload repair logs
         if: always() && steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip' && steps.leak_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: agent-pr-repair-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            /tmp/agent.log
-            /tmp/agent-events.jsonl
-            /tmp/agent-last-message.txt
-            /tmp/agent-result.json
-            /tmp/agent-status.txt
-            /tmp/agent-commits.txt
-            /tmp/agent-recovery.stat
-            /tmp/agent-recovery.diff
-            /tmp/agent-recovery.patch
-            /tmp/agent-logfile.txt
-            /tmp/git-activity-before.json
-            /tmp/git-activity-after.json
-            /tmp/git-activity/**/*
-            /tmp/pr-diff.stat
-            /tmp/pr.diff
-            /tmp/final-task.md
-            /tmp/repair.json
-            /tmp/repair-apply.patch
-            /tmp/repair-verify.sh
-            /tmp/repair-verify.log
-            /tmp/repair-summary.md
-            /tmp/final-pr-diff.stat
-            /tmp/final-pr.diff
-            ~/.claude/projects/**/*.jsonl
-            ~/.codex/sessions/**/*.jsonl
+          path: ${{ steps.artifact_manifest.outputs.paths }}
           retention-days: 7
