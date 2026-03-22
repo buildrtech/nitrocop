@@ -27,6 +27,56 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Download pre-baked rubocop baseline (if available) ──────────
+  download-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      config_hash: ${{ steps.config-hash.outputs.hash }}
+      available: ${{ steps.download.outputs.available }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute config hash
+        id: config-hash
+        run: |
+          # Hash ALL inputs that determine rubocop output.
+          # Must match the formula in rubocop-baseline.yml.
+          HASH=$(cat bench/corpus/Gemfile \
+                     bench/corpus/baseline_rubocop.yml \
+                     bench/corpus/repo_excludes.json \
+                     bench/corpus/rescue_parser_crashes.rb \
+                     bench/corpus/manifest.jsonl \
+                     bench/corpus/manifest_extended.jsonl \
+                 2>/dev/null | sha256sum | cut -c1-16)
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Baseline config hash: ${HASH}"
+
+      - name: Download rubocop baseline
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HASH="${{ steps.config-hash.outputs.hash }}"
+          if gh release download rubocop-baseline \
+               --pattern "rubocop-baseline-${HASH}.tar.zst" \
+               --dir . 2>/dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Downloaded rubocop-baseline-${HASH}.tar.zst"
+            ls -lh "rubocop-baseline-${HASH}.tar.zst"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No rubocop baseline for hash ${HASH} — rubocop will run fresh per batch"
+          fi
+
+      - name: Upload as workflow artifact
+        if: steps.download.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubocop-baseline
+          path: rubocop-baseline-*.tar.zst
+          retention-days: 1
+
   # ── Build nitrocop release binary ──────────────────────────────
   build-nitrocop:
     runs-on: ubuntu-24.04
@@ -126,7 +176,7 @@ jobs:
 
   # ── Run oracle on each batch of repos ────────────────────────────
   oracle-repo:
-    needs: [build-nitrocop, compute-matrix]
+    needs: [build-nitrocop, compute-matrix, download-baseline]
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ github.event.inputs.corpus_size == 'extended' && 90 || 30 }}
     strategy:
@@ -189,6 +239,14 @@ jobs:
           path: rubocop-cache/
           key: rubocop-batch-${{ matrix.batch_hash }}-${{ steps.rubocop-cache-key.outputs.hash }}
 
+      - name: Restore rubocop baseline
+        if: needs.download-baseline.outputs.available == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: rubocop-baseline
+          path: baseline-dl/
+        continue-on-error: true
+
       - name: Compute batch repos
         id: batch-repos
         env:
@@ -234,6 +292,31 @@ jobs:
               json.dump([{'id': r['id'], 'repo_url': r['repo_url'], 'sha': r['sha']} for r in chunk], f)
           print(f'Batch {batch_id}: {len(chunk)} repos')
           PYEOF
+
+      - name: Extract rubocop baseline into cache
+        run: |
+          mkdir -p rubocop-cache
+          BASELINE_FILE=$(ls baseline-dl/rubocop-baseline-*.tar.zst 2>/dev/null | head -1)
+          if [ -n "$BASELINE_FILE" ]; then
+            # Extract baseline into a temp dir, then copy files not already
+            # present in rubocop-cache (per-batch cache takes priority).
+            TEMP_DIR=$(mktemp -d)
+            zstd -d "$BASELINE_FILE" --stdout | tar xf - -C "$TEMP_DIR" 2>/dev/null || true
+            LOADED=0
+            for f in "$TEMP_DIR"/*.json; do
+              [ -f "$f" ] || continue
+              BASENAME=$(basename "$f")
+              if [ ! -f "rubocop-cache/${BASENAME}" ]; then
+                mv "$f" "rubocop-cache/${BASENAME}"
+                LOADED=$((LOADED + 1))
+              fi
+            done
+            rm -rf "$TEMP_DIR"
+            TOTAL=$(ls rubocop-cache/*.json 2>/dev/null | wc -l)
+            echo "Loaded ${LOADED} rubocop results from baseline (${TOTAL} total cached)"
+          else
+            echo "No baseline archive available — rubocop will run fresh"
+          fi
 
       - name: Run batch
         env:
