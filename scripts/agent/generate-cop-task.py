@@ -693,14 +693,21 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 
 ### Workflow
 1. Read the **Pre-diagnostic Results** and **Corpus FP/FN Examples** sections below first
-2. Add a test case FIRST:
+2. **Verify with RuboCop first** (for FP fixes): before writing any code, confirm RuboCop's
+   behavior on BOTH the specific FP case AND the general pattern:
+   ```bash
+   echo '<specific FP case>' > /tmp/test.rb && rubocop --only {cop} /tmp/test.rb
+   echo '<general pattern>' > /tmp/test.rb && rubocop --only {cop} /tmp/test.rb
+   ```
+   If RuboCop flags the general pattern, your fix must be narrow enough to not suppress it.
+3. Add a test case FIRST:
    - FN fix: add the missed pattern to `tests/fixtures/cops/{dept_snake}/{snake}/offense.rb` with `^` annotation
    - FP fix: add the false-positive pattern to `tests/fixtures/cops/{dept_snake}/{snake}/no_offense.rb`
-3. Verify test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
-4. Fix `src/cop/{dept_snake}/{snake}.rs`
-5. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
-6. Add a `///` doc comment on the cop struct documenting what you found and fixed
-7. Commit only your cop's files
+4. Verify test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
+5. Fix `src/cop/{dept_snake}/{snake}.rs`
+6. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
+7. Add a `///` doc comment on the cop struct documenting what you found and fixed
+8. Commit only your cop's files
 
 ### Fixture Format
 Mark offenses with `^` markers on the line AFTER the offending source line:
@@ -748,6 +755,24 @@ caused by config/context differences, not a detection bug.
 2. The fix is likely in `src/config/` or the cop's config handling, not detection logic
 3. If you cannot determine the root cause within 5 minutes, document your findings as
    a `///` comment on the cop struct and commit
+
+### CRITICAL: Avoid regressions in the opposite direction
+When fixing FPs, your change MUST NOT suppress legitimate detections. When fixing FNs,
+your change MUST NOT flag code that RuboCop accepts. A fix that eliminates a few issues
+in one direction but introduces hundreds in the other is a catastrophic regression.
+
+**Before exempting a category of patterns**, verify with RuboCop that the general case
+is still an offense:
+```bash
+rubocop --only {cop} /tmp/test.rb
+```
+If RuboCop flags the general pattern but not your specific case, the difference is in
+a narrow context (e.g., enclosing structure, receiver type, argument count) — your fix
+must target that specific context, not the broad category.
+
+**Rule of thumb:** if your fix adds an early `return` or `continue` that skips a whole
+node type, operator class, or naming pattern, it's probably too broad. Prefer adding a
+condition that matches the SPECIFIC differentiating context.
 
 ### Rules
 - Only modify `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`

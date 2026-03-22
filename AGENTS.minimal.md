@@ -128,6 +128,17 @@ Since Prism has no parent pointers, cops that need nesting/scope context use one
   and the target node, and use `check_node` to track state. Simpler but limited to single-level
   nesting.
 
+## Avoiding Regressions
+
+**Narrow fixes only.** When fixing FPs, never make broad exemptions that could suppress legitimate
+detections. When fixing FNs, don't add detection that flags code RuboCop accepts. Always verify
+with RuboCop: `rubocop --only Department/CopName /tmp/test.rb`. If your fix adds an early `return`
+that skips a whole node type or pattern class, it's probably too broad — target the specific
+differentiating context instead.
+
+**Don't remove existing test cases.** Existing offense.rb and no_offense.rb fixtures are verified
+correct behavior. If your change causes them to fail, the change is too aggressive.
+
 ## Key Constraints
 
 - `ruby_prism::ParseResult` is `!Send + !Sync` — parsing happens per-thread
