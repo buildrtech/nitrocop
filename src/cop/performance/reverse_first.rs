@@ -3,6 +3,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-22)
+///
+/// Extended corpus reported FP=1, FN=0.
+///
+/// FP=1: `.reverse(:retired_at_epoch_ms).first` in archivesspace repo.
+/// Sequel's `reverse(:column)` is an ordering method (ORDER BY ... DESC),
+/// not Array#reverse. RuboCop's NodePattern `(call $(call _ :reverse) :first ...)`
+/// requires `.reverse` with no arguments. Fixed by checking
+/// `chain.inner_call.arguments().is_none()`.
 pub struct ReverseFirst;
 
 impl Cop for ReverseFirst {
@@ -29,6 +38,13 @@ impl Cop for ReverseFirst {
         };
 
         if chain.inner_method != b"reverse" || chain.outer_method != b"first" {
+            return;
+        }
+
+        // RuboCop's pattern `(call $(call _ :reverse) :first ...)` requires
+        // reverse with NO arguments. `.reverse(:column)` is Sequel's ordering
+        // method, not Array#reverse.
+        if chain.inner_call.arguments().is_some() {
             return;
         }
 
