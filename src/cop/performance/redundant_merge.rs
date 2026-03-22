@@ -41,6 +41,13 @@ use ruby_prism::Visit;
 ///   accumulator clearing (same as visit_case_node).
 /// - Moved incorrect begin/rescue test case from offense.rb to no_offense.rb (verified
 ///   RuboCop does not flag merge! inside begin/rescue).
+///
+/// FN=1 fix (2026-03-22, extended corpus): merge! inside `begin...end while` loop wrapped
+/// in `begin...rescue`. The while/until body value is discarded (loop returns nil), so
+/// value_used should be false. But the begin/rescue parent set value_used=true, which leaked
+/// into the while body. Fixed by explicitly setting value_used=false in visit_while_node and
+/// visit_until_node body traversal, matching RuboCop's value_used? which returns false for
+/// while/until/while_post/until_post.
 pub struct RedundantMerge;
 
 impl Cop for RedundantMerge {
@@ -401,11 +408,16 @@ impl<'pr> Visit<'pr> for RedundantMergeVisitor<'_, '_> {
             self.visit(&node.predicate());
             self.value_used = prev;
         }
+        // While/until body value is discarded — the loop returns nil in Ruby.
+        // In RuboCop's value_used?, while/until/while_post/until_post return false.
+        let prev = self.value_used;
+        self.value_used = false;
         let prev_acc = self.each_with_object_accumulator.take();
         if let Some(stmts) = node.statements() {
             self.visit_statements_node(&stmts);
         }
         self.each_with_object_accumulator = prev_acc;
+        self.value_used = prev;
     }
 
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
@@ -415,11 +427,15 @@ impl<'pr> Visit<'pr> for RedundantMergeVisitor<'_, '_> {
             self.visit(&node.predicate());
             self.value_used = prev;
         }
+        // While/until body value is discarded — the loop returns nil in Ruby.
+        let prev = self.value_used;
+        self.value_used = false;
         let prev_acc = self.each_with_object_accumulator.take();
         if let Some(stmts) = node.statements() {
             self.visit_statements_node(&stmts);
         }
         self.each_with_object_accumulator = prev_acc;
+        self.value_used = prev;
     }
 
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {

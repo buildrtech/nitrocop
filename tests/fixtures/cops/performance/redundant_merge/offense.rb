@@ -40,3 +40,16 @@ items.each_with_object({}) { |style, memo| memo.merge!(style["name"] => style["v
                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/RedundantMerge: Use `[]=` instead of `merge!` with a single key-value pair.
 config.each_with_object({}) { |key, filter| filter.merge!(key => []) }
                                             ^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/RedundantMerge: Use `[]=` instead of `merge!` with a single key-value pair.
+# hash rocket inside do..while inside begin/rescue
+def list_files
+  begin
+    begin
+      response = client.list_objects(options)
+      break if response[:contents].empty?
+      s3_options.merge!(:marker => response[:contents].last[:key])
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/RedundantMerge: Use `[]=` instead of `merge!` with a single key-value pair.
+    end while response[:truncated]
+  rescue Errno::EPIPE
+    nil
+  end
+end
