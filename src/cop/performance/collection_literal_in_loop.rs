@@ -49,6 +49,21 @@ use std::sync::LazyLock;
 ///      `items.reject { %i[a b].include?(x) }.each { }`) were incorrectly
 ///      excluded because the literal was byte-contained in the `.each`
 ///      receiver expression.
+///   9. Numblock/itblock exclusion: RuboCop's `enumerable_loop?` and
+///      `kernel_loop?` patterns match only `(block ...)`, not `(numblock ...)`
+///      or `(itblock ...)`. In Prism, `_1` numbered parameters produce a
+///      BlockNode with NumberedParametersNode, and `it` implicit parameters
+///      produce a BlockNode with ItParametersNode. Skip these blocks when
+///      determining loop context to match RuboCop's behavior. This fixes FPs
+///      where `find { ['a','b'].include?(_1.method) }` was incorrectly treated
+///      as a loop at TargetRubyVersion 4.0.
+///  10. Structural descendant exclusion: RuboCop's
+///      `!receiver.descendants.include?(node)` uses AST value equality, which
+///      matches any descendant with the same structure — not just physical
+///      containment. A literal in the loop body can be excluded if the loop
+///      receiver expression contains a descendant with identical source text.
+///      Approximated via substring search of the literal's source text within
+///      the receiver's source text.
 pub struct CollectionLiteralInLoop;
 
 const ENUMERABLE_METHODS: &[&[u8]] = &[
@@ -364,10 +379,23 @@ impl<'pr> Visit<'pr> for CollectionLiteralVisitor<'_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method_name = node.name().as_slice();
 
-        // Check if this call has a block and is a loop-like method
+        // Check if this call has a block and is a loop-like method.
+        // RuboCop's `enumerable_loop?` pattern matches only `(block ...)`, not
+        // `(numblock ...)` or `(itblock ...)`. In Prism, numbered parameters
+        // (`_1`) produce a BlockNode with NumberedParametersNode, and `it`
+        // implicit parameters produce a BlockNode with ItParametersNode. We
+        // must skip these to match RuboCop's behavior.
         let loop_kind = if let Some(block) = node.block() {
-            if block.as_block_node().is_some() {
-                self.loop_method_kind(node)
+            if let Some(block_node) = block.as_block_node() {
+                let has_implicit_params = block_node.parameters().is_some_and(|p| {
+                    p.as_numbered_parameters_node().is_some()
+                        || p.as_it_parameters_node().is_some()
+                });
+                if has_implicit_params {
+                    LoopKind::None
+                } else {
+                    self.loop_method_kind(node)
+                }
             } else {
                 LoopKind::None
             }
@@ -527,8 +555,20 @@ impl CollectionLiteralVisitor<'_, '_> {
             if node_bytes == recv_bytes {
                 continue;
             }
-            // Containment (node is a descendant of receiver) → this loop excludes
+            // Containment (node is a descendant of receiver) → this loop excludes.
+            // Physical containment: the literal is inside the receiver's byte range.
             if node_start >= recv_start && node_end <= recv_end {
+                continue;
+            }
+            // Structural containment: RuboCop's `!receiver.descendants.include?(node)`
+            // uses AST value equality — if ANY descendant of the receiver has the same
+            // structure as the literal, it's excluded. We approximate this by checking
+            // if the literal's source text appears as a substring within the receiver.
+            if recv_bytes.len() > node_bytes.len()
+                && recv_bytes
+                    .windows(node_bytes.len())
+                    .any(|w| w == node_bytes)
+            {
                 continue;
             }
             // This loop does NOT exclude the literal → offense should fire

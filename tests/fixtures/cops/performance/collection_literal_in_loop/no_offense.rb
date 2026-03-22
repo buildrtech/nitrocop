@@ -51,3 +51,15 @@ end
 [1, 2].sort.each { |x| puts x }
 # Literal in arguments to zip without a block (not a loop)
 [1, 2].zip([3, 4])
+# Numbered block parameter (_1) creates numblock in RuboCop — not treated as a loop
+params.keys.find { ['champ', 'identite'].include?(_1.split('_').first) }
+# it implicit parameter creates itblock in RuboCop 4.0+ — not treated as a loop
+items.reject { [nil, "f2"].include?(it[:name]) }.each do |filter|
+  puts filter
+end
+# Literal in loop body excluded when receiver descendants contain same literal text
+{
+  a: [1, 2].map { [0, 1] }
+}.each do |name, input|
+  [0, 1].map { input }
+end
