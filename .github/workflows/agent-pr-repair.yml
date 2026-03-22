@@ -181,7 +181,7 @@ jobs:
       - name: Set git identity
         if: steps.pr.outputs.should_run == 'true'
         run: |
-          python3 scripts/ci/workflow_git.py configure
+          python3 scripts/workflows/workflow_git.py configure
           git fetch origin main
           echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           WORKSPACE_BRANCH="repair-workspace-${{ github.run_id }}-${{ github.run_attempt }}"
@@ -202,7 +202,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          python3 scripts/ci/prepare_pr_repair.py \
+          python3 scripts/workflows/prepare_pr_repair.py \
             --repo "${{ github.repository }}" \
             --run-id "${{ steps.target.outputs.checks_run_id }}" \
             --pr-number "${{ steps.pr.outputs.number }}" \
@@ -222,7 +222,7 @@ jobs:
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
         id: workspace
         run: |
-          python3 scripts/ci/prepare_agent_workspace.py \
+          python3 scripts/workflows/prepare_agent_workspace.py \
             --mode agent-pr-repair \
             --backend "${{ steps.repair.outputs.backend }}" \
             --preserve-ci-scripts /tmp/ci-scripts
@@ -301,7 +301,7 @@ jobs:
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
         id: backend
         run: |
-          python3 scripts/ci/resolve_backend.py "${{ steps.repair.outputs.backend }}" \
+          python3 scripts/workflows/resolve_backend.py "${{ steps.repair.outputs.backend }}" \
             >> "$GITHUB_OUTPUT"
 
       - name: Run backend setup
@@ -336,7 +336,7 @@ jobs:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          python3 /tmp/ci-scripts/watch_agent_progress.py \
+          python3 /tmp/ci-scripts/agent_logs.py watch \
             --newer-than /tmp/final-task.md --interval 30 \
             --backend "${{ steps.backend.outputs.log_format }}" &
           WATCHER_PID=$!
@@ -355,7 +355,7 @@ jobs:
           git diff --binary "${{ steps.workspace.outputs.workspace_sha }}" > /tmp/agent-recovery.patch || true
           python3 -c "
           import sys; sys.path.insert(0, '/tmp/ci-scripts')
-          from watch_agent_progress import find_logfile
+          from agent_logs import find_logfile
           from pathlib import Path
           f = find_logfile(Path('/tmp/final-task.md'), '${{ steps.backend.outputs.log_format }}')
           print(f or '')
@@ -603,7 +603,7 @@ jobs:
             if [ -n "$LOGFILE" ] && [ -f "$LOGFILE" ]; then
               echo "## Agent Conversation"
               echo ""
-              python3 /tmp/ci-scripts/extract_agent_log.py "$LOGFILE" --max-lines 120 2>/dev/null || true
+              python3 /tmp/ci-scripts/agent_logs.py extract "$LOGFILE" --max-lines 120 2>/dev/null || true
               echo ""
             fi
 

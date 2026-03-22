@@ -11,7 +11,7 @@ You (any machine with gh CLI)
   ▼
 GitHub Actions
   │  1. Checkout repo + build Rust (cached)
-  │  2. generate-cop-task.py → task prompt
+  │  2. dispatch-cops.py task → task prompt
   │  3. Install Claude Code CLI
   │  4. claude -p --dangerously-skip-permissions "task prompt"
   │     (backed by MiniMax M2.7 via ANTHROPIC_BASE_URL)
@@ -58,7 +58,7 @@ Same commands as the Codex workflow, just a different workflow name:
 gh workflow run agent-cop-fix.yml -f cop="Style/VariableInterpolation"
 
 # Batch (Tier 1)
-python3 scripts/agent/tier_cops.py --extended --tier 1 --names | while read cop; do
+python3 scripts/dispatch-cops.py tiers --extended --tier 1 --names | while read cop; do
   gh workflow run agent-cop-fix.yml -f cop="$cop"
   sleep 5
 done

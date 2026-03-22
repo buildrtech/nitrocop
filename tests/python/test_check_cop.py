@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for corpus.check_cop."""
+"""Tests for check-cop.py."""
 import importlib.util
 import json
 import sys
 import tempfile
 from pathlib import Path
 
-SCRIPT = Path(__file__).parents[2] / "scripts" / "corpus" / "check_cop.py"
-sys.path.insert(0, str(SCRIPT.parents[1]))
+SCRIPT = Path(__file__).parents[2] / "scripts" / "check-cop.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("check_cop", SCRIPT)
 assert SPEC and SPEC.loader
 check_cop = importlib.util.module_from_spec(SPEC)

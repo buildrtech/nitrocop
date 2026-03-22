@@ -76,7 +76,7 @@ jobs:
       - name: Resolve backend config
         id: backend
         run: |
-          python3 scripts/ci/resolve_backend.py "${{ github.event.inputs.backend }}" \
+          python3 scripts/workflows/resolve_backend.py "${{ github.event.inputs.backend }}" \
             >> "$GITHUB_OUTPUT"
 
       - name: Compute identifiers
@@ -183,7 +183,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          python3 scripts/agent/generate-cop-task.py \
+          python3 scripts/dispatch-cops.py task \
             "${{ github.event.inputs.cop }}" \
             --extended \
             --binary target/debug/nitrocop \
@@ -200,7 +200,7 @@ jobs:
 
           # Count tokens
           pip install -q tiktoken
-          TOKENS=$(python3 scripts/ci/count_tokens.py /tmp/task.md 2>/dev/null || echo "?")
+          TOKENS=$(python3 scripts/workflows/count_tokens.py /tmp/task.md 2>/dev/null || echo "?")
           echo "tokens=$TOKENS" >> "$GITHUB_OUTPUT"
           echo "Tokens: $TOKENS"
         id: task
@@ -212,7 +212,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          python3 scripts/agent/collect_prior_attempts.py \
+          python3 scripts/dispatch-cops.py prior-attempts \
             --cop "${{ github.event.inputs.cop }}" \
             --output /tmp/prior_attempts.md
 
@@ -320,14 +320,14 @@ jobs:
           DEPT_DIR="${{ steps.cop.outputs.filter }}"
           # cop::dept::name -> tests/fixtures/cops/dept/name
           FIXTURE_DIR="tests/fixtures/cops/$(echo "$DEPT_DIR" | sed 's|cop::||;s|::|/|g')"
-          python3 scripts/ci/prepopulate_fixtures.py /tmp/task.md "$COP" "$FIXTURE_DIR"
+          python3 scripts/workflows/prepopulate_fixtures.py /tmp/task.md "$COP" "$FIXTURE_DIR"
 
       - name: Prepare clean workspace for agent
         if: steps.task.outputs.code_bugs != '0'
         run: |
-          python3 scripts/ci/workflow_git.py configure
+          python3 scripts/workflows/workflow_git.py configure
           echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          python3 scripts/ci/prepare_agent_workspace.py \
+          python3 scripts/workflows/prepare_agent_workspace.py \
             --mode agent-cop-fix \
             --backend "${{ github.event.inputs.backend }}" \
             --preserve-ci-scripts /tmp/ci-scripts
@@ -374,7 +374,7 @@ jobs:
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
           # Background progress watcher
-          python3 /tmp/ci-scripts/watch_agent_progress.py \
+          python3 /tmp/ci-scripts/agent_logs.py watch \
             --newer-than /tmp/final-task.md --interval 30 \
             --backend "${{ steps.backend.outputs.log_format }}" &
           WATCHER_PID=$!
@@ -403,7 +403,7 @@ jobs:
             src/cop/ tests/fixtures/cops/ bench/corpus/ > /tmp/agent-recovery.patch || true
           python3 -c "
           import sys; sys.path.insert(0, '/tmp/ci-scripts')
-          from watch_agent_progress import find_logfile
+          from agent_logs import find_logfile
           from pathlib import Path
           f = find_logfile(Path('/tmp/final-task.md'), '${{ steps.backend.outputs.log_format }}')
           print(f or '')
@@ -498,7 +498,7 @@ jobs:
             if [ -n "$LOGFILE" ]; then
               echo "## Agent Conversation"
               echo ""
-              python3 /tmp/ci-scripts/extract_agent_log.py "$LOGFILE" 2>/dev/null || true
+              python3 /tmp/ci-scripts/agent_logs.py extract "$LOGFILE" 2>/dev/null || true
               echo ""
             fi
 
@@ -702,7 +702,7 @@ jobs:
               echo "<details>"
               echo "<summary>Agent conversation excerpt</summary>"
               echo ""
-              python3 /tmp/ci-scripts/extract_agent_log.py "$LOGFILE" --max-lines 120 2>/dev/null || true
+              python3 /tmp/ci-scripts/agent_logs.py extract "$LOGFILE" --max-lines 120 2>/dev/null || true
               echo ""
               echo "</details>"
               echo ""

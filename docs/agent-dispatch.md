@@ -13,7 +13,7 @@ You (any machine with gh CLI)
   ▼
 GitHub Actions (agent-cop-fix.yml)
   │  1. Checkout repo + build Rust (cached, ~1 min)
-  │  2. generate-cop-task.py → self-contained task prompt
+  │  2. dispatch-cops.py task → self-contained task prompt
   │  3. codex exec --full-auto → Codex edits files in the GHA runner
   │  4. cargo test --lib → validate the fix compiles + tests pass
   │  5. Commit, push branch, open PR
@@ -75,14 +75,14 @@ Go to **Settings > Rules > Rulesets > New ruleset**:
 ### Phase 1: Triage (5 min)
 
 ```bash
-python3 scripts/agent/tier_cops.py --extended
+python3 scripts/dispatch-cops.py tiers --extended
 ```
 
 ### Phase 2: Pilot (10 cops)
 
 ```bash
 # Inspect a task packet first
-python3 scripts/agent/generate-cop-task.py Style/VariableInterpolation --extended
+python3 scripts/dispatch-cops.py task Style/VariableInterpolation --extended
 
 # Dispatch one cop
 gh workflow run agent-cop-fix.yml -f cop="Style/VariableInterpolation"
@@ -104,7 +104,7 @@ If ≥7/10 pilot cops produce usable PRs, scale to Phase 3.
 ### Phase 3: Batch Dispatch
 
 ```bash
-python3 scripts/agent/tier_cops.py --extended --tier 1 --names | while read cop; do
+python3 scripts/dispatch-cops.py tiers --extended --tier 1 --names | while read cop; do
   gh workflow run agent-cop-fix.yml -f cop="$cop"
   sleep 5
 done
@@ -134,7 +134,7 @@ gh workflow run corpus-oracle.yml -f corpus_size=extended
 
 ### Task Packet
 
-`generate-cop-task.py` produces a markdown prompt containing:
+`dispatch-cops.py task` produces a markdown prompt containing:
 - Focused instructions (TDD workflow, fixture format)
 - The cop's Rust source
 - RuboCop's Ruby implementation (ground truth)
@@ -169,10 +169,7 @@ On the PR, two additional workflows run:
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/agent/generate-cop-task.py` | Produces self-contained task prompt per cop |
-| `scripts/agent/tier_cops.py` | Classifies cops by difficulty tier |
-| `scripts/agent/detect_changed_cops.py` | Maps git diff to cop names (CI) |
-| `scripts/agent/collect_prior_attempts.py` | Gathers diffs + logs from prior failed PRs |
+| `scripts/dispatch-cops.py` | Dispatch helper CLI: task generation, tiers, changed cops, and prior attempts |
 
 ## Workflows
 

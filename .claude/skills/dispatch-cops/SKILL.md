@@ -31,7 +31,7 @@ See `docs/agent-dispatch.md` for setup instructions.
 Find cops with real code bugs (not just config noise):
 
 ```bash
-python3 scripts/agent/rank_dispatchable_cops.py
+python3 scripts/dispatch-cops.py rank
 ```
 
 This runs pre-diagnostic on every cop's FP/FN examples to classify them as
@@ -41,13 +41,13 @@ cops with at least 1 real code bug.
 For MiniMax, filter to cops with 3-10 total FP+FN and mostly code bugs:
 
 ```bash
-python3 scripts/agent/rank_dispatchable_cops.py --min-bugs 2 --max-total 10
+python3 scripts/dispatch-cops.py rank --min-bugs 2 --max-total 10
 ```
 
 For harder cops or overview by tier:
 
 ```bash
-python3 scripts/agent/tier_cops.py --extended --tier 1   # simple FP+FN count view
+python3 scripts/dispatch-cops.py tiers --extended --tier 1   # simple FP+FN count view
 python3 scripts/investigate-cop.py Department/CopName --extended --context  # deep dive
 ```
 
@@ -105,7 +105,7 @@ and avoids re-dispatching already-fixed cops.
 
 ```bash
 # Dispatch all cops with real code bugs (minimax, default)
-python3 scripts/agent/rank_dispatchable_cops.py --json 2>/dev/null | \
+python3 scripts/dispatch-cops.py rank --json 2>/dev/null | \
   jq -r '.[].cop' | while read cop; do
   if echo "$EXISTING" | grep -qxF "$cop"; then
     echo "Skipping $cop — PR already open or merged"
@@ -116,7 +116,7 @@ python3 scripts/agent/rank_dispatchable_cops.py --json 2>/dev/null | \
 done
 
 # Or dispatch a specific tier with Codex for harder cops
-python3 scripts/agent/tier_cops.py --extended --tier 2 --names | while read cop; do
+python3 scripts/dispatch-cops.py tiers --extended --tier 2 --names | while read cop; do
   if echo "$EXISTING" | grep -qxF "$cop"; then
     echo "Skipping $cop — PR already open or merged"
     continue
@@ -186,7 +186,7 @@ gh workflow run corpus-oracle.yml -f corpus_size=extended
 Wait ~90 min, then check results:
 
 ```bash
-python3 scripts/agent/tier_cops.py --extended
+python3 scripts/dispatch-cops.py tiers --extended
 ```
 
 ## Arguments
