@@ -155,6 +155,58 @@ def test_extracts_codex_shell_tool():
     assert "cargo test --lib -- cop::style::foo" in out
 
 
+def test_extracts_codex_event_msg_agent_message():
+    line = json.dumps({
+        "type": "event_msg",
+        "payload": {
+            "type": "agent_message",
+            "message": "Inspecting the cop implementation now.",
+        },
+    })
+    out = run(line + "\n")
+    assert "Inspecting the cop implementation now." in out
+
+
+def test_extracts_codex_response_item_message():
+    line = json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Running the focused test next."}],
+        },
+    })
+    out = run(line + "\n")
+    assert "Running the focused test next." in out
+
+
+def test_extracts_codex_response_item_function_call():
+    line = json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "cargo test --lib -- cop::style::foo"}),
+        },
+    })
+    out = run(line + "\n")
+    assert "`exec_command`" in out
+    assert "cargo test --lib -- cop::style::foo" in out
+
+
+def test_extracts_codex_item_file_change():
+    line = json.dumps({
+        "type": "item.completed",
+        "item": {
+            "type": "file_change",
+            "changes": [{"path": "/tmp/src/cop/style/foo.rs"}],
+        },
+    })
+    out = run(line + "\n")
+    assert "`file_change`" in out
+    assert "foo.rs" in out
+
+
 if __name__ == "__main__":
     test_extracts_text()
     test_extracts_bash_tool()
@@ -169,4 +221,8 @@ if __name__ == "__main__":
     test_empty_file()
     test_extracts_codex_text()
     test_extracts_codex_shell_tool()
+    test_extracts_codex_event_msg_agent_message()
+    test_extracts_codex_response_item_message()
+    test_extracts_codex_response_item_function_call()
+    test_extracts_codex_item_file_change()
     print("All tests passed.")

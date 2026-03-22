@@ -22,6 +22,28 @@ LOG_PATTERNS = {
     "codex": "~/.codex/sessions/**/*.jsonl",
 }
 
+CODEX_LOOKBACK_LINES = 50
+CODEX_NOISE_TYPES = {
+    "?",
+    "event_msg",
+    "response_item",
+    "item.started",
+    "item.completed",
+    "session_meta",
+    "token_count",
+    "task_started",
+    "task_complete",
+    "user_message",
+    "reasoning",
+    "function_call_output",
+    "custom_tool_call_output",
+}
+
+
+def _set_meaningful_type(status: dict, type_name: str) -> None:
+    if status["last_type"] in CODEX_NOISE_TYPES:
+        status["last_type"] = type_name
+
 
 def find_logfile(newer_than: Path, backend: str = "minimax") -> Optional[str]:
     """Find the most recent JSONL file newer than the reference file."""
@@ -52,24 +74,73 @@ def _parse_claude_event(ev: dict, status: dict) -> bool:
 def _parse_codex_event(ev: dict, status: dict) -> bool:
     """Parse a Codex rollout JSONL event. Returns True if status was updated."""
     event_type = ev.get("type", "?")
-    status["last_type"] = event_type
+    if status["last_type"] == "?":
+        status["last_type"] = event_type
+
+    payload = ev.get("payload")
+    if isinstance(payload, dict):
+        payload_type = payload.get("type", event_type)
+        if status["last_type"] in CODEX_NOISE_TYPES:
+            status["last_type"] = payload_type
+
+        if event_type == "event_msg":
+            if payload_type == "agent_message":
+                text = payload.get("message", "").strip()
+                if text:
+                    if not status["last_text"]:
+                        status["last_text"] = text[:200]
+                    _set_meaningful_type(status, "agent_message")
+                    return True
+            if payload_type in ("token_count", "task_started", "task_complete", "user_message"):
+                return False
+
+        if event_type == "response_item":
+            if payload_type in (
+                "reasoning",
+                "function_call_output",
+                "custom_tool_call_output",
+            ):
+                return False
+
+            if payload_type == "message" and payload.get("role") == "assistant":
+                for block in reversed(payload.get("content", [])):
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") in ("output_text", "text"):
+                        text = block.get("text", "").strip()
+                        if text:
+                            if not status["last_text"]:
+                                status["last_text"] = text[:200]
+                            _set_meaningful_type(status, payload_type)
+                            return True
+                return False
+
+            if payload_type in ("function_call", "custom_tool_call", "web_search_call"):
+                if not status["last_tool"]:
+                    status["last_tool"] = payload.get("name", payload_type)
+                _set_meaningful_type(status, payload_type)
+                return True
 
     item = ev.get("item")
     if isinstance(item, dict):
         item_type = item.get("type", event_type)
-        status["last_type"] = item_type
         if item_type == "agent_message":
             text = item.get("text", "").strip()
             if text:
-                status["last_text"] = text[:200]
+                if not status["last_text"]:
+                    status["last_text"] = text[:200]
+                _set_meaningful_type(status, item_type)
                 return True
         if item_type == "file_change":
             changes = item.get("changes", [])
             if changes:
                 path = changes[0].get("path", "")
-                status["last_tool"] = f"file_change:{Path(path).name}" if path else "file_change"
+                if not status["last_tool"]:
+                    status["last_tool"] = f"file_change:{Path(path).name}" if path else "file_change"
             else:
-                status["last_tool"] = "file_change"
+                if not status["last_tool"]:
+                    status["last_tool"] = "file_change"
+            _set_meaningful_type(status, item_type)
             return True
         if item_type == "todo_list":
             return False
@@ -77,26 +148,33 @@ def _parse_codex_event(ev: dict, status: dict) -> bool:
     # Older Codex event shapes use a payload containing content blocks.
     payload = ev.get("payload", ev)
     msg_type = payload.get("type", event_type)
-    status["last_type"] = msg_type
+    if status["last_type"] in CODEX_NOISE_TYPES:
+        status["last_type"] = msg_type
 
     # Assistant messages
     if msg_type in ("assistant", "response.output_item.done"):
         content = payload.get("content", payload.get("item", {}).get("content", []))
         if isinstance(content, str):
-            status["last_text"] = content.strip()[:200]
+            if not status["last_text"]:
+                status["last_text"] = content.strip()[:200]
+            _set_meaningful_type(status, msg_type)
             return True
         if isinstance(content, list):
             for block in reversed(content):
                 if isinstance(block, str):
-                    status["last_text"] = block.strip()[:200]
+                    if not status["last_text"]:
+                        status["last_text"] = block.strip()[:200]
+                    _set_meaningful_type(status, msg_type)
                     return True
                 btype = block.get("type", "")
                 if btype in ("function_call", "tool_use") and not status["last_tool"]:
                     status["last_tool"] = block.get("name", block.get("function", {}).get("name", "?"))
+                    _set_meaningful_type(status, btype)
                 elif btype in ("text", "output_text") and not status["last_text"]:
                     text = block.get("text", "").strip()
                     if text:
                         status["last_text"] = text[:200]
+                        _set_meaningful_type(status, btype)
             return bool(status["last_tool"] or status["last_text"])
     return False
 
@@ -119,14 +197,19 @@ def get_status(logfile: str, backend: str = "minimax") -> dict:
     status["events"] = len(lines)
     parser = _parse_codex_event if backend == "codex" else _parse_claude_event
 
-    # Scan last 10 lines for the most recent useful content
-    for line in reversed(lines[-10:]):
+    # Scan recent lines for the most recent useful content.
+    lookback = CODEX_LOOKBACK_LINES if backend == "codex" else 10
+    for line in reversed(lines[-lookback:]):
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
 
-        if parser(ev, status):
+        parser(ev, status)
+        if backend == "codex":
+            if status["last_text"] and status["last_tool"]:
+                break
+        elif status["last_text"] or status["last_tool"]:
             break
 
     return status

@@ -169,6 +169,98 @@ def test_codex_current_file_change_event():
     assert s["last_tool"] == "file_change:mixin_usage.rs"
 
 
+def test_codex_event_msg_agent_message():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        write_jsonl(f.name, [
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "Inspecting the latest session format now.",
+                },
+            },
+        ])
+        s = watch_agent_progress.get_status(f.name, backend="codex")
+    assert s["last_type"] == "agent_message"
+    assert "Inspecting the latest session format" in s["last_text"]
+
+
+def test_codex_response_item_function_call_sets_tool():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        write_jsonl(f.name, [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"pwd\"}",
+                },
+            },
+        ])
+        s = watch_agent_progress.get_status(f.name, backend="codex")
+    assert s["last_type"] == "function_call"
+    assert s["last_tool"] == "exec_command"
+
+
+def test_codex_looks_past_token_count_noise():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        events = [
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "Useful status before token churn.",
+                },
+            }
+        ]
+        for _ in range(20):
+            events.append({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {"total_token_usage": {"input_tokens": 1}},
+                },
+            })
+        write_jsonl(f.name, events)
+        s = watch_agent_progress.get_status(f.name, backend="codex")
+    assert s["last_type"] == "agent_message"
+    assert "Useful status before token churn" in s["last_text"]
+
+
+def test_codex_ignores_function_call_output_noise():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        write_jsonl(f.name, [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Planning the fix."}],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"pwd\"}",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "abc",
+                    "output": "ok",
+                },
+            },
+        ])
+        s = watch_agent_progress.get_status(f.name, backend="codex")
+    assert s["last_type"] == "function_call"
+    assert s["last_tool"] == "exec_command"
+    assert "Planning the fix" in s["last_text"]
+
+
 def test_find_logfile_returns_none():
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as ref:
         # No JSONL files in a temp dir — should return None
@@ -189,5 +281,9 @@ if __name__ == "__main__":
     test_codex_string_content()
     test_codex_current_agent_message_event()
     test_codex_current_file_change_event()
+    test_codex_event_msg_agent_message()
+    test_codex_response_item_function_call_sets_tool()
+    test_codex_looks_past_token_count_noise()
+    test_codex_ignores_function_call_output_noise()
     test_find_logfile_returns_none()
     print("All tests passed.")

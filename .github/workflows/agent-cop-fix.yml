@@ -371,9 +371,29 @@ jobs:
           echo "Turns: $(jq -r '.num_turns // "?"' /tmp/agent-result.json 2>/dev/null)"
           echo "Result: $(jq -r '.result // "no result"' /tmp/agent-result.json 2>/dev/null | head -20)"
 
+      - name: Snapshot agent outputs
+        if: always() && steps.task.outputs.code_bugs != '0'
+        run: |
+          git status --short > /tmp/agent-status.txt || true
+          git log --oneline "${{ steps.prep.outputs.main_sha }}"..HEAD > /tmp/agent-commits.txt || true
+          git diff --stat "${{ steps.prep.outputs.main_sha }}" -- \
+            src/cop/ tests/fixtures/cops/ bench/corpus/ > /tmp/agent-recovery.stat || true
+          git diff "${{ steps.prep.outputs.main_sha }}" -- \
+            src/cop/ tests/fixtures/cops/ bench/corpus/ > /tmp/agent-recovery.diff || true
+          git diff --binary "${{ steps.prep.outputs.main_sha }}" -- \
+            src/cop/ tests/fixtures/cops/ bench/corpus/ > /tmp/agent-recovery.patch || true
+          python3 -c "
+          import sys; sys.path.insert(0, '/tmp/ci-scripts')
+          from watch_agent_progress import find_logfile
+          from pathlib import Path
+          f = find_logfile(Path('/tmp/final-task.md'), '${{ steps.backend.outputs.log_format }}')
+          print(f or '')
+          " > /tmp/agent-logfile.txt 2>/dev/null || true
+
       - name: Generate summary
         if: always() && steps.task.outputs.code_bugs != '0'
         run: |
+          set +e
           COP="${{ github.event.inputs.cop }}"
           BACKEND="${{ github.event.inputs.backend }}"
           MODE="${{ github.event.inputs.mode }}"
@@ -412,14 +432,30 @@ jobs:
             # Changes summary
             echo "## Changes"
             echo ""
-            if git diff --stat HEAD~1 2>/dev/null | grep -q '.'; then
+            if [ -s /tmp/agent-recovery.stat ]; then
               echo '```'
-              git diff --stat HEAD~1 2>/dev/null || echo "(no git diff available)"
+              cat /tmp/agent-recovery.stat
               echo '```'
             else
               echo "No file changes detected."
             fi
             echo ""
+
+            if [ -s /tmp/agent-recovery.diff ]; then
+              DIFF_LINES=$(wc -l < /tmp/agent-recovery.diff 2>/dev/null || echo "0")
+              echo "<details>"
+              echo "<summary>Full diff</summary>"
+              echo ""
+              echo '```diff'
+              sed -n '1,400p' /tmp/agent-recovery.diff
+              if [ "${DIFF_LINES}" -gt 400 ]; then
+                echo ""
+                echo "... diff truncated after 400 lines ..."
+              fi
+              echo '```'
+              echo "</details>"
+              echo ""
+            fi
 
             # Task prompt excerpt
             echo "## Task Prompt (first 30 lines)"
@@ -430,7 +466,7 @@ jobs:
             echo ""
 
             # Pre-diagnostic results
-            DIAG=$(grep -A 50 "## Pre-diagnostic Results" /tmp/task.md 2>/dev/null | head -50)
+            DIAG=$(grep -A 50 "## Pre-diagnostic Results" /tmp/task.md 2>/dev/null | head -50 || true)
             if [ -n "$DIAG" ]; then
               echo "## Pre-diagnostic Results"
               echo ""
@@ -439,13 +475,7 @@ jobs:
             fi
 
             # Agent conversation log (extracted from JSONL)
-            LOGFILE=$(python3 -c "
-            import sys; sys.path.insert(0, '/tmp/ci-scripts')
-            from watch_agent_progress import find_logfile
-            from pathlib import Path
-            f = find_logfile(Path('/tmp/final-task.md'), '${{ steps.backend.outputs.log_format }}')
-            print(f or '')
-            " 2>/dev/null)
+            LOGFILE=$(cat /tmp/agent-logfile.txt 2>/dev/null || true)
             if [ -n "$LOGFILE" ]; then
               echo "## Agent Conversation"
               echo ""
@@ -483,6 +513,12 @@ jobs:
             /tmp/agent-events.jsonl \
             /tmp/agent-last-message.txt \
             /tmp/agent-result.json \
+            /tmp/agent-status.txt \
+            /tmp/agent-commits.txt \
+            /tmp/agent-recovery.stat \
+            /tmp/agent-recovery.diff \
+            /tmp/agent-recovery.patch \
+            /tmp/agent-logfile.txt \
             /tmp/task.md \
             /tmp/final-task.md \
             /tmp/summary.md \
@@ -504,6 +540,12 @@ jobs:
             /tmp/agent-events.jsonl
             /tmp/agent-last-message.txt
             /tmp/agent-result.json
+            /tmp/agent-status.txt
+            /tmp/agent-commits.txt
+            /tmp/agent-recovery.stat
+            /tmp/agent-recovery.diff
+            /tmp/agent-recovery.patch
+            /tmp/agent-logfile.txt
             /tmp/task.md
             /tmp/final-task.md
             /tmp/summary.md
@@ -611,6 +653,8 @@ jobs:
             DIFF_STAT=$(gh api "repos/${REPO}/compare/${PARENT_SHA}...${SIGNED_SHA}" --jq '"  \(.files | length) files changed"' 2>/dev/null || echo "")
           fi
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RESULT=$(jq -r '.result // "no result"' /tmp/agent-result.json 2>/dev/null || echo "no result")
+          LOGFILE=$(cat /tmp/agent-logfile.txt 2>/dev/null || true)
 
           {
             echo "Automated ${MODE} fix for \`${COP}\` corpus conformance."
@@ -625,12 +669,27 @@ jobs:
             echo "| **Turns** | ${TURNS} |"
             echo "| **Run** | [#${{ github.run_number }}](${RUN_URL}) |"
             echo ""
+            echo "## Result"
+            echo ""
+            echo '```'
+            echo "${RESULT}" | head -80
+            echo '```'
+            echo ""
             echo "## Changes"
             echo ""
             echo '```'
             echo "${DIFF_STAT}"
             echo '```'
             echo ""
+            if [ -n "$LOGFILE" ]; then
+              echo "<details>"
+              echo "<summary>Agent conversation excerpt</summary>"
+              echo ""
+              python3 /tmp/ci-scripts/extract_agent_log.py "$LOGFILE" --max-lines 120 2>/dev/null || true
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
             echo "<details>"
             echo "<summary>Task prompt (${{ steps.task.outputs.tokens }} tokens)</summary>"
             echo ""
