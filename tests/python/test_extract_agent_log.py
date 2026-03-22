@@ -126,6 +126,35 @@ def test_empty_file():
     assert out.strip() == ""
 
 
+def test_extracts_codex_text():
+    line = json.dumps({
+        "type": "response.output_item.done",
+        "payload": {
+            "type": "response.output_item.done",
+            "item": {"content": [{"type": "text", "text": "Fixing the cop now."}]},
+        },
+    })
+    out = run(line + "\n")
+    assert "Fixing the cop now." in out
+
+
+def test_extracts_codex_shell_tool():
+    line = json.dumps({
+        "type": "response.output_item.done",
+        "payload": {
+            "type": "response.output_item.done",
+            "item": {"content": [{
+                "type": "function_call",
+                "name": "shell",
+                "arguments": {"command": "cargo test --lib -- cop::style::foo"},
+            }]},
+        },
+    })
+    out = run(line + "\n")
+    assert "`shell`" in out
+    assert "cargo test --lib -- cop::style::foo" in out
+
+
 if __name__ == "__main__":
     test_extracts_text()
     test_extracts_bash_tool()
@@ -138,4 +167,6 @@ if __name__ == "__main__":
     test_max_lines()
     test_handles_malformed_json()
     test_empty_file()
+    test_extracts_codex_text()
+    test_extracts_codex_shell_tool()
     print("All tests passed.")

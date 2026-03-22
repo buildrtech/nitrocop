@@ -14,6 +14,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 
 LOG_PATTERNS = {
@@ -22,7 +23,7 @@ LOG_PATTERNS = {
 }
 
 
-def find_logfile(newer_than: Path, backend: str = "minimax") -> str | None:
+def find_logfile(newer_than: Path, backend: str = "minimax") -> Optional[str]:
     """Find the most recent JSONL file newer than the reference file."""
     ref_mtime = newer_than.stat().st_mtime if newer_than.exists() else 0
     pattern = LOG_PATTERNS.get(backend, LOG_PATTERNS["minimax"])

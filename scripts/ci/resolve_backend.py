@@ -64,12 +64,20 @@ BACKENDS = {
         "log_pattern": "~/.codex/sessions/**/*.jsonl",
         "run_cmd": (
             'mkdir -p ~/.codex && '
-            'echo "$CODEX_AUTH_JSON" > ~/.codex/auth.json && '
-            'codex exec --full-auto -m gpt-5.4 '
+            'printf \'%s\' "$CODEX_AUTH_JSON" > ~/.codex/auth.json && '
+            '( codex exec --full-auto -m gpt-5.4 '
             '-c model_reasoning_effort=xhigh '
+            '--json '
+            '-o /tmp/agent-last-message.txt '
             '- < /tmp/final-task.md '
-            '> /tmp/agent-result.json '
-            '2> >(tee /tmp/agent.log >&2) || true'
+            '> /tmp/agent-events.jsonl '
+            '2> >(tee /tmp/agent.log >&2); '
+            'STATUS=$?; '
+            'python3 /tmp/ci-scripts/summarize_agent_result.py '
+            '/tmp/agent-events.jsonl '
+            '/tmp/agent-last-message.txt '
+            '> /tmp/agent-result.json || true; '
+            'exit $STATUS ) || true'
         ),
         "env": {},
         "secrets": {

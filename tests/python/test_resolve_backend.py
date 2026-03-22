@@ -40,6 +40,9 @@ def test_codex_uses_codex():
     assert config["cli"] == "codex"
     assert config["log_format"] == "codex"
     assert "CODEX_AUTH_JSON" in config["secrets"]
+    assert "--json" in config["run_cmd"]
+    assert "/tmp/agent-events.jsonl" in config["run_cmd"]
+    assert "summarize_agent_result.py" in config["run_cmd"]
 
 
 def test_unknown_backend_exits():

@@ -336,6 +336,13 @@ jobs:
         if: steps.task.outputs.code_bugs != '0'
         run: ${{ steps.backend.outputs.install_cmd }}
 
+      - name: Validate Codex auth secret
+        if: steps.task.outputs.code_bugs != '0' && github.event.inputs.backend == 'codex'
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          python3 /tmp/ci-scripts/validate_codex_auth.py --from-env CODEX_AUTH_JSON
+
       - name: Run agent
         if: steps.task.outputs.code_bugs != '0'
         timeout-minutes: 45
@@ -471,11 +478,14 @@ jobs:
           name: agent-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/agent.log
+            /tmp/agent-events.jsonl
+            /tmp/agent-last-message.txt
             /tmp/agent-result.json
             /tmp/task.md
             /tmp/final-task.md
             /tmp/summary.md
             ~/.claude/projects/**/*.jsonl
+            ~/.codex/sessions/**/*.jsonl
           retention-days: 7
 
       # --- Validate + PR ---
