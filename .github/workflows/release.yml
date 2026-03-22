@@ -66,6 +66,9 @@ jobs:
           git add Cargo.toml Cargo.lock gem/lib/nitrocop.rb
           git commit -m "Release v${{ steps.version.outputs.tag }}"
           git tag "v${{ steps.version.outputs.tag }}"
+          # Clean up any stale tag/branch from a previous failed attempt
+          git push origin --delete "v${{ steps.version.outputs.tag }}" 2>/dev/null || true
+          git push origin --delete "release/v${{ steps.version.outputs.tag }}" 2>/dev/null || true
           # Push tag (builds check out by tag, not main)
           git push origin "v${{ steps.version.outputs.tag }}"
           # Push version bump to main via PR to satisfy branch protection.
