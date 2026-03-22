@@ -338,6 +338,13 @@ jobs:
         run: |
           python3 /tmp/ci-scripts/render_helper_scripts_section.py >> /tmp/final-task.md
 
+      - name: Snapshot git state before agent
+        if: steps.task.outputs.code_bugs != '0'
+        run: |
+          python3 /tmp/ci-scripts/git_activity_snapshot.py capture \
+            --repo-root "$PWD" \
+            --output /tmp/git-activity-before.json
+
       # --- Install + run agent ---
 
       - name: Run backend setup
@@ -408,6 +415,13 @@ jobs:
           f = find_logfile(Path('/tmp/final-task.md'), '${{ steps.backend.outputs.log_format }}')
           print(f or '')
           " > /tmp/agent-logfile.txt 2>/dev/null || true
+          python3 /tmp/ci-scripts/git_activity_snapshot.py capture \
+            --repo-root "$PWD" \
+            --output /tmp/git-activity-after.json || true
+          python3 /tmp/ci-scripts/git_activity_snapshot.py report \
+            --before /tmp/git-activity-before.json \
+            --after /tmp/git-activity-after.json \
+            --out-dir /tmp/git-activity || true
 
       - name: Generate summary
         if: always() && steps.task.outputs.code_bugs != '0'
@@ -476,6 +490,16 @@ jobs:
               echo ""
             fi
 
+            if [ -s /tmp/git-activity/report.md ]; then
+              echo "<details>"
+              echo "<summary>Additional git activity</summary>"
+              echo ""
+              cat /tmp/git-activity/report.md
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
+
             # Task prompt excerpt
             echo "## Task Prompt (first 30 lines)"
             echo ""
@@ -540,6 +564,9 @@ jobs:
             /tmp/agent-recovery.diff \
             /tmp/agent-recovery.patch \
             /tmp/agent-logfile.txt \
+            /tmp/git-activity-before.json \
+            /tmp/git-activity-after.json \
+            '/tmp/git-activity/**/*' \
             /tmp/task.md \
             /tmp/final-task.md \
             /tmp/summary.md \
@@ -567,6 +594,9 @@ jobs:
             /tmp/agent-recovery.diff
             /tmp/agent-recovery.patch
             /tmp/agent-logfile.txt
+            /tmp/git-activity-before.json
+            /tmp/git-activity-after.json
+            /tmp/git-activity/**/*
             /tmp/task.md
             /tmp/final-task.md
             /tmp/summary.md
@@ -662,6 +692,14 @@ jobs:
             --repo "$REPO" \
             --branch "$BRANCH" \
             --message "Fix ${COP}: agent-generated fix${RETRY_NOTE} (${BACKEND})")"
+
+          FINAL_CHANGED_FILES=$(gh api "repos/${REPO}/compare/main...${signed_sha}" --jq '(.files | length) // 0' 2>/dev/null || true)
+          if [ -n "${FINAL_CHANGED_FILES}" ] && [ "${FINAL_CHANGED_FILES}" = "0" ]; then
+            echo "Final PR diff is empty after replay/push"
+            echo "has_pr=false" >> "$GITHUB_OUTPUT"
+            gh pr close "$PR_URL" --comment "Agent fix produced an empty PR after replay/push." --delete-branch
+            exit 0
+          fi
 
           # Build final PR body with agent results
           TURNS=$(jq -r '.num_turns // "?"' /tmp/agent-result.json 2>/dev/null || echo "?")

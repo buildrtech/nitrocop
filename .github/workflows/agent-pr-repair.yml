@@ -321,6 +321,13 @@ jobs:
             --from-env GH_TOKEN_FOR_ACTIONS_READ \
             emit-masks
 
+      - name: Snapshot git state before agent
+        if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
+        run: |
+          python3 /tmp/ci-scripts/git_activity_snapshot.py capture \
+            --repo-root "$PWD" \
+            --output /tmp/git-activity-before.json
+
       - name: Run repair agent
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
         timeout-minutes: 45
@@ -360,6 +367,13 @@ jobs:
           f = find_logfile(Path('/tmp/final-task.md'), '${{ steps.backend.outputs.log_format }}')
           print(f or '')
           " > /tmp/agent-logfile.txt 2>/dev/null || true
+          python3 /tmp/ci-scripts/git_activity_snapshot.py capture \
+            --repo-root "$PWD" \
+            --output /tmp/git-activity-after.json || true
+          python3 /tmp/ci-scripts/git_activity_snapshot.py report \
+            --before /tmp/git-activity-before.json \
+            --after /tmp/git-activity-after.json \
+            --out-dir /tmp/git-activity || true
 
       - name: Validate repair locally
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
@@ -599,6 +613,16 @@ jobs:
               echo ""
             fi
 
+            if [ -s /tmp/git-activity/report.md ]; then
+              echo "<details>"
+              echo "<summary>Additional git activity</summary>"
+              echo ""
+              cat /tmp/git-activity/report.md
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
+
             LOGFILE=$(cat /tmp/agent-logfile.txt 2>/dev/null || true)
             if [ -n "$LOGFILE" ] && [ -f "$LOGFILE" ]; then
               echo "## Agent Conversation"
@@ -646,6 +670,9 @@ jobs:
             /tmp/agent-recovery.diff \
             /tmp/agent-recovery.patch \
             /tmp/agent-logfile.txt \
+            /tmp/git-activity-before.json \
+            /tmp/git-activity-after.json \
+            '/tmp/git-activity/**/*' \
             /tmp/pr-diff.stat \
             /tmp/pr.diff \
             /tmp/final-task.md \
@@ -675,6 +702,9 @@ jobs:
             /tmp/agent-recovery.diff
             /tmp/agent-recovery.patch
             /tmp/agent-logfile.txt
+            /tmp/git-activity-before.json
+            /tmp/git-activity-after.json
+            /tmp/git-activity/**/*
             /tmp/pr-diff.stat
             /tmp/pr.diff
             /tmp/final-task.md
