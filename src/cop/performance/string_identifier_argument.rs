@@ -3,6 +3,9 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation: 2 FP from `send("\xF8")` — hex escapes producing
+/// non-UTF-8 bytes that aren't valid Ruby identifiers. Fix: validate that
+/// the unescaped string content is valid UTF-8 and contains only identifier chars.
 pub struct StringIdentifierArgument;
 
 // All methods that accept identifier arguments (matches RuboCop's RESTRICT_ON_SEND)
@@ -85,6 +88,22 @@ const MULTIPLE_ARGUMENTS_METHODS: &[&[u8]] = &[
     b"public_constant",
     b"module_function",
 ];
+
+/// Check if the unescaped string content consists of valid Ruby identifier bytes.
+/// Rejects strings containing non-UTF-8 bytes (e.g., `\xF8`, `\xFF`) or null bytes,
+/// which cannot be valid method/variable names.
+fn is_valid_identifier_string(content: &[u8]) -> bool {
+    // Must be valid UTF-8
+    let s = match std::str::from_utf8(content) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // Must not be empty and must only contain identifier-valid characters:
+    // alphanumeric, underscore, @, $, !, ?, =
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '@' | '$' | '!' | '?' | '='))
+}
 
 impl Cop for StringIdentifierArgument {
     fn name(&self) -> &'static str {
@@ -175,6 +194,12 @@ impl Cop for StringIdentifierArgument {
 
             // Skip strings containing :: (namespace separator)
             if content.windows(2).any(|w| w == b"::") {
+                continue;
+            }
+
+            // Skip strings with bytes that aren't valid Ruby identifier characters.
+            // Hex escapes like "\xF8" produce non-UTF-8 bytes that can't be symbols.
+            if !is_valid_identifier_string(content) {
                 continue;
             }
 
