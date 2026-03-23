@@ -52,8 +52,11 @@ mandatory = %w(  )
 syms = %i(  )
           ^ Layout/ExtraSpacing: Unnecessary spacing detected.
 
-# Double space in method call argument
+# Double space in method call argument (adjacent lines have no alignment at col 12)
+x = 1
 say_status  "DONE"
           ^ Layout/ExtraSpacing: Unnecessary spacing detected.
+y = 2
 assert  @fake_stderr.contained?(/pattern/)
       ^ Layout/ExtraSpacing: Unnecessary spacing detected.
+z = 3

@@ -338,6 +338,47 @@ fn find_hash_key_column(line_bytes: &[u8], bracket_col: usize) -> Option<usize> 
     Some(j)
 }
 
+/// Check if there is a method call (`.`) at depth 0 between `start` and `end_col`
+/// on the same line. This detects patterns like `expect(client.search body: [`
+/// where the hash key `body:` is an argument to `client.search` (intermediate
+/// method call), not to `expect(`. Tracks balanced parens/brackets/braces.
+fn has_method_call_between(line_bytes: &[u8], start: usize, end_col: usize) -> bool {
+    let end = end_col.min(line_bytes.len());
+    let mut paren_depth: i32 = 0;
+    let mut bracket_depth: i32 = 0;
+    let mut brace_depth: i32 = 0;
+    let mut i = start;
+    while i < end {
+        // Skip string literals
+        if line_bytes[i] == b'\'' || line_bytes[i] == b'"' {
+            let quote = line_bytes[i];
+            i += 1;
+            while i < end && line_bytes[i] != quote {
+                if line_bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        match line_bytes[i] {
+            b'(' => paren_depth += 1,
+            b')' => paren_depth -= 1,
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth -= 1,
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth -= 1,
+            b'.' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Check if the `[` is immediately preceded by a `%` operator (string formatting).
 /// In patterns like `gc.draw('format' % [...])`, the array is the RHS of the `%`
 /// operator, not a direct argument of the method call's parentheses. Scans
@@ -614,6 +655,8 @@ impl Cop for FirstArrayElementIndentation {
             .unwrap_or(0);
 
         // Compute the indent base column (before adding width) and its type.
+        // Also track the found paren byte column for later use in hash key analysis.
+        let mut found_paren_byte_col: Option<usize> = None;
         let (indent_base, base_type) = {
             match style {
                 "consistent" => (open_line_indent, IndentBaseType::StartOfLine),
@@ -633,6 +676,7 @@ impl Cop for FirstArrayElementIndentation {
                                     paren_scan.has_unmatched_brace,
                                 );
                         if use_paren_relative {
+                            found_paren_byte_col = Some(paren_byte_col);
                             (
                                 paren_col + 1,
                                 IndentBaseType::FirstColumnAfterLeftParenthesis,
@@ -741,9 +785,27 @@ impl Cop for FirstArrayElementIndentation {
                         key_bc,
                     )
                 });
+                // For single-pair hash value arrays, accept closing bracket at
+                // line-indent level when:
+                // - base_type is StartOfLine, OR
+                // - base_type is paren-relative but there's an intermediate method
+                //   call (`.`) between the `(` and the hash key, meaning the paren
+                //   doesn't directly contain this array's hash context (e.g.,
+                //   `expect(client.search body: [...])`).
+                // When the hash key IS a direct argument of the paren-bearing call
+                // (e.g., `create(:x, :groups => [...])`), RuboCop enforces
+                // paren-relative for the closing bracket.
+                let has_intermediate_call = matches!(
+                    base_type,
+                    IndentBaseType::FirstColumnAfterLeftParenthesis
+                ) && found_paren_byte_col.is_some_and(|pc| {
+                    hash_key_byte_col
+                        .is_some_and(|hk| has_method_call_between(open_line_bytes, pc + 1, hk))
+                });
                 if hash_key_col.is_some()
                     && !is_multi_pair
                     && effective_close_col == open_line_indent
+                    && (matches!(base_type, IndentBaseType::StartOfLine) || has_intermediate_call)
                 {
                     return;
                 }

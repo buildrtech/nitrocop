@@ -991,6 +991,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_percent_i_array_flagged() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // Empty %i(  ) should flag the extra spaces (not element separators)
+        let src = b"x = 1\nsyms = %i(  )\ny = 2\n";
+        let diags = run_cop_full(&cop, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag extra spaces in empty %i(), got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("L{}:C{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn multibyte_alignment_allowed() {
         use crate::testutil::run_cop_full;
         let cop = ExtraSpacing;
