@@ -13,10 +13,11 @@ use crate::parse::source::SourceFile;
 /// constant (like `Date::ENGLAND`), matching the `historic_date?` pattern:
 /// `(send _ _ _ (const (const {nil? (cbase)} :Date) _))`.
 ///
-/// Root cause of FP (53): All 53 FPs were `to_datetime` calls in projects
-/// (discourse, ruby-polars) that likely set `AllowCoercion: true` in their
-/// project-level config. The cop logic for `to_datetime` is correct per vendor —
-/// these are config resolution issues, not cop logic bugs.
+/// Root cause of FP (53): All 53 FPs were bare `to_datetime(args)` calls
+/// without a receiver (e.g., `to_datetime(row["created_at"])` where
+/// `to_datetime` is a locally-defined helper method). RuboCop only flags
+/// `receiver.to_datetime`, not bare function calls. Fixed by checking
+/// `call.receiver().is_some()` before flagging.
 ///
 /// Fix applied: Replaced the `args.len() >= 2` check with proper `is_historic_date`
 /// detection that only skips when the last arg is `Date::XXX` or `::Date::XXX`.
@@ -53,8 +54,13 @@ impl Cop for DateTime {
 
         let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
 
-        // Check for .to_datetime calls
+        // Check for receiver.to_datetime calls (not bare to_datetime calls)
         if method_name == "to_datetime" {
+            // Only flag when there's a receiver (e.g., string.to_datetime).
+            // Bare to_datetime(args) is a local/inherited method call, not a coercion.
+            if call.receiver().is_none() {
+                return;
+            }
             if allow_coercion {
                 return;
             }
