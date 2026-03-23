@@ -387,7 +387,8 @@ impl DisabledRanges {
     /// Mark all directives with the given key that cover the given line as used.
     fn mark_directives_used(&mut self, key: &str, line: usize) {
         for directive in &mut self.directives {
-            if (directive.cop_name == key || directive.cop_name.eq_ignore_ascii_case(key))
+            if (directive.cop_name == key
+                || department_case_insensitive_match(&directive.cop_name, key))
                 && line >= directive.range.0
                 && line <= directive.range.1
             {
@@ -419,12 +420,26 @@ impl DisabledRanges {
                 }
             }
         }
-        // Fallback: case-insensitive match for department names.
-        // RuboCop normalizes cop names via Badge.parse which applies camel_case,
-        // so `Rspec/AnyInstance` matches `RSpec/AnyInstance`. We do a simple
-        // case-insensitive comparison as fallback.
+        // Fallback: department-level case-insensitive match.
+        //
+        // RuboCop's `qualified_cop_name` resolves directive cop names via
+        // `Badge.parse` + `Registry.registered?`. When Badge.parse normalizes
+        // the department name enough for `registered?` to return true, the
+        // RAW (un-normalized) string is used as the hash key, causing lookups
+        // to fail if the cop name portion differs in case.
+        //
+        // When `registered?` returns false (department mismatch), RuboCop
+        // falls back to `qualify_badge` which searches all departments and
+        // returns the correctly-cased name. This handles `Rspec/AnyInstance`
+        // → `RSpec/AnyInstance`.
+        //
+        // To match this behavior, we only allow case-insensitive matching when
+        // the cop name portion (after the last `/`) is identical and only the
+        // department prefix differs. This allows `Rspec/AnyInstance` to match
+        // `RSpec/AnyInstance` but prevents `Metrics/abcSize` from matching
+        // `Metrics/AbcSize`.
         for (stored_key, ranges) in &self.ranges {
-            if stored_key.eq_ignore_ascii_case(key) && stored_key != key {
+            if stored_key != key && department_case_insensitive_match(stored_key, key) {
                 for &(start, end) in ranges {
                     if line >= start && line <= end {
                         return true;
@@ -438,6 +453,25 @@ impl DisabledRanges {
 
 fn short_cop_name(cop_name: &str) -> Option<&str> {
     cop_name.split_once('/').map(|(_, short)| short)
+}
+
+/// Check if two cop names differ only in department case, with the cop name
+/// portion (after the last `/`) being identical. This matches RuboCop's
+/// behavior where `Rspec/AnyInstance` resolves to `RSpec/AnyInstance` via
+/// department qualification, but `Metrics/abcSize` does NOT resolve to
+/// `Metrics/AbcSize` because the cop name portion differs.
+fn department_case_insensitive_match(a: &str, b: &str) -> bool {
+    let (a_dept, a_cop) = match a.rsplit_once('/') {
+        Some(parts) => parts,
+        None => return false, // no department — not a qualified cop name
+    };
+    let (b_dept, b_cop) = match b.rsplit_once('/') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    // Cop name must match exactly (case-sensitive)
+    // Department must match case-insensitively
+    a_cop == b_cop && a_dept.eq_ignore_ascii_case(b_dept)
 }
 
 fn build_directive_legacy_aliases(
@@ -871,6 +905,22 @@ mod tests {
         assert!(
             !dr.is_disabled("RSpec/AnyInstance", 4),
             "after enable, should not be disabled"
+        );
+    }
+
+    #[test]
+    fn cop_name_case_sensitive() {
+        // `Metrics/abcSize` should NOT match `Metrics/AbcSize`.
+        // In RuboCop, Badge.parse normalizes `abcSize` to `AbcSize` which makes
+        // `registered?` return true, causing the RAW string to be used as the
+        // hash key. The lookup with `Metrics/AbcSize` fails because the keys
+        // differ. This means the disable does NOT suppress the offense.
+        let src =
+            "# rubocop:disable Metrics/abcSize\nx = 1\n# rubocop:enable Metrics/abcSize\ny = 2\n";
+        let dr = disabled_ranges(src);
+        assert!(
+            !dr.is_disabled("Metrics/AbcSize", 2),
+            "cop name case difference should NOT match (Metrics/abcSize != Metrics/AbcSize)"
         );
     }
 
