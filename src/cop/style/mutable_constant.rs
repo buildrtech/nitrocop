@@ -178,10 +178,7 @@ impl MutableConstant {
             }
 
             // Arithmetic with int/float operands: int/float op anything, or anything op int/float
-            if matches!(
-                name_bytes,
-                b"+" | b"-" | b"*" | b"**" | b"/" | b"%" | b"<<"
-            ) {
+            if matches!(name_bytes, b"+" | b"-" | b"*" | b"**" | b"/" | b"%" | b"<<") {
                 if let Some(recv) = call.receiver() {
                     if recv.as_integer_node().is_some() || recv.as_float_node().is_some() {
                         return true;

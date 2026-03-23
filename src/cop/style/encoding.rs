@@ -6,16 +6,37 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Investigation findings (2026-03-18)
 ///
-/// ### FP root cause fixed:
+/// ### FP root cause fixed (round 1):
 /// - Non-magic comment lines (e.g., `# This is a description`) on line 1 or 2
 ///   should stop magic comment processing. Previously we checked the first 3 lines
 ///   regardless; now we match RuboCop's behavior of only processing contiguous
 ///   magic comment lines (frozen_string_literal, encoding, shareable_constant_value,
 ///   typed, rbs_inline). Regular comments terminate the search.
 ///
-/// ### FN root cause fixed:
+/// ### FN root cause fixed (round 1):
 /// - `# coding: utf-8` format was already handled but lacked fixture coverage.
 ///   Added coding_format.rb scenario.
+///
+/// ## Investigation findings (2026-03-23)
+///
+/// ### FP root causes fixed (58 FP):
+/// 1. `# vim:fileencoding=utf-8` (44 FP, resque-scheduler): Vim comments with only
+///    one token should NOT detect encoding. RuboCop's VimComment#encoding returns nil
+///    when tokens.size <= 1, making valid? false and stopping magic comment processing.
+/// 2. `# encoding:utf-8` / `#coding:utf-8` (12 FP, catarse/gollum/padrino/piotrmurach):
+///    RuboCop's SimpleComment encoding regex requires `: ` (colon + space) after the
+///    keyword. `encoding:utf-8` (no space) is NOT a valid magic comment.
+/// 3. `# -*- Mode: Ruby; tab-width: 2 -*-` (1 FP, juvia) and `# -*- rspec -*-` (1 FP, ffi):
+///    Emacs comments with unrecognized keywords (Mode, tab-width, rspec) are NOT valid
+///    magic comments. RuboCop checks `any?` which requires encoding/frozen_string_literal/
+///    shareable_constant_value/typed/rbs_inline to be specified. Previously we treated
+///    ALL emacs-style comments as valid.
+///
+/// ### FN root cause fixed (494 FN):
+/// - `# -*- coding: utf-8 -*- #` (all 494 from rouge-ruby/rouge): Emacs comments
+///   with trailing content after `-*-` were not matched. RuboCop's Emacs regex
+///   `-*-(?<token>.+)-*-` greedily matches between first and last `-*-` occurrences,
+///   ignoring trailing text. Fixed by using `rfind("-*-")` instead of `ends_with("-*-")`.
 pub struct Encoding;
 
 impl Cop for Encoding {
@@ -140,7 +161,11 @@ fn extract_vim_tokens(line: &str) -> Option<&str> {
 
 /// Count tokens in a vim comment (comma-separated).
 fn vim_token_count(tokens_str: &str) -> usize {
-    tokens_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).count()
+    tokens_str
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .count()
 }
 
 /// Check if a comment line is a valid Ruby magic comment.
@@ -167,9 +192,12 @@ fn is_magic_comment(line: &str) -> bool {
     if let Some(inner) = extract_emacs_inner(&lower) {
         // Split by ';' to get tokens, check if any is a recognized magic keyword
         let emacs_keywords = &[
-            "encoding", "coding",       // encoding/coding
-            "frozen_string_literal", "frozen-string-literal",
-            "shareable_constant_value", "shareable-constant-value",
+            "encoding",
+            "coding", // encoding/coding
+            "frozen_string_literal",
+            "frozen-string-literal",
+            "shareable_constant_value",
+            "shareable-constant-value",
             "typed",
             "rbs_inline",
         ];
@@ -250,8 +278,8 @@ fn is_magic_comment(line: &str) -> bool {
     //
     // For is_magic_comment, we need: does any keyword match => valid? = true
     let simple_magic_prefixes_with_colon_space = &[
-        "encoding: ",   // requires space after colon
-        "coding: ",     // requires space after colon
+        "encoding: ", // requires space after colon
+        "coding: ",   // requires space after colon
     ];
 
     let simple_magic_prefixes_colon_optional_space = &[
