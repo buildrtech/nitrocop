@@ -278,6 +278,13 @@ impl DoubleNegationVisitor<'_> {
         // double_negative_condition_return_value? logic
         if let Some(&cond_last_line) = self.conditional_last_line_stack.last() {
             // RuboCop: find_parent_not_enumerable → if parent.begin_type?
+            // In Parser AST, begin_type? is true for both multi-statement
+            // bodies AND parenthesized expressions like `(!!expr)`. For
+            // parenthesized expressions, the same-line check always passes
+            // because `!!` and the parens are on the same line.
+            if self.parent_is_parens {
+                return true;
+            }
             // Only apply the statements line check when the !! node's
             // non-enumerable parent IS a StatementsNode (begin_type? in
             // Parser AST). When !! is inside another expression (method call,
@@ -615,10 +622,13 @@ impl<'pr> Visit<'pr> for DoubleNegationVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         self.check_double_negation(node);
 
-        // After checking this node, clear parent_is_statements for children.
-        // Children of a call node are not direct children of the StatementsNode.
+        // After checking this node, clear parent_is_statements and
+        // parent_is_parens for children. Children of a call node are not
+        // direct children of the StatementsNode or ParenthesesNode.
         let saved_parent = self.parent_is_statements;
+        let saved_parens = self.parent_is_parens;
         self.parent_is_statements = false;
+        self.parent_is_parens = false;
 
         // Check if this is a define_method or define_singleton_method call with a block
         if let Some(block) = node.block() {
@@ -632,6 +642,7 @@ impl<'pr> Visit<'pr> for DoubleNegationVisitor<'_> {
                         ruby_prism::visit_call_node(this, node);
                     });
                     self.parent_is_statements = saved_parent;
+                    self.parent_is_parens = saved_parens;
                     return;
                 }
             }
@@ -639,6 +650,7 @@ impl<'pr> Visit<'pr> for DoubleNegationVisitor<'_> {
 
         ruby_prism::visit_call_node(self, node);
         self.parent_is_statements = saved_parent;
+        self.parent_is_parens = saved_parens;
     }
 
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
