@@ -17,6 +17,15 @@ use crate::parse::source::SourceFile;
 /// (pattern 2). Fixed by checking `as_block_node()` instead of `block().is_some()` to
 /// distinguish real blocks from block arguments. Also confirmed `.flatten(1)` with depth arg
 /// works correctly (same root cause as the block_pass issue in corpus cases).
+///
+/// ## Extended corpus investigation (2026-03-23)
+///
+/// Extended corpus reported FP=0, FN=1. The single FN is from
+/// brixen__poetics__b382a80 at `bin/poetics:88` (`@history.last(100).map { |s| f.puts s }`).
+/// The cop logic correctly detects this pattern (verified by unit test at
+/// offense.rb:38). The FN is a file-discovery issue: `bin/poetics` is an
+/// extensionless Ruby script that nitrocop may not be scanning (possibly
+/// missing Ruby shebang or skipped by the walker).
 pub struct ChainArrayAllocation;
 
 /// Methods that ALWAYS return a new array.
