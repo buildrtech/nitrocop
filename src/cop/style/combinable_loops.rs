@@ -130,10 +130,7 @@ fn get_loop_info(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<Loo
     // Capture method arguments (e.g., each_with_object([]) — the `([])` part)
     let arguments_text = if let Some(args) = call.arguments() {
         source
-            .try_byte_slice(
-                args.location().start_offset(),
-                args.location().end_offset(),
-            )
+            .try_byte_slice(args.location().start_offset(), args.location().end_offset())
             .unwrap_or("")
             .to_string()
     } else {
