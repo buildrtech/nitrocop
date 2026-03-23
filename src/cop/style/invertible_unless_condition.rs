@@ -96,10 +96,8 @@ impl InvertibleUnlessCondition {
             // Check if the method has an inverse in our map
             if inverse_map.contains_key(call.name().as_slice()) {
                 // For `<` operator: check if the receiver is a constant (class inheritance check)
-                if call.name().as_slice() == b"<" {
-                    if Self::is_inheritance_check(&call) {
-                        return false;
-                    }
+                if call.name().as_slice() == b"<" && Self::is_inheritance_check(&call) {
+                    return false;
                 }
                 return true;
             }
@@ -212,7 +210,7 @@ impl InvertibleUnlessCondition {
 
             if let Some(inv) = inverse_map.get(name_bytes) {
                 // Check if the method has arguments
-                let has_args = call.arguments().is_some_and(|a| a.arguments().len() > 0);
+                let has_args = call.arguments().is_some_and(|a| !a.arguments().is_empty());
 
                 if has_args {
                     let args = call.arguments().unwrap();
