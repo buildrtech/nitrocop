@@ -29,3 +29,24 @@ class Report < ApplicationRecord
   has_one :baz, -> { condition }, class_name: 'Bar'
   has_one :qux, -> { some_condition }, class_name: 'Bar'
 end
+
+# Associations with do...end blocks are excluded from duplicate checking
+# (RuboCop's each_child_node(:send) skips block-wrapped calls)
+class Author < ApplicationRecord
+  has_many :posts_containing_the_letter_a, :class_name => "Post"
+  has_many :posts_with_extension, :class_name => "Post" do
+    def testing
+      true
+    end
+  end
+end
+
+# Name duplicate with block should also not be flagged
+class Publisher < ApplicationRecord
+  has_many :books
+  has_many :books do
+    def bestsellers
+      where(bestseller: true)
+    end
+  end
+end

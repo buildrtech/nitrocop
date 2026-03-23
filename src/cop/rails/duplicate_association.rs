@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::cop::node_type::{CLASS_NODE, SYMBOL_NODE};
-use crate::cop::util::{class_body_calls, is_dsl_call, parent_class_name};
+use crate::cop::util::{is_dsl_call, parent_class_name};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -24,6 +24,19 @@ use crate::parse::source::SourceFile;
 ///
 /// Message format for name duplicates: "Association `x` is defined multiple times. Don't
 /// repeat associations." (matching RuboCop exactly).
+///
+/// ## Investigation findings
+///
+/// **FP (block associations):** RuboCop uses `class_send_nodes` which calls
+/// `each_child_node(:send)` on the class body. In Parser gem's AST, a call with a
+/// `do...end` block is wrapped in a `(block (send ...) ...)` node, so the `send` is
+/// NOT a direct child of the class body — it's skipped. In Prism, calls with blocks
+/// are still `CallNode` direct children. Fix: skip calls where `call.block().is_some()`.
+///
+/// **FN (if/else branches):** When the class body has exactly one statement that is an
+/// `if` node, RuboCop's `each_child_node(:send)` is called on the `if` node itself,
+/// finding `send` nodes that are direct children (i.e., single-statement branches).
+/// Fix: detect this pattern and collect calls from the if/else branches.
 pub struct DuplicateAssociation;
 
 /// Association method names we track.
@@ -77,7 +90,7 @@ impl Cop for DuplicateAssociation {
             return;
         }
 
-        let calls = class_body_calls(&class);
+        let calls = collect_class_send_nodes(&class);
 
         // --- Pass 1: Duplicate association names ---
         // Group calls by name, then flag ALL occurrences in groups with >1 member.
@@ -154,6 +167,91 @@ impl Cop for DuplicateAssociation {
             }
         }
     }
+}
+
+/// Collect call nodes from the class body, matching RuboCop's `class_send_nodes` behavior.
+///
+/// RuboCop uses `each_child_node(:send)` which:
+/// - Skips calls wrapped in blocks (in Parser AST, `do...end` creates a `block` parent)
+/// - When the class body is a single `if` node, finds sends that are direct children
+///   of that `if` (i.e., single-statement branches)
+fn collect_class_send_nodes<'a>(
+    class_node: &ruby_prism::ClassNode<'a>,
+) -> Vec<ruby_prism::CallNode<'a>> {
+    let body = match class_node.body() {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let stmts = match body.as_statements_node() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let body_nodes: Vec<_> = stmts.body().iter().collect();
+
+    // When the class body has exactly one statement that is an if node,
+    // RuboCop's each_child_node(:send) is called on the if node itself,
+    // finding send nodes that are direct children (single-statement branches).
+    if body_nodes.len() == 1 {
+        if let Some(if_node) = body_nodes[0].as_if_node() {
+            return collect_calls_from_if_branches(&if_node);
+        }
+    }
+
+    // Normal case: collect direct call children, excluding those with blocks
+    body_nodes
+        .iter()
+        .filter_map(|node| {
+            let call = node.as_call_node()?;
+            // In Parser AST, calls with do...end blocks are wrapped in (block (send ...))
+            // nodes, so each_child_node(:send) on the class body skips them.
+            if call.block().is_some() {
+                return None;
+            }
+            Some(call)
+        })
+        .collect()
+}
+
+/// Collect call nodes from the branches of an if/else node.
+/// Only collects from single-statement branches (matching Parser AST behavior
+/// where multi-statement branches are wrapped in `begin` nodes).
+fn collect_calls_from_if_branches<'a>(
+    if_node: &ruby_prism::IfNode<'a>,
+) -> Vec<ruby_prism::CallNode<'a>> {
+    let mut calls = Vec::new();
+
+    // Collect from the if-branch
+    if let Some(stmts) = if_node.statements() {
+        for node in stmts.body().iter() {
+            if let Some(call) = node.as_call_node() {
+                if call.block().is_none() {
+                    calls.push(call);
+                }
+            }
+        }
+    }
+
+    // Collect from else/elsif branches
+    if let Some(subsequent) = if_node.subsequent() {
+        if let Some(else_clause) = subsequent.as_else_node() {
+            if let Some(stmts) = else_clause.statements() {
+                for node in stmts.body().iter() {
+                    if let Some(call) = node.as_call_node() {
+                        if call.block().is_none() {
+                            calls.push(call);
+                        }
+                    }
+                }
+            }
+        }
+        // elsif is another IfNode — recurse
+        if let Some(elsif_node) = subsequent.as_if_node() {
+            calls.extend(collect_calls_from_if_branches(&elsif_node));
+        }
+    }
+
+    calls
 }
 
 /// Check if the call is one of the four association methods.

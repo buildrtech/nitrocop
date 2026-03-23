@@ -50,3 +50,14 @@ class Profile < ApplicationRecord
   has_one :qux, class_name: 'Bar'
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Association `class_name: 'Bar'` is defined multiple times. Don't repeat associations.
 end
+
+# FN fix: associations inside if/else (sole statement in class body)
+class Thing < ActiveRecord::Base
+  if ActiveRecord.version >= Gem::Version.new('5.0')
+    belongs_to :person, optional: true
+    ^^^^^^^^^^ Rails/DuplicateAssociation: Association `person` is defined multiple times. Don't repeat associations.
+  else
+    belongs_to :person
+    ^^^^^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Association `person` is defined multiple times. Don't repeat associations.
+  end
+end
