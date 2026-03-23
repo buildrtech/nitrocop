@@ -25,12 +25,12 @@ use crate::parse::source::SourceFile;
 /// - Non-parameter return values already handled via `truthy_branch_returns_param`
 ///
 /// The vendor RuboCop NodePattern handles these block body shapes:
-/// 1. `(if cond lvar {next|nil})` -- if with param in then, next/nil in else
-/// 2. `(if cond {next|nil} lvar)` -- if with next/nil in then, param in else
-/// 3. `(if cond (next lvar) {next|nil|nil?})` -- next-with-value in then
-/// 4. `(if cond {next|nil|nil?} (next lvar))` -- next-with-value in else
-/// 5. `(begin (if cond next nil?) lvar)` -- guard clause with bare next
-/// 6. `(begin (if cond (next lvar) nil?) (nil))` -- guard with next-value + nil
+/// 1. `(if cond lvar {next|nil})` — if with param in then, next/nil in else
+/// 2. `(if cond {next|nil} lvar)` — if with next/nil in then, param in else
+/// 3. `(if cond (next lvar) {next|nil|nil?})` — next-with-value in then
+/// 4. `(if cond {next|nil|nil?} (next lvar))` — next-with-value in else
+/// 5. `(begin (if cond next nil?) lvar)` — guard clause with bare next
+/// 6. `(begin (if cond (next lvar) nil?) (nil))` — guard with next-value + nil
 /// Plus unless variants of all the above.
 pub struct MapCompactWithConditionalBlock;
 
@@ -60,7 +60,7 @@ impl Cop for MapCompactWithConditionalBlock {
         let method_name = call.name().as_slice();
 
         if method_name == b"compact" {
-            // .compact call -- check receiver is map/filter_map with conditional block
+            // .compact call — check receiver is map/filter_map with conditional block
             if call.arguments().is_some() {
                 return;
             }
@@ -95,7 +95,7 @@ impl Cop for MapCompactWithConditionalBlock {
                 }
             }
         } else if method_name == b"filter_map" {
-            // filter_map call -- check if it has a conditional block
+            // filter_map call — check if it has a conditional block
             if let Some(block) = call.block() {
                 if let Some(block_node) = block.as_block_node() {
                     if check_block_body(source, &block_node) {
@@ -135,8 +135,15 @@ fn check_block_body(source: &SourceFile, block_node: &ruby_prism::BlockNode<'_>)
     };
 
     match body_nodes.len() {
-        1 => check_single_conditional(source, &body_nodes[0], &param_name),
-        2 => check_guard_clause(source, &body_nodes[0], &body_nodes[1], &param_name),
+        1 => {
+            // Single statement: if/unless conditional
+            check_single_conditional(source, &body_nodes[0], &param_name)
+        }
+        2 => {
+            // Two statements: guard clause pattern
+            // Pattern: (if cond next/next-val) followed by lvar or nil
+            check_guard_clause(source, &body_nodes[0], &body_nodes[1], &param_name)
+        }
         _ => false,
     }
 }
@@ -151,17 +158,13 @@ fn check_single_conditional(
         return check_if_node(source, &if_node, param_name);
     }
     if let Some(unless_node) = expr.as_unless_node() {
-        return check_unless_node(&unless_node, param_name);
+        return check_unless_node(source, &unless_node, param_name);
     }
     false
 }
 
 /// Check an IfNode (covers regular if, ternary, modifier if).
-fn check_if_node(
-    source: &SourceFile,
-    if_node: &ruby_prism::IfNode<'_>,
-    param_name: &[u8],
-) -> bool {
+fn check_if_node(source: &SourceFile, if_node: &ruby_prism::IfNode<'_>, param_name: &[u8]) -> bool {
     // Skip elsif chains
     if is_elsif(source, if_node) {
         return false;
@@ -170,14 +173,10 @@ fn check_if_node(
     let then_stmts = get_if_then_stmts(if_node);
     let else_stmts = get_if_else_stmts(if_node);
 
-    // Pattern 1: if cond; param; end (no else -- implicit nil)
+    // Pattern 1: if cond; param; end (no else — implicit nil)
     if else_stmts.is_none() {
         if let Some(ref then) = then_stmts {
             if then.len() == 1 && is_param_read(&then[0], param_name) {
-                return true;
-            }
-            // `next param if cond` -- modifier if with next-value, no else
-            if then.len() == 1 && is_next_with_param(&then[0], param_name) {
                 return true;
             }
         }
@@ -227,18 +226,18 @@ fn check_if_node(
 }
 
 /// Check an UnlessNode.
-fn check_unless_node(unless_node: &ruby_prism::UnlessNode<'_>, param_name: &[u8]) -> bool {
+fn check_unless_node(
+    _source: &SourceFile,
+    unless_node: &ruby_prism::UnlessNode<'_>,
+    param_name: &[u8],
+) -> bool {
     let then_stmts = get_unless_then_stmts(unless_node);
     let else_stmts = get_unless_else_stmts(unless_node);
 
-    // Pattern: unless cond; param; end (no else -- implicit nil, reject)
+    // Pattern: unless cond; param; end (no else — implicit nil → reject)
     if else_stmts.is_none() {
         if let Some(ref then) = then_stmts {
             if then.len() == 1 && is_param_read(&then[0], param_name) {
-                return true;
-            }
-            // `next param unless cond` -- modifier unless with next-value
-            if then.len() == 1 && is_next_with_param(&then[0], param_name) {
                 return true;
             }
         }
@@ -277,45 +276,53 @@ fn check_guard_clause(
     second: &ruby_prism::Node<'_>,
     param_name: &[u8],
 ) -> bool {
+    // Shape A: (if cond next) followed by (lvar) — bare next guard
+    // Shape B: (if cond (next lvar)) followed by (nil) — next-with-value guard
+    // Shape C: (if cond (next nil)) followed by (lvar) — next-nil guard
+
     if let Some(if_node) = first.as_if_node() {
+        let then_stmts = get_if_then_stmts(&if_node);
         // modifier if: no else branch
         if if_node.subsequent().is_some() {
             return false;
         }
-        if let Some(ref then) = get_if_then_stmts(&if_node) {
+        if let Some(ref then) = then_stmts {
             if then.len() == 1 {
-                // `next if cond` + `param`
+                // Shape A: `next if cond` + `param`
                 if is_bare_next(&then[0]) && is_param_read(second, param_name) {
                     return true;
                 }
-                // `next nil if cond` + `param`
+                // Shape A2: `next nil if cond` + `param`
                 if is_next_nil(&then[0]) && is_param_read(second, param_name) {
                     return true;
                 }
-                // `next param if cond` + `nil`
+                // Shape B: `next param if cond` + `nil`
                 if is_next_with_param(&then[0], param_name) && is_nil_literal(second) {
                     return true;
                 }
+                // Shape B2: `next param if cond` + implicit (single statement, no second)
+                // This is handled by the single-statement path
             }
         }
     }
 
     if let Some(unless_node) = first.as_unless_node() {
+        let then_stmts = get_unless_then_stmts(&unless_node);
         // modifier unless: no else branch
         if unless_node.else_clause().is_some() {
             return false;
         }
-        if let Some(ref then) = get_unless_then_stmts(&unless_node) {
+        if let Some(ref then) = then_stmts {
             if then.len() == 1 {
-                // `next unless cond` + `param`
+                // Shape A: `next unless cond` + `param`
                 if is_bare_next(&then[0]) && is_param_read(second, param_name) {
                     return true;
                 }
-                // `next nil unless cond` + `param`
+                // Shape A2: `next nil unless cond` + `param`
                 if is_next_nil(&then[0]) && is_param_read(second, param_name) {
                     return true;
                 }
-                // `next param unless cond` + `nil`
+                // Shape B: `next param unless cond` + `nil`
                 if is_next_with_param(&then[0], param_name) && is_nil_literal(second) {
                     return true;
                 }
@@ -325,6 +332,12 @@ fn check_guard_clause(
 
     false
 }
+
+/// Also need to handle single-statement `next param if cond` (modifier if with next-value).
+/// This appears as a single IfNode where the then branch is `next param`.
+/// Already covered in check_single_conditional → check_if_node when mapped to
+/// the pattern: if cond; next param; end (no else, implicit nil).
+/// But we need to recognize `next param` as a valid pattern.
 
 /// Extract the first block parameter name (e.g., `|x|` -> "x").
 fn get_block_param_name(block_node: &ruby_prism::BlockNode<'_>) -> Option<Vec<u8>> {
@@ -348,6 +361,7 @@ fn is_param_read(node: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
 /// Check if a node is bare `next` (no arguments).
 fn is_bare_next(node: &ruby_prism::Node<'_>) -> bool {
     if let Some(next_node) = node.as_next_node() {
+        // bare next has no arguments
         return next_node.arguments().is_none();
     }
     false
@@ -394,16 +408,22 @@ fn is_next_with_param(node: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
     false
 }
 
-/// Check if an IfNode contains an elsif chain.
+/// Check if an IfNode is actually an `elsif` (vs a top-level `if`).
 fn is_elsif(source: &SourceFile, if_node: &ruby_prism::IfNode<'_>) -> bool {
-    // Check if the subsequent is another IfNode (elsif)
+    // Check the subsequent (else/elsif) for elsif nodes
+    // Actually, we need to check if THIS if_node's condition contains an elsif.
+    // The vendor checks `condition_node.parent.elsif?` which means the if_node
+    // itself is an elsif clause.
+    // In Prism, elsif is represented as a nested IfNode in the subsequent field.
+    // We need to check if the if_node has a subsequent that is an elsif (another IfNode).
+    // But more importantly, we need to check if the if_node itself has an elsif child.
     if let Some(subsequent) = if_node.subsequent() {
         if subsequent.as_if_node().is_some() {
             return true;
         }
     }
 
-    // Also check: is this if_node's keyword "elsif" (meaning it IS an elsif)?
+    // Also check: is this if_node's keyword "elsif"?
     if let Some(kw) = if_node.if_keyword_loc() {
         let kw_bytes = &source.content[kw.start_offset()..kw.end_offset()];
         if kw_bytes == b"elsif" {
@@ -427,7 +447,7 @@ fn get_if_else_stmts<'a>(if_node: &ruby_prism::IfNode<'a>) -> Option<Vec<ruby_pr
         if let Some(stmts) = else_node.statements() {
             return Some(stmts.body().iter().collect());
         }
-        // else with no body -- treat as empty
+        // else with no body — treat as empty
         return Some(vec![]);
     }
     None

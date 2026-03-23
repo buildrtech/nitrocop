@@ -19,15 +19,16 @@ use crate::parse::source::SourceFile;
 ///    Fixed by handling constant nodes as valid single-arg patterns.
 /// 2. `format('%s %s', 'foo', 'bar')` — multi-arg format calls where all format args are
 ///    string/symbol/numeric/boolean/nil literals. This is the `detect_unnecessary_fields`
-///    method in vendor RuboCop. Implemented detection of multi-arg format calls where the
-///    format string uses simple specifiers (%s, %d, %i, %u, %f with optional width/precision)
-///    and all arguments are literals.
+///    method in vendor RuboCop. Implemented basic %s-only multi-arg detection with string,
+///    symbol, integer, float, true, false, nil literals. Also handles width-padded %s like
+///    `%-40s` and %d/%i/%u with integer literals.
 /// 3. Splat check was wrong — checked the single arg node itself instead of iterating args
 ///    for SplatNode presence. Also need to check `call.block()` for block_argument (`&`).
 pub struct RedundantFormat;
 
-/// Check if a node is a literal that can be used with %s format specifier.
-fn is_acceptable_literal(node: &ruby_prism::Node<'_>) -> bool {
+/// Check if a node is a literal that can be converted to a string via %s.
+/// Matches vendor's ACCEPTABLE_LITERAL_TYPES = %i[str dstr sym dsym numeric boolean nil]
+fn is_string_convertible_literal(node: &ruby_prism::Node<'_>) -> bool {
     node.as_string_node().is_some()
         || node.as_interpolated_string_node().is_some()
         || node.as_symbol_node().is_some()
@@ -41,53 +42,36 @@ fn is_acceptable_literal(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_nil_node().is_some()
 }
 
-/// Check if a node is an integer-compatible literal (for %d/%i/%u).
-fn is_integer_compatible(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
-    if node.as_integer_node().is_some() || node.as_float_node().is_some() {
+/// Check if a node is an integer literal (can be used with %d/%i/%u).
+fn is_integer_literal(node: &ruby_prism::Node<'_>) -> bool {
+    if node.as_integer_node().is_some() {
         return true;
     }
+    // String literals that parse as integers
     if let Some(s) = node.as_string_node() {
-        let src =
-            &source.as_bytes()[s.content_loc().start_offset()..s.content_loc().end_offset()];
-        if let Ok(text) = std::str::from_utf8(src) {
+        let content = s.content_loc().as_slice();
+        if let Ok(text) = std::str::from_utf8(content) {
             return text.parse::<i64>().is_ok();
         }
     }
     false
 }
 
-/// Check if a node is a float-compatible literal (for %f).
-fn is_float_compatible(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
-    if node.as_integer_node().is_some() || node.as_float_node().is_some() {
-        return true;
-    }
+/// Get the string representation of a literal for %s formatting.
+fn literal_to_string(node: &ruby_prism::Node<'_>) -> Option<String> {
     if let Some(s) = node.as_string_node() {
-        let src =
-            &source.as_bytes()[s.content_loc().start_offset()..s.content_loc().end_offset()];
-        if let Ok(text) = std::str::from_utf8(src) {
-            return text.parse::<f64>().is_ok();
-        }
-    }
-    false
-}
-
-/// Get a literal's string representation for %s.
-fn literal_str_value(node: &ruby_prism::Node<'_>, source: &SourceFile) -> Option<String> {
-    if let Some(s) = node.as_string_node() {
-        let src =
-            &source.as_bytes()[s.content_loc().start_offset()..s.content_loc().end_offset()];
-        return std::str::from_utf8(src).ok().map(|v| v.to_string());
+        let content = s.content_loc().as_slice();
+        return std::str::from_utf8(content).ok().map(|s| s.to_string());
     }
     if let Some(sym) = node.as_symbol_node() {
-        let val = sym.unescaped();
-        return std::str::from_utf8(val).ok().map(|v| v.to_string());
+        let val = sym.unescaped().as_slice();
+        return std::str::from_utf8(val).ok().map(|s| s.to_string());
     }
     if let Some(int) = node.as_integer_node() {
-        let src =
-            &source.as_bytes()[int.location().start_offset()..int.location().end_offset()];
-        return std::str::from_utf8(src).ok().map(|v| v.to_string());
+        return Some(int.value().to_string());
     }
     if let Some(f) = node.as_float_node() {
+        // Ruby's %s on a float uses the default to_s
         return Some(format!("{}", f.value()));
     }
     if node.as_true_node().is_some() {
@@ -99,61 +83,42 @@ fn literal_str_value(node: &ruby_prism::Node<'_>, source: &SourceFile) -> Option
     if node.as_nil_node().is_some() {
         return Some("".to_string());
     }
-    // For rational, imaginary, interpolated strings/symbols — use source text
-    let src = &source.as_bytes()[node.location().start_offset()..node.location().end_offset()];
-    std::str::from_utf8(src).ok().map(|v| v.to_string())
+    // For rational, imaginary, interpolated strings/symbols — too complex to inline
+    None
 }
 
-/// Get integer value from a literal node.
-fn get_integer_value(node: &ruby_prism::Node<'_>, source: &SourceFile) -> Option<i64> {
+/// Get integer value from a literal for %d/%i/%u formatting.
+fn literal_to_integer(node: &ruby_prism::Node<'_>) -> Option<i64> {
     if let Some(int) = node.as_integer_node() {
-        let src =
-            &source.as_bytes()[int.location().start_offset()..int.location().end_offset()];
-        let s = std::str::from_utf8(src).ok()?;
-        return s.parse::<i64>().ok();
+        return Some(int.value());
     }
     if let Some(f) = node.as_float_node() {
         return Some(f.value() as i64);
     }
     if let Some(s) = node.as_string_node() {
-        let src =
-            &source.as_bytes()[s.content_loc().start_offset()..s.content_loc().end_offset()];
-        let text = std::str::from_utf8(src).ok()?;
-        return text.parse::<i64>().ok();
+        let content = s.content_loc().as_slice();
+        if let Ok(text) = std::str::from_utf8(content) {
+            return text.parse::<i64>().ok();
+        }
     }
     None
 }
 
-/// Get float value from a literal node.
-fn get_float_value(node: &ruby_prism::Node<'_>, source: &SourceFile) -> Option<f64> {
-    if let Some(int) = node.as_integer_node() {
-        let src =
-            &source.as_bytes()[int.location().start_offset()..int.location().end_offset()];
-        let s = std::str::from_utf8(src).ok()?;
-        return s.parse::<f64>().ok();
-    }
-    if let Some(f) = node.as_float_node() {
-        return Some(f.value());
-    }
-    if let Some(s) = node.as_string_node() {
-        let src =
-            &source.as_bytes()[s.content_loc().start_offset()..s.content_loc().end_offset()];
-        let text = std::str::from_utf8(src).ok()?;
-        return text.parse::<f64>().ok();
-    }
-    None
-}
-
-/// Represents a parsed format specifier.
+/// Represents a parsed format specifier in a format string.
 struct FormatSpec {
+    /// The type character: 's', 'd', 'i', 'u', 'f', etc.
     spec_type: u8,
+    /// Width (if specified), negative means left-aligned
     width: Option<i32>,
+    /// Precision (if specified)
     precision: Option<usize>,
+    /// Flags
     flags: Vec<u8>,
 }
 
-/// Parse simple format specifiers from a format string.
-/// Returns None if the string contains specifiers we can't handle.
+/// Parse format specifiers from a format string. Returns None if the string
+/// contains specifiers we can't handle (annotated, template, variable width, etc).
+/// Returns Some(vec) of simple specifiers if all are handleable.
 fn parse_simple_format_specs(fmt: &str) -> Option<Vec<FormatSpec>> {
     let bytes = fmt.as_bytes();
     let mut specs = Vec::new();
@@ -164,37 +129,44 @@ fn parse_simple_format_specs(fmt: &str) -> Option<Vec<FormatSpec>> {
             i += 1;
             continue;
         }
+
         i += 1;
         if i >= bytes.len() {
             return None;
         }
+
+        // %% is literal
         if bytes[i] == b'%' {
             i += 1;
             continue;
         }
-        // Reject annotated/template
+
+        // Reject annotated (%<name>...) and template (%{name})
         if bytes[i] == b'<' || bytes[i] == b'{' {
             return None;
         }
+
         // Reject positional (N$)
         let pos_start = i;
         while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
         }
         if i > pos_start && i < bytes.len() && bytes[i] == b'$' {
-            return None;
+            return None; // positional args are complex
         }
         i = pos_start;
 
+        // Parse flags
         let mut flags = Vec::new();
         while i < bytes.len() && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') {
             flags.push(bytes[i]);
             i += 1;
         }
 
+        // Parse width
         let mut width: Option<i32> = None;
         if i < bytes.len() && bytes[i] == b'*' {
-            return None;
+            return None; // variable width — too complex
         }
         let w_start = i;
         while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -203,14 +175,19 @@ fn parse_simple_format_specs(fmt: &str) -> Option<Vec<FormatSpec>> {
         if i > w_start {
             let w_str = std::str::from_utf8(&bytes[w_start..i]).ok()?;
             let w: i32 = w_str.parse().ok()?;
-            width = Some(if flags.contains(&b'-') { -w } else { w });
+            if flags.contains(&b'-') {
+                width = Some(-w);
+            } else {
+                width = Some(w);
+            }
         }
 
+        // Parse precision
         let mut precision: Option<usize> = None;
         if i < bytes.len() && bytes[i] == b'.' {
             i += 1;
             if i < bytes.len() && bytes[i] == b'*' {
-                return None;
+                return None; // variable precision
             }
             let p_start = i;
             while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -224,13 +201,23 @@ fn parse_simple_format_specs(fmt: &str) -> Option<Vec<FormatSpec>> {
             }
         }
 
+        // Type character
         if i >= bytes.len() {
             return None;
         }
         let spec_type = bytes[i];
         if !matches!(
             spec_type,
-            b's' | b'd' | b'i' | b'u' | b'f' | b'g' | b'e' | b'x' | b'X' | b'o' | b'b'
+            b's' | b'd'
+                | b'i'
+                | b'u'
+                | b'f'
+                | b'g'
+                | b'e'
+                | b'x'
+                | b'X'
+                | b'o'
+                | b'b'
                 | b'B'
                 | b'c'
                 | b'p'
@@ -254,37 +241,20 @@ fn parse_simple_format_specs(fmt: &str) -> Option<Vec<FormatSpec>> {
     Some(specs)
 }
 
-/// Check if an argument matches its format specifier type.
-fn arg_matches_spec(spec: &FormatSpec, node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
+/// Format a single value according to a format spec, producing the literal result string.
+fn format_value(spec: &FormatSpec, node: &ruby_prism::Node<'_>) -> Option<String> {
     match spec.spec_type {
         b's' => {
-            if (spec.width.is_some() || spec.precision.is_some())
-                && (node.as_interpolated_string_node().is_some()
-                    || node.as_interpolated_symbol_node().is_some())
-            {
-                return false;
-            }
-            is_acceptable_literal(node)
-        }
-        b'd' | b'i' | b'u' => is_integer_compatible(node, source),
-        b'f' => is_float_compatible(node, source),
-        _ => false,
-    }
-}
-
-/// Format a single value according to a format spec.
-fn format_value(
-    spec: &FormatSpec,
-    node: &ruby_prism::Node<'_>,
-    source: &SourceFile,
-) -> Option<String> {
-    match spec.spec_type {
-        b's' => {
-            let val = literal_str_value(node, source)?;
+            // %s — convert to string
+            let val = literal_to_string(node)?;
             apply_width_padding(&val, spec)
         }
         b'd' | b'i' | b'u' => {
-            let int_val = get_integer_value(node, source)?;
+            // %d/%i/%u — integer formatting
+            if !is_integer_literal(node) {
+                return None;
+            }
+            let int_val = literal_to_integer(node)?;
             let mut formatted = if spec.flags.contains(&b'+') && int_val >= 0 {
                 format!("+{}", int_val)
             } else if spec.flags.contains(&b' ') && int_val >= 0 {
@@ -293,42 +263,44 @@ fn format_value(
                 format!("{}", int_val)
             };
 
+            // Apply precision (minimum digits)
             if let Some(prec) = spec.precision {
-                if prec == 0 && int_val == 0 {
-                    formatted = String::new();
+                let is_neg = int_val < 0;
+                let digits: String = if is_neg {
+                    formatted[1..].to_string()
+                } else if formatted.starts_with('+') || formatted.starts_with(' ') {
+                    formatted[1..].to_string()
                 } else {
-                    let is_neg = int_val < 0;
-                    let prefix_len = usize::from(
-                        is_neg
-                            || formatted.starts_with('+')
-                            || formatted.starts_with(' '),
-                    );
-                    let digits = &formatted[prefix_len..];
-                    if digits.len() < prec {
-                        let padded = format!("{:0>width$}", digits, width = prec);
-                        if prefix_len > 0 {
-                            formatted = format!("{}{}", &formatted[..prefix_len], padded);
-                        } else {
-                            formatted = padded;
-                        }
+                    formatted.clone()
+                };
+                if digits.len() < prec {
+                    let padded = format!("{:0>width$}", digits, width = prec);
+                    if is_neg {
+                        formatted = format!("-{}", padded);
+                    } else if formatted.starts_with('+') {
+                        formatted = format!("+{}", padded);
+                    } else if formatted.starts_with(' ') {
+                        formatted = format!(" {}", padded);
+                    } else {
+                        formatted = padded;
                     }
+                } else if prec == 0 && int_val == 0 {
+                    // %.d with value 0 produces empty string
+                    formatted = String::new();
                 }
             }
 
+            // Apply zero-padding (flag '0') with width
             if spec.flags.contains(&b'0') && !spec.flags.contains(&b'-') {
                 if let Some(w) = spec.width {
                     let w = w.unsigned_abs() as usize;
                     if formatted.len() < w {
                         let is_neg = formatted.starts_with('-');
-                        let digits = if is_neg {
-                            &formatted[1..]
-                        } else {
-                            &formatted[..]
-                        };
+                        let digits = if is_neg { &formatted[1..] } else { &formatted };
                         let padded = format!(
                             "{:0>width$}",
                             digits,
-                            width = w - usize::from(is_neg)
+                            width = w - if is_neg { 1 } else { 0 }
                         );
                         formatted = if is_neg {
                             format!("-{}", padded)
@@ -342,12 +314,24 @@ fn format_value(
             apply_width_padding(&formatted, spec)
         }
         b'f' => {
-            let float_val = get_float_value(node, source)?;
+            // %f — float formatting
+            let float_val = if let Some(int) = node.as_integer_node() {
+                int.value() as f64
+            } else if let Some(f) = node.as_float_node() {
+                f.value()
+            } else if let Some(s) = node.as_string_node() {
+                let content = s.content_loc().as_slice();
+                let text = std::str::from_utf8(content).ok()?;
+                text.parse::<f64>().ok()?
+            } else {
+                return None;
+            };
+
             let prec = spec.precision.unwrap_or(6);
             let formatted = format!("{:.prec$}", float_val, prec = prec);
             apply_width_padding(&formatted, spec)
         }
-        _ => None,
+        _ => None, // Other types not supported for inlining
     }
 }
 
@@ -357,8 +341,10 @@ fn apply_width_padding(s: &str, spec: &FormatSpec) -> Option<String> {
         let abs_w = w.unsigned_abs() as usize;
         if s.len() < abs_w {
             if w < 0 || spec.flags.contains(&b'-') {
+                // Left-aligned
                 Some(format!("{:<width$}", s, width = abs_w))
             } else {
+                // Right-aligned
                 Some(format!("{:>width$}", s, width = abs_w))
             }
         } else {
@@ -375,6 +361,7 @@ fn has_splat_arg(args: &[ruby_prism::Node<'_>]) -> bool {
         if arg.as_splat_node().is_some() {
             return true;
         }
+        // Check for **kwargs (keyword hash containing AssocSplatNode)
         if let Some(kh) = arg.as_keyword_hash_node() {
             for elem in kh.elements().iter() {
                 if elem.as_assoc_splat_node().is_some() {
@@ -545,12 +532,13 @@ impl RedundantFormat {
             Err(_) => return,
         };
 
-        // Parse format specifiers — reject complex patterns
+        // Parse format specifiers
         let specs = match parse_simple_format_specs(fmt_str) {
-            Some(s) if !s.is_empty() => s,
-            _ => return,
+            Some(s) => s,
+            None => return,
         };
 
+        // Number of format args (everything after the format string)
         let format_args = &arg_list[1..];
 
         // Must have exactly the right number of args
@@ -558,14 +546,7 @@ impl RedundantFormat {
             return;
         }
 
-        // All args must be literals matching their specifier
-        for (spec, arg) in specs.iter().zip(format_args.iter()) {
-            if !arg_matches_spec(spec, arg, source) {
-                return;
-            }
-        }
-
-        // Compute the formatted result
+        // All args must be literals, and each must match its specifier
         let mut parts = Vec::new();
         let mut last_end = 0;
         let bytes = fmt_str.as_bytes();
@@ -577,59 +558,77 @@ impl RedundantFormat {
                 i += 1;
                 continue;
             }
+
+            // Save text before this specifier
             if i > last_end {
                 parts.push(fmt_str[last_end..i].to_string());
             }
+
+            let spec_start = i;
             i += 1;
             if i >= bytes.len() {
-                break;
+                return;
             }
+
+            // %% literal
             if bytes[i] == b'%' {
                 parts.push("%".to_string());
                 i += 1;
                 last_end = i;
                 continue;
             }
-            // Skip over the specifier to find its end
+
+            // This is a real specifier — find its end
+            // Skip flags
             while i < bytes.len() && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') {
                 i += 1;
             }
+            // Skip width
             while i < bytes.len() && bytes[i].is_ascii_digit() {
                 i += 1;
             }
+            // Skip precision
             if i < bytes.len() && bytes[i] == b'.' {
                 i += 1;
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
                     i += 1;
                 }
             }
-            if i < bytes.len() {
-                i += 1;
+            // Type char
+            if i >= bytes.len() {
+                return;
             }
+            i += 1; // skip type char
             last_end = i;
 
-            if spec_idx < specs.len() {
-                match format_value(&specs[spec_idx], &format_args[spec_idx], source) {
-                    Some(s) => parts.push(s),
-                    None => return,
-                }
-                spec_idx += 1;
+            if spec_idx >= specs.len() {
+                return;
             }
+
+            let formatted = match format_value(&specs[spec_idx], &format_args[spec_idx]) {
+                Some(s) => s,
+                None => return,
+            };
+            parts.push(formatted);
+            spec_idx += 1;
         }
 
+        // Remaining text after last specifier
         if last_end < bytes.len() {
             parts.push(fmt_str[last_end..].to_string());
         }
 
         let result = parts.join("");
+
+        // Escape control chars and quote the result
         let escaped = escape_control_chars(&result);
 
+        // Determine quoting: if any arg is interpolated, use double quotes
         let has_interpolation = format_args.iter().any(|a| {
-            a.as_interpolated_string_node().is_some()
-                || a.as_interpolated_symbol_node().is_some()
+            a.as_interpolated_string_node().is_some() || a.as_interpolated_symbol_node().is_some()
         });
 
-        let quoted = if has_interpolation || escaped.contains('\\') || escaped != result {
+        let quoted = if has_interpolation || escaped.contains('\\') {
             format!("\"{}\"", escaped)
         } else {
             format!("'{}'", escaped)
