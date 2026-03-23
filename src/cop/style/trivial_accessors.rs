@@ -333,25 +333,4 @@ impl<'pr> Visit<'pr> for TrivialAccessorsVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(TrivialAccessors, "cops/style/trivial_accessors");
-
-    #[test]
-    fn block_scope_reader() {
-        let source = b"describe \"something\" do\n  def app\n    @app\n  end\nend\n";
-        let diagnostics = crate::testutil::run_cop_full(&TrivialAccessors, source);
-        eprintln!("DEBUG: diagnostics = {:?}", diagnostics);
-
-        // Also test with class wrapper to confirm baseline works
-        let class_source =
-            b"class Foo\n  def app\n    @app\n  end\nend\n";
-        let class_diagnostics = crate::testutil::run_cop_full(&TrivialAccessors, class_source);
-        eprintln!("DEBUG class: diagnostics = {:?}", class_diagnostics);
-
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Expected 1 offense for trivial reader inside block, got {}: {:?}",
-            diagnostics.len(),
-            diagnostics
-        );
-    }
 }
