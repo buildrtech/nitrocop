@@ -249,6 +249,33 @@ use crate::parse::source::SourceFile;
 /// `context`/`let` blocks (DataDog pattern). These create a separate Ruby
 /// scope that our AST-walking approach doesn't enter. A full fix requires
 /// VariableForce-level scope tracking.
+///
+/// ## Investigation (FP=34, FN=59, 2026-03-23)
+///
+/// **FP=34 fixed (two root causes):**
+/// 1. **Describe/context arguments as example-scope reads** (~20 FPs):
+///    `stmt_example_scope_var_interaction` and `check_var_used_in_example_scopes`
+///    counted variable references in describe/context call arguments (e.g.,
+///    `describe "#{v}" do`, `context "...", skip: flag do`) as example-scope
+///    reads. Per RuboCop's source, `part_of_example_scope?` only matches
+///    it/before/let/subject/include — NOT describe/context arguments, which
+///    are evaluated at the group scope level. Repos affected: active_type (4),
+///    chef (3), puppet (5), CocoaPods (2), vcr (2), elasticsearch (1),
+///    imap-backup (1), activegraph (1), natalie (1), openproject (1).
+/// 2. **File-level assignment collection entering shared groups** (~14 FPs):
+///    `collect_file_level_assignments` recursed into shared_examples,
+///    shared_examples_for, and shared_context blocks. Fixed by adding
+///    `is_rspec_shared_group` check. Repos affected: forem (4), puppet (3),
+///    vcr (2), openproject (2), natalie (1), activegraph (1), other (1).
+///
+/// **FN=59 remaining (multiple root causes, all require VariableForce):**
+/// - `def self.method` with `.each`/`context` (DataDog: ~11 FN)
+/// - Ruby 3.1 keyword shorthand `url:` not detected as variable reference
+///   (stringer: ~4 FN)
+/// - `def` methods inside describe blocks not entered by `check_def_level_vars`
+///   (opal: ~3 FN)
+/// - Conditional reassignment flow analysis gaps (fastlane: ~3 FN)
+/// - Various other VariableForce scope-tracking gaps (~38 FN)
 pub struct LeakyLocalVariable;
 
 impl Cop for LeakyLocalVariable {
@@ -3403,10 +3430,7 @@ end
         // group-level assignment used in the before hook), but should NOT be
         // double-flagged by check_source as a file-level assignment.
         let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source_with_describe);
-        let offenses_at_line1: Vec<_> = diags
-            .iter()
-            .filter(|d| d.location.line == 1)
-            .collect();
+        let offenses_at_line1: Vec<_> = diags.iter().filter(|d| d.location.line == 1).collect();
         assert!(
             offenses_at_line1.is_empty(),
             "sc_extra at file level should not be flagged (not used in examples)"
