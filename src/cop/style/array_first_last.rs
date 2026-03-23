@@ -149,19 +149,9 @@ fn check_index_write_args<'a>(
             // Use opening bracket location as the offense location
             let (line, column) = source.offset_to_line_col(opening_loc.start_offset());
             if v == 0 {
-                diagnostics.push(cop.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use `first`.".to_string(),
-                ));
+                diagnostics.push(cop.diagnostic(source, line, column, "Use `first`.".to_string()));
             } else if v == -1 {
-                diagnostics.push(cop.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use `last`.".to_string(),
-                ));
+                diagnostics.push(cop.diagnostic(source, line, column, "Use `last`.".to_string()));
             }
         }
     }
@@ -231,10 +221,7 @@ impl<'pr> Visit<'pr> for ArrayFirstLastVisitor<'_> {
         ruby_prism::visit_index_and_write_node(self, node);
     }
 
-    fn visit_index_operator_write_node(
-        &mut self,
-        node: &ruby_prism::IndexOperatorWriteNode<'pr>,
-    ) {
+    fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'pr>) {
         // Suppress [] call arguments (FP fix: h[arr[0]] += val)
         suppress_index_write_args(node.arguments(), &mut self.suppressed_offsets);
         // Check own index for 0/-1 (FN fix: arr[0] += val)
