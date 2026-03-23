@@ -1,5 +1,5 @@
 format('%s', foo)
-sprintf('%d %s', 1, 'hello')
+sprintf('%d %s', 1, bar)
 'foo'
 "bar"
 foo.format('baz')
