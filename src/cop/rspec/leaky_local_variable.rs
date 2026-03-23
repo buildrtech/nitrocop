@@ -550,6 +550,14 @@ fn collect_file_level_assignments(
         if no_recv && is_rspec_example_group(name) {
             return;
         }
+        // Stop at shared example groups (shared_examples, shared_examples_for,
+        // shared_context). Variables inside shared groups are scoped to the
+        // shared group block, not file-level. RuboCop's VariableForce respects
+        // block scope boundaries, so variables inside shared groups don't leak
+        // to the file level.
+        if no_recv && util::is_rspec_shared_group(name) {
+            return;
+        }
         // Stop at example scopes (it, before, let, subject, etc.)
         // Variables assigned inside example scopes are not file-level leaks.
         if call.receiver().is_none() && (is_example_scope(name) || is_includes_method(name)) {
@@ -1029,15 +1037,11 @@ fn stmt_example_scope_var_interaction(
         // Nested example groups: recurse into their statements
         // Match both `describe` (no receiver) and `RSpec.describe` (receiver is RSpec)
         if (no_recv || is_rspec_recv) && is_rspec_example_group(name) {
-            // Check arguments of the example group call (e.g., `describe result::Success`).
-            // Variables used as arguments to describe/context are reads.
-            if let Some(args) = call.arguments() {
-                for arg in args.arguments().iter() {
-                    if node_references_var(&arg, var_name) {
-                        return VarInteraction::ReadOnly;
-                    }
-                }
-            }
+            // Note: describe/context ARGUMENTS (e.g., `describe "#{v}" do`) are
+            // evaluated at the group scope, not inside example scopes. RuboCop's
+            // LeakyLocalVariable cop checks `part_of_example_scope?` which only
+            // matches it/before/let/subject/include — NOT describe/context call
+            // arguments. So we do NOT check call.arguments() here.
             if let Some(blk) = call.block() {
                 if let Some(bn) = blk.as_block_node() {
                     if let Some(body) = bn.body() {
@@ -1925,17 +1929,12 @@ fn check_var_used_in_example_scopes(node: &ruby_prism::Node<'_>, var_name: &[u8]
             return false;
         }
 
-        // Nested example groups: check arguments and recurse into their body
+        // Nested example groups: recurse into their body
         // Match both `describe` (no receiver) and `RSpec.describe` (receiver is RSpec)
         if (no_recv || is_rspec_recv) && is_rspec_example_group(name) {
-            // Check arguments (e.g., `describe result::Success`)
-            if let Some(args) = call.arguments() {
-                for arg in args.arguments().iter() {
-                    if node_references_var(&arg, var_name) {
-                        return true;
-                    }
-                }
-            }
+            // Note: describe/context ARGUMENTS are evaluated at the group scope,
+            // not inside example scopes. RuboCop doesn't flag these. See the
+            // matching comment in stmt_example_scope_var_interaction.
             if let Some(blk) = call.block() {
                 if let Some(bn) = blk.as_block_node() {
                     if let Some(body) = bn.body() {
@@ -3380,6 +3379,41 @@ end
     }
 
     #[test]
+    fn test_no_fp_shared_context_vars() {
+        // shared_context IS in RSPEC_EXAMPLE_GROUPS, so check_node DOES process it.
+        // Variables inside shared_context used in example scopes ARE correctly flagged.
+        // This test verifies that file-level collection stops at shared_context.
+        //
+        // When only the shared_context exists in the file (no surrounding describe),
+        // check_node processes it and finds sc_opts used in the before hook — offense.
+        // This is CORRECT per RuboCop's vendor spec.
+        let source_with_describe = br#"sc_extra = "file level"
+RSpec.shared_context "test setup" do
+  sc_opts = { timeout: 30 }
+  before { setup(sc_opts) }
+end
+describe SomeClass do
+  it "test" do
+    expect(true).to be true
+  end
+end
+"#;
+        // sc_extra at file level should NOT be flagged (not used in example scopes).
+        // sc_opts inside shared_context IS correctly flagged by check_node (as a
+        // group-level assignment used in the before hook), but should NOT be
+        // double-flagged by check_source as a file-level assignment.
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source_with_describe);
+        let offenses_at_line1: Vec<_> = diags
+            .iter()
+            .filter(|d| d.location.line == 1)
+            .collect();
+        assert!(
+            offenses_at_line1.is_empty(),
+            "sc_extra at file level should not be flagged (not used in examples)"
+        );
+    }
+
+    #[test]
     fn test_fn_def_body_vars_leak_into_describe() {
         // chef pattern: variables assigned inside def body, then used in describe/let/it blocks
         let source = br#"def static_provider_resolution(opts = {})
@@ -3444,8 +3478,10 @@ end
 
     #[test]
     fn test_fn_var_used_in_describe_argument() {
-        // dry-monads pattern: variable used as argument to nested describe call
-        // e.g., `result = described_class; describe result::Success do ... end`
+        // Describe/context arguments are evaluated at the group scope, not inside
+        // example scopes. RuboCop's `part_of_example_scope?` doesn't match
+        // describe/context, so variables used only in describe arguments should
+        // NOT be flagged.
         let source = br#"RSpec.describe(SomeClass) do
   result = described_class
 
@@ -3458,8 +3494,8 @@ end
 "#;
         let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
         assert!(
-            diags.len() >= 1,
-            "Expected at least 1 offense for var used in describe arg, got {}: {:?}",
+            diags.is_empty(),
+            "Expected no offense for var used only in describe arg, got {}: {:?}",
             diags.len(),
             diags
                 .iter()

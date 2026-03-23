@@ -263,18 +263,6 @@ describe SomeClass do
   its('groups') { should include root_group }
 end
 
-# Variable used as argument to nested describe (ConstantPathNode)
-RSpec.describe(SomeClass) do
-  result = described_class
-  ^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
-
-  describe result::Success do
-    it "works" do
-      expect(true).to be true
-    end
-  end
-end
-
 # Variable assigned in if-condition, used in let block
 describe SomeClass do
   specs.each do |spec|
