@@ -16,12 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-LOG_PATTERNS = {
-    "minimax": "~/.claude/projects/**/*.jsonl",
-    "claude-normal": "~/.claude/projects/**/*.jsonl",
-    "claude-hard": "~/.claude/projects/**/*.jsonl",
-    "codex-normal": "~/.codex/sessions/**/*.jsonl",
-    "codex-hard": "~/.codex/sessions/**/*.jsonl",
+import resolve_backend
+
+LOG_FORMAT_PATTERNS = {
+    "claude": "~/.claude/projects/**/*.jsonl",
+    "codex": "~/.codex/sessions/**/*.jsonl",
 }
 
 CODEX_LOOKBACK_LINES = 50
@@ -47,10 +46,22 @@ def _set_meaningful_type(status: dict, type_name: str) -> None:
         status["last_type"] = type_name
 
 
-def find_logfile(newer_than: Path, backend: str = "codex-hard") -> Optional[str]:
+def normalize_backend(backend: str) -> str:
+    if backend in LOG_FORMAT_PATTERNS:
+        return backend
+    if backend in resolve_backend.BACKENDS:
+        return resolve_backend.resolve(backend)["log_format"]
+    if backend.startswith("codex"):
+        return "codex"
+    if backend.startswith("claude") or backend == "minimax":
+        return "claude"
+    return "codex"
+
+
+def find_logfile(newer_than: Path, backend: str = "codex") -> Optional[str]:
     """Find the most recent JSONL file newer than the reference file."""
     ref_mtime = newer_than.stat().st_mtime if newer_than.exists() else 0
-    pattern = LOG_PATTERNS.get(backend, LOG_PATTERNS["codex-hard"])
+    pattern = LOG_FORMAT_PATTERNS[normalize_backend(backend)]
     candidates = glob.glob(os.path.expanduser(pattern), recursive=True)
     for f in sorted(candidates, key=os.path.getmtime, reverse=True):
         if os.path.getmtime(f) > ref_mtime:
@@ -181,7 +192,7 @@ def _parse_codex_event(ev: dict, status: dict) -> bool:
     return False
 
 
-def get_status(logfile: str, backend: str = "codex-hard") -> dict:
+def get_status(logfile: str, backend: str = "codex") -> dict:
     """Read the last few events and extract status info."""
     status = {
         "events": 0,
@@ -197,7 +208,7 @@ def get_status(logfile: str, backend: str = "codex-hard") -> dict:
         return status
 
     status["events"] = len(lines)
-    is_codex_backend = backend.startswith("codex")
+    is_codex_backend = normalize_backend(backend) == "codex"
     parser = _parse_codex_event if is_codex_backend else _parse_claude_event
 
     # Scan recent lines for the most recent useful content.
@@ -439,14 +450,8 @@ def main():
     watch_parser.add_argument("--interval", type=int, default=30)
     watch_parser.add_argument(
         "--backend",
-        choices=[
-            "minimax",
-            "claude-normal",
-            "claude-hard",
-            "codex-normal",
-            "codex-hard",
-        ],
-        default="codex-hard",
+        choices=sorted(LOG_FORMAT_PATTERNS),
+        default="codex",
     )
 
     extract_parser = subparsers.add_parser("extract", help="Render a conversation excerpt as markdown")

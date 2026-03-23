@@ -8,6 +8,7 @@ from pathlib import Path
 # Import the module directly for unit testing get_status
 sys.path.insert(0, str(Path(__file__).parents[3] / "scripts" / "workflows"))
 import agent_logs
+import resolve_backend
 
 
 def write_jsonl(path: str, events: list[dict]) -> None:
@@ -267,6 +268,11 @@ def test_find_logfile_returns_none():
     assert result is None
 
 
+def test_agent_log_formats_match_resolve_backend_outputs():
+    expected = {config["log_format"] for config in resolve_backend.BACKENDS.values()}
+    assert expected == set(agent_logs.LOG_FORMAT_PATTERNS)
+
+
 if __name__ == "__main__":
     test_get_status_text()
     test_get_status_tool()
@@ -285,4 +291,5 @@ if __name__ == "__main__":
     test_codex_looks_past_token_count_noise()
     test_codex_ignores_function_call_output_noise()
     test_find_logfile_returns_none()
+    test_agent_log_formats_match_resolve_backend_outputs()
     print("All tests passed.")
