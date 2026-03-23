@@ -110,6 +110,27 @@ fn byte_col_to_char_col(line_bytes: &[u8], byte_col: usize) -> usize {
 /// bracket checks (markevans, gel-rb, jruby, natalie) caused similar FP regression.
 /// These patterns need a more nuanced approach to `is_multi_pair_hash` that
 /// distinguishes same-line vs cross-line closing bracket + next pair layouts.
+///
+/// **FP/FN root cause #7 (2026-03-23, 85 FP + 95 FN fixed):** Three sub-causes:
+/// a) First element on same line as `[`: RuboCop's `check` returns early when
+///    `same_line?(first_elem, left_bracket)`, skipping both element and closing
+///    bracket checks. Nitrocop only skipped element checks but still checked
+///    closing brackets, producing 83+ FPs (puppetlabs, chef, natalie, vagrant,
+///    hexapdf, loomio, fluent, etc.). Fix: `return` early when `elem_line == open_line`.
+/// b) Single-pair hash value closing bracket exemption in paren-relative mode:
+///    The exemption at `hash_key_col.is_some() && !is_multi_pair && close_col == line_indent`
+///    was applied regardless of `base_type`. For paren-relative arrays like
+///    `create(:x, :groups => [...])`, RuboCop still enforces paren-relative for the
+///    closing bracket. Fix: only apply exemption for `StartOfLine` base type.
+///    Also added `intermediate_method_call` check: when there's a `.` between `(`
+///    and the hash key (e.g., `expect(client.search body: [...])`), the paren
+///    belongs to an outer call, so use line-relative indent. This fixed 95 FNs
+///    (NatLabRockies/api-umbrella).
+/// c) Comma-separated argument binary op false positive: `find_left_paren_on_line`
+///    detected `?` in `create(flag ? :x : nil, key: [...])` as a grouping-paren
+///    indicator. Fix: reset `has_binary_op` when `,` at depth 0 is encountered
+///    during backward scan, since operators before commas are part of preceding
+///    argument expressions. Fixed 2 FPs (antiwork/gumroad).
 pub struct FirstArrayElementIndentation;
 
 /// Describes what the expected indentation is relative to.
@@ -215,6 +236,14 @@ fn find_left_paren_on_line(line_bytes: &[u8], bracket_col: usize) -> ParenScanRe
                 } else {
                     has_unmatched_brace = true;
                 }
+            }
+            // `,` at depth 0 separates arguments. Binary operators before a
+            // comma (i.e., at lower index, since we scan backward) are part of
+            // preceding argument expressions, not grouping operators. Reset
+            // `has_binary_op` so that e.g. `create(x ? y : z, key: [...])`
+            // doesn't misidentify `?` as a grouping operator.
+            b',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                has_binary_op = false;
             }
             // Detect binary/ternary operators at depth 0 (not inside nested parens/brackets/braces).
             // These indicate the `(` is a grouping paren, e.g., `(CONST + [...])` or
@@ -655,8 +684,6 @@ impl Cop for FirstArrayElementIndentation {
             .unwrap_or(0);
 
         // Compute the indent base column (before adding width) and its type.
-        // Also track the found paren byte column for later use in hash key analysis.
-        let mut found_paren_byte_col: Option<usize> = None;
         let (indent_base, base_type) = {
             match style {
                 "consistent" => (open_line_indent, IndentBaseType::StartOfLine),
@@ -685,7 +712,6 @@ impl Cop for FirstArrayElementIndentation {
                                     paren_scan.has_unmatched_brace,
                                 );
                         if use_paren_relative {
-                            found_paren_byte_col = Some(paren_byte_col);
                             (
                                 paren_col + 1,
                                 IndentBaseType::FirstColumnAfterLeftParenthesis,

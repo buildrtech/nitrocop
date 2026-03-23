@@ -222,6 +222,13 @@ FactoryBot.create(:limited_admin, :groups => [
                     FactoryBot.create(:google_admin_group),
                   ])
 
+# FP fix: Ternary ? in preceding argument, not grouping operator
+@product = create(:product, recommendable ? :recommendable : nil, recurrence_price_values: [
+                    {
+                      BasePrice::Recurrence::MONTHLY => { enabled: true, price: 3 },
+                    },
+                  ])
+
 # FP fix: Single-pair hash value with intermediate method call (`.`)
 # expect(client.search body: [...]) — paren is from expect(), not search
 # RuboCop uses line-relative (on_array path), so closing bracket at line indent is OK
