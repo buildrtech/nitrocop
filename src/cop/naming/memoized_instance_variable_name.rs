@@ -499,6 +499,12 @@ fn get_last_child_or_write<'pr>(
     // 1. With block → block body (Parser: `block` children = [send, args, body], last = body)
     //    Skip define_method/define_singleton_method blocks — those create their own
     //    method context and are handled separately by check_dynamic_method.
+    //    IMPORTANT: only check if the block body IS the or_write directly, without
+    //    recursing further. In Parser, block.children.last returns the block's body
+    //    (e.g., an if-node), and RuboCop checks `body == or_asgn`. If the body is
+    //    something else (like an if-node), it doesn't match — no recursion into the
+    //    if/else branches. Recursing caused FP for patterns like:
+    //    `options.fetch(:x) do if cond then nil else @ivar ||= val end end`
     // 2. Without block → last argument (Parser: `send` children = [recv, method, ...args], last = last arg)
     //    Handles patterns like `expr - @ivar ||= 0.0`
     if let Some(call_node) = node.as_call_node() {
@@ -510,7 +516,12 @@ fn get_last_child_or_write<'pr>(
         if let Some(block) = call_node.block() {
             if let Some(block_node) = block.as_block_node() {
                 if let Some(body) = block_node.body() {
-                    return unwrap_single_stmt_to_or_write_or_recurse(&body);
+                    // Direct match: body IS the or_write
+                    if let Some(or_write) = body.as_instance_variable_or_write_node() {
+                        return Some(or_write);
+                    }
+                    // StatementsNode with single statement (Prism wrapper, no recursion)
+                    return unwrap_single_stmt_to_or_write(body.as_statements_node());
                 }
             }
             return None;
