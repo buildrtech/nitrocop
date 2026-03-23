@@ -114,11 +114,9 @@ impl Cop for RedundantException {
                             // Autocorrect: replace `RuntimeError.new("msg")` with just `"msg"`
                             if let Some(ref mut corr) = corrections {
                                 let new_args = new_call.arguments().unwrap();
-                                let args_src = std::str::from_utf8(
-                                    new_args.location().as_slice(),
-                                )
-                                .unwrap_or("")
-                                .to_string();
+                                let args_src = std::str::from_utf8(new_args.location().as_slice())
+                                    .unwrap_or("")
+                                    .to_string();
                                 corr.push(crate::correction::Correction {
                                     start: arg_list[0].location().start_offset(),
                                     end: arg_list[0].location().end_offset(),

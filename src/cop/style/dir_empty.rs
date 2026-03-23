@@ -117,15 +117,14 @@ impl Cop for DirEmpty {
                                                     .to_string(),
                                             );
                                             if let Some(ref mut corr) = corrections {
-                                                let args_src =
-                                                    if let Some(args) = inner_call.arguments() {
-                                                        std::str::from_utf8(
-                                                            args.location().as_slice(),
-                                                        )
+                                                let args_src = if let Some(args) =
+                                                    inner_call.arguments()
+                                                {
+                                                    std::str::from_utf8(args.location().as_slice())
                                                         .unwrap_or("")
-                                                    } else {
-                                                        ""
-                                                    };
+                                                } else {
+                                                    ""
+                                                };
                                                 let dir_src = std::str::from_utf8(
                                                     dir_recv.location().as_slice(),
                                                 )
