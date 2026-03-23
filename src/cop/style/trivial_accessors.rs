@@ -3,6 +3,25 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Style/TrivialAccessors — flags trivial reader/writer methods that could use
+/// `attr_reader`/`attr_writer`.
+///
+/// ## Investigation notes (2026-03-23)
+///
+/// **FN root cause (84 offenses):** Methods inside blocks (`describe`, `context`,
+/// `Class.new do...end`, etc.) were not checked because the visitor only recognized
+/// `class`/`sclass` scopes. RuboCop's `in_module_or_instance_eval?` walks ancestors
+/// and only skips methods in `module` or `instance_eval` blocks — regular blocks are
+/// transparent, so methods inside them are checked. Fixed by adding `Block` and
+/// `InstanceEval` scope kinds and making blocks transparent when walking the scope
+/// stack.
+///
+/// **FP root cause (5 offenses):**
+/// 1. Methods inside `instance_eval` blocks were not skipped (4 FP from activeagents).
+///    Fixed by detecting `instance_eval` calls and pushing `InstanceEval` scope.
+/// 2. Reader with keyword rest params (`def errors(**_args); @errors; end`) was
+///    flagged as trivial (1 FP from trailblazer). Fixed by checking `keyword_rest`
+///    in the parameter validation.
 pub struct TrivialAccessors;
 
 /// Default AllowedMethods from vendor config (to_ary, to_a, to_c, ... to_sym).
@@ -172,11 +191,15 @@ impl<'a> TrivialAccessorsVisitor<'a> {
             let ivar_bytes = ivar_name.as_slice();
             let ivar_without_at = &ivar_bytes[1..];
 
-            // Skip if method has parameters
+            // Skip if method has any parameters (requireds, optionals, rest,
+            // keyword rest, block, etc.)
             if let Some(params) = def_node.parameters() {
                 if !params.requireds().is_empty()
                     || !params.optionals().is_empty()
                     || params.rest().is_some()
+                    || !params.keywords().is_empty()
+                    || params.keyword_rest().is_some()
+                    || params.block().is_some()
                 {
                     return;
                 }
