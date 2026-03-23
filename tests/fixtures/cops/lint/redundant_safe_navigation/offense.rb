@@ -133,3 +133,9 @@ end
 # Assignment with ||= and parenthesized &&
 zone ||= (user&.is_a?(Admin) && user.valid?) ? user.zone : default
               ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# AllowedMethod in && inside method body
+def check_roles?(roles)
+  user&.is_a?(Admin) && user.respond_to?(:roles)
+      ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+end
