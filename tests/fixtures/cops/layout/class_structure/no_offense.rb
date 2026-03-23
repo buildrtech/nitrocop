@@ -146,3 +146,27 @@ class << self
     2
   end
 end
+
+# Inline private declaration where no public method follows: no offense
+class InlinePrivateNoFollowUp
+  include Comparable
+  CONST = 1
+  def initialize
+    @x = 1
+  end
+  def validate_back_url(back_url)
+    back_url
+  end
+  private :validate_back_url
+end
+
+# Inline protected followed by more protected: no offense
+class InlineProtectedOrder
+  def public_method
+    1
+  end
+  def scm_entries
+    2
+  end
+  protected :scm_entries
+end
