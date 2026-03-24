@@ -49,6 +49,15 @@ const DEFAULT_ALLOWED_METHODS: &[&str] = &["present?", "blank?", "presence", "tr
 /// - Track the nearest `&&` group for each operand and suppress the "all csend
 ///   in and-context" heuristic when the grouped operands come from distinct
 ///   `&&` branches and no regular send establishes a baseline.
+///
+/// ## Corpus investigation (2026-03-24)
+///
+/// FP=4 (tagteam=2, brick=1, 18xx=1). brick and 18xx no longer reproduce with
+/// current binary. tagteam FP root cause: Prism represents block calls
+/// (e.g. `foo.bar { }`) as CallNode with a block field, while Parser gem wraps
+/// them in a `(block (send ...))` node. RuboCop's `operand_nodes` only collects
+/// `call_type?` nodes, so block-wrapped calls are excluded. Fix: skip CallNodes
+/// with `call.block().is_some()` in `extract_operand_info`.
 pub struct SafeNavigationConsistency;
 
 impl Cop for SafeNavigationConsistency {
@@ -207,6 +216,12 @@ fn extract_operand_info(
     and_group_key: Option<(usize, usize)>,
 ) -> Option<OperandInfo> {
     let call = node.as_call_node()?;
+    // Skip calls with blocks — RuboCop's Parser gem wraps these in a block node
+    // which is not call_type?, so they are never collected as operands.
+    // Prism represents them as CallNode with a block field.
+    if call.block().is_some() {
+        return None;
+    }
     let recv = call.receiver()?;
 
     let receiver_name = get_receiver_source(&recv)?;

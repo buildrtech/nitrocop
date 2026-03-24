@@ -28,3 +28,8 @@ x.foo.bar && y.foo&.baz
 # Separate && branches within an || chain should not be merged together
 (foo&.a && x) || (foo&.b && y) || (foo&.c && z)
 foo&.a || foo&.b || (foo&.c && flag) || foo&.d
+
+# Block-wrapped calls should not be collected as operands (RuboCop skips block nodes)
+setting&.domains&.include?(domain) || setting&.domains.any? { |d| d.match?(/x/) }
+foo&.bar || foo.baz { |x| x }
+foo&.bar && foo.baz { |x| x }
