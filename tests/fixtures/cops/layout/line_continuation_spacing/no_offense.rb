@@ -23,25 +23,36 @@ z = <<~RUBY
       baz)
 RUBY
 
-# Backslash immediately after closing string delimiter (implicit concatenation)
-raise TypeError, "Argument must be a Binding, not "\
+# String concatenation with exactly one space before backslash (correct)
+raise TypeError, "Argument must be a Binding, not " \
     "a #{scope.class.name}"
 
-msg = "Expected result "\
+msg = "Expected result " \
     "but found something else"
 
-debugMsg(2, "Starting at position %d: prefix = %s, "\
+debugMsg(2, "Starting at position %d: prefix = %s, " \
          "delimiter = %s, quoted = %s",
          pos, prefix, delim, quoted)
 
-raise MatchFailure, "Mismatched bracket at offset %d: "\
-    "Expected '%s', but found '%s' instead." %
-    [offset, expected, actual]
-
-# Single-quoted string followed by backslash continuation
-result = 'hello '\
+# Single-quoted string concatenation with one space before backslash
+result = 'hello ' \
     'world'
 
-# Backslash after closing quote with no space (no_space style would be fine too)
-x = 'first'\
-    'second'
+# Backslash inside multiline string should not be flagged
+x = 'foo\
+bar'
+
+y = "foo\
+bar"
+
+# Backslash inside %q string should not be flagged
+z = %q{foo\
+bar}
+
+# Backslash inside regexp should not be flagged
+r = /foo\
+bar/
+
+# Backslash inside backtick string should not be flagged
+c = `echo hello\
+world`
