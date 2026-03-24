@@ -25,12 +25,12 @@ else
   a
 end
 
-# unless with condition == else_branch
+# unless with condition == body (not else)
 unless b
 ^^^^^^ Style/RedundantCondition: Use double pipes `||` instead.
-  y(x, z)
-else
   b
+else
+  c
 end
 
 # no-else pattern: if cond; cond; end → "This condition is not needed."
@@ -74,3 +74,11 @@ a = b(x) ? b(x) : c
 # ternary predicate+true with number else
 a.zero? ? true : 5
 ^^^^^^^ Style/RedundantCondition: Use double pipes `||` instead.
+
+# constant path write assignment branches (FN fix)
+if ENV['GIT_ADAPTER']
+^^ Style/RedundantCondition: Use double pipes `||` instead.
+  Gollum::GIT_ADAPTER = ENV['GIT_ADAPTER']
+else
+  Gollum::GIT_ADAPTER = 'rugged'
+end

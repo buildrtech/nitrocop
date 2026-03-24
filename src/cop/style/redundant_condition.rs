@@ -86,16 +86,19 @@ impl RedundantCondition {
     }
 
     /// Check if a node is an assignment node (lvasgn, ivasgn, cvasgn, gvasgn, casgn)
+    /// In RuboCop, casgn covers both simple constants (CONST =) and constant paths (Mod::CONST =).
+    /// In Prism, these are ConstantWriteNode and ConstantPathWriteNode respectively.
     fn is_assignment_node(node: &ruby_prism::Node<'_>) -> bool {
         node.as_local_variable_write_node().is_some()
             || node.as_instance_variable_write_node().is_some()
             || node.as_class_variable_write_node().is_some()
             || node.as_global_variable_write_node().is_some()
             || node.as_constant_write_node().is_some()
+            || node.as_constant_path_write_node().is_some()
     }
 
     /// Get the assignment target name for comparison
-    fn assignment_name(_source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<String> {
+    fn assignment_name(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<String> {
         if let Some(n) = node.as_local_variable_write_node() {
             return Some(String::from_utf8_lossy(n.name().as_slice()).to_string());
         }
@@ -110,6 +113,14 @@ impl RedundantCondition {
         }
         if let Some(n) = node.as_constant_write_node() {
             return Some(String::from_utf8_lossy(n.name().as_slice()).to_string());
+        }
+        if let Some(n) = node.as_constant_path_write_node() {
+            // Use the full constant path source (e.g., "Gollum::GIT_ADAPTER") as the name
+            let target = n.target();
+            let loc = target.location();
+            let bytes =
+                &source.as_bytes()[loc.start_offset()..loc.start_offset() + loc.as_slice().len()];
+            return Some(String::from_utf8_lossy(bytes).to_string());
         }
         None
     }
@@ -129,6 +140,9 @@ impl RedundantCondition {
             return Some(n.value());
         }
         if let Some(n) = node.as_constant_write_node() {
+            return Some(n.value());
+        }
+        if let Some(n) = node.as_constant_path_write_node() {
             return Some(n.value());
         }
         None
@@ -216,7 +230,11 @@ impl RedundantCondition {
         Self::nodes_equal(source, condition, &true_args[0])
     }
 
-    /// Handle an unless node: condition == else_branch means offense
+    /// Handle an unless node: in RuboCop, `unless` nodes have the unless-body as
+    /// `if_branch` (runs when condition is false). So `condition == if_branch` checks
+    /// if the unless body equals the condition: `unless b; b; else; c; end` is flagged
+    /// because `condition(b) == unless_body(b)`. But `unless b; y; else; b; end` is NOT
+    /// flagged because `condition(b) != unless_body(y)`.
     fn check_unless(
         &self,
         source: &SourceFile,
@@ -226,10 +244,6 @@ impl RedundantCondition {
         kw_offset: usize,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let else_stmts = match else_stmts {
-            Some(s) => s,
-            None => return,
-        };
         let unless_body = match body_stmts {
             Some(s) => s,
             None => return,
@@ -238,16 +252,38 @@ impl RedundantCondition {
         if unless_body_nodes.len() != 1 {
             return;
         }
-        let else_body: Vec<_> = else_stmts.body().into_iter().collect();
-        if else_body.len() != 1 {
-            return;
-        }
-        if Self::nodes_equal(source, condition, &else_body[0]) {
-            diagnostics.push(self.make_diagnostic_at(
-                source,
-                kw_offset,
-                "Use double pipes `||` instead.",
-            ));
+
+        // Check condition == unless_body (the body between `unless` and `else`/`end`)
+        // This matches RuboCop's `condition == if_branch` where if_branch = unless body
+        if Self::nodes_equal(source, condition, &unless_body_nodes[0]) {
+            // If there's an else branch, check else guards
+            if let Some(else_stmts_inner) = else_stmts {
+                let else_body: Vec<_> = else_stmts_inner.body().into_iter().collect();
+                if else_body.len() != 1 {
+                    return;
+                }
+                if Self::else_is_multiline(source, &else_stmts_inner) {
+                    return;
+                }
+                if Self::else_body_is_if(&else_stmts_inner) {
+                    return;
+                }
+                if Self::else_body_is_hash_key_assignment(&else_stmts_inner) {
+                    return;
+                }
+                diagnostics.push(self.make_diagnostic_at(
+                    source,
+                    kw_offset,
+                    "Use double pipes `||` instead.",
+                ));
+            } else {
+                // No else: `unless cond; cond; end` → redundant condition
+                diagnostics.push(self.make_diagnostic_at(
+                    source,
+                    kw_offset,
+                    "This condition is not needed.",
+                ));
+            }
         }
     }
 
@@ -313,10 +349,12 @@ impl RedundantCondition {
         }
 
         // Pattern 2: predicate+true — condition is predicate call, true branch is `true`
+        // In RuboCop AST, a call with a block is a `block` node, not a `send` node,
+        // so `cond.call_type?` returns false. Skip calls with blocks to match.
         if true_value.as_true_node().is_some() {
             if let Some(call) = condition.as_call_node() {
                 let method_name = call.name().as_slice();
-                if method_name.ends_with(b"?") {
+                if method_name.ends_with(b"?") && call.block().is_none() {
                     let allowed = config
                         .get_string_array("AllowedMethods")
                         .unwrap_or_default();

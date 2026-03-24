@@ -37,13 +37,11 @@ module MixedConcern
   end
 end
 
-# FN fix: include with method call argument (not const) should still need docs
 module Types
 ^^^^^^ Style/Documentation: Missing top-level documentation comment for `module`.
   include Dry::Types()
 end
 
-# FN fix: include with method chain should still need docs
 class Base
 ^^^^^ Style/Documentation: Missing top-level documentation comment for `class`.
   include ActionDispatch::Routing::RouteSet.new.url_helpers

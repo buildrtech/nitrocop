@@ -4,6 +4,24 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/Documentation cop — checks for missing top-level documentation on classes/modules.
+///
+/// ## Investigation findings (2026-03-24)
+///
+/// **FP root cause:** `is_include_statement_only` only recursed into `StatementsNode`, not into
+/// `SingletonClassNode` (`class << self`). RuboCop's `include_statement_only?` uses
+/// `body.respond_to?(:children) && body.children.all? { ... }` which recurses into ANY node
+/// with children. Classes like `class Cache; class << self; prepend Mixin; end; end` were
+/// falsely flagged because nitrocop didn't recognize the singleton class body as include-only.
+///
+/// **FN root cause:** `is_include_extend_prepend` matched ANY `include`/`extend`/`prepend` call
+/// regardless of argument type. RuboCop's pattern is `(send nil? {:include :extend :prepend} const)`
+/// — the argument must be a constant reference. Calls like `include Dry::Types()` or
+/// `include Foo.bar.baz` were incorrectly exempted, hiding modules/classes that should be flagged.
+///
+/// **Fix:** (1) Added `SingletonClassNode` recursion in `is_include_statement_only`.
+/// (2) Restricted `is_include_extend_prepend` to require a single constant argument
+/// (ConstantReadNode or ConstantPathNode), matching RuboCop's pattern.
 pub struct Documentation;
 
 /// Extract the short (unqualified) name from a constant node.
@@ -74,7 +92,7 @@ fn is_include_statement_only(node: &ruby_prism::Node<'_>) -> bool {
     // containing only include/extend/prepend is treated as include-only.
     if let Some(sclass) = node.as_singleton_class_node() {
         if let Some(ref body) = sclass.body() {
-            return is_include_statement_only(&body);
+            return is_include_statement_only(body);
         }
         return true; // empty singleton class
     }
@@ -786,7 +804,8 @@ mod tests {
     // FN fix: include with method chain argument should need docs
     #[test]
     fn include_with_method_chain_needs_docs() {
-        let source = b"class Base\n  include ActionDispatch::Routing::RouteSet.new.url_helpers\nend\n";
+        let source =
+            b"class Base\n  include ActionDispatch::Routing::RouteSet.new.url_helpers\nend\n";
         let diags = run_cop_full(&Documentation, source);
         assert_eq!(
             diags.len(),

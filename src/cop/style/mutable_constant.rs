@@ -402,6 +402,14 @@ impl Cop for MutableConstant {
         let enforced_style = config.get_str("EnforcedStyle", "literals");
         let frozen_strings = Self::has_frozen_string_literal_true(source);
 
+        eprintln!(
+            "DEBUG MutableConstant check_node called, node type matches CW={} CPW={} COW={} CPOW={}",
+            node.as_constant_write_node().is_some(),
+            node.as_constant_path_write_node().is_some(),
+            node.as_constant_or_write_node().is_some(),
+            node.as_constant_path_or_write_node().is_some(),
+        );
+
         // Check ConstantWriteNode (CONST = value)
         if let Some(cw) = node.as_constant_write_node() {
             let value = cw.value();

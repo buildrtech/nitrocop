@@ -147,3 +147,13 @@ end
 
 # ternary with different condition and branches
 a.zero? ? a : b
+
+# FP fix: predicate with block in ternary — not flagged (block changes AST type in RuboCop)
+libs.all? { |lib| load_library(lib) } ? true : nil
+
+# FP fix: unless with condition in else branch — not flagged (RuboCop only checks if_branch)
+unless layout_without_inheritance
+  parent.layout if parent?
+else
+  layout_without_inheritance
+end
