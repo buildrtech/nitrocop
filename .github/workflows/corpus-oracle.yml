@@ -279,70 +279,51 @@ jobs:
             # Resolve per-repo config (adds file exclusions for repos with known parser crashes)
             REPO_CONFIG=$(python3 bench/corpus/gen_repo_config.py "$REPO_ID" bench/corpus/baseline_rubocop.yml "$DEST")
 
-            # Both tools run from inside the repo (cd + "." target) so the
-            # `ignore` crate and RuboCop see the repo's .gitignore correctly.
-            # GIT_CEILING_DIRECTORIES prevents walking up to the parent workspace.
-            # This matches check-cop.py's per-repo invocation exactly.
+            # Both tools run from inside the repo so the `ignore` crate and
+            # RuboCop see the same .gitignore context. GIT_CEILING_DIRECTORIES
+            # prevents walking up to the parent workspace git tree.
+            # All config/output paths are absolute so they resolve from any cwd.
             WORKSPACE="$PWD"
             ABS_DEST="$(cd "$DEST" && pwd)"
-            CEILING="$(dirname "$ABS_DEST")"
 
             # nitrocop
             echo "=== nitrocop: ${REPO_ID} ==="
             rc=0
-            (
-              cd "$DEST"
-              timeout "${REPO_TIMEOUT}" \
-              env BUNDLE_GEMFILE=$WORKSPACE/bench/corpus/Gemfile \
-                  BUNDLE_PATH=$WORKSPACE/bench/corpus/vendor/bundle \
-                  GIT_CEILING_DIRECTORIES=$CEILING \
-              $WORKSPACE/bin/nitrocop \
-                --preview \
-                --format json \
-                --no-cache \
-                --config "$REPO_CONFIG" \
-                . \
-                > "$WORKSPACE/results/nitrocop/${REPO_ID}.json" 2>"$WORKSPACE/results/nitrocop/${REPO_ID}.err"
-            ) || rc=$?
+            timeout "${REPO_TIMEOUT}" \
+            env BUNDLE_GEMFILE=$WORKSPACE/bench/corpus/Gemfile \
+                BUNDLE_PATH=$WORKSPACE/bench/corpus/vendor/bundle \
+                GIT_CEILING_DIRECTORIES=$(dirname "$ABS_DEST") \
+            $WORKSPACE/bin/nitrocop \
+              --preview \
+              --format json \
+              --no-cache \
+              --config "$REPO_CONFIG" \
+              "$ABS_DEST" \
+              > "$WORKSPACE/results/nitrocop/${REPO_ID}.json" 2>"$WORKSPACE/results/nitrocop/${REPO_ID}.err" || rc=$?
 
             if [ "$rc" -eq 124 ]; then
               echo "::warning::nitrocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
-            fi
-
-            # Debug: log offense count for a known-affected repo
-            if [ "$REPO_ID" = "autolab__Autolab__674efe9" ]; then
-              NC_COUNT=$(python3 -c "import json; d=json.load(open('$WORKSPACE/results/nitrocop/${REPO_ID}.json')); print(len(d.get('offenses',[])))" 2>/dev/null || echo "?")
-              echo "::notice::DEBUG ${REPO_ID}: nitrocop=${NC_COUNT} offenses (cwd-inside-repo mode)"
             fi
 
             # rubocop — skip if we have a cached result
             if [ "$RUBOCOP_CACHED" = false ]; then
               echo "=== rubocop: ${REPO_ID} ==="
               rc=0
-              (
-                cd "$DEST"
-                timeout "${REPO_TIMEOUT}" \
-                env BUNDLE_GEMFILE=$WORKSPACE/bench/corpus/Gemfile \
-                    BUNDLE_PATH=$WORKSPACE/bench/corpus/vendor/bundle \
-                    GIT_CEILING_DIRECTORIES=$CEILING \
-                bundle exec rubocop \
-                  --require $WORKSPACE/bench/corpus/rescue_parser_crashes.rb \
-                  --config "$REPO_CONFIG" \
-                  --format json \
-                  --force-exclusion \
-                  --cache false \
-                  . \
-                  > "$WORKSPACE/results/rubocop/${REPO_ID}.json" 2>"$WORKSPACE/results/rubocop/${REPO_ID}.err"
-              ) || rc=$?
+              timeout "${REPO_TIMEOUT}" \
+              env BUNDLE_GEMFILE=$WORKSPACE/bench/corpus/Gemfile \
+                  BUNDLE_PATH=$WORKSPACE/bench/corpus/vendor/bundle \
+                  GIT_CEILING_DIRECTORIES=$(dirname "$ABS_DEST") \
+              bundle exec rubocop \
+                --require $WORKSPACE/bench/corpus/rescue_parser_crashes.rb \
+                --config "$REPO_CONFIG" \
+                --format json \
+                --force-exclusion \
+                --cache false \
+                "$ABS_DEST" \
+                > "$WORKSPACE/results/rubocop/${REPO_ID}.json" 2>"$WORKSPACE/results/rubocop/${REPO_ID}.err" || rc=$?
 
               if [ "$rc" -eq 124 ]; then
                 echo "::warning::rubocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
-              fi
-
-              # Debug: log rubocop count for the same repo
-              if [ "$REPO_ID" = "autolab__Autolab__674efe9" ]; then
-                RC_COUNT=$(python3 -c "import json; d=json.load(open('$WORKSPACE/results/rubocop/${REPO_ID}.json')); print(sum(len(f.get('offenses',[])) for f in d.get('files',[])))" 2>/dev/null || echo "?")
-                echo "::notice::DEBUG ${REPO_ID}: rubocop=${RC_COUNT} total offenses (cwd-inside-repo mode)"
               fi
             fi
 
