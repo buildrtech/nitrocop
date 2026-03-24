@@ -1989,9 +1989,20 @@ def cmd_dispatch_issues(args: argparse.Namespace) -> int:
     repo = args.repo
 
     if not args.dry_run:
-        healthy, health_reason = _main_checks_healthy(repo)
-        if not healthy:
-            print(f"ERROR: {health_reason}. Fix main before dispatching.", file=sys.stderr)
+        import time as _time
+        max_wait, interval = 600, 30
+        for elapsed in range(0, max_wait + 1, interval):
+            healthy, health_reason = _main_checks_healthy(repo)
+            if healthy:
+                break
+            if "in_progress" not in health_reason and "queued" not in health_reason:
+                # Hard failure (not just pending) — don't wait
+                print(f"ERROR: {health_reason}. Fix main before dispatching.", file=sys.stderr)
+                return 1
+            print(f"Waiting for main Checks ({health_reason})... {elapsed}s/{max_wait}s", file=sys.stderr)
+            _time.sleep(interval)
+        else:
+            print(f"ERROR: main Checks did not pass within {max_wait}s. Last: {health_reason}", file=sys.stderr)
             return 1
 
     issues = list_tracker_issues(repo)
