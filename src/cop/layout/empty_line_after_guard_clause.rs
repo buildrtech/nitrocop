@@ -348,12 +348,17 @@ impl Cop for EmptyLineAfterGuardClause {
         // or `return "\n...\n" if cond` is not a guard — the raise/fail/return call itself
         // must be single-line. Exception: heredoc arguments make the statement multi-line
         // in Prism's AST but RuboCop still treats them as valid guard clauses.
+        //
+        // For `and`/`or` operator nodes (e.g., `expr || raise(...)`), RuboCop checks
+        // `operator_keyword? ? rhs : self` — so only the `rhs` (the guard part) needs
+        // to be single-line, not the entire `or` expression.
         {
+            let check_node = guard_clause_check_node(first_stmt);
             let stmt_start_line = source
-                .offset_to_line_col(first_stmt.location().start_offset())
+                .offset_to_line_col(check_node.location().start_offset())
                 .0;
             let stmt_end_line = source
-                .offset_to_line_col(first_stmt.location().end_offset().saturating_sub(1))
+                .offset_to_line_col(check_node.location().end_offset().saturating_sub(1))
                 .0;
             if stmt_start_line != stmt_end_line {
                 // For modifier form, check if the multi-line span is due to a heredoc.
@@ -689,6 +694,19 @@ fn find_heredoc_end_line(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Op
     };
     finder.visit(node);
     finder.max_end_line
+}
+
+/// For `and`/`or` operator nodes, return the RHS (the guard part).
+/// For other nodes, return the node itself. This mirrors RuboCop's
+/// `guard_clause?` which checks `operator_keyword? ? rhs : self`.
+fn guard_clause_check_node<'a>(node: &'a ruby_prism::Node<'a>) -> ruby_prism::Node<'a> {
+    if let Some(and_node) = node.as_and_node() {
+        return guard_clause_check_node(&and_node.right());
+    }
+    if let Some(or_node) = node.as_or_node() {
+        return guard_clause_check_node(&or_node.right());
+    }
+    node.clone()
 }
 
 fn is_guard_stmt(node: &ruby_prism::Node<'_>) -> bool {
