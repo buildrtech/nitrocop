@@ -8,8 +8,9 @@ use ruby_prism::Visit;
 /// Corpus investigation (FN=2): Both FN cases were `next unless condition` inside
 /// reduce/inject blocks. Prism parses `next unless cond` as an UnlessNode containing
 /// a NextNode — the default Visit traversal correctly descends into UnlessNode and
-/// finds the bare NextNode. The cop logic was already correct; the FN was a CI baseline
-/// timing issue. Added test fixtures covering `next unless` patterns.
+/// finds the bare NextNode. The cop logic is correct and test fixtures cover both
+/// FN patterns (`next unless memo` in reduce, `next unless Integer === value` in inject).
+/// Corpus FN=2 is a stale baseline issue; a re-run should clear it.
 pub struct NextWithoutAccumulator;
 
 impl Cop for NextWithoutAccumulator {

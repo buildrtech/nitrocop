@@ -160,6 +160,12 @@ use ruby_prism::Visit;
 ///   `class << @reflex.controller.response` blocks) already worked correctly since
 ///   both push the same scope name and share the global definitions map. (FN3:
 ///   stimulus_reflex was already handled)
+///
+/// ### Current status
+/// All 4 standard FNs from Round 10 are fixed in the code and covered by tests.
+/// Corpus may still report FN=3 due to stale baseline artifacts that predate the
+/// Round 10 fixes (pry sclass-expression, stimulusreflex reopened sclass, vcr
+/// defs-method). A corpus re-run should clear these.
 pub struct DuplicateMethods;
 
 impl Cop for DuplicateMethods {
