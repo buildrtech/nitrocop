@@ -429,8 +429,7 @@ pub fn run(args: Args) -> Result<i32> {
 
     // --list-target-files (-L): print files that would be linted, then exit
     if args.list_target_files {
-        let mut cop_filters = config.build_cop_filters(&registry, &tier_map, args.preview);
-        cop_filters.set_scan_roots(args.paths.iter().filter(|p| p.is_dir()).cloned().collect());
+        let cop_filters = config.build_cop_filters(&registry, &tier_map, args.preview);
         for file in &discovered.files {
             if cop_filters.is_globally_excluded(file) {
                 let is_explicit = discovered.explicit.contains(file)

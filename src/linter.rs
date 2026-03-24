@@ -175,10 +175,7 @@ pub fn run_linter(
     crate::schema::init(config.config_dir());
 
     // Build cop filters once before the parallel loop
-    let mut cop_filters = config.build_cop_filters(registry, tier_map, args.preview);
-    // Set scan roots from discovered file paths so that AllCops.Exclude patterns
-    // can match files in directories outside the config's base_dir/config_dir.
-    cop_filters.set_scan_roots(args.paths.iter().filter(|p| p.is_dir()).cloned().collect());
+    let cop_filters = config.build_cop_filters(registry, tier_map, args.preview);
     // Pre-compute base cop configs once (avoids HashMap clone per cop per file)
     let base_configs = config.precompute_cop_configs(registry);
     let has_dir_overrides = config.has_dir_overrides();

@@ -161,13 +161,6 @@ pub struct CopFilterSet {
     /// 14-digit run that is <= this value have all offenses suppressed.
     /// Implements rubocop-rails' MigrationFileSkippable behavior.
     migrated_schema_version: Option<String>,
-    /// Root directories being scanned (from CLI arguments). Used to relativize
-    /// file paths before matching against AllCops.Exclude patterns. Without this,
-    /// running `nitrocop repos/myproject` with a config in a different directory
-    /// fails to match patterns like `vendor/**/*` because the file path
-    /// `repos/myproject/vendor/bundle/foo.rb` can't be relativized against
-    /// base_dir or config_dir.
-    scan_roots: Vec<PathBuf>,
 }
 
 impl CopFilterSet {
@@ -210,10 +203,16 @@ impl CopFilterSet {
         //   - other configs → current working directory
         // This handles absolute file paths (e.g., `/abs/path/vendor/foo.rb`
         // needs to match a pattern like `vendor/**`).
-        let mut any_ref_dir_matched = false;
+        // NOTE: Do NOT add a "scan_roots" fallback that resolves AllCops.Exclude
+        // patterns relative to CLI target directories. RuboCop resolves these
+        // patterns relative to the config file's directory (base_dir/config_dir),
+        // not the scan target. Adding scan_roots caused smoke test regressions:
+        // when `--config bench/corpus/baseline.yml /tmp/repo` was used, patterns
+        // like `vendor/**/*` incorrectly excluded `/tmp/repo/vendor/` files that
+        // RuboCop still lints (since RuboCop resolves relative to the config dir).
+        // See commit a44c8fc2 (reverted) for the failed attempt.
         for dir in [&self.base_dir, &self.config_dir].into_iter().flatten() {
             if let Ok(rel) = path.strip_prefix(dir) {
-                any_ref_dir_matched = true;
                 if self.matches_global_exclude_glob(rel) {
                     return true;
                 }
@@ -225,51 +224,7 @@ impl CopFilterSet {
                 }
             }
         }
-        // Fall back to scan roots ONLY when the file is outside all known reference
-        // directories (base_dir, config_dir). This handles the corpus oracle scenario
-        // where `nitrocop --config path/to/config.yml repos/myproject` needs exclude
-        // patterns like `vendor/**/*` to match `repos/myproject/vendor/...`.
-        //
-        // We intentionally skip scan roots when base_dir or config_dir could
-        // relativize the path, to avoid over-excluding. For example, `bin/**/*`
-        // should only match project-root `bin/`, not `nested/repo/bin/`.
-        if !any_ref_dir_matched {
-            for root in &self.scan_roots {
-                if let Ok(rel) = path.strip_prefix(root) {
-                    if self.matches_global_exclude_glob(rel) {
-                        return true;
-                    }
-                    if let Some(ref re) = self.global_exclude_re {
-                        let rel_str = rel.to_string_lossy();
-                        if re.is_match(rel_str.as_ref()) {
-                            return true;
-                        }
-                    }
-                }
-                // Also try with canonicalized paths (relative vs absolute mismatch)
-                if let (Ok(canon_path), Ok(canon_root)) = (path.canonicalize(), root.canonicalize())
-                {
-                    if let Ok(rel) = canon_path.strip_prefix(&canon_root) {
-                        if self.matches_global_exclude_glob(rel) {
-                            return true;
-                        }
-                        if let Some(ref re) = self.global_exclude_re {
-                            let rel_str = rel.to_string_lossy();
-                            if re.is_match(rel_str.as_ref()) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
         false
-    }
-
-    /// Set the scan root directories (directories passed on the command line).
-    /// Must be called after construction and before linting begins.
-    pub fn set_scan_roots(&mut self, roots: Vec<PathBuf>) {
-        self.scan_roots = roots;
     }
 
     /// Check if a file is a "migrated" migration file that should have all offenses
@@ -2808,7 +2763,6 @@ impl ResolvedConfig {
             universal_cop_indices,
             pattern_cop_indices,
             migrated_schema_version: self.migrated_schema_version.clone(),
-            scan_roots: Vec::new(),
         }
     }
 
@@ -3508,7 +3462,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         // Glob pattern should work
         assert!(
@@ -3546,7 +3499,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
 
         assert!(
@@ -4569,7 +4521,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         let path = Path::new("bench/repos/mastodon/lib/tasks/emojis.rake");
         assert!(
@@ -4593,7 +4544,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         let path = Path::new("/tmp/test/db/migrate/001_create_users.rb");
         assert!(
@@ -4618,7 +4568,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         let path = Path::new("bench/repos/discourse/spec/models/user_spec.rb");
         assert!(
@@ -4643,7 +4592,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         let path = Path::new("bench/repos/discourse/spec/requests/api/invites_spec.rb");
         assert!(
@@ -4667,7 +4615,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         assert!(filter_set.is_cop_match(0, Path::new("app/models/user.rb")));
         assert!(!filter_set.is_cop_match(0, Path::new("vendor/gems/foo.rb")));
@@ -4687,7 +4634,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         assert!(!filter_set.is_cop_match(0, Path::new("anything.rb")));
     }
@@ -4708,7 +4654,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         // File doesn't match Include, but is_cop_excluded only checks Exclude
         assert!(
@@ -4731,7 +4676,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         assert!(
             filter_set.is_cop_excluded(0, Path::new("/project/app/controllers/test.rb")),
@@ -4759,7 +4703,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         // File in sub-config dir: nearest_config_dir is the sub-dir,
         // but root-relative path should still match the Exclude pattern.
@@ -4786,7 +4729,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: Some("19700101000000".to_string()),
-            scan_roots: Vec::new(),
         };
         // SHA hash containing 14-digit run <= 19700101000000 → migrated
         assert!(filter_set.is_migrated_file(Path::new(
@@ -4814,7 +4756,6 @@ mod tests {
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
             migrated_schema_version: None,
-            scan_roots: Vec::new(),
         };
         assert!(!no_version.is_migrated_file(Path::new("19700101000000_init.rb")));
     }
