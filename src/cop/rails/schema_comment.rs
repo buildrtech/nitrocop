@@ -309,10 +309,9 @@ impl SchemaComment {
             return;
         }
 
-        // Must have a receiver (e.g., `t.string`, not just `string`)
-        if call.receiver().is_none() {
-            return;
-        }
+        // RuboCop's t_column? pattern uses `_var` which matches any receiver
+        // including nil. This allows both ActiveRecord (`t.string :name`) and
+        // Sequel (`column :name, :text`) column calls inside create_table blocks.
 
         if !has_valid_comment(&call) {
             let loc = node.location();

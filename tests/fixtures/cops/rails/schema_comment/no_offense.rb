@@ -60,3 +60,8 @@ create_table table_name, create_table_sql(table_name, engine), force: force
 create_table table_name, options, &block
 create_table(:entities, id: false, &block)
 
+# Sequel migration — bare column calls with comment (no offense)
+create_table :guestbook_messages, comment: 'Guestbook messages' do
+  column :name, :text, comment: 'Poster name'
+  column :message, :text, comment: 'Message body'
+end

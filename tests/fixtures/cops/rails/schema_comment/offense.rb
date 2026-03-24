@@ -72,3 +72,14 @@ add_column :col_name, :text, null: false
 
 add_column :created_at, :timestamp, collate: '"C"'
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/SchemaComment: New database column without `comment`.
+
+# Sequel migration — bare column calls (no receiver) inside create_table block
+# RuboCop's t_column? pattern uses `_var` which matches nil receiver
+create_table :guestbook_messages, comment: 'Messages people have left in the guestbook' do
+  column :name, :text
+  ^^^^^^^^^^^^^^^^^^^^ Rails/SchemaComment: New database column without `comment`.
+  column :message, :text
+  ^^^^^^^^^^^^^^^^^^^^^^ Rails/SchemaComment: New database column without `comment`.
+  column :ip_address, :inet
+  ^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/SchemaComment: New database column without `comment`.
+end
