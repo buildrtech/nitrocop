@@ -29,6 +29,23 @@ use ruby_prism::Visit;
 /// - Fix: treat tabs as valid whitespace in text scanner; add extra-space
 ///   detection for `=` and `=>` in text scanner; improve alignment detection
 ///   to support cross-operator alignment (operators ending at same column).
+///
+/// Investigation findings (2026-03-23):
+/// - FP=1492, FN=861, match=93.3%.
+/// - FP root cause: alignment detection was text-based and could match operators
+///   inside strings. Also, word/space boundary check was used for leading-space
+///   alignment (should only be used for trailing space). And for simple `=`
+///   assignments, the alignment search didn't match RuboCop's assignment-group
+///   logic (searching across non-assignment lines, "no subsequent → OK" rule).
+/// - FN root cause: alignment detection was too broad (matching string contents),
+///   suppressing real offenses. Also, misaligned extra-space `=` assignments were
+///   incorrectly suppressed by the word-boundary check.
+/// - Fix: (1) pass code_map to alignment functions so operators inside strings
+///   are not considered alignment candidates; (2) disable word/space boundary
+///   check for operator alignment (only relevant for trailing-space checks);
+///   (3) add assignment-group alignment search for simple `=` operators that
+///   mirrors RuboCop's `relevant_assignment_lines` — searches across non-assignment
+///   lines with blank-line breaks and "no subsequent assignment → OK" rule.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -583,6 +600,7 @@ fn is_aligned_standalone(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_alignment_standalone(
     source: &SourceFile,
     lines: &[&[u8]],
@@ -755,6 +773,7 @@ enum SubsequentStatus {
 /// Search for an assignment at the same column in one direction.
 /// Uses RuboCop-like blank-line break: stops when a blank line is encountered
 /// while we're at the relevant indentation level.
+#[allow(clippy::too_many_arguments)]
 fn search_assignment_alignment(
     source: &SourceFile,
     lines: &[&[u8]],
@@ -808,17 +827,17 @@ fn search_assignment_alignment(
         }
 
         // Check alignment at lines with the same indentation
-        if indent == my_indent {
-            if check_line_has_aligned_assignment(
+        if indent == my_indent
+            && check_line_has_aligned_assignment(
                 source,
                 lines,
                 check_idx,
                 char_col,
                 char_end_col,
                 code_map,
-            ) {
-                return true;
-            }
+            )
+        {
+            return true;
         }
 
         // Update at_relevant_indent for non-blank lines
@@ -877,21 +896,21 @@ fn search_subsequent_assignment_status(
         }
 
         // At same indentation, check if this line has any assignment operator
-        if indent == my_indent {
-            if line_has_any_assignment_operator(source, lines, check_idx, code_map) {
-                // Found an assignment — check if it's at the same column
-                if check_line_has_aligned_assignment(
-                    source,
-                    lines,
-                    check_idx,
-                    char_col,
-                    char_end_col,
-                    code_map,
-                ) {
-                    return SubsequentStatus::Aligned;
-                }
-                return SubsequentStatus::Misaligned;
+        if indent == my_indent
+            && line_has_any_assignment_operator(source, lines, check_idx, code_map)
+        {
+            // Found an assignment — check if it's at the same column
+            if check_line_has_aligned_assignment(
+                source,
+                lines,
+                check_idx,
+                char_col,
+                char_end_col,
+                code_map,
+            ) {
+                return SubsequentStatus::Aligned;
             }
+            return SubsequentStatus::Misaligned;
         }
 
         // Update at_relevant_indent for non-blank lines
@@ -928,15 +947,13 @@ fn check_line_has_aligned_assignment(
     // Check same `=` at same char column
     if let Some(byte_col) = char_col_to_bytes(line_bytes, char_col) {
         let abs_offset = source.line_start_offset(check_idx + 1) + byte_col;
-        if byte_col + 1 <= line_bytes.len()
+        if byte_col < line_bytes.len()
             && line_bytes[byte_col] == b'='
             && code_map.is_none_or(|cm| cm.is_code(abs_offset))
+            && byte_col > 0
+            && (line_bytes[byte_col - 1] == b' ' || line_bytes[byte_col - 1] == b'\t')
         {
-            if byte_col > 0
-                && (line_bytes[byte_col - 1] == b' ' || line_bytes[byte_col - 1] == b'\t')
-            {
-                return true;
-            }
+            return true;
         }
     }
     false
