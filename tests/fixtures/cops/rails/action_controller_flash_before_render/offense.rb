@@ -278,3 +278,41 @@ class Widget < ActiveRecord::Base
     ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
   end
 end
+
+# FN fix: flash inside case/when branches before render after the case
+class RegistrationsController < ApplicationController
+  def payment_completion
+    case stored_intent.wca_status
+    when "succeeded"
+      flash[:success] = "Payment successful"
+      ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+    when "pending"
+      flash[:warning] = "Payment pending"
+      ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+    when "failed"
+      flash[:error] = "Payment failed"
+      ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+    else
+      flash[:error] = "Invalid status"
+      ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+    end
+    render :payment_status
+  end
+end
+
+# FN fix: flash inside case/when with implicit render (no siblings after case)
+class SessionsController2 < ApplicationController
+  def create
+    case authenticate(session_params)
+    when :success
+      return log_user_in(user)
+    when :invalid_password
+      flash[:error] = "Invalid password"
+      ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+    when :no_user
+      flash[:error] = "Not found"
+      ^^^^^ Rails/ActionControllerFlashBeforeRender: Use `flash.now` before `render`.
+    end
+    render :new
+  end
+end

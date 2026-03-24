@@ -98,6 +98,33 @@
 /// `outer_siblings` and check for redirect_to when flash is the last statement
 /// in a when body. Additionally, the begin/rescue suppression of outer_siblings
 /// needs revisiting — `redirect_to` AFTER a begin block should still be visible.
+///
+/// ## Fix (2026-03-24): FP fix for begin/rescue + FN fix for case/when
+///
+/// **FP fix (begin body with rescue):** Root cause 16. `check_begin_node_with_outer`
+/// passed `outer_siblings` to the begin body even when a rescue clause was present.
+/// In RuboCop's Parser AST, `each_ancestor(:if, :rescue)` finds the `:rescue`
+/// ancestor first when flash is inside a begin body, and `:rescue`'s right_siblings
+/// are the ensure body (or empty) — NOT the begin's outer siblings. This caused
+/// FP=3-4 on extended corpus (flash in begin body before rescue, with respond_to
+/// containing render after the begin block). Fixed by checking `has_rescue` and
+/// passing ensure_stmts instead of outer_siblings when a rescue clause exists,
+/// mirroring `check_def_body`'s handling of def-level rescue.
+///
+/// **FN fix (case/when):** Root cause 17. CaseNode was not handled at all — the cop
+/// only recursed into if/unless/begin/block. Added `check_case_node_with_outer` that
+/// treats when/else branches like if branches: flash in when bodies checks the case
+/// node's outer siblings for render, and inner siblings for redirect_to. This avoids
+/// the previous attempt's FP=9 by reusing `check_branch_stmts_with_outer` which
+/// correctly handles redirect checking. Covers ~15 FNs on extended corpus.
+///
+/// **Remaining FN patterns not addressed:**
+/// - Lambda bodies (7 FNs from archivesspace): flash inside `lambda { }` or `-> { }`
+///   blocks. Prism represents these as `LambdaNode`, not `BlockNode`. The cop only
+///   checks `CallNode.block()`. Fixing requires adding lambda body traversal.
+/// - `query = flash[:query] = value` (1 FN from next-l): the top-level statement is
+///   a `LocalVariableWriteNode`, not a `CallNode`, so `get_flash_assignment` misses it.
+/// - Various other 1-2 FN patterns across repos.
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -272,6 +299,11 @@ impl FlashVisitor<'_> {
                 self.check_begin_node_with_outer(&begin_node, remaining);
             }
 
+            // Flash inside a case/when block: recurse into when branches
+            if let Some(case_node) = stmt.as_case_node() {
+                self.check_case_node_with_outer(&case_node, remaining);
+            }
+
             // Recurse into respond_to/format blocks (nested block bodies).
             // Pass outer siblings so implicit-render detection can see outer redirect/render.
             if let Some(call_node) = stmt.as_call_node() {
@@ -414,14 +446,64 @@ impl FlashVisitor<'_> {
         }
     }
 
+    /// Check a case/when node's branches. Flash in when/else bodies are offenses
+    /// if the outer siblings (the case node's right siblings) contain render.
+    ///
+    /// In RuboCop's Parser AST, `each_ancestor(:if, :rescue)` does NOT match
+    /// `:case`/`:when`. Instead, flash inside a when body has the when as parent,
+    /// and the when's right_siblings are the subsequent when/else nodes. RuboCop's
+    /// `traverse_node` walks up through when → case → parent scope. The effect is
+    /// that flash in a when body checks the case node's outer siblings for render
+    /// and the when's own remaining siblings for redirect_to.
+    fn check_case_node_with_outer(
+        &mut self,
+        case_node: &ruby_prism::CaseNode<'_>,
+        outer_siblings: &[ruby_prism::Node<'_>],
+    ) {
+        // Check each when clause
+        for when_clause in case_node.conditions().iter() {
+            if let Some(when_node) = when_clause.as_when_node() {
+                if let Some(stmts) = when_node.statements() {
+                    let body_nodes: Vec<_> = stmts.body().iter().collect();
+                    // When bodies are like if branches: flash checks outer siblings
+                    // for render, and inner siblings for redirect_to.
+                    self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+                }
+            }
+        }
+        // Check the else clause (consequent)
+        if let Some(else_clause) = case_node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                let body_nodes: Vec<_> = stmts.body().iter().collect();
+                self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+            }
+        }
+    }
+
     fn check_begin_node_with_outer(
         &mut self,
         begin_node: &ruby_prism::BeginNode<'_>,
         outer_siblings: &[ruby_prism::Node<'_>],
     ) {
+        let has_rescue = begin_node.rescue_clause().is_some();
+
         if let Some(stmts) = begin_node.statements() {
             let body_nodes: Vec<_> = stmts.body().iter().collect();
-            self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+            if has_rescue {
+                // When a begin has a rescue clause, RuboCop's each_ancestor(:if, :rescue)
+                // finds the :rescue ancestor first. The rescue node's right_siblings are
+                // the ensure body (if present) or empty — NOT the begin's outer siblings.
+                // This matches check_def_body's handling of def-level rescue.
+                let ensure_stmts: Vec<ruby_prism::Node<'_>> = begin_node
+                    .ensure_clause()
+                    .and_then(|ec| ec.statements())
+                    .map(|stmts| stmts.body().iter().collect())
+                    .unwrap_or_default();
+                self.check_branch_stmts_with_outer(&body_nodes, &ensure_stmts, true);
+            } else {
+                // No rescue: begin is transparent, outer siblings apply.
+                self.check_branch_stmts_with_outer(&body_nodes, outer_siblings, true);
+            }
         }
         // For rescue clauses: RuboCop's each_ancestor(:rescue) finds the rescue node,
         // and rescue.right_siblings within the begin is empty. So pass empty outer.
@@ -534,6 +616,9 @@ impl FlashVisitor<'_> {
             }
             if let Some(nested_begin) = stmt.as_begin_node() {
                 self.check_begin_node_with_outer(&nested_begin, inner_remaining);
+            }
+            if let Some(case_node) = stmt.as_case_node() {
+                self.check_case_node_with_outer(&case_node, inner_remaining);
             }
             if let Some(call_node) = stmt.as_call_node() {
                 if let Some(block) = call_node.block() {

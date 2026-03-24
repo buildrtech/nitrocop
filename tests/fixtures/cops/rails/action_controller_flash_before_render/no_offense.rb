@@ -328,3 +328,65 @@ class PaymentsController < ApplicationController
     redirect_to payments_path
   end
 end
+
+# FP fix: flash inside standalone begin body with rescue — RuboCop finds rescue
+# ancestor first, right_siblings are empty, so no offense even with respond_to after
+class ReviewMappingController < ApplicationController
+  def save_grade
+    begin
+      review_grade.save!
+      flash[:success] = "Grade saved."
+    rescue StandardError
+      flash[:error] = "Error saving"
+    end
+    respond_to do |format|
+      format.js { render action: 'save_grade.js.erb', layout: false }
+      format.html { redirect_to controller: 'reports', action: 'response_report' }
+    end
+  end
+end
+
+# FP fix: flash inside begin body with rescue, render in respond_to after begin
+class TreeDisplayController < ApplicationController
+  def children_node_ng
+    begin
+      child_nodes.each do |node|
+        process_node(node)
+      end
+      flash[:error] = "Invalid child nodes"
+    rescue StandardError
+      flash[:warn] = "Error processing"
+    end
+    respond_to do |format|
+      format.html { render json: contents }
+    end
+  end
+end
+
+# FP fix: flash inside begin/rescue before respond_to with render and json
+class UsersShowController < ApplicationController
+  def show
+    begin
+      @user.sync_all_provider_data
+      flash[:notice] = "API sources refreshed."
+    rescue ApiError
+      flash[:alert] = "API error."
+    end
+    respond_to do |format|
+      format.html
+      format.json { render json: @user }
+    end
+  end
+end
+
+# No offense: flash in case/when with redirect_to after case
+class BulkUploadsController < ApplicationController
+  def bulk
+    case action
+    when "destroy"
+      bulk_uploads.destroy_all
+      flash[:notice] = "Deleted"
+    end
+    redirect_to bulk_uploads_path
+  end
+end
