@@ -37,26 +37,18 @@ pub struct MethodParameterName;
 /// These live in `params.posts()` in Prism's AST, which was not iterated.
 /// Fix: add `params.posts()` iteration alongside `params.requireds()`.
 ///
-/// ## Corpus investigation (2026-03-24) — extended corpus
+/// ## CI check-cop regression (2026-03-24) — standard corpus, +7 FP
 ///
-/// Extended corpus reported FP=34, FN=0 across 3 repos:
-/// - pitluga/supply_drop (18 FP), cjstewart88/Tubalr (10 FP),
-///   liaoziyang/stackneveroverflow (6 FP).
-/// All three are systemic-noise repos with 2k-9k total FP+FN across hundreds
-/// of cops (file discovery, encoding, or parser differences). No cop-specific
-/// bug. These FPs are not actionable without fixing the systemic repo-level
-/// divergence.
-///
-/// ## CI check-cop false alarm (2026-03-24) — standard corpus
-///
-/// check-cop reports +7 FP (11,960 vs 11,952 expected). This is NOT a cop
-/// logic regression. Root cause: the corpus oracle lacks `nitro_total_unfiltered`
-/// for this cop, so check-cop falls back to comparing against the filtered
-/// RuboCop count. The 8 extra offenses are on files where RuboCop crashed or
-/// was excluded (parser errors) but nitrocop ran successfully. This gap is
-/// constant and pre-existing — it only surfaces when check-cop re-runs the cop
-/// (triggered by any file touch, including doc-comment-only changes).
-/// Fix: update corpus oracle to emit `nitro_total_unfiltered` for all cops.
+/// check-cop reports 11,960 vs 11,952 expected (+8 excess, gate says +7 FP
+/// after file-drop adjustment). Triggered when naming-extended branch doc
+/// comments touched this file, causing CI to re-check the cop. The naming
+/// commits were reverted pending investigation. The oracle lacks
+/// `nitro_total_unfiltered` for this cop, so check-cop compares against the
+/// filtered RuboCop count — the 8 extra offenses may be on files where
+/// RuboCop crashed but nitrocop parsed successfully. However, this was not
+/// conclusively proven. Before re-landing naming-extended changes, either:
+/// (a) update the corpus oracle to emit `nitro_total_unfiltered`, or
+/// (b) identify the exact 8 excess offenses and confirm they are benign.
 const DEFAULT_ALLOWED: &[&str] = &[
     "as", "at", "by", "cc", "db", "id", "if", "in", "io", "ip", "of", "on", "os", "pp", "to",
 ];
