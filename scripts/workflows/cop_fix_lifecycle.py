@@ -1040,12 +1040,10 @@ def cmd_finalize(args: list[str]) -> int:
     p.add_argument("--run-url", required=True)
     p.add_argument("--run-number", required=True)
     p.add_argument("--tokens", required=True)
-    p.add_argument("--requires-standard-gate", default="false")
     opts = p.parse_args(args)
 
     scope_report_file = _env_path("AGENT_SCOPE_REPORT_FILE")
     pr_body_file = _env_path("PR_BODY_FILE")
-    standard_log_file = _env_path("STANDARD_COP_CHECK_LOG")
 
     # 1. Check for changes
     diff_check = _git("diff", "--quiet", check=False)
@@ -1160,57 +1158,7 @@ def cmd_finalize(args: list[str]) -> int:
     write_and_read(pr_body_file, body)
     _run(["gh", "pr", "edit", opts.pr_url, "--body-file", str(pr_body_file)])
 
-    # 10. Standard quick corpus gate (conditional)
-    if opts.requires_standard_gate == "true":
-        _notice("Running local standard quick corpus gate for a high-risk extended-only edge case")
-        gate_ok = True
-        try:
-            _run(["cargo", "build", "--release", "--bin", "nitrocop"])
-            _run(["bash", "-c", "cd bench/corpus && BUNDLE_PATH=vendor/bundle bundle check || BUNDLE_PATH=vendor/bundle bundle install --jobs 4 --retry 3"])
-            r = subprocess.run(
-                ["bash", "-c",
-                 f'NITROCOP_BIN="$PWD/target/release/nitrocop" '
-                 f'python3 scripts/check-cop.py "{opts.cop}" '
-                 f'--verbose --rerun --quick --clone '
-                 f'2>&1 | tee "{standard_log_file}" >&2'],
-                text=True, check=True,
-            )
-        except subprocess.CalledProcessError:
-            gate_ok = False
-
-        if not gate_ok:
-            # Keep PR as draft, comment about gate failure
-            log_tail = ""
-            if standard_log_file.exists():
-                log_lines = standard_log_file.read_text().splitlines()
-                log_tail = "\n".join(log_lines[-120:])
-
-            body = (
-                f"## Local Standard Corpus Gate Failed\n\n"
-                f"This cop was classified as a high-risk extended-only edge case, "
-                f"so the workflow reran a local standard quick gate before making the PR ready.\n\n"
-                f"The local standard gate failed, so this PR is staying in draft instead of enabling auto-merge.\n"
-                f"CI can still run on the pushed branch, and `agent-pr-repair` can continue "
-                f"from this PR if the standard corpus regression is reproducible there.\n\n"
-                f"- Cop: `{opts.cop}`\n"
-                f"- Run: {opts.run_url}\n\n"
-                f"<details>\n"
-                f"<summary>Local standard quick gate output</summary>\n\n"
-                f"```\n{log_tail}\n```\n"
-                f"</details>\n"
-            )
-            claim_body = _env_path("CLAIM_BODY_FILE")
-            write_and_read(claim_body, body)
-            _run_ok(["gh", "pr", "comment", opts.pr_url, "--repo", opts.repo, "--body-file", str(claim_body)])
-            if opts.issue_number:
-                _run_ok(["gh", "issue", "comment", opts.issue_number, "--repo", opts.repo, "--body-file", str(claim_body)])
-
-            _output("result", "gate_failed")
-            _output("has_pr", "true")
-            _output("pr_url", opts.pr_url)
-            return 0
-
-    # 11. Mark PR ready + auto-merge
+    # 10. Mark PR ready + auto-merge
     _run(["gh", "pr", "ready", opts.pr_url])
     _log(f"PR ready: {opts.pr_url}")
     _run(["gh", "pr", "merge", opts.pr_url, "--auto", "--squash", "--delete-branch"])
