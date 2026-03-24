@@ -62,7 +62,6 @@ def test_recommended_action_dispatches_simple_without_pr_candidate():
 
 def test_render_report_mentions_issue_and_action():
     report = mod.render_report(
-        "standard",
         {"id": 1, "html_url": "https://example.com/1", "head_sha": "abc"},
         {"id": 2, "html_url": "https://example.com/2", "head_sha": "def"},
         [
