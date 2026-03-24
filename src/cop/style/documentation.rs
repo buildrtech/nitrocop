@@ -745,4 +745,87 @@ mod tests {
             "All documented/namespace classes should not be flagged"
         );
     }
+
+    // FP fix: class with `class << self; prepend Foo; end` should not need docs
+    // (RuboCop's include_statement_only? recurses into singleton class)
+    #[test]
+    fn singleton_class_with_prepend_no_offense() {
+        let source = b"class Cache\n  class << self\n    prepend Mixin\n  end\nend\n";
+        let diags = run_cop_full(&Documentation, source);
+        assert!(
+            diags.is_empty(),
+            "Class with only class << self { prepend } should not need docs"
+        );
+    }
+
+    // FP fix: module with `class << self; include Foo; end` should not need docs
+    #[test]
+    fn module_singleton_class_with_include_no_offense() {
+        let source =
+            b"module Marshal\n  class << self\n    include MarshalAutoloader\n  end\nend\n";
+        let diags = run_cop_full(&Documentation, source);
+        assert!(
+            diags.is_empty(),
+            "Module with only class << self { include } should not need docs"
+        );
+    }
+
+    // FN fix: include with non-const argument should NOT exempt from docs
+    // RuboCop pattern: (send nil? {:include :extend :prepend} const)
+    #[test]
+    fn include_with_method_call_arg_needs_docs() {
+        let source = b"module Types\n  include Dry::Types()\nend\n";
+        let diags = run_cop_full(&Documentation, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Module with include of method call (not const) should need docs"
+        );
+    }
+
+    // FN fix: include with method chain argument should need docs
+    #[test]
+    fn include_with_method_chain_needs_docs() {
+        let source = b"class Base\n  include ActionDispatch::Routing::RouteSet.new.url_helpers\nend\n";
+        let diags = run_cop_full(&Documentation, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Class with include of method chain should need docs"
+        );
+    }
+
+    // Include with simple constant argument should still exempt
+    #[test]
+    fn include_with_const_arg_no_offense() {
+        let source = b"module Mixin\n  include Comparable\nend\n";
+        let diags = run_cop_full(&Documentation, source);
+        assert!(
+            diags.is_empty(),
+            "Module with include of simple const should not need docs"
+        );
+    }
+
+    // Include with constant path argument should still exempt
+    #[test]
+    fn include_with_const_path_arg_no_offense() {
+        let source = b"module Mixin\n  include ActiveSupport::Concern\nend\n";
+        let diags = run_cop_full(&Documentation, source);
+        assert!(
+            diags.is_empty(),
+            "Module with include of constant path should not need docs"
+        );
+    }
+
+    // Extend with method call should need docs
+    #[test]
+    fn extend_with_method_call_needs_docs() {
+        let source = b"module Foo\n  extend Dry.Types\nend\n";
+        let diags = run_cop_full(&Documentation, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Module with extend of method call should need docs"
+        );
+    }
 }
