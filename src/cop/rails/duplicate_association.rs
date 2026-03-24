@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::cop::node_type::{CLASS_NODE, SYMBOL_NODE};
-use crate::cop::util::{class_body_calls, is_dsl_call, parent_class_name};
+use crate::cop::util::{is_dsl_call, parent_class_name};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -90,7 +90,7 @@ impl Cop for DuplicateAssociation {
             return;
         }
 
-        let calls = class_body_calls(&class);
+        let calls = collect_association_calls(&class);
 
         // --- Pass 1: Duplicate association names ---
         // Group calls by name, then flag ALL occurrences in groups with >1 member.
@@ -164,6 +164,99 @@ impl Cop for DuplicateAssociation {
                         "Association `class_name: {cn_str}` is defined multiple times. Don't repeat associations."
                     ),
                 ));
+            }
+        }
+    }
+}
+
+/// Collect all association-relevant call nodes from a class body.
+///
+/// This collects:
+/// 1. Top-level CallNode statements in the class body (same as `class_body_calls`)
+/// 2. CallNode statements inside the `if` body and `else` body of top-level IfNode/UnlessNode
+///
+/// RuboCop's `each_child_node(:send)` on an `if` node finds sends in the `if` body
+/// and `else` body, but NOT in `elsif` branches (those are nested `if` nodes in Parser AST).
+/// We replicate this by collecting from the IfNode's body StatementsNode and the ElseNode's
+/// StatementsNode, but NOT recursing into `subsequent()` (elsif chains).
+fn collect_association_calls<'a>(
+    class_node: &ruby_prism::ClassNode<'a>,
+) -> Vec<ruby_prism::CallNode<'a>> {
+    let body = match class_node.body() {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let stmts = match body.as_statements_node() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let mut calls = Vec::new();
+
+    for node in stmts.body().iter() {
+        if let Some(call) = node.as_call_node() {
+            calls.push(call);
+        } else if let Some(if_node) = node.as_if_node() {
+            collect_calls_from_if_node(&if_node, &mut calls);
+        } else if let Some(unless_node) = node.as_unless_node() {
+            // UnlessNode has body (the unless branch) and an optional else clause
+            if let Some(body) = unless_node.statements() {
+                for stmt in body.body().iter() {
+                    if let Some(call) = stmt.as_call_node() {
+                        calls.push(call);
+                    }
+                }
+            }
+            if let Some(else_clause) = unless_node.else_clause() {
+                if let Some(else_stmts) = else_clause.statements() {
+                    for stmt in else_stmts.body().iter() {
+                        if let Some(call) = stmt.as_call_node() {
+                            calls.push(call);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    calls
+}
+
+/// Collect calls from an IfNode's body and else clause.
+///
+/// IMPORTANT: Do NOT recurse into elsif (subsequent IfNode). In Parser AST,
+/// `if ... elsif ... end` has the elsif as a nested `if` node. RuboCop's
+/// `each_child_node(:send)` only finds sends that are direct children of the
+/// outer `if`, which means only the `if` body and `else` body sends, not
+/// sends inside elsif branches. We replicate this exactly.
+///
+/// Prism's `subsequent()` returns:
+/// - `Some(ElseNode)` for an `else` clause
+/// - `Some(IfNode)` for an `elsif` clause
+/// - `None` if there is no else/elsif
+fn collect_calls_from_if_node<'a>(
+    if_node: &ruby_prism::IfNode<'a>,
+    calls: &mut Vec<ruby_prism::CallNode<'a>>,
+) {
+    // Collect from the if body (StatementsNode)
+    if let Some(body) = if_node.statements() {
+        for stmt in body.body().iter() {
+            if let Some(call) = stmt.as_call_node() {
+                calls.push(call);
+            }
+        }
+    }
+
+    // Collect from the else clause only (ElseNode -> StatementsNode).
+    // If subsequent() is an IfNode, that's an elsif — do NOT collect from it.
+    if let Some(subsequent) = if_node.subsequent() {
+        if let Some(else_node) = subsequent.as_else_node() {
+            if let Some(else_stmts) = else_node.statements() {
+                for stmt in else_stmts.body().iter() {
+                    if let Some(call) = stmt.as_call_node() {
+                        calls.push(call);
+                    }
+                }
             }
         }
     }
