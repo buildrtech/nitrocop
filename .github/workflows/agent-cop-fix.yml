@@ -349,6 +349,7 @@ jobs:
           prompt: ${{ steps.prepare.outputs.prompt_content }}
           claude_args: "--dangerously-skip-permissions --model claude-opus-4-6 --effort ${{ steps.backend.outputs.reasoning_effort }}"
           github_token: ${{ steps.actions-read-token.outputs.token }}
+          allowed_bots: "github-actions[bot]"
         env:
           ANTHROPIC_MODEL: ${{ steps.backend.outputs.env_ANTHROPIC_MODEL }}
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
