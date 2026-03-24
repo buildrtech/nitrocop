@@ -67,17 +67,10 @@ x = a * b ** 2
 x.y =2
     ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `=`.
 
+# Extra spaces around = (not aligned)
+x  = 1
+   ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+
 # Extra spaces around => (not aligned)
 {'key'  => 'val'}
         ^^ Layout/SpaceAroundOperators: Operator `=>` should be surrounded by a single space.
-
-# Extra space around compound operator preceded by aligned << inside a string
-x   += foo
-    ^^ Layout/SpaceAroundOperators: Operator `+=` should be surrounded by a single space.
-'yz << bar'
-
-# Multiple assignments with inconsistent extra spacing (not aligned with each other)
-x   = 0
-    ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
-y +=   0
-  ^^ Layout/SpaceAroundOperators: Operator `+=` should be surrounded by a single space.

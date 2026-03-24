@@ -43,13 +43,8 @@ x = a * b**2
 # Setter call without spaces
 x.y = 2
 
+# Extra spaces around = (not aligned)
+x = 1
+
 # Extra spaces around => (not aligned)
 {'key' => 'val'}
-
-# Extra space around compound operator preceded by aligned << inside a string
-x += foo
-'yz << bar'
-
-# Multiple assignments with inconsistent extra spacing (not aligned with each other)
-x = 0
-y += 0

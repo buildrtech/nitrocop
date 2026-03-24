@@ -30,22 +30,21 @@ use ruby_prism::Visit;
 ///   detection for `=` and `=>` in text scanner; improve alignment detection
 ///   to support cross-operator alignment (operators ending at same column).
 ///
-/// Investigation findings (2026-03-23):
-/// - FP=1492, FN=861, match=93.3%.
-/// - FP root cause: alignment detection was text-based and could match operators
-///   inside strings. Also, word/space boundary check was used for leading-space
-///   alignment (should only be used for trailing space). And for simple `=`
-///   assignments, the alignment search didn't match RuboCop's assignment-group
-///   logic (searching across non-assignment lines, "no subsequent → OK" rule).
-/// - FN root cause: alignment detection was too broad (matching string contents),
-///   suppressing real offenses. Also, misaligned extra-space `=` assignments were
-///   incorrectly suppressed by the word-boundary check.
-/// - Fix: (1) pass code_map to alignment functions so operators inside strings
-///   are not considered alignment candidates; (2) disable word/space boundary
-///   check for operator alignment (only relevant for trailing-space checks);
-///   (3) add assignment-group alignment search for simple `=` operators that
-///   mirrors RuboCop's `relevant_assignment_lines` — searches across non-assignment
-///   lines with blank-line breaks and "no subsequent assignment → OK" rule.
+/// ## Corpus investigation (2026-03-24)
+///
+/// Corpus oracle reported FP=1,492, FN=861.
+///
+/// An attempt was made to fix alignment detection with: (1) code-map awareness
+/// for alignment checks, (2) word-boundary restriction, (3) assignment-group
+/// alignment for `=`. The approach (commit 884f8c2, reverted) fixed FPs but
+/// massively increased FNs from 861 to 12,736 — the assignment-group alignment
+/// logic was too aggressively suppressing offenses. The code-map and word-boundary
+/// changes also suppressed too many legitimate detections.
+///
+/// A correct fix needs to: implement assignment-group alignment narrowly (only
+/// for consecutive simple `=` assignments at the same indentation level, not
+/// for `==`, `!=`, `=>`, etc.), and ensure code-map checks don't suppress
+/// operators that happen to be adjacent to string literals.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -137,7 +136,6 @@ impl Cop for SpaceAroundOperators {
         let mut op_checker = OperatorChecker {
             cop: self,
             source,
-            code_map,
             diagnostics: Vec::new(),
             corrections: Vec::new(),
             has_corrections: corrections.is_some(),
@@ -246,7 +244,6 @@ impl Cop for SpaceAroundOperators {
                             check_text_scanner_extra_space(
                                 self,
                                 source,
-                                code_map,
                                 i,
                                 i + 2,
                                 op_str,
@@ -356,7 +353,6 @@ impl Cop for SpaceAroundOperators {
                         check_text_scanner_extra_space(
                             self,
                             source,
-                            code_map,
                             i,
                             i + 1,
                             "=",
@@ -382,7 +378,6 @@ impl Cop for SpaceAroundOperators {
 fn check_text_scanner_extra_space(
     cop: &SpaceAroundOperators,
     source: &SourceFile,
-    code_map: &CodeMap,
     op_start: usize,
     op_end: usize,
     op_str: &str,
@@ -404,7 +399,7 @@ fn check_text_scanner_extra_space(
         }
     }
     // AllowForAlignment: skip if aligned with operator on adjacent line
-    if is_aligned_standalone(source, op_start, op_bytes, Some(code_map), false) {
+    if is_aligned_standalone(source, op_start, op_bytes) {
         return;
     }
     // Skip if trailing space extends to a comment on the same line
@@ -521,21 +516,7 @@ fn char_col_to_bytes(line: &[u8], char_col: usize) -> Option<usize> {
 /// 1. Same operator at same char column
 /// 2. Word/space boundary at same column (aligned_words in RuboCop)
 /// 3. Cross-operator alignment (operators ending at same column)
-///
-/// When `code_map` is provided, alignment candidates on adjacent lines are
-/// verified to be actual code (not inside strings or comments).
-/// Check alignment of operator for extra-space detection.
-///
-/// `check_word_boundary`: when true, enables the word/space boundary check
-/// (RuboCop's `aligned_words`). This should be true only for trailing space
-/// checks, not leading space checks, to avoid false alignment.
-fn is_aligned_standalone(
-    source: &SourceFile,
-    start: usize,
-    op_bytes: &[u8],
-    code_map: Option<&CodeMap>,
-    check_word_boundary: bool,
-) -> bool {
+fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> bool {
     let bytes = source.as_bytes();
     let mut ls = start;
     while ls > 0 && bytes[ls - 1] != b'\n' {
@@ -551,17 +532,7 @@ fn is_aligned_standalone(
     // All alignment operators are ASCII, so char length == byte length.
     let char_end_col = char_col + op_bytes.len();
     // Pass 1: closest non-blank, non-comment line (no indentation filter)
-    if check_alignment_standalone(
-        source,
-        &lines,
-        line_idx,
-        char_col,
-        char_end_col,
-        op_bytes,
-        None,
-        code_map,
-        check_word_boundary,
-    ) {
+    if check_alignment_standalone(&lines, line_idx, char_col, char_end_col, op_bytes, None) {
         return true;
     }
     // Pass 2: search for same-indentation lines further out
@@ -569,48 +540,23 @@ fn is_aligned_standalone(
         .iter()
         .position(|&b| b != b' ' && b != b'\t')
         .unwrap_or(0);
-    if check_alignment_standalone(
-        source,
+    check_alignment_standalone(
         &lines,
         line_idx,
         char_col,
         char_end_col,
         op_bytes,
         Some(my_indent),
-        code_map,
-        check_word_boundary,
-    ) {
-        return true;
-    }
-    // Pass 3: for simple `=` assignment operators only, search through
-    // assignment groups at the same indentation, skipping non-assignment lines.
-    // This mirrors RuboCop's `excess_leading_space?` which uses a more permissive
-    // `aligned_with_equals_sign` for `type == :assignment` only (not compound +=, etc.).
-    if op_bytes == b"=" {
-        return check_assignment_group_alignment(
-            source,
-            &lines,
-            line_idx,
-            char_col,
-            char_end_col,
-            my_indent,
-            code_map,
-        );
-    }
-    false
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_alignment_standalone(
-    source: &SourceFile,
     lines: &[&[u8]],
     line_idx: usize,
     char_col: usize,
     char_end_col: usize,
     op_bytes: &[u8],
     indent_filter: Option<usize>,
-    code_map: Option<&CodeMap>,
-    check_word_boundary: bool,
 ) -> bool {
     for up in [true, false] {
         let mut check_idx = if up {
@@ -648,48 +594,25 @@ fn check_alignment_standalone(
                     // This handles lines where multi-byte chars (e.g. curly-quote string
                     // keys) appear before the operator, shifting the byte offset.
                     if let Some(byte_col) = char_col_to_bytes(line_bytes, char_col) {
-                        // Compute absolute byte offset for code_map checks.
-                        // check_idx is 0-based, line_start_offset takes 1-based line number.
-                        let abs_offset = source.line_start_offset(check_idx + 1) + byte_col;
-
                         // Check 1: same operator at same char column
                         if byte_col + op_bytes.len() <= line_bytes.len()
                             && &line_bytes[byte_col..byte_col + op_bytes.len()] == op_bytes
                         {
-                            // Verify the matched operator is actually code, not inside a string
-                            if code_map.is_none_or(|cm| cm.is_code(abs_offset)) {
-                                return true;
-                            }
+                            return true;
                         }
                         // Check 2: word/space boundary at same column (aligned_words)
-                        // Only used for trailing space alignment (RuboCop's aligned_with_something?)
-                        if check_word_boundary
-                            && byte_col > 0
+                        if byte_col > 0
                             && byte_col < line_bytes.len()
                             && (line_bytes[byte_col - 1] == b' '
                                 || line_bytes[byte_col - 1] == b'\t')
                             && line_bytes[byte_col] != b' '
                             && line_bytes[byte_col] != b'\t'
                         {
-                            // Verify the word boundary is in code
-                            if code_map.is_none_or(|cm| cm.is_code(abs_offset)) {
-                                return true;
-                            }
+                            return true;
                         }
                     }
                     // Check 3: cross-operator alignment (operators ending at same char column)
-                    if let Some(byte_end_col) = char_col_to_bytes(line_bytes, char_end_col) {
-                        let abs_end_offset = source.line_start_offset(check_idx + 1) + byte_end_col;
-                        // Only check cross-operator alignment if the end position is in code
-                        if code_map.is_none_or(|cm| {
-                            byte_end_col > 0 && cm.is_code(abs_end_offset.saturating_sub(1))
-                        }) && line_has_operator_ending_at_col(line_bytes, byte_end_col)
-                        {
-                            return true;
-                        }
-                    } else if code_map.is_none()
-                        && line_has_operator_ending_at_char_col(line_bytes, char_end_col)
-                    {
+                    if line_has_operator_ending_at_char_col(line_bytes, char_end_col) {
                         return true;
                     }
                     break;
@@ -703,289 +626,6 @@ fn check_alignment_standalone(
             } else {
                 check_idx += 1;
             }
-        }
-    }
-    false
-}
-
-/// Search for assignment-group alignment: looks through lines at the same
-/// indentation level, skipping non-assignment lines and blank lines, to find
-/// an assignment operator ending at the same column. Also implements the
-/// "no subsequent assignment → not an offense" rule from RuboCop.
-///
-/// This mirrors RuboCop's `excess_leading_space?` for assignments, which checks
-/// both preceding and subsequent assignment lines and allows extra space if:
-/// - There IS a preceding assignment at the same column, OR
-/// - There is NO subsequent assignment at the same indent (isolated), OR
-/// - There IS a subsequent assignment at the same column.
-///
-/// Example that should be considered aligned:
-/// ```ruby
-/// a  = 1
-/// foo(bar)     # non-assignment line at same indent — skipped
-/// b  = 2
-/// ```
-fn check_assignment_group_alignment(
-    source: &SourceFile,
-    lines: &[&[u8]],
-    line_idx: usize,
-    char_col: usize,
-    char_end_col: usize,
-    my_indent: usize,
-    code_map: Option<&CodeMap>,
-) -> bool {
-    // Check preceding: is there any assignment at the same column above?
-    if search_assignment_alignment(
-        source,
-        lines,
-        line_idx,
-        char_col,
-        char_end_col,
-        my_indent,
-        code_map,
-        true,
-    ) {
-        return true;
-    }
-    // Check subsequent: search for any assignment at the same indent below.
-    let subsequent_status = search_subsequent_assignment_status(
-        source,
-        lines,
-        line_idx,
-        char_col,
-        char_end_col,
-        my_indent,
-        code_map,
-    );
-    match subsequent_status {
-        SubsequentStatus::None => true, // No subsequent assignment → not an offense
-        SubsequentStatus::Aligned => true, // Subsequent assignment at same column → aligned
-        SubsequentStatus::Misaligned => false, // Subsequent at different column → offense
-    }
-}
-
-enum SubsequentStatus {
-    None,       // No subsequent assignment found at same indent
-    Aligned,    // Found subsequent assignment at same column
-    Misaligned, // Found subsequent assignment at different column
-}
-
-/// Search for an assignment at the same column in one direction.
-/// Uses RuboCop-like blank-line break: stops when a blank line is encountered
-/// while we're at the relevant indentation level.
-#[allow(clippy::too_many_arguments)]
-fn search_assignment_alignment(
-    source: &SourceFile,
-    lines: &[&[u8]],
-    line_idx: usize,
-    char_col: usize,
-    char_end_col: usize,
-    my_indent: usize,
-    code_map: Option<&CodeMap>,
-    up: bool,
-) -> bool {
-    let mut check_idx = if up {
-        if line_idx == 0 {
-            return false;
-        }
-        line_idx - 1
-    } else {
-        line_idx + 1
-    };
-    let mut at_relevant_indent = true;
-    loop {
-        if check_idx >= lines.len() {
-            break;
-        }
-        let line_bytes = lines[check_idx];
-        let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
-        let is_blank = first_non_ws.is_none();
-        let is_comment = first_non_ws.is_some_and(|fs| line_bytes[fs] == b'#');
-        let indent = first_non_ws.unwrap_or(0);
-
-        // Break on non-blank line with less indentation
-        if !is_blank && !is_comment && indent < my_indent {
-            break;
-        }
-        // Break on blank line while at relevant indentation level
-        // (mirrors RuboCop's relevant_assignment_lines)
-        if at_relevant_indent && is_blank {
-            break;
-        }
-
-        // Skip blank and comment lines
-        if is_blank || is_comment {
-            if up {
-                if check_idx == 0 {
-                    break;
-                }
-                check_idx -= 1;
-            } else {
-                check_idx += 1;
-            }
-            continue;
-        }
-
-        // Check alignment at lines with the same indentation
-        if indent == my_indent
-            && check_line_has_aligned_assignment(
-                source,
-                lines,
-                check_idx,
-                char_col,
-                char_end_col,
-                code_map,
-            )
-        {
-            return true;
-        }
-
-        // Update at_relevant_indent for non-blank lines
-        if !is_blank {
-            at_relevant_indent = indent == my_indent;
-        }
-
-        if up {
-            if check_idx == 0 {
-                break;
-            }
-            check_idx -= 1;
-        } else {
-            check_idx += 1;
-        }
-    }
-    false
-}
-
-/// Search for any subsequent assignment at the same indent level and determine
-/// whether it's aligned, misaligned, or absent. Uses RuboCop-like blank-line break.
-fn search_subsequent_assignment_status(
-    source: &SourceFile,
-    lines: &[&[u8]],
-    line_idx: usize,
-    char_col: usize,
-    char_end_col: usize,
-    my_indent: usize,
-    code_map: Option<&CodeMap>,
-) -> SubsequentStatus {
-    let mut check_idx = line_idx + 1;
-    let mut at_relevant_indent = true;
-    loop {
-        if check_idx >= lines.len() {
-            break;
-        }
-        let line_bytes = lines[check_idx];
-        let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
-        let is_blank = first_non_ws.is_none();
-        let is_comment = first_non_ws.is_some_and(|fs| line_bytes[fs] == b'#');
-        let indent = first_non_ws.unwrap_or(0);
-
-        // Break on non-blank line with less indentation
-        if !is_blank && !is_comment && indent < my_indent {
-            break;
-        }
-        // Break on blank line while at relevant indentation level
-        if at_relevant_indent && is_blank {
-            break;
-        }
-
-        // Skip blank and comment lines
-        if is_blank || is_comment {
-            check_idx += 1;
-            continue;
-        }
-
-        // At same indentation, check if this line has any assignment operator
-        if indent == my_indent
-            && line_has_any_assignment_operator(source, lines, check_idx, code_map)
-        {
-            // Found an assignment — check if it's at the same column
-            if check_line_has_aligned_assignment(
-                source,
-                lines,
-                check_idx,
-                char_col,
-                char_end_col,
-                code_map,
-            ) {
-                return SubsequentStatus::Aligned;
-            }
-            return SubsequentStatus::Misaligned;
-        }
-
-        // Update at_relevant_indent for non-blank lines
-        if !is_blank {
-            at_relevant_indent = indent == my_indent;
-        }
-
-        check_idx += 1;
-    }
-    SubsequentStatus::None
-}
-
-/// Check if a line has an assignment/comparison operator at the given column.
-fn check_line_has_aligned_assignment(
-    source: &SourceFile,
-    lines: &[&[u8]],
-    check_idx: usize,
-    char_col: usize,
-    char_end_col: usize,
-    code_map: Option<&CodeMap>,
-) -> bool {
-    let line_bytes = lines[check_idx];
-
-    // Check cross-operator alignment (operators ending at same column)
-    if let Some(byte_end_col) = char_col_to_bytes(line_bytes, char_end_col) {
-        let abs_end_offset = source.line_start_offset(check_idx + 1) + byte_end_col;
-        if code_map
-            .is_none_or(|cm| byte_end_col > 0 && cm.is_code(abs_end_offset.saturating_sub(1)))
-            && line_has_operator_ending_at_col(line_bytes, byte_end_col)
-        {
-            return true;
-        }
-    }
-    // Check same `=` at same char column
-    if let Some(byte_col) = char_col_to_bytes(line_bytes, char_col) {
-        let abs_offset = source.line_start_offset(check_idx + 1) + byte_col;
-        if byte_col < line_bytes.len()
-            && line_bytes[byte_col] == b'='
-            && code_map.is_none_or(|cm| cm.is_code(abs_offset))
-            && byte_col > 0
-            && (line_bytes[byte_col - 1] == b' ' || line_bytes[byte_col - 1] == b'\t')
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if a line has any assignment-like operator (=, ==, !=, <=, >=, +=, etc.) in code.
-fn line_has_any_assignment_operator(
-    source: &SourceFile,
-    lines: &[&[u8]],
-    check_idx: usize,
-    code_map: Option<&CodeMap>,
-) -> bool {
-    let line_bytes = lines[check_idx];
-    let line_start = source.line_start_offset(check_idx + 1);
-    for (i, &b) in line_bytes.iter().enumerate() {
-        if b == b'=' {
-            // Skip if preceded by !, <, >, =, +, -, *, /, %, &, |, ^, ~ (compound operators)
-            // We just need to know if there's ANY `=` on this line that is in code
-            if let Some(cm) = code_map {
-                if !cm.is_code(line_start + i) {
-                    continue;
-                }
-            }
-            // Skip `=>` (hash rocket)
-            if i + 1 < line_bytes.len() && line_bytes[i + 1] == b'>' {
-                continue;
-            }
-            // Skip `=~`
-            if i + 1 < line_bytes.len() && line_bytes[i + 1] == b'~' {
-                continue;
-            }
-            return true;
         }
     }
     false
@@ -1060,7 +700,6 @@ const MATCH_OPERATORS: &[&[u8]] = &[b"=~", b"!~", b"==="];
 struct OperatorChecker<'a> {
     cop: &'a SpaceAroundOperators,
     source: &'a SourceFile,
-    code_map: &'a CodeMap,
     diagnostics: Vec<Diagnostic>,
     corrections: Vec<crate::correction::Correction>,
     has_corrections: bool,
@@ -1076,7 +715,7 @@ impl OperatorChecker<'_> {
     /// Delegates to the standalone alignment checker which supports
     /// cross-operator alignment (e.g., `||=` aligned with `=`).
     fn is_aligned_with_adjacent(&self, start: usize, op_bytes: &[u8]) -> bool {
-        is_aligned_standalone(self.source, start, op_bytes, Some(self.code_map), false)
+        is_aligned_standalone(self.source, start, op_bytes)
     }
 
     /// Check operator spacing for a "should have space" operator.
