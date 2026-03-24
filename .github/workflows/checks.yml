@@ -32,11 +32,7 @@ jobs:
 
   build-and-test:
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -50,70 +46,61 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
-        if: matrix.os == 'ubuntu-24.04'
         run: cargo fmt --check
 
       - name: Validate corpus manifest
-        if: matrix.os == 'ubuntu-24.04'
         run: python3 bench/corpus/validate_manifest.py
 
       - name: No vendor include macros
-        if: matrix.os == 'ubuntu-24.04'
         run: bash scripts/workflows/check_no_vendor_include_macros.sh
 
-      - name: Set up uv
-        if: matrix.os == 'ubuntu-24.04'
-        uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6
 
       - name: Python lint
-        if: matrix.os == 'ubuntu-24.04'
         run: uv run ruff check scripts tests/python bench/corpus
 
       - name: Gem builder tests
-        if: matrix.os == 'ubuntu-24.04'
         run: ruby gem/test/gem_builder_test.rb
 
       - name: Python script tests
-        if: matrix.os == 'ubuntu-24.04'
         run: uv run pytest tests/python/ -v
 
       - name: Clippy
-        if: matrix.os == 'ubuntu-24.04'
         run: cargo clippy --profile ci -- -D warnings
 
-      # On ubuntu, clippy verifies compilation and corpus-smoke-test builds --release
-      # (same settings as --profile ci), so an explicit build step here is redundant.
-      # On macos, we still build --profile ci to catch cross-platform linking issues.
-      - name: Build
-        if: matrix.os == 'macos-latest'
-        run: cargo build --profile ci
-
-      # Compile test binaries in debug mode (dev profile, opt-level=1) rather than
-      # --profile ci (release + thin LTO). Test compilation with LTO was the main
-      # bottleneck: ~4m on ubuntu vs ~1.5m in debug. Test runtime stays under 30s.
-      # --no-run compiles all test binaries once up front so the per-filter steps
-      # below are instant and their step names show up clearly in the CI UI.
       - name: Compile tests
-        if: matrix.os == 'ubuntu-24.04'
         run: cargo test --no-run
 
       - name: NodePattern verifier
-        if: matrix.os == 'ubuntu-24.04'
         run: cargo test verifier -- --nocapture
 
       - name: Config audit
-        if: matrix.os == 'ubuntu-24.04'
         run: cargo test config_audit -- --nocapture
 
       - name: Prism pitfalls
-        if: matrix.os == 'ubuntu-24.04'
         run: cargo test prism_pitfalls -- --nocapture
 
       - name: File discovery sync
-        if: matrix.os == 'ubuntu-24.04'
         run: cargo test file_discovery_sync -- --nocapture
 
       - name: Test
+        run: cargo test
+
+  # macOS: build-only on PRs, build + test on main
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          ref: ${{ inputs.ref || '' }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --profile ci
+      - name: Test
+        if: github.ref == 'refs/heads/main'
         run: cargo test
 
   # Corpus cop check: for any changed cops, re-run nitrocop on corpus repos
