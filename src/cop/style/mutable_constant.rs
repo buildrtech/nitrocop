@@ -435,4 +435,17 @@ impl Cop for MutableConstant {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MutableConstant, "cops/style/mutable_constant");
+
+    #[test]
+    fn test_array_constant_fires() {
+        let cop = MutableConstant;
+        let source_bytes = b"CONST = []\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &cop,
+            source_bytes,
+            CopConfig::default(),
+            "test.rb",
+        );
+        assert_eq!(diags.len(), 1, "Expected 1 offense for CONST = [], got {:?}", diags);
+    }
 }
