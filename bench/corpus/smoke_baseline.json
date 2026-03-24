@@ -53,15 +53,15 @@
     "rc_files": 288
   },
   "ruby-formatter__rufo__a90e654": {
-    "fn": 551,
-    "fp": 18,
-    "matches": 10352,
+    "fn": 556,
+    "fp": 17,
+    "matches": 10347,
     "nc_files": 157,
     "overlay_divergence": {
       "fn": 6420,
       "fp": 10,
-      "fp_delta": -8,
-      "match_delta": 5869,
+      "fp_delta": -7,
+      "match_delta": 5864,
       "matches": 4483
     },
     "rate": 94.8,
@@ -69,10 +69,10 @@
   },
   "standardrb__standard__c886a57": {
     "fn": 32,
-    "fp": 6,
+    "fp": 3,
     "matches": 3148,
     "nc_files": 107,
-    "rate": 98.8,
+    "rate": 98.9,
     "rc_files": 107
   }
 }
