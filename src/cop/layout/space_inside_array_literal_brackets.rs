@@ -1,4 +1,18 @@
-use crate::cop::node_type::ARRAY_NODE;
+/// Layout/SpaceInsideArrayLiteralBrackets
+///
+/// Investigation notes (2026-03-24, FP=0 FN=58):
+/// - The 58 FNs were caused by two issues:
+///   1. Empty bracket detection only handled exactly 0 or 1 space between brackets.
+///      RuboCop treats any bracket pair with only whitespace/newlines between them
+///      as "empty", including `[   ]` and `[\n]`. Fixed by scanning for non-whitespace
+///      between brackets.
+///   2. Autocorrect for `no_space` style only removed a single space character.
+///      When multiple spaces exist (e.g., `[  1, 2, 3   ]`), all contiguous spaces
+///      adjacent to the bracket must be removed. Fixed by scanning for the full
+///      whitespace run.
+///   3. `ARRAY_PATTERN_NODE` (pattern matching `in [a, b]`) was not handled.
+///      RuboCop aliases `on_array_pattern` to `on_array`. Added support.
+use crate::cop::node_type::{ARRAY_NODE, ARRAY_PATTERN_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -11,7 +25,7 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[ARRAY_NODE]
+        &[ARRAY_NODE, ARRAY_PATTERN_NODE]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -25,37 +39,54 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let array = match node.as_array_node() {
-            Some(a) => a,
-            None => return,
+        let (opening, closing) = if let Some(array) = node.as_array_node() {
+            match (array.opening_loc(), array.closing_loc()) {
+                (Some(o), Some(c)) => (o, c),
+                _ => return, // Implicit array (no brackets)
+            }
+        } else if let Some(pattern) = node.as_array_pattern_node() {
+            match (pattern.opening_loc(), pattern.closing_loc()) {
+                (Some(o), Some(c)) => (o, c),
+                _ => return,
+            }
+        } else {
+            return;
         };
 
-        let opening = match array.opening_loc() {
-            Some(loc) => loc,
-            None => return, // Implicit array (no brackets)
-        };
-        let closing = match array.closing_loc() {
-            Some(loc) => loc,
-            None => return,
-        };
-
-        // Only check [ ] arrays
+        // Only check [ ] arrays, not %w() etc.
         if opening.as_slice() != b"[" || closing.as_slice() != b"]" {
             return;
         }
 
+        self.check_brackets(source, &opening, &closing, config, diagnostics, corrections);
+    }
+}
+
+impl SpaceInsideArrayLiteralBrackets {
+    fn check_brackets(
+        &self,
+        source: &SourceFile,
+        opening: &ruby_prism::Location<'_>,
+        closing: &ruby_prism::Location<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
         let bytes = source.as_bytes();
         let open_end = opening.end_offset();
         let close_start = closing.start_offset();
 
         let empty_style = config.get_str("EnforcedStyleForEmptyBrackets", "no_space");
 
-        // Handle empty arrays []
-        if close_start == open_end {
-            match empty_style {
-                "space" => {
+        // Check if the array is empty: only whitespace/newlines between brackets
+        let is_empty = is_only_whitespace(bytes, open_end, close_start);
+
+        if is_empty {
+            if close_start == open_end {
+                // Truly empty: []
+                if empty_style == "space" {
                     let (line, column) = source.offset_to_line_col(opening.start_offset());
                     let mut diag = self.diagnostic(
                         source,
@@ -75,43 +106,61 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
                     }
                     diagnostics.push(diag);
                 }
-                _ => return,
-            }
-        }
-        // Check for [ ] (empty with space)
-        if close_start == open_end + 1 && bytes.get(open_end) == Some(&b' ') {
-            match empty_style {
-                "no_space" => {
-                    let (line, column) = source.offset_to_line_col(open_end);
-                    let mut diag = self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Space inside empty array literal brackets detected.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        corr.push(crate::correction::Correction {
-                            start: open_end,
-                            end: open_end + 1,
-                            replacement: String::new(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diag.corrected = true;
+            } else {
+                // Has whitespace between brackets: [ ], [   ], [\n]
+                let is_single_space =
+                    close_start == open_end + 1 && bytes.get(open_end) == Some(&b' ');
+                match empty_style {
+                    "no_space" => {
+                        let (line, column) = source.offset_to_line_col(opening.start_offset());
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Space inside empty array literal brackets detected.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: open_end,
+                                end: close_start,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
                     }
-                    diagnostics.push(diag);
+                    "space" if !is_single_space => {
+                        // Multiple spaces or newline: correct to single space
+                        let (line, column) = source.offset_to_line_col(opening.start_offset());
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Space inside empty array literal brackets missing.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: open_end,
+                                end: close_start,
+                                replacement: " ".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
+                    }
+                    _ => {}
                 }
-                _ => return,
             }
+            return;
         }
 
         let enforced = config.get_str("EnforcedStyle", "no_space");
 
         // For multiline arrays, determine which bracket sides to skip.
-        // RuboCop uses start_ok/end_ok:
-        // - For no_space: start_ok if next token after [ is a comment
-        // - For space: start_ok if next non-whitespace after [ is on a different line
-        // - end_ok: if ] begins its own line (only whitespace before it)
         let (open_line, _) = source.offset_to_line_col(opening.start_offset());
         let (close_line, _) = source.offset_to_line_col(closing.start_offset());
         let is_multiline = open_line != close_line;
@@ -126,18 +175,19 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
         };
 
         let end_ok = if is_multiline {
-            // ] begins its line: only whitespace before it on the same line
             begins_its_line_raw(bytes, close_start)
         } else {
             false
         };
 
-        let space_after_open = bytes.get(open_end) == Some(&b' ');
-        let space_before_close = close_start > 0 && bytes.get(close_start - 1) == Some(&b' ');
+        let space_after_open = matches!(bytes.get(open_end), Some(b' ' | b'\t'));
+        let space_before_close =
+            close_start > 0 && matches!(bytes.get(close_start - 1), Some(b' ' | b'\t'));
 
         match enforced {
             "no_space" => {
                 if !start_ok && space_after_open {
+                    let space_end = scan_space_forward(bytes, open_end);
                     let (line, column) = source.offset_to_line_col(opening.start_offset());
                     let mut diag = self.diagnostic(
                         source,
@@ -148,7 +198,7 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
                             start: open_end,
-                            end: open_end + 1,
+                            end: space_end,
                             replacement: String::new(),
                             cop_name: self.name(),
                             cop_index: 0,
@@ -158,6 +208,7 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
                     diagnostics.push(diag);
                 }
                 if !end_ok && space_before_close {
+                    let space_start = scan_space_backward(bytes, close_start);
                     let (line, column) = source.offset_to_line_col(closing.start_offset());
                     let mut diag = self.diagnostic(
                         source,
@@ -167,7 +218,7 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
                     );
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
-                            start: close_start - 1,
+                            start: space_start,
                             end: close_start,
                             replacement: String::new(),
                             cop_name: self.name(),
@@ -225,9 +276,32 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
     }
 }
 
+/// Check if bytes between `start` and `end` contain only whitespace (spaces, tabs, newlines).
+fn is_only_whitespace(bytes: &[u8], start: usize, end: usize) -> bool {
+    bytes[start..end]
+        .iter()
+        .all(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r')
+}
+
+/// Scan forward from `pos` past contiguous spaces/tabs. Returns the offset after the run.
+fn scan_space_forward(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
+    i
+}
+
+/// Scan backward from `pos` past contiguous spaces/tabs. Returns the offset at the start of the run.
+fn scan_space_backward(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    i
+}
+
 /// Check if the next non-whitespace character after `pos` is on a different line.
-/// Used for `space` style to skip the opening bracket check when elements
-/// start on the next line.
 fn next_to_newline(bytes: &[u8], pos: usize) -> bool {
     let mut i = pos;
     while i < bytes.len() {
@@ -241,7 +315,6 @@ fn next_to_newline(bytes: &[u8], pos: usize) -> bool {
 }
 
 /// Check if the next non-whitespace character after `pos` is a `#` comment.
-/// Used for `no_space` style to allow `[ # comment\n  ...]`.
 fn next_to_comment(bytes: &[u8], pos: usize) -> bool {
     let mut i = pos;
     while i < bytes.len() {
@@ -255,7 +328,6 @@ fn next_to_comment(bytes: &[u8], pos: usize) -> bool {
 }
 
 /// Check if the position is the first non-whitespace on its line (raw byte scan).
-/// Equivalent to `util::begins_its_line` but works on raw bytes without SourceFile.
 fn begins_its_line_raw(bytes: &[u8], pos: usize) -> bool {
     if pos == 0 {
         return true;
@@ -316,5 +388,54 @@ mod tests {
         let src = b"x = []\n";
         let diags = run_cop_full(&SpaceInsideArrayLiteralBrackets, src);
         assert!(diags.is_empty(), "Default no_space should accept []");
+    }
+
+    #[test]
+    fn array_pattern_no_space_flags_spaces() {
+        use crate::testutil::run_cop_full;
+
+        let src = b"case foo\nin [ bar, baz ]\nend\n";
+        let diags = run_cop_full(&SpaceInsideArrayLiteralBrackets, src);
+        assert_eq!(
+            diags.len(),
+            2,
+            "array pattern with spaces should be flagged"
+        );
+    }
+
+    #[test]
+    fn array_pattern_no_space_accepts_no_spaces() {
+        use crate::testutil::run_cop_full;
+
+        let src = b"case foo\nin [bar, baz]\nend\n";
+        let diags = run_cop_full(&SpaceInsideArrayLiteralBrackets, src);
+        assert!(
+            diags.is_empty(),
+            "array pattern without spaces should not be flagged"
+        );
+    }
+
+    #[test]
+    fn empty_brackets_multiple_spaces_no_space_style() {
+        use crate::testutil::run_cop_full;
+
+        let src = b"x = [     ]\n";
+        let diags = run_cop_full(&SpaceInsideArrayLiteralBrackets, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "empty brackets with multiple spaces should be flagged"
+        );
+        assert!(diags[0].message.contains("empty"));
+    }
+
+    #[test]
+    fn multiline_empty_brackets_no_space_style() {
+        use crate::testutil::run_cop_full;
+
+        let src = b"x = [\n]\n";
+        let diags = run_cop_full(&SpaceInsideArrayLiteralBrackets, src);
+        assert_eq!(diags.len(), 1, "multiline empty brackets should be flagged");
+        assert!(diags[0].message.contains("empty"));
     }
 }
