@@ -1,4 +1,4 @@
-use crate::cop::node_type::{CALL_NODE, STRING_NODE};
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -22,6 +22,17 @@ use crate::parse::source::SourceFile;
 ///    innermost was flagged. But inner nodes often get skipped by line-end-concat check while the
 ///    middle/outer nodes (with CallNode receivers, not str_type?) should still fire. Changed to
 ///    skip inner nodes when they're part of a larger chain (argument-side dedup).
+///
+/// FN/FP fix (FN=18273→?, dedup rewrite):
+/// Root cause: dedup only checked immediate receiver for `is_string_concat`, not the full
+/// receiver chain. In chains like `((user.name + ' <') + user.email) + '>'`, the outer node
+/// fired because its receiver `(user.name + ' <') + user.email` was NOT string_concat (neither
+/// side was str), so dedup didn't suppress it. Meanwhile the inner also fired → duplicate.
+/// And in chains where no direct string-concat node existed at the `+` level being checked,
+/// nothing fired at all → FN. Fix: walk the full receiver chain to find if any inner `+` call
+/// would fire (is_string_concat AND NOT line-end-concat AND NOT heredoc). Fire only from the
+/// innermost qualifying node. Also match RuboCop's `find_topmost_plus_node` / `collect_parts`
+/// approach: conservative mode checks leftmost part of entire chain, not just immediate receiver.
 pub struct StringConcatenation;
 
 impl StringConcatenation {
@@ -44,7 +55,7 @@ impl StringConcatenation {
         false
     }
 
-    /// Check if either operand is a heredoc. In Prism, heredocs are StringNode or
+    /// Check if a node is a heredoc. In Prism, heredocs are StringNode or
     /// InterpolatedStringNode whose opening starts with `<<`. RuboCop does not flag
     /// concatenation involving heredocs because they can't be converted to interpolation.
     fn is_heredoc(node: &ruby_prism::Node<'_>) -> bool {
@@ -57,6 +68,33 @@ impl StringConcatenation {
             return s
                 .opening_loc()
                 .is_some_and(|loc| loc.as_slice().starts_with(b"<<"));
+        }
+        false
+    }
+
+    /// Check if this is a `+` call with exactly one argument and a receiver.
+    fn is_plus_call(call: &ruby_prism::CallNode<'_>) -> bool {
+        if call.name().as_slice() != b"+" {
+            return false;
+        }
+        if let Some(args) = call.arguments() {
+            let count = args.arguments().iter().count();
+            return count == 1 && call.receiver().is_some();
+        }
+        false
+    }
+
+    /// Check if this `+` call is a string concatenation (at least one side is a string literal)
+    fn is_string_concat(call: &ruby_prism::CallNode<'_>) -> bool {
+        if !Self::is_plus_call(call) {
+            return false;
+        }
+        if let Some(args) = call.arguments() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if let Some(receiver) = call.receiver() {
+                // Either side must be a string literal
+                return Self::is_string_literal(&receiver) || Self::is_string_literal(&arg_list[0]);
+            }
         }
         false
     }
@@ -109,22 +147,63 @@ impl StringConcatenation {
         false
     }
 
-    /// Check if this `+` call is a string concatenation (at least one side is a string literal)
-    fn is_string_concat(call: &ruby_prism::CallNode<'_>) -> bool {
-        if call.name().as_slice() != b"+" {
-            return false;
-        }
-        if let Some(args) = call.arguments() {
-            let arg_list: Vec<_> = args.arguments().iter().collect();
-            if arg_list.len() != 1 {
-                return false;
-            }
-            if let Some(receiver) = call.receiver() {
-                // Either side must be a string literal
-                return Self::is_string_literal(&receiver) || Self::is_string_literal(&arg_list[0]);
+    /// Check if any `+` call in the receiver chain would independently fire
+    /// (is_string_concat AND NOT line_end_concatenation AND NOT heredoc-involved).
+    /// This is used for dedup: if an inner node will fire, the outer should not.
+    fn has_inner_firing_node(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> bool {
+        if let Some(receiver) = call.receiver() {
+            if let Some(recv_call) = receiver.as_call_node() {
+                if Self::is_plus_call(&recv_call) {
+                    // Check if this receiver `+` call would fire
+                    if Self::is_string_concat(&recv_call)
+                        && !Self::is_line_end_concatenation(source, &recv_call)
+                        && !Self::chain_has_heredoc(&recv_call)
+                    {
+                        return true;
+                    }
+                    // Recurse: check deeper in the chain
+                    return Self::has_inner_firing_node(source, &recv_call);
+                }
             }
         }
         false
+    }
+
+    /// Check if any part in the `+` chain involves a heredoc.
+    fn chain_has_heredoc(call: &ruby_prism::CallNode<'_>) -> bool {
+        // Check immediate receiver and argument
+        if let Some(receiver) = call.receiver() {
+            if Self::is_heredoc(&receiver) {
+                return true;
+            }
+            // Recurse through receiver chain
+            if let Some(recv_call) = receiver.as_call_node() {
+                if Self::is_plus_call(&recv_call) && Self::chain_has_heredoc(&recv_call) {
+                    return true;
+                }
+            }
+        }
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                if Self::is_heredoc(&arg) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Find the leftmost (deepest) non-`+` part of the chain. Used for conservative mode.
+    fn leftmost_part<'a>(call: &ruby_prism::CallNode<'a>) -> Option<ruby_prism::Node<'a>> {
+        if let Some(receiver) = call.receiver() {
+            if let Some(recv_call) = receiver.as_call_node() {
+                if Self::is_plus_call(&recv_call) {
+                    return Self::leftmost_part(&recv_call);
+                }
+            }
+            return Some(receiver);
+        }
+        None
     }
 }
 
@@ -134,7 +213,7 @@ impl Cop for StringConcatenation {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, STRING_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -155,17 +234,6 @@ impl Cop for StringConcatenation {
             return;
         }
 
-        let mode = config.get_str("Mode", "aggressive");
-
-        if mode == "conservative" {
-            // In conservative mode, only flag if the receiver (LHS) is a string literal
-            if let Some(receiver) = call.receiver() {
-                if !Self::is_string_literal(&receiver) {
-                    return;
-                }
-            }
-        }
-
         // Skip line-end concatenation where both sides are string literals, the
         // expression spans multiple lines, and the `+` is at the end of a line.
         // This is handled by Style/LineEndConcatenation instead.
@@ -173,31 +241,28 @@ impl Cop for StringConcatenation {
             return;
         }
 
-        // Dedup chains: skip this node if the receiver is a `+` concat that would
-        // itself be flagged (i.e., not skipped by line-end-concatenation). This
-        // avoids duplicate reports within chains while still ensuring at least one
-        // node in the chain fires. When the inner is line-end-concat (skipped), the
-        // outer/middle must still fire.
-        if let Some(receiver) = call.receiver() {
-            if let Some(recv_call) = receiver.as_call_node() {
-                if Self::is_string_concat(&recv_call)
-                    && !Self::is_line_end_concatenation(source, &recv_call)
-                {
-                    return;
-                }
-            }
+        // Skip concatenation involving heredocs anywhere in the chain
+        if Self::chain_has_heredoc(&call) {
+            return;
         }
 
-        // Skip concatenation involving heredocs — can't convert to interpolation
-        if let Some(receiver) = call.receiver() {
-            if Self::is_heredoc(&receiver) {
-                return;
-            }
+        // Dedup chains: if any inner `+` call in the receiver chain would
+        // independently fire (is_string_concat, not line-end-concat, not heredoc),
+        // skip this node. The inner one will fire at the same start position.
+        // This matches RuboCop's behavior of reporting one offense per chain.
+        if Self::has_inner_firing_node(source, &call) {
+            return;
         }
-        if let Some(args) = call.arguments() {
-            let arg_list: Vec<_> = args.arguments().iter().collect();
-            if !arg_list.is_empty() && Self::is_heredoc(&arg_list[0]) {
-                return;
+
+        // Conservative mode: check if the leftmost part of the entire chain is a
+        // string literal. RuboCop walks up to the topmost `+` node, collects all
+        // parts, and checks `parts.first.str_type?`.
+        let mode = config.get_str("Mode", "aggressive");
+        if mode == "conservative" {
+            if let Some(leftmost) = Self::leftmost_part(&call) {
+                if !Self::is_string_literal(&leftmost) {
+                    return;
+                }
             }
         }
 

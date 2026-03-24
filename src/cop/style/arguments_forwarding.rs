@@ -954,4 +954,80 @@ mod tests {
             diags
         );
     }
+
+    #[test]
+    fn detects_yield_rest_forwarding() {
+        use crate::testutil::run_cop_full;
+        let source = b"def foo(*args)\n  yield(*args)\nend\n";
+        let diags = run_cop_full(&ArgumentsForwarding, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "should detect anonymous * forwarding in yield: {:?}",
+            diags
+        );
+        assert!(diags[0].message.contains("(`*`)"));
+    }
+
+    #[test]
+    fn detects_yield_kwrest_forwarding() {
+        use crate::testutil::run_cop_full;
+        let source = b"def foo(**kwargs)\n  yield(**kwargs)\nend\n";
+        let diags = run_cop_full(&ArgumentsForwarding, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "should detect anonymous ** forwarding in yield: {:?}",
+            diags
+        );
+        assert!(diags[0].message.contains("(`**`)"));
+    }
+
+    #[test]
+    fn no_anonymous_forwarding_inside_block_ruby33() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        // Ruby 3.3: anonymous block forwarding inside a block is a syntax error
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "TargetRubyVersion".to_string(),
+            serde_json::Value::from(3.3),
+        );
+        let config = CopConfig {
+            options,
+            ..CopConfig::default()
+        };
+        let source = b"def foo(*args, &block)\n  wrapper do\n    bar(*args, &block)\n  end\nend\n";
+        let diags = run_cop_full_with_config(&ArgumentsForwarding, source, config);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Ruby 3.3: should not flag anonymous forwarding inside blocks: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn anonymous_forwarding_inside_block_ruby34() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        // Ruby 3.4: anonymous forwarding inside blocks is fixed
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "TargetRubyVersion".to_string(),
+            serde_json::Value::from(3.4),
+        );
+        let config = CopConfig {
+            options,
+            ..CopConfig::default()
+        };
+        let source = b"def foo(*args, &block)\n  wrapper do\n    bar(*args, &block)\n  end\nend\n";
+        let diags = run_cop_full_with_config(&ArgumentsForwarding, source, config);
+        assert_eq!(
+            diags.len(),
+            4,
+            "Ruby 3.4: should flag anonymous forwarding inside blocks: {:?}",
+            diags
+        );
+    }
 }

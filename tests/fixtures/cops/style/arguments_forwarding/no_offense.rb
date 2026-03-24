@@ -62,24 +62,3 @@ def task(name, &block)
   define_task(name, *deps, &block)
 end
 
-# Anonymous block forwarding inside a block is a syntax error in Ruby < 3.4
-# RuboCop does not flag this
-def with_block_forwarding(&block)
-  with_wrapper do
-    bar(&block)
-  end
-end
-
-# Anonymous rest forwarding inside a block
-def with_rest_in_block(*args)
-  with_wrapper do
-    bar(*args)
-  end
-end
-
-# Anonymous kwargs forwarding inside a block
-def with_kwargs_in_block(**options)
-  with_wrapper do
-    bar(**options)
-  end
-end
