@@ -13,7 +13,9 @@ use crate::parse::source::SourceFile;
 /// or `::Date`, not qualified paths like `Hijri::Date`. Fixed by replacing `constant_name()`
 /// (which returns the terminal name) with `is_simple_constant()` which validates the full path.
 ///
-/// FN=1: netzke/netzke-basepack — needs investigation.
+/// FN=1: netzke/netzke-basepack — `to_time_in_current_zone` deprecated method was not detected.
+/// Fixed by adding an explicit check for `to_time_in_current_zone` that fires regardless of
+/// EnforcedStyle, matching RuboCop's DEPRECATED_METHODS behavior.
 pub struct Date;
 
 impl Cop for Date {
@@ -47,6 +49,22 @@ impl Cop for Date {
         };
 
         let method = call.name().as_slice();
+
+        // `to_time_in_current_zone` is always deprecated, regardless of EnforcedStyle
+        if method == b"to_time_in_current_zone" {
+            let msg_loc = match call.message_loc() {
+                Some(loc) => loc,
+                None => return,
+            };
+            let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "`to_time_in_current_zone` is deprecated. Use `in_time_zone` instead.".to_string(),
+            ));
+            return;
+        }
 
         // In strict mode, also flag `to_time`
         if method == b"to_time" && !allow_to_time && style == "strict" {
