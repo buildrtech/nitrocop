@@ -53,16 +53,6 @@ use crate::parse::source::SourceFile;
 /// ending in `?` or `!`, not `tIDENTIFIER`. RuboCop only checks `tIDENTIFIER`
 /// and `tCONSTANT`, so these are never flagged. Fix: skip identifiers ending
 /// with `?` or `!` in the byte scanner.
-///
-/// ## Corpus investigation (2026-03-24) — extended corpus, round 3
-///
-/// FN=3 from Pluvie/italian-ruby: method definitions `def non_è_un?`,
-/// `def è_un_commento?`, `def è_una_stringa?`. In `def` context, Ruby's lexer
-/// produces `tIDENTIFIER` (not `tFID`) even for names ending in `?` or `!`,
-/// so RuboCop flags these. Verified with `rubocop --only Naming/AsciiIdentifiers`.
-/// Fix: added `is_after_def_keyword()` check — only skip `?`/`!` identifiers
-/// when NOT in def context. Updated no_offense fixture (removed incorrect test
-/// case) and added offense fixture for def with `?`/`!` suffix.
 pub struct AsciiIdentifiers;
 
 impl Cop for AsciiIdentifiers {
@@ -141,13 +131,10 @@ impl Cop for AsciiIdentifiers {
 
                 // Skip identifiers ending with ? or ! — these are tFID tokens
                 // in Ruby's lexer. RuboCop only checks tIDENTIFIER and tCONSTANT
-                // tokens, not tFID. However, in `def` context, Ruby's lexer
-                // produces tIDENTIFIER even for names ending in ?/!, so method
-                // definitions like `def è_un_commento?` ARE flagged by RuboCop.
-                // We detect def context by checking for `def ` (or `def self.`)
-                // before the identifier.
+                // tokens, not tFID. This covers both method calls (è_un_commento?)
+                // and method definitions (def è_un_commento?).
                 if let Some(&last) = ident.last() {
-                    if (last == b'?' || last == b'!') && !is_after_def_keyword(bytes, start) {
+                    if last == b'?' || last == b'!' {
                         continue;
                     }
                 }
@@ -250,81 +237,6 @@ impl Cop for AsciiIdentifiers {
             diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
         }
     }
-}
-
-/// Check if the identifier at `start` is immediately after a `def` keyword.
-/// This detects patterns like `def è_un_commento?` and `def self.è_un_commento?`.
-/// In Ruby's lexer, `def` context produces tIDENTIFIER (not tFID) even for
-/// names ending in `?` or `!`, so RuboCop flags these.
-fn is_after_def_keyword(bytes: &[u8], start: usize) -> bool {
-    // Walk backwards past whitespace/dot/self to find `def`
-    let mut pos = start;
-
-    // Skip the space before the identifier
-    if pos == 0 {
-        return false;
-    }
-    pos -= 1;
-    // Allow `def self.name` — skip `.self` backwards
-    if pos < bytes.len() && bytes[pos] == b'.' {
-        // Skip the dot
-        if pos == 0 {
-            return false;
-        }
-        pos -= 1;
-        // Check for `self` before the dot
-        if pos >= 3
-            && bytes[pos - 3] == b's'
-            && bytes[pos - 2] == b'e'
-            && bytes[pos - 1] == b'l'
-            && bytes[pos] == b'f'
-        {
-            pos -= 4;
-            // Skip space between `def` and `self`
-            if pos < bytes.len() && bytes[pos] == b' ' {
-                if pos == 0 {
-                    return false;
-                }
-                pos -= 1;
-            } else {
-                return false;
-            }
-        } else {
-            // Some other receiver.method — still check for `def` before it
-            // (e.g., `def obj.method?`). Walk back past the receiver identifier.
-            while pos > 0 && is_ident_continue(bytes[pos]) {
-                pos -= 1;
-            }
-            // Skip space
-            if bytes[pos] == b' ' {
-                if pos == 0 {
-                    return false;
-                }
-                pos -= 1;
-            } else {
-                return false;
-            }
-        }
-    } else if bytes[pos] != b' ' {
-        return false;
-    } else {
-        // Normal case: `def name?` — already at the space, back up one more
-        if pos == 0 {
-            return false;
-        }
-        pos -= 1;
-    }
-
-    // Now check if we're looking at `def`
-    if pos >= 2 && bytes[pos - 2] == b'd' && bytes[pos - 1] == b'e' && bytes[pos] == b'f' {
-        // Make sure `def` is not part of a larger identifier
-        if pos >= 3 && is_ident_continue(bytes[pos - 3]) {
-            return false;
-        }
-        return true;
-    }
-
-    false
 }
 
 /// Check if a byte can start a Ruby identifier.

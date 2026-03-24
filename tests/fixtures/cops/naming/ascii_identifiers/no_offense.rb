@@ -29,7 +29,7 @@ alias :è_un? :is_a?
 è_una_stringa?
 non_è_nullo!
 
-# Method definitions with ? or ! suffix in def context are tIDENTIFIER
-# (flagged by RuboCop), but method CALLS with ? or ! are tFID (not flagged).
-# The call examples above (è_un_commento?, è_una_stringa?, non_è_nullo!)
-# should remain no-offense.
+# Method definitions with ? or ! suffix are also tFID
+def è_un_commento?
+  false
+end
