@@ -17,6 +17,20 @@ use crate::parse::source::SourceFile;
 /// checking: look at the preceding and following non-blank lines and
 /// verify that the argument column has a `\s\S` boundary (space followed
 /// by non-space) at the same position, indicating intentional alignment.
+///
+/// ## Investigation findings (2026-03-24)
+///
+/// FP=69, FN=124 from corpus. Two issues found:
+/// 1. Tab characters in the gap between method name and first argument were
+///    not being flagged (the check required all-spaces). Fixed to accept
+///    tabs as whitespace in the gap.
+/// 2. Alignment check was checking up to 2 nearest non-blank lines per
+///    direction, while RuboCop uses a two-pass approach: pass 1 checks only
+///    the nearest non-blank line, pass 2 checks the nearest line with the
+///    same base indentation. The old approach could miss alignment when the
+///    aligned line was separated by differently-indented lines (FPs), and
+///    could falsely detect alignment from a 2nd non-blank line that RuboCop
+///    wouldn't consider (FNs).
 pub struct SpaceBeforeFirstArg;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -35,9 +49,14 @@ fn is_setter_method(name: &[u8]) -> bool {
 
 /// Check if the argument at `arg_col` (0-indexed byte column) is aligned with
 /// a token boundary on an adjacent line. Mirrors RuboCop's `aligned_with_something?`
-/// from `PrecedingFollowingAlignment`, simplified for this cop's needs.
+/// from `PrecedingFollowingAlignment`.
 ///
-/// Checks preceding and following non-blank, non-comment lines for:
+/// Uses a two-pass approach matching RuboCop's `aligned_with_any_line_range?`:
+/// - Pass 1: Check the nearest non-blank, non-comment line in each direction
+/// - Pass 2: Check the nearest non-blank, non-comment line with the same
+///   base indentation in each direction (may look further to find it)
+///
+/// Alignment is detected by:
 /// - Mode 1: space-then-non-space at `arg_col - 1` (token boundary alignment)
 /// - Mode 2: exact token text match at `arg_col`
 fn is_aligned_with_adjacent(source: &SourceFile, line: usize, arg_col: usize) -> bool {
@@ -48,37 +67,86 @@ fn is_aligned_with_adjacent(source: &SourceFile, line: usize, arg_col: usize) ->
     let current_line = lines.get(current_line_idx).copied().unwrap_or(&[]);
     let current_token = extract_token_at(current_line, arg_col);
 
-    // Check preceding lines (up to 2 non-blank, non-comment lines)
-    let mut checked = 0;
-    let mut idx = current_line_idx;
-    while idx > 0 && checked < 2 {
-        idx -= 1;
-        let adj = lines[idx];
-        if is_blank_or_comment(adj) {
-            continue;
+    // Pass 1: check the nearest non-blank, non-comment line in each direction.
+    // RuboCop's aligned_with_line? yields the first qualifying line and returns.
+    if let Some(adj) = find_nearest_nonblank(&lines, current_line_idx, Direction::Up, None) {
+        if check_alignment_at(adj, arg_col, current_token) {
+            return true;
         }
-        checked += 1;
+    }
+    if let Some(adj) = find_nearest_nonblank(&lines, current_line_idx, Direction::Down, None) {
         if check_alignment_at(adj, arg_col, current_token) {
             return true;
         }
     }
 
-    // Check following lines (up to 2 non-blank, non-comment lines)
-    checked = 0;
-    idx = current_line_idx;
-    while idx + 1 < lines.len() && checked < 2 {
-        idx += 1;
-        let adj = lines[idx];
-        if is_blank_or_comment(adj) {
-            continue;
+    // Pass 2: check the nearest line with the same base indentation.
+    let base_indent = line_indentation(current_line);
+    if let Some(adj) =
+        find_nearest_nonblank(&lines, current_line_idx, Direction::Up, Some(base_indent))
+    {
+        if check_alignment_at(adj, arg_col, current_token) {
+            return true;
         }
-        checked += 1;
+    }
+    if let Some(adj) =
+        find_nearest_nonblank(&lines, current_line_idx, Direction::Down, Some(base_indent))
+    {
         if check_alignment_at(adj, arg_col, current_token) {
             return true;
         }
     }
 
     false
+}
+
+enum Direction {
+    Up,
+    Down,
+}
+
+/// Find the nearest non-blank, non-comment line in the given direction.
+/// If `required_indent` is Some, only consider lines with that exact indentation.
+fn find_nearest_nonblank<'a>(
+    lines: &[&'a [u8]],
+    current_idx: usize,
+    direction: Direction,
+    required_indent: Option<usize>,
+) -> Option<&'a [u8]> {
+    let mut idx = current_idx;
+    loop {
+        match direction {
+            Direction::Up => {
+                if idx == 0 {
+                    return None;
+                }
+                idx -= 1;
+            }
+            Direction::Down => {
+                if idx + 1 >= lines.len() {
+                    return None;
+                }
+                idx += 1;
+            }
+        }
+        let line = lines[idx];
+        if is_blank_or_comment(line) {
+            continue;
+        }
+        if let Some(indent) = required_indent {
+            if line_indentation(line) != indent {
+                continue;
+            }
+        }
+        return Some(line);
+    }
+}
+
+/// Compute the indentation level (number of leading spaces/tabs) of a line.
+fn line_indentation(line: &[u8]) -> usize {
+    line.iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count()
 }
 
 /// Check if there's a token boundary at `col` on the given line,
@@ -223,10 +291,10 @@ impl Cop for SpaceBeforeFirstArg {
         }
 
         if gap > 1 {
-            // More than one space between method name and first arg
+            // More than one space/tab between method name and first arg
             let bytes = source.as_bytes();
             let between = &bytes[method_end..arg_start];
-            if between.iter().all(|&b| b == b' ') {
+            if between.iter().all(|&b| b == b' ' || b == b'\t') {
                 // When AllowForAlignment is true (default), check if the argument
                 // is actually aligned with a token on an adjacent line.
                 if allow_for_alignment {

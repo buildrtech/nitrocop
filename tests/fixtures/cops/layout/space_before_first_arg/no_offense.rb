@@ -30,3 +30,13 @@ something \
 # Method call across lines
 something x,
           y
+
+# Alignment with same-indentation line separated by differently-indented lines.
+# The has_many/has_one calls align their first argument, but continuation lines
+# in between have different indentation. RuboCop's second pass (same-indent
+# filter) finds the alignment even though the nearest non-blank lines don't match.
+has_many    :foo, -> { where(active: true) },
+                  as:         :addressable,
+                  class_name: 'Address'
+has_one     :bar, as: :addressable,
+                  class_name: 'Address'
