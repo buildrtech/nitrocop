@@ -447,3 +447,26 @@ def timing_in_begin_rescue
     report_timeout(e, elapsed)
   end
 end
+
+# Begin body and rescue body both write the same variable — not useless
+# because begin and rescue are alternative paths (only one executes)
+def commit(action, params)
+  begin
+    raw = ssl_post(action, params)
+    response = parse(raw)
+  rescue
+    raw = fallback_response
+    response = parse(raw)
+  end
+  response
+end
+
+# Same pattern with ensure
+def fetch_with_retry
+  begin
+    result = try_fetch
+  rescue
+    result = default_value
+  end
+  result
+end

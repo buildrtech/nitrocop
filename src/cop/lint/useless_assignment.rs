@@ -60,6 +60,16 @@ use ruby_prism::Visit;
 ///   suppress this detection.
 /// - FN: Various patterns requiring deeper flow analysis that our sequential
 ///   approximation misses.
+///
+/// ## Corpus investigation (2026-03-24)
+///
+/// FP fix: begin-body writes were not protected during rescue analysis. When
+/// both `begin` and `rescue` write the same variable (e.g., `response = parse(raw)`
+/// in both branches), the begin-body write was flagged as useless because the
+/// rescue re-write appeared to supersede it. But begin and rescue are alternative
+/// paths — the begin-body write is live when no exception occurs. Fixed by
+/// selectively protecting write offsets that were added during begin-body
+/// analysis (not pre-existing) before analyzing the rescue chain.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {
@@ -1197,7 +1207,18 @@ impl ScopeAnalyzer {
                     rescue_start.live_writes.insert(name.clone(), offset);
                 }
             }
+            // Protect pre-body writes during rescue analysis.
             self.protect_live_writes(&before);
+            // Also protect writes made IN the begin body (not pre-existing).
+            // Begin body and rescue body are alternative paths — only one executes.
+            // When no exception occurs, begin-body writes survive past the block.
+            // Without this, a rescue re-write (e.g., `response = parse(...)` in both
+            // begin and rescue) incorrectly flags the begin-body write as useless.
+            for (name, &offset) in &state.live_writes {
+                if before.live_writes.get(name) != Some(&offset) {
+                    self.protected_offsets.insert(offset);
+                }
+            }
             self.analyze_rescue_chain(&rescue_node, &rescue_start, state);
         }
 
