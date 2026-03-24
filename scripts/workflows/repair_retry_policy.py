@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 
 MARKER_RE = re.compile(r"<!--\s*nitrocop-auto-repair:\s*(.*?)\s*-->")
 PR_ISSUE_RE = re.compile(r"<!--\s*nitrocop-cop-issue:\s*(.*?)\s*-->")
@@ -92,7 +93,23 @@ def gate_pr(pr: dict, repo: str, checks_head_sha: str) -> tuple[bool, str]:
         return False, f"PR author {author_login} is not trusted for auto-repair"
     if checks_head_sha and pr.get("headRefOid") and pr["headRefOid"] != checks_head_sha:
         return False, "PR head moved after the failed Checks run"
+    if _checks_failing_on_main(repo):
+        return False, "Checks is also failing on main (likely infra issue, not a cop bug)"
     return True, ""
+
+
+def _checks_failing_on_main(repo: str) -> bool:
+    """Return True if the latest Checks run on main also failed."""
+    try:
+        result = subprocess.run(
+            ["gh", "run", "list", "--workflow=checks.yml", "--branch=main",
+             "--repo", repo, "--limit", "1", "--json", "conclusion",
+             "-q", ".[0].conclusion // empty"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return result.stdout.strip() == "failure"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
 
 
 def apply_policy(

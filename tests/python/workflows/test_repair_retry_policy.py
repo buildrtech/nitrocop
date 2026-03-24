@@ -61,7 +61,7 @@ def test_inspect_attempts_counts_pushes_and_codex():
     assert result["prior_attempted_current_head"] is True
 
 
-def test_gate_pr_accepts_trusted_bot_pr():
+def test_gate_pr_accepts_trusted_bot_pr(monkeypatch):
     pr = {
         "state": "OPEN",
         "baseRefName": "main",
@@ -71,9 +71,26 @@ def test_gate_pr_accepts_trusted_bot_pr():
         "labels": [{"name": "agent-fix"}],
         "headRefOid": "abc",
     }
+    monkeypatch.setattr(repair_retry_policy, "_checks_failing_on_main", lambda _repo: False)
     should_run, reason = repair_retry_policy.gate_pr(pr, "6/nitrocop", "abc")
     assert should_run is True
     assert reason == ""
+
+
+def test_gate_pr_rejects_when_main_checks_failing(monkeypatch):
+    pr = {
+        "state": "OPEN",
+        "baseRefName": "main",
+        "isCrossRepository": False,
+        "headRepository": {"nameWithOwner": "6/nitrocop"},
+        "author": {"login": "6[bot]"},
+        "labels": [{"name": "agent-fix"}],
+        "headRefOid": "abc",
+    }
+    monkeypatch.setattr(repair_retry_policy, "_checks_failing_on_main", lambda _repo: True)
+    should_run, reason = repair_retry_policy.gate_pr(pr, "6/nitrocop", "abc")
+    assert should_run is False
+    assert "main" in reason
 
 
 def test_gate_pr_rejects_closed_pr():

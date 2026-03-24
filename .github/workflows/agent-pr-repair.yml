@@ -3,6 +3,7 @@ name: Agent PR Repair
 permissions:
   contents: write
   actions: read
+  issues: write
   pull-requests: write
 
 on:
@@ -863,3 +864,51 @@ jobs:
           name: agent-pr-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.artifact_manifest.outputs.paths }}
           retention-days: 7
+
+  # Reset linked tracker issue when a bot PR is closed without merging.
+  # This handles both manual closes and programmatic closes that bypass
+  # the cop_fix_lifecycle.py finalize step.
+  reset-issue:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == false &&
+      startsWith(github.event.pull_request.head.ref, 'fix/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            scripts/workflows/cop_fix_lifecycle.py
+            scripts/shared
+          persist-credentials: false
+
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Reset linked tracker issue to backlog
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PR_BODY=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" --json body -q '.body')
+          # Extract linked issue number from PR body marker
+          ISSUE_NUM=$(echo "$PR_BODY" | grep -oP '(?<=nitrocop-cop-issue:\s)\S+' | grep -oP 'issue=\K\d+' || true)
+          if [ -z "$ISSUE_NUM" ]; then
+            echo "::notice::No linked tracker issue found in PR body"
+            exit 0
+          fi
+          # Only reset if issue is currently in pr-open state
+          LABELS=$(gh issue view "$ISSUE_NUM" --repo "${{ github.repository }}" \
+            --json labels -q '[.labels[].name] | join(",")')
+          if echo "$LABELS" | grep -q "state:pr-open"; then
+            gh issue edit "$ISSUE_NUM" --repo "${{ github.repository }}" \
+              --remove-label "state:pr-open" --add-label "state:backlog"
+            echo "::notice::Reset issue #$ISSUE_NUM from state:pr-open to state:backlog"
+          else
+            echo "::notice::Issue #$ISSUE_NUM is not in state:pr-open (labels: $LABELS), skipping reset"
+          fi
