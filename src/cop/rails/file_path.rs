@@ -81,8 +81,9 @@ use crate::parse::source::SourceFile;
 ///    a `csend`, not a regular `send`. RuboCop's `RESTRICT_ON_SEND = %i[join]` only matches
 ///    regular sends. Fixed by checking `call_operator_loc()` for `&.` and skipping.
 /// 2. `File.join [Rails.root, ENV['FIXTURES_PATH'] || %w[test fixtures]].flatten` — single
-///    argument is a method call on an array literal. RuboCop errors/crashes on this pattern,
-///    effectively not flagging it. Fixed by adding `is_call_on_array` guard to `check_file_join`.
+///    argument is a method call on an array literal. Originally guarded by `is_call_on_array`
+///    assuming RuboCop crashed on this. Later analysis showed RuboCop DOES flag `[...].flatten`
+///    arguments; the guard was removed because it caused FNs (see 2026-03-24 notes).
 /// 3. `"#{scheme}://#{Rails.root}/db/#{Rails.env}.sqlite3"` — the `://` before Rails.root
 ///    contains a colon. RuboCop's `dstr_separated_by_colon?` checks `children[1..]` (ALL
 ///    string parts from index 1), not just parts after the Rails.root index. Our check was
@@ -95,6 +96,17 @@ use crate::parse::source::SourceFile;
 ///    StatementsNode) or OrNode. Fixed by adding both node types to the traversal.
 /// 2. `File.join(::Rails.root || '', 'config')` — bare OrNode argument. Same root cause
 ///    as above. Fixed by adding OrNode traversal to `contains_rails_root`.
+///
+/// ## Investigation findings (2026-03-24)
+///
+/// **FN root cause**: `File.join([Rails.root, 'paperclip', ...].flatten)` — the `is_call_on_array`
+/// guard (added 2026-03-23) blanket-skipped ALL `[...].flatten` arguments to `File.join`. RuboCop's
+/// `valid_arguments_for_file_join_with_rails_root?` checks top-level args for `variable?`,
+/// `const_type?`, and multi-slash strings — a CallNode like `[...].flatten` passes all these
+/// checks, so RuboCop flags it. The `is_call_on_array` guard was removed. The previously-assumed
+/// FP (`File.join [Rails.root, ENV['FIXTURES_PATH'] || %w[test fixtures]].flatten`) is actually
+/// a true positive — RuboCop detects it (any crash is in autocorrect, not detection). Moved that
+/// case from no_offense to offense fixtures.
 pub struct FilePath;
 
 /// Check if a constant node is top-level (bare `Foo` or `::Foo`), not namespaced (`A::Foo`).
@@ -242,18 +254,6 @@ fn string_contains_slash(node: &ruby_prism::Node<'_>) -> bool {
     } else {
         false
     }
-}
-
-/// Check if a File.join argument is a method call on an array literal,
-/// like `[Rails.root, ...].flatten`. RuboCop errors on such patterns,
-/// effectively not flagging them.
-fn is_call_on_array(node: &ruby_prism::Node<'_>) -> bool {
-    if let Some(call) = node.as_call_node() {
-        if let Some(recv) = call.receiver() {
-            return recv.as_array_node().is_some();
-        }
-    }
-    false
 }
 
 /// Check if a node is a constant (not Rails).
@@ -428,16 +428,10 @@ impl FilePath {
             return;
         }
 
-        // Check that no arguments are variables, non-Rails constants, contain multiple slashes,
-        // or are method calls on array literals (e.g. `[...].flatten`).
+        // Check that no arguments are variables, non-Rails constants, or contain multiple slashes.
         // RuboCop: arguments.none? { |arg| arg.variable? || arg.const_type? || string_contains_multiple_slashes?(arg) }
-        // Additionally, skip call-on-array arguments as RuboCop errors on patterns like
-        // `File.join([Rails.root, ...].flatten)`.
         let has_invalid_arg = arg_list.iter().any(|a| {
-            is_variable(a)
-                || is_non_rails_constant(a)
-                || string_contains_multiple_slashes(a)
-                || is_call_on_array(a)
+            is_variable(a) || is_non_rails_constant(a) || string_contains_multiple_slashes(a)
         });
         if has_invalid_arg {
             return;

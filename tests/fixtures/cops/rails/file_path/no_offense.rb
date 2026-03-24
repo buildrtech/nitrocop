@@ -27,7 +27,5 @@ assert_equal "Some message #{Rails.root.join('vendor/plugins/foo')}.", e.message
 # FP fix: safe navigation operator on Rails.root
 ::Rails.root&.join("app", "models")&.to_s
 Rails.root&.join("app", "models")
-# FP fix: File.join with complex array argument (flattened array with mixed expressions)
-File.join [Rails.root, ENV['FIXTURES_PATH'] || %w[test fixtures]].flatten
 # FP fix: string interpolation with scheme:// before Rails.root
 "#{scheme}://#{Rails.root}/db/#{Rails.env}.sqlite3"

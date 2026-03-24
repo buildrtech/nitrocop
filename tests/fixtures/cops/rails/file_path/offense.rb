@@ -57,3 +57,9 @@ File.join((Rails.root || "."), "config", "textcaptcha.yml")
 
 File.join(::Rails.root || '', 'config')
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+File.join([Rails.root, 'paperclip', 'file_uploads', 'files', url_params].flatten)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+File.join [Rails.root, ENV['FIXTURES_PATH'] || %w[test fixtures]].flatten
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
