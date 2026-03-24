@@ -991,7 +991,7 @@ mod tests {
         let mut options = std::collections::HashMap::new();
         options.insert(
             "TargetRubyVersion".to_string(),
-            serde_json::Value::from(3.3),
+            serde_yml::Value::Number(serde_yml::Number::from(3.3_f64)),
         );
         let config = CopConfig {
             options,
@@ -1015,7 +1015,7 @@ mod tests {
         let mut options = std::collections::HashMap::new();
         options.insert(
             "TargetRubyVersion".to_string(),
-            serde_json::Value::from(3.4),
+            serde_yml::Value::Number(serde_yml::Number::from(3.4_f64)),
         );
         let config = CopConfig {
             options,

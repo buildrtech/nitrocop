@@ -194,7 +194,6 @@ impl Cop for InverseMethods {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        eprintln!("DEBUG InverseMethods: interested_node_types called");
         &[CALL_NODE, PARENTHESES_NODE, STATEMENTS_NODE]
     }
 

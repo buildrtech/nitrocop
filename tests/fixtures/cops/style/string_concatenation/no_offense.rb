@@ -30,3 +30,11 @@ CONF
 result = header + <<~HEREDOC
   some content here
 HEREDOC
+
+# Line-end concatenation (both sides str, + at end of line) — handled by Style/LineEndConcatenation
+name = 'First' +
+  'Last'
+
+# Percent literal concatenation — in Prism these are StringNode but in Parser they're dstr
+config + %[some value]
+header + %{some value}
