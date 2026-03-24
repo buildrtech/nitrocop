@@ -27,7 +27,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from shared.corpus_artifacts import download_corpus_results as _download_corpus
@@ -223,39 +222,51 @@ def count_deduplicated_offenses(json_data: dict) -> int:
     return len(seen)
 
 
+_SYMLINK_DIR: Path | None = None
+
+
+def _ensure_symlink_dir() -> Path:
+    """Create a shared temp directory with symlinks to all corpus repos.
+
+    The oracle runs from its workspace root with repos at repos/<id>/,
+    outside any git tree. To match this file-discovery context, we
+    symlink all repos into a temp directory. The symlinks are created
+    once and reused across all per-repo runs.
+    """
+    global _SYMLINK_DIR
+    if _SYMLINK_DIR is not None:
+        return _SYMLINK_DIR
+
+    import tempfile
+    tmpdir = Path(tempfile.mkdtemp(prefix="nitrocop_cop_check_"))
+    repos_parent = tmpdir / "repos"
+    repos_parent.mkdir()
+    for repo_dir in CORPUS_DIR.iterdir():
+        if repo_dir.is_dir():
+            link = repos_parent / repo_dir.name
+            link.symlink_to(repo_dir.resolve())
+    _SYMLINK_DIR = tmpdir
+    return tmpdir
+
+
 def _run_one_repo(args: tuple[str, str]) -> tuple[str, int]:
     """Run nitrocop on a single repo. Used by the parallel executor.
 
-    The corpus oracle runs from its workspace root with repos at
-    repos/<id>/ — a path NOT inside any git tree. To match this,
-    we symlink the repo into a temp directory outside the nitrocop
-    project tree and run from there. This gives the `ignore` crate
-    the same .gitignore resolution context as the oracle.
+    Runs from a shared temp directory outside the git tree with a
+    symlink to the repo, matching the oracle's file-discovery context.
     """
     cop_name, repo_dir = args
     repo_id = Path(repo_dir).name
-    repo_abs = str(Path(repo_dir).resolve())
-
-    # Create a temp directory outside the git tree with a symlink to the repo.
-    # The symlink makes the path <tmpdir>/repos/<repo_id> which mirrors the
-    # oracle's repos/<id>/ layout. Running from <tmpdir> means cwd is NOT
-    # inside any git tree, matching the oracle exactly.
-    tmpdir = tempfile.mkdtemp(prefix="nitrocop_cop_check_")
-    repos_parent = Path(tmpdir) / "repos"
-    repos_parent.mkdir()
-    link = repos_parent / repo_id
-    link.symlink_to(repo_abs)
+    symlink_dir = _ensure_symlink_dir()
+    link = symlink_dir / "repos" / repo_id
     try:
         result = subprocess.run(
             nitrocop_cmd(cop_name, str(link)),
             capture_output=True, text=True, timeout=120,
-            cwd=tmpdir, env=corpus_env(),
+            cwd=str(symlink_dir), env=corpus_env(),
         )
     except subprocess.TimeoutExpired:
         return (repo_id, -1)
-    finally:
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
 
     if result.returncode not in (0, 1):
         return (repo_id, -1)
