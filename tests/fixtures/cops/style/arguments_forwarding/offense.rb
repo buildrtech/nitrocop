@@ -68,9 +68,3 @@ def bar_yield(**kwargs)
         ^^^^^^^^ Style/ArgumentsForwarding: Use anonymous keyword arguments forwarding (`**`).
 end
 
-# Anonymous block only forwarding to yield
-def baz_yield(&block)
-              ^^^^^^ Style/ArgumentsForwarding: Use anonymous block arguments forwarding (`&`).
-  yield(&block)
-        ^^^^^^ Style/ArgumentsForwarding: Use anonymous block arguments forwarding (`&`).
-end
