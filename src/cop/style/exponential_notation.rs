@@ -3,6 +3,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-25)
+///
+/// Corpus oracle reported FP=149, FN=4.
+///
+/// FP=149: RuboCop only checks for lowercase `e` in exponential notation
+/// (`node.source['e']`). Uppercase `E` (e.g., `0.22E1`) is ignored. Nitrocop
+/// was lowercasing first and matching both. Fix: check for lowercase `e` only.
 pub struct ExponentialNotation;
 
 impl Cop for ExponentialNotation {
@@ -35,11 +42,12 @@ impl Cop for ExponentialNotation {
             Err(_) => return,
         };
 
-        // Only care about exponential notation (contains 'e' or 'E')
-        let lower = src_str.to_lowercase();
-        if !lower.contains('e') {
+        // RuboCop only checks for lowercase 'e' — uppercase 'E' (e.g., 0.22E1) is ignored
+        if !src_str.contains('e') {
             return;
         }
+
+        let lower = src_str.to_lowercase();
 
         // Strip leading minus for mantissa analysis
         let working = if let Some(stripped) = lower.strip_prefix('-') {
