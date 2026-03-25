@@ -195,7 +195,7 @@ struct ExistInfo {
 fn has_explicit_not_force(call: &ruby_prism::CallNode<'_>) -> bool {
     if let Some(args) = call.arguments() {
         for arg in args.arguments().iter() {
-            if check_force_false(&arg) {
+            if check_force_value(&arg, false) {
                 return true;
             }
         }
@@ -203,8 +203,22 @@ fn has_explicit_not_force(call: &ruby_prism::CallNode<'_>) -> bool {
     false
 }
 
-/// Check a node (keyword hash or hash) for `force: false`.
-fn check_force_false(node: &ruby_prism::Node<'_>) -> bool {
+/// Check if a call node has `force: true` in its arguments.
+/// RuboCop treats methods with `force: true` as force methods,
+/// suppressing the "Use atomic" offense.
+fn has_force_option(call: &ruby_prism::CallNode<'_>) -> bool {
+    if let Some(args) = call.arguments() {
+        for arg in args.arguments().iter() {
+            if check_force_value(&arg, true) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check a node (keyword hash or hash) for `force: <value>`.
+fn check_force_value(node: &ruby_prism::Node<'_>, expect_true: bool) -> bool {
     let elements = if let Some(kw_hash) = node.as_keyword_hash_node() {
         kw_hash.elements()
     } else if let Some(hash) = node.as_hash_node() {
@@ -216,8 +230,12 @@ fn check_force_false(node: &ruby_prism::Node<'_>) -> bool {
     for elem in elements.iter() {
         if let Some(assoc) = elem.as_assoc_node() {
             if let Some(key) = assoc.key().as_symbol_node() {
-                if key.unescaped() == b"force" && assoc.value().as_false_node().is_some() {
-                    return true;
+                if key.unescaped() == b"force" {
+                    if expect_true {
+                        return assoc.value().as_true_node().is_some();
+                    } else {
+                        return assoc.value().as_false_node().is_some();
+                    }
                 }
             }
         }
@@ -331,8 +349,9 @@ impl Cop for NonAtomicFileOperation {
             return;
         }
 
-        // Emit offense on file operation (only for non-force methods)
-        if !is_force_method(method) {
+        // Emit offense on file operation (only for non-force methods/options)
+        // RuboCop treats `force: true` option the same as force method names
+        if !is_force_method(method) && !has_force_option(&file_op_call) {
             let replacement = replacement_method(method);
             let loc = file_op_call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());

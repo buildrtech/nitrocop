@@ -140,6 +140,24 @@ File.delete('./.slather.yml') if File.exist?("./.slather.yml")
                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/NonAtomicFileOperation: Remove unnecessary existence check `File.exist?`.
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/NonAtomicFileOperation: Use atomic file operation method `FileUtils.rm_f`.
 
+# remove_entry with force: true option (only existence check offense)
+if File.exist?(base_directory)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/NonAtomicFileOperation: Remove unnecessary existence check `File.exist?`.
+  FileUtils.remove_entry base_directory, :force => true
+end
+
+# rm with force: true option (only existence check offense)
+if File.exist?(path)
+^^^^^^^^^^^^^^^^^^^^ Lint/NonAtomicFileOperation: Remove unnecessary existence check `File.exist?`.
+  FileUtils.rm(path, :force => true)
+end
+
+# remove with force: true using new-style hash syntax (only existence check offense)
+if File.exist?(path)
+^^^^^^^^^^^^^^^^^^^^ Lint/NonAtomicFileOperation: Remove unnecessary existence check `File.exist?`.
+  FileUtils.remove(path, force: true)
+end
+
 # Negated condition using == false
 if Dir.exist?(catalogs_path) == false
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/NonAtomicFileOperation: Remove unnecessary existence check `Dir.exist?`.
