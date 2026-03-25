@@ -3,6 +3,11 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/MapToSet: detects `map { ... }.to_set` and suggests `to_set { ... }`.
+///
+/// FP fix: RuboCop's pattern `(block_pass sym)` only matches `&:symbol`, not `&variable`
+/// or `&method(:foo)`. We must check that block_pass arguments contain a symbol node
+/// before flagging.
 pub struct MapToSet;
 
 impl Cop for MapToSet {
@@ -54,8 +59,21 @@ impl Cop for MapToSet {
         }
 
         // Must have a block
-        if recv_call.block().is_none() {
-            return;
+        let block = match recv_call.block() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // If the block is a block_pass (&expr), only flag when expr is a symbol (&:sym).
+        // RuboCop's pattern is `(block_pass sym)` which only matches symbol literals,
+        // not variables (&var) or method calls (&method(:foo)).
+        if let Some(block_arg) = block.as_block_argument_node() {
+            let is_symbol = block_arg
+                .expression()
+                .is_some_and(|expr| expr.as_symbol_node().is_some());
+            if !is_symbol {
+                return;
+            }
         }
 
         let method_str = std::str::from_utf8(method_bytes).unwrap_or("map");

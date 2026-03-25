@@ -4,3 +4,5 @@ foo.map { |x| x.to_s }.to_a
 foo.each_with_object([]) { |x, a| a << x }
 items.to_set
 foo.map(&:to_s).to_h
+foo.map(&method).to_set
+foo.map(&method(:something)).to_set
