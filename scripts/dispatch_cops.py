@@ -997,7 +997,7 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 6. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
 7. **Validate against corpus** (REQUIRED before committing):
    ```bash
-   python3 scripts/check_cop.py {cop} --rerun --quick --clone --sample 15
+   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15
    ```
    If this reports FP or FN regression, your fix is too broad — narrow it down.
 8. Add a `///` doc comment on the cop struct documenting what you found and fixed
@@ -1068,7 +1068,7 @@ condition that matches the SPECIFIC differentiating context.
 ### Rules
 - Only modify `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`
 - Run `cargo test --lib -- cop::{dept_snake}::{snake}` to verify your fix (do NOT run the full test suite)
-- Run `python3 scripts/check_cop.py {cop} --rerun --quick --clone --sample 15` before committing to catch regressions
+- Run `python3 scripts/check_cop.py {cop} --rerun --clone --sample 15` before committing to catch regressions
 - Do NOT touch unrelated files
 - Do NOT use `git stash`
 """)

@@ -492,6 +492,13 @@ def main():
                         help="Total number of shards for parallel CI")
     args = parser.parse_args()
 
+    # --rerun implies --quick: running all repos is never useful and takes 30+ min.
+    # The --quick flag filters to repos with baseline activity, which is always
+    # what you want. Keep --quick as an explicit flag for backwards compat but
+    # auto-enable it whenever --rerun is set.
+    if args.rerun:
+        args.quick = True
+
     # Load corpus results
     if args.input:
         input_path = args.input
