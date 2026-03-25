@@ -28,23 +28,4 @@ RSpec.describe 'test' do
   it 'allows block with multiple extra params' do
     allow(Dir).to receive(:chdir) { |_, &b| b.call }
   end
-
-  # Safe navigation on block param (block&.call) is NOT flagged by RuboCop.
-  # RuboCop's pattern `(send (lvar %) :call ...)` matches `send` nodes only,
-  # not `csend` (safe navigation). In Prism, `block&.call` has a call_operator.
-  it 'allows block&.call with safe navigation' do
-    allow(obj).to receive(:method) do |&block|
-      block&.call(value)
-    end
-  end
-
-  it 'allows block&.call inline with safe navigation' do
-    allow(obj).to receive(:method) { |&block| block&.call }
-  end
-
-  it 'allows block&.call chained with and_return' do
-    allow(Foo).to receive(:find_item) do |&block|
-      block&.call(tokenized_version)
-    end.and_return([tokenized_version, uri])
-  end
 end

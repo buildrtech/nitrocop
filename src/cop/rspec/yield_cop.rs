@@ -27,14 +27,6 @@ use crate::parse::source::SourceFile;
 /// so `receive(:foo).with(bar)` becomes an argument to `.to`. The argument-checking code
 /// only looked at the top-level argument name (which was `with`, not `receive`). Fixed by
 /// recursively walking the argument's receiver chain via `call_chain_includes_receive_shallow`.
-///
-/// ## Corpus investigation (2026-03-25)
-///
-/// FP=4: All from `block&.call` (safe navigation) patterns — e.g.,
-/// `receive(:method) { |&block| block&.call }` or `receive(:find_item) do |&block| block&.call(v) end`.
-/// RuboCop's pattern `(send (lvar %) :call ...)` matches `send` nodes only, not `csend`
-/// (safe navigation). In Prism, `block&.call` has a `call_operator_loc` of `&.`.
-/// Fixed by checking `call_operator_loc` on the statement call node and skipping `&.` operators.
 pub struct Yield;
 
 /// Flags `receive(:method) { |&block| block.call }` — should use `.and_yield` instead.
@@ -138,9 +130,7 @@ impl Cop for Yield {
             return;
         }
 
-        // Every statement must be `block.call` or `block.call(args)` (regular dot-send).
-        // Safe navigation (`block&.call`) is NOT flagged — RuboCop's pattern `(send (lvar %) :call ...)`
-        // matches only `send` nodes, not `csend` (safe navigation).
+        // Every statement must be `block.call` or `block.call(args)`
         for stmt in &stmts {
             let stmt_call = match stmt.as_call_node() {
                 Some(c) => c,
@@ -149,14 +139,6 @@ impl Cop for Yield {
 
             if stmt_call.name().as_slice() != b"call" {
                 return;
-            }
-
-            // Reject safe navigation: block&.call is a different pattern than block.call
-            if let Some(op_loc) = stmt_call.call_operator_loc() {
-                let op = &source.as_bytes()[op_loc.start_offset()..op_loc.end_offset()];
-                if op == b"&." {
-                    return;
-                }
             }
 
             // Receiver must be the block parameter
