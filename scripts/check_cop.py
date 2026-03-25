@@ -519,29 +519,20 @@ def run_nitrocop_per_repo(
 
     total = len(repos)
 
-    # Batch repos into groups for fewer nitrocop process invocations.
-    # Each batch runs one nitrocop process scanning ~50 repos at once,
-    # eliminating per-repo startup overhead (~10ms × 1291 = ~13s saved,
-    # plus reduced process scheduling overhead).
-    BATCH_SIZE = 50
-    repo_strs = [str(r) for r in repos]
-    batches = [
-        (cop_name, repo_strs[i:i + BATCH_SIZE])
-        for i in range(0, len(repo_strs), BATCH_SIZE)
-    ]
+    work = [(cop_name, str(r)) for r in repos]
 
-    workers = min(os.cpu_count() or 4, 8)
+    workers = min(os.cpu_count() or 4, 16)
     counts: dict[str, int] = {}
     done = 0
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_run_batch, b): b for b in batches}
+        futures = {pool.submit(_run_one_repo, w): w for w in work}
         for future in as_completed(futures):
-            batch_counts = future.result()
-            counts.update(batch_counts)
-            done += len(batch_counts)
-            if done % 50 < BATCH_SIZE:
-                print(f"  [{done}/{total}] ...", file=sys.stderr)
+            repo_id, count = future.result()
+            counts[repo_id] = count
+            done += 1
+            if done % 50 == 0:
+                print(f"  [{done}/{total}] {repo_id}...", file=sys.stderr)
 
     # Fill in 0 for skipped repos
     if relevant_repos is not None:
