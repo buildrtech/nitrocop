@@ -74,6 +74,17 @@ use crate::parse::source::SourceFile;
 /// **Fixes applied:**
 /// - Check `call.call_operator_loc()` for `&.` and skip safe navigation calls
 /// - Check `call.block().is_some()` and skip calls with blocks
+///
+/// ## Investigation findings (2026-03-25)
+///
+/// **FN=1 root cause:** `call.block().is_some()` was too broad — it returned true
+/// for BlockArgumentNode (`&:sym`) which is NOT a block in Parser AST. RuboCop's
+/// `condition.send_type?` returns true for `all?(&:fulfilled?)` since the block_pass
+/// is just an argument. Only actual `{ }` / `do...end` blocks (BlockNode) should
+/// cause a skip.
+///
+/// **Fix applied:** Changed to `call.block().and_then(|b| b.as_block_node()).is_some()`
+/// to only skip actual block nodes, not block_pass arguments.
 pub struct IfWithBooleanLiteralBranches;
 
 impl Cop for IfWithBooleanLiteralBranches {
@@ -348,7 +359,8 @@ fn condition_returns_boolean(
 
         // Calls with blocks (e.g., `foo.any? { ... }`) are `block` nodes in Parser AST,
         // not `send` nodes. RuboCop's `condition.send_type?` returns false for blocks.
-        if call.block().is_some() {
+        // But block_pass (&:sym) is still a send node in Parser AST, so only skip actual blocks.
+        if call.block().and_then(|b| b.as_block_node()).is_some() {
             return false;
         }
 

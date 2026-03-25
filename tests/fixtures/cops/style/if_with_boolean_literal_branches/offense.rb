@@ -46,3 +46,13 @@ end
 # and keyword with boolean-returning right operand
 (foo and bar == "baz") ? true : false
                        ^^^^^^^^^^^^^^^ Style/IfWithBooleanLiteralBranches: Remove redundant ternary operator with boolean literal branches.
+
+# Predicate method with block_pass argument (&:sym) — should be flagged
+# In Prism, &:sym is a BlockArgumentNode, NOT a BlockNode.
+# RuboCop treats `all?(&:fulfilled?)` as a send node (predicate method).
+if futures.all?(&:fulfilled?)
+^^ Style/IfWithBooleanLiteralBranches: Remove redundant `if` with boolean literal branches.
+  true
+else
+  false
+end
