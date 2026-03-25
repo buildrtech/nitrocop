@@ -237,4 +237,51 @@ mod tests {
         let corrected = cs.apply(input);
         assert_eq!(corrected, b"x = <<-\"SQL\"\n  foo\nSQL\n");
     }
+
+    #[test]
+    fn heredoc_inside_string_interpolation() {
+        // Heredocs used inside string interpolation like:
+        //   "#{<<-"begin;"}\n#{<<-'end;'}"
+        // Should still be detected as case offenses.
+        let input = "x = \"#{<<-\"begin;\"}\\n#{<<-'end;'}\"\nbegin;\n  something\nend;\n";
+        let diags = crate::testutil::run_cop_full(&HeredocDelimiterCase, input.as_bytes());
+        assert!(
+            diags.len() >= 2,
+            "should flag both 'begin;' and 'end;' heredoc delimiters, got {}",
+            diags.len()
+        );
+    }
+
+    #[test]
+    fn heredoc_inside_interpolation_exact_corpus_pattern() {
+        // Exact pattern from ruby/logger corpus: heredoc with ; in delimiter
+        let input = concat!(
+            "stderr = run_children(2, [logfile], \"#{<<-\"begin;\"}\\n#{<<-'end;'}\")\n",
+            "begin;\n",
+            "  logger = Logger.new(ARGV[0], 4, 10)\n",
+            "  10.times do\n",
+            "    logger.info '0' * 15\n",
+            "  end\n",
+            "end;\n",
+        );
+        let diags = crate::testutil::run_cop_full(&HeredocDelimiterCase, input.as_bytes());
+        assert!(
+            diags.len() >= 2,
+            "should flag 'begin;' and 'end;' heredoc delimiters, got {}",
+            diags.len()
+        );
+        // RuboCop reports at the closing delimiter line:
+        // begin; is at line 2, end; is at line 7
+        let lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            lines.contains(&2),
+            "should have offense at line 2 (begin; closing), got {:?}",
+            lines
+        );
+        assert!(
+            lines.contains(&7),
+            "should have offense at line 7 (end; closing), got {:?}",
+            lines
+        );
+    }
 }
