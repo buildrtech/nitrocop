@@ -85,3 +85,8 @@ alias :"foo" :"bar"
 %s(CourierNew)
 %s(CourierNew,Italic)
 %s[bar]
+# Multi-line symbols — RuboCop does not flag these
+:"a\\
+b"
+# Symbols with \v escape — quoting IS necessary
+:" \t\n\r\v "

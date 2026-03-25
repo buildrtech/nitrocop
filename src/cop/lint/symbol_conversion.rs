@@ -346,6 +346,7 @@ fn escape_double_quoted_symbol(value: &str) -> String {
             0x0C => escaped.push_str("\\f"),
             0x07 => escaped.push_str("\\a"),
             0x08 => escaped.push_str("\\b"),
+            0x0B => escaped.push_str("\\v"),
             0x1B => escaped.push_str("\\e"),
             // Escape # before {, $, @ to prevent interpolation
             b'#' if i + 1 < bytes.len()
@@ -636,6 +637,13 @@ impl SymbolConversion {
             Some(b":\"" | b":'") => {}
             _ if is_percent_s_quote => {}
             _ => return,
+        }
+
+        // Skip multi-line symbols (source contains a literal newline between quotes).
+        // RuboCop does not flag these because they cannot be simplified without
+        // changing the visual representation.
+        if src.contains(&b'\n') {
+            return;
         }
 
         // Skip symbols that are arguments to `alias` — a symbol requiring
