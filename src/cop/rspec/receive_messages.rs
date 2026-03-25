@@ -36,14 +36,17 @@ use ruby_prism::Visit;
 /// ## Corpus investigation (2026-03-25)
 ///
 /// FP=3 from two repos: skylightio/skylight-ruby (2 FPs) and jruby/jruby-rack (1 FP).
-/// Root cause: Stubs inside explicit `begin...end` blocks were incorrectly flagged.
-/// In the parser gem AST, explicit `begin...end` creates `kwbegin` nodes, and
-/// RuboCop's `on_begin` callback does NOT fire on `kwbegin` — only on implicit
-/// `begin` nodes (block bodies, method bodies, etc.). In Prism, both cases use
-/// `StatementsNode`, so our visitor was processing `StatementsNode` inside
-/// `BeginNode` (explicit begin..end) which RuboCop skips.
-/// Fix: Override `visit_begin_node` to set a flag that skips `check_statements`
-/// for the direct `StatementsNode` body of `BeginNode`.
+///
+/// FP=2 (skylight): Stubs inside explicit `begin...end` blocks were incorrectly
+/// flagged. In the parser gem AST, explicit `begin...end` creates `kwbegin` nodes,
+/// and RuboCop's `on_begin` callback does NOT fire on `kwbegin` — only on implicit
+/// `begin` nodes (block bodies, method bodies, etc.). Fixed by overriding
+/// `visit_begin_node` to skip `check_statements` for BeginNode bodies.
+///
+/// FP=1 (jruby): Two stubs on the same line separated by `;` were flagged.
+/// RuboCop's `repeated_lines - [item.first_line]` yields an empty list when all
+/// items share the same line, causing the offense to be skipped. Fixed by checking
+/// that unique items span at least 2 distinct lines before reporting.
 pub struct ReceiveMessages;
 
 struct StubInfo {
@@ -143,6 +146,18 @@ impl<'a> ReceiveMessagesVisitor<'a> {
 
             if uniq_indices.len() < 2 {
                 // Mark all as processed so we don't re-check
+                for &idx in &group {
+                    processed[idx] = true;
+                }
+                continue;
+            }
+
+            // RuboCop's repeated_lines logic: for each item, the "repeated lines"
+            // are lines of OTHER unique items. If all unique items are on the same
+            // line, repeated_lines is empty for each, and no offense is reported.
+            let distinct_lines: std::collections::HashSet<usize> =
+                uniq_indices.iter().map(|&idx| stubs[idx].line).collect();
+            if distinct_lines.len() < 2 {
                 for &idx in &group {
                     processed[idx] = true;
                 }

@@ -76,3 +76,7 @@ begin
   allow(obj).to receive(:foo).and_return(1)
   allow(obj).to receive(:bar).and_return(2)
 end
+
+# Stubs on the same line separated by semicolons — RuboCop's repeated_lines
+# subtraction leaves an empty list when all items share the same line.
+allow(@session).to receive(:getAttribute).and_return(nil); allow(@session).to receive(:getCreationTime).and_return(1)
