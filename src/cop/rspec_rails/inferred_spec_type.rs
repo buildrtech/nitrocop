@@ -16,6 +16,22 @@ use crate::parse::source::SourceFile;
 /// FP=1: Caused by `# rubocop:disable RSpec/Rails/InferredSpecType` not being
 /// recognized as `RSpecRails/InferredSpecType`. Fixed in directive processing by
 /// normalizing 3-part cop names (e.g. `RSpec/Rails/X` -> `RSpecRails/X`).
+///
+/// ## Corpus investigation (2026-03-25)
+///
+/// Corpus oracle reported FP=13, FN=0.
+///
+/// FP=13: All 13 are `RSpec.describe type: :model do` (no described class,
+/// `type:` is the only pair). RuboCop crashes on these with NoMethodError in
+/// `remove_range`: `node.left_sibling.source_range` fails because
+/// `left_sibling` returns the method name Symbol (`:describe`) instead of an
+/// AST node when the hash is the first argument. RuboCop swallows the error
+/// and reports 0 offenses. Fixed by skipping the offense when `type:` is the
+/// only pair and there are no positional arguments before the hash.
+///
+/// Also fixed `infer_type()` falling through to hardcoded `DEFAULT_INFERENCES`
+/// when the config already has an `Inferences` key — RuboCop uses
+/// `cop_config['Inferences'] || {}` without merging defaults.
 pub struct InferredSpecType;
 
 /// Default directory-to-type inferences (matching RuboCop's defaults).
@@ -114,8 +130,9 @@ impl Cop for InferredSpecType {
         let arg_list: Vec<_> = args.arguments().iter().collect();
 
         // Find a hash argument containing `type: :something`
-        for arg in arg_list {
-            if let Some(diag) = self.check_hash_arg(source, &arg, config) {
+        for (i, arg) in arg_list.iter().enumerate() {
+            let has_positional_before = i > 0;
+            if let Some(diag) = self.check_hash_arg(source, arg, config, has_positional_before) {
                 diagnostics.push(diag);
             }
         }
@@ -128,12 +145,19 @@ impl InferredSpecType {
         source: &SourceFile,
         arg: &ruby_prism::Node<'_>,
         config: &CopConfig,
+        has_positional_before: bool,
     ) -> Option<Diagnostic> {
         if let Some(hash) = arg.as_hash_node() {
-            return self.check_pairs(source, arg, &hash.elements(), config);
+            return self.check_pairs(source, arg, &hash.elements(), config, has_positional_before);
         }
         if let Some(kw_hash) = arg.as_keyword_hash_node() {
-            return self.check_pairs(source, arg, &kw_hash.elements(), config);
+            return self.check_pairs(
+                source,
+                arg,
+                &kw_hash.elements(),
+                config,
+                has_positional_before,
+            );
         }
         None
     }
@@ -144,6 +168,7 @@ impl InferredSpecType {
         hash_arg: &ruby_prism::Node<'_>,
         pairs: &ruby_prism::NodeList<'_>,
         config: &CopConfig,
+        has_positional_before: bool,
     ) -> Option<Diagnostic> {
         for element in pairs.iter() {
             let assoc = match element.as_assoc_node() {
@@ -177,7 +202,19 @@ impl InferredSpecType {
 
             if let Some(inferred_type) = inferred {
                 if inferred_type == type_str {
-                    let loc = if self.is_only_pair(pairs) {
+                    let only_pair = self.is_only_pair(pairs);
+
+                    // RuboCop bug: when `type:` is the only pair and the hash
+                    // is the first argument (no described class), the autocorrect
+                    // crashes with NoMethodError on `left_sibling.source_range`
+                    // because `left_sibling` returns the method name Symbol
+                    // instead of an AST node. RuboCop swallows the error and
+                    // reports 0 offenses. We replicate this by skipping.
+                    if only_pair && !has_positional_before {
+                        return None;
+                    }
+
+                    let loc = if only_pair {
                         hash_arg.location()
                     } else {
                         assoc.location()
@@ -196,7 +233,9 @@ impl InferredSpecType {
     }
 
     fn infer_type(&self, file_path: &str, config: &CopConfig) -> Option<String> {
-        // Check user-configured inferences first
+        // Use config Inferences if present; only fall back to defaults when
+        // the config key is entirely absent. RuboCop uses
+        // `cop_config['Inferences'] || {}` — it never merges with defaults.
         if let Some(inferences) = config.get_string_hash("Inferences") {
             for (prefix, inferred_type) in &inferences {
                 let pattern = format!("spec/{prefix}/");
@@ -204,9 +243,10 @@ impl InferredSpecType {
                     return Some(inferred_type.clone());
                 }
             }
+            return None;
         }
 
-        // Fall back to defaults
+        // Fall back to defaults only when config doesn't have Inferences key
         for (prefix, inferred_type) in DEFAULT_INFERENCES {
             let pattern = format!("spec/{prefix}/");
             if file_path.contains(&pattern) {
@@ -254,5 +294,38 @@ mod tests {
         );
         assert_eq!(diags.len(), 1, "Expected 1 offense, got {:?}", diags);
         assert_eq!(diags[0].message, "Remove redundant spec type.");
+    }
+
+    #[test]
+    fn custom_inferences_does_not_fall_through_to_defaults() {
+        // When config has a custom Inferences hash that does NOT include "models",
+        // a file in spec/models/ with type: :model should NOT be flagged.
+        // RuboCop uses cop_config['Inferences'] || {} without merging defaults.
+        let source = b"RSpec.describe User, type: :model do\nend\n";
+        let mut inferences = serde_yml::Mapping::new();
+        inferences.insert(
+            serde_yml::Value::String("services".into()),
+            serde_yml::Value::String("service".into()),
+        );
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "Inferences".to_string(),
+            serde_yml::Value::Mapping(inferences),
+        );
+        let config = crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_internal(
+            &InferredSpecType,
+            source,
+            config,
+            "spec/models/user_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag when custom Inferences doesn't include 'models', got {:?}",
+            diags
+        );
     }
 }

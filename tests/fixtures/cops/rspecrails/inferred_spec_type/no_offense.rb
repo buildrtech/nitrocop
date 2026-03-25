@@ -14,3 +14,12 @@ end
 
 describe type: :controller do
 end
+
+# No described class, type: is the only pair — RuboCop crashes on these
+# (NoMethodError in autocorrect: left_sibling returns method name Symbol
+# instead of AST node), so no offense is reported. Match that behavior.
+RSpec.describe type: :model do
+end
+
+describe type: :model do
+end
