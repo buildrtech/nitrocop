@@ -12,7 +12,6 @@ ALLOWLISTS = {
     "agent-cop-fix": [
         "src/cop/**",
         "tests/fixtures/cops/**",
-        "bench/corpus/**",
     ],
     "repair-rust-test": [
         "src/**",
