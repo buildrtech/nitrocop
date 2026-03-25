@@ -11,6 +11,14 @@ use crate::parse::source::SourceFile;
 /// parameter forms. Zero-parameter blocks, splat-only blocks, and `_1; _2`
 /// numbered-parameter blocks all changed behavior and were falsely flagged by
 /// our old `param_count < 2` heuristic.
+///
+/// ## Corpus investigation (2026-03-25)
+///
+/// FP=1: Blocks with destructured parameters like `|(a, c)|` use a
+/// `MultiTargetNode` in Prism's requireds list (count still 1), but RuboCop's
+/// `(args (arg _))` pattern only matches simple arg nodes. Fixed by checking
+/// that the single required param is a `RequiredParameterNode`.
+///
 /// FN=1: the remaining miss was the chained `with_index` form
 /// (`receiver.each.with_index { |item| ... }` / `times.with_index { |i| ... }`),
 /// which RuboCop treats the same as `each_with_index` as long as `with_index`
@@ -119,8 +127,17 @@ fn redundant_block_signature(block: &ruby_prism::BlockNode<'_>) -> bool {
             return false;
         };
 
-        return params_node.requireds().len() == 1
-            && params_node.optionals().is_empty()
+        if params_node.requireds().len() != 1 {
+            return false;
+        }
+        // Destructured params like |(a, c)| are MultiTargetNode, not RequiredParameterNode.
+        // RuboCop only matches simple (arg _), so skip destructured params.
+        let req = params_node.requireds().iter().next().unwrap();
+        if req.as_required_parameter_node().is_none() {
+            return false;
+        }
+
+        return params_node.optionals().is_empty()
             && params_node.rest().is_none()
             && params_node.posts().is_empty()
             && params_node.keywords().is_empty()
