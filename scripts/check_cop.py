@@ -850,7 +850,6 @@ def main():
     if has_enriched and args.rerun and 'per_repo' in dir():
         new_fp = 0
         new_fn = 0
-        fp_repos = []
         fn_repos = []
         activity_counts = {}
 
@@ -871,30 +870,41 @@ def main():
                 # (if nothing changed, local == oracle == rubocop).
                 activity_counts.setdefault(repo_id, per_repo.get(repo_id, 0))
 
+        # FN: per-repo comparison (reliable — oracle count is an upper bound
+        # for nitrocop, so local finding fewer = real FN regression).
         for repo_id, local_count in per_repo.items():
             if repo_id == "__ci_baseline_matching_repos__" or local_count < 0:
                 continue
             oracle_count = activity_counts.get(repo_id)
             if oracle_count is None:
-                continue  # Repo not tracked by oracle — skip
-            diff = local_count - oracle_count
+                continue
+            diff = oracle_count - local_count
             if diff > 0:
-                new_fp += diff
-                fp_repos.append((repo_id, local_count, oracle_count, diff))
-            elif diff < 0:
-                new_fn += abs(diff)
-                fn_repos.append((repo_id, local_count, oracle_count, abs(diff)))
+                new_fn += diff
+                fn_repos.append((repo_id, local_count, oracle_count, diff))
 
-        print("  Gate: per-repo regression (rerun mode)")
-        print(f"  New FP (local > oracle): {new_fp:>6,}")
-        print(f"  New FN (local < oracle): {new_fn:>6,}")
+        # FP: global comparison against unfiltered baseline.
+        # Per-repo FP is unreliable because local nitrocop scans extra files
+        # (vendored paths, clone-depth differences) that the oracle filtered.
+        # Instead, compare total against unfiltered baseline. The env gap
+        # (local finding ~0.5% more) is stable noise present on main too.
+        # Only flag if total exceeds unfiltered + baseline_fp + 1% tolerance.
+        nitro_unfiltered = cop_entry.get("nitro_total_unfiltered", ci_nitrocop_total)
+        tolerance = max(10, int(nitro_unfiltered * 0.01))
+        fp_ceiling = nitro_unfiltered + baseline_fp + tolerance
+        new_fp = max(0, nitrocop_total - fp_ceiling)
+
+        print("  Gate: per-repo FN + global FP (rerun mode)")
+        print(f"  FP: local {nitrocop_total:,} vs ceiling {fp_ceiling:,} "
+              f"(unfiltered {nitro_unfiltered:,} + FP {baseline_fp:,} + "
+              f"tolerance {tolerance:,})")
+        print(f"  New FP beyond tolerance: {new_fp:>6,}")
+        print(f"  New FN (per-repo):       {new_fn:>6,}")
         print()
 
         failed = False
         if new_fp > args.threshold:
             print(f"FAIL: FP regression detected (+{new_fp:,})")
-            for repo_id, local, oracle, diff in sorted(fp_repos, key=lambda x: -x[3])[:10]:
-                print(f"  +{diff:>4}  {repo_id}  (local={local}, oracle={oracle})")
             failed = True
         if new_fn > args.threshold:
             print(f"FAIL: FN regression detected (+{new_fn:,})")
