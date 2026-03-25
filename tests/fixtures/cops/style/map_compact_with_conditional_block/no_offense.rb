@@ -54,3 +54,10 @@ items.filter_map do |name, spec|
 end
 # Multi-parameter with unless
 pairs.map { |a, b| a unless b.nil? }.compact
+# Ternary with nil literal — RuboCop does NOT match nil literal in else
+# (its pattern uses nil? which checks absent, not NilNode)
+ary.map { |x| x.valid? ? x : nil }.compact
+# Same pattern in block form
+ary.map do |key|
+  key.verify ? key : nil
+end.compact

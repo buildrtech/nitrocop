@@ -31,6 +31,11 @@ use crate::parse::source::SourceFile;
 /// - `filter_map` blocks used the wrong message ("Use `filter_map` instead of
 ///   `map { ... }.compact`") when the code already used `filter_map`. Fixed by
 ///   using a distinct message for the `filter_map` path.
+/// - Ternary `cond ? param : nil` was incorrectly flagged. RuboCop's pattern
+///   `{next nil?}` means "next node or absent child" — `nil?` tests Ruby nil
+///   (absent), NOT a NilNode literal. `cond ? param : nil` has a NilNode in the
+///   else branch which doesn't match `nil?`. Fixed by using `is_bare_next` only
+///   for Patterns 2/3 (param+next or next+param), not `is_next_or_nil`.
 ///
 /// The vendor RuboCop NodePattern handles these block body shapes
 /// (plus unless variants of all):
@@ -199,19 +204,21 @@ fn check_if_node(source: &SourceFile, if_node: &ruby_prism::IfNode<'_>, param_na
     let then_stmts = then_stmts.unwrap_or_default();
     let else_stmts = else_stmts.unwrap_or_default();
 
-    // Pattern 2: if cond; param; else; next/nil; end
+    // Pattern 2: if cond; param; else; next; end
+    // RuboCop's pattern `{next nil?}` means "next node or absent" — NOT nil literal.
+    // Nil literal in else (e.g., `cond ? param : nil`) does NOT match.
     if then_stmts.len() == 1
         && else_stmts.len() == 1
         && is_param_read(&then_stmts[0], param_name)
-        && is_next_or_nil(&else_stmts[0])
+        && is_bare_next(&else_stmts[0])
     {
         return true;
     }
 
-    // Pattern 3: if cond; next/nil; else; param; end
+    // Pattern 3: if cond; next; else; param; end
     if then_stmts.len() == 1
         && else_stmts.len() == 1
-        && is_next_or_nil(&then_stmts[0])
+        && is_bare_next(&then_stmts[0])
         && is_param_read(&else_stmts[0], param_name)
     {
         return true;
@@ -264,19 +271,19 @@ fn check_unless_node(
     let then_stmts = then_stmts.unwrap_or_default();
     let else_stmts = else_stmts.unwrap_or_default();
 
-    // unless cond; param; else; next/nil; end
+    // unless cond; param; else; next; end
     if then_stmts.len() == 1
         && else_stmts.len() == 1
         && is_param_read(&then_stmts[0], param_name)
-        && is_next_or_nil(&else_stmts[0])
+        && is_bare_next(&else_stmts[0])
     {
         return true;
     }
 
-    // unless cond; next/nil; else; param; end
+    // unless cond; next; else; param; end
     if then_stmts.len() == 1
         && else_stmts.len() == 1
-        && is_next_or_nil(&then_stmts[0])
+        && is_bare_next(&then_stmts[0])
         && is_param_read(&else_stmts[0], param_name)
     {
         return true;
@@ -406,11 +413,6 @@ fn is_next_nil(node: &ruby_prism::Node<'_>) -> bool {
         }
     }
     false
-}
-
-/// Check if a node is `next` (bare) or `nil` literal.
-fn is_next_or_nil(node: &ruby_prism::Node<'_>) -> bool {
-    is_bare_next(node) || is_nil_literal(node)
 }
 
 /// Check if a node is `next` (bare), `nil` literal, or `next nil`.
