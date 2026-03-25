@@ -205,3 +205,25 @@ module Lexer
   state :func_call_fix do
   end
 end
+
+# include(...) used as RHS of local variable assignment (RSpec matcher, not module inclusion)
+RSpec.describe "supplemental claims" do
+  it "logs metrics" do
+    tags = include('service:supplemental-claims', 'function:evidence submission')
+    expect(StatsD).to have_received(:increment).with(statsd, tags:).exactly(1).time
+  end
+end
+
+# include(...) used as RHS of instance variable assignment
+class Spec
+  def setup
+    @matcher = include('expected_value')
+    run_checks
+  end
+end
+
+# include(...) used as RHS of constant assignment
+module Matchers
+  INCLUSION = include('foo', 'bar')
+  run_validation
+end

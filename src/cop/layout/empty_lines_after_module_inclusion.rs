@@ -99,6 +99,26 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Corpus investigation (2026-03-23)
 ///
+/// (See below for details on the rescue/semicolon FP fix.)
+///
+/// ## Corpus investigation (2026-03-25, FP=15)
+///
+/// 15 FPs, mostly from RSpec test files where `include(...)` is an RSpec
+/// matcher used as a value expression, not a module inclusion:
+///
+/// - `tags = include('service:...')` — local variable assignment
+/// - `@matcher = include('expected')` — instance variable assignment
+/// - `INCLUSION = include('foo')` — constant assignment
+///
+/// Root cause: the visitor descended into assignment node values without
+/// marking them as a "send/value" context. In RuboCop, `include(...)` nested
+/// inside an assignment has no `right_sibling`, so `require_empty_line?(nil)`
+/// returns false. Fix: add `visit_*_variable_write_node` and
+/// `visit_constant*_write_node` overrides that set `in_block_or_send = true`
+/// for the value expression, preventing the include from being flagged.
+///
+/// ## Corpus investigation (2026-03-23, previous)
+///
 /// Corpus oracle reported FP=12. Two root causes:
 ///
 /// 1. **include/extend as last of multiple statements before rescue** (~9 FPs):
@@ -710,6 +730,58 @@ impl<'pr> Visit<'pr> for InclusionVisitor<'_> {
             self.visit(&expr);
         }
         self.visit(&node.rescue_expression());
+    }
+
+    // Assignment nodes: include/extend/prepend used as the value of an
+    // assignment is a value expression, not a module inclusion statement.
+    // In RuboCop's AST, such calls have no right_sibling (they're nested
+    // inside the assignment node), so `require_empty_line?(nil)` returns false.
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        let was = self.in_block_or_send;
+        self.in_block_or_send = true;
+        self.visit(&node.value());
+        self.in_block_or_send = was;
+    }
+
+    fn visit_instance_variable_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableWriteNode<'pr>,
+    ) {
+        let was = self.in_block_or_send;
+        self.in_block_or_send = true;
+        self.visit(&node.value());
+        self.in_block_or_send = was;
+    }
+
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'pr>) {
+        let was = self.in_block_or_send;
+        self.in_block_or_send = true;
+        self.visit(&node.value());
+        self.in_block_or_send = was;
+    }
+
+    fn visit_global_variable_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableWriteNode<'pr>,
+    ) {
+        let was = self.in_block_or_send;
+        self.in_block_or_send = true;
+        self.visit(&node.value());
+        self.in_block_or_send = was;
+    }
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        let was = self.in_block_or_send;
+        self.in_block_or_send = true;
+        self.visit(&node.value());
+        self.in_block_or_send = was;
+    }
+
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        let was = self.in_block_or_send;
+        self.in_block_or_send = true;
+        self.visit(&node.value());
+        self.in_block_or_send = was;
     }
 
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
