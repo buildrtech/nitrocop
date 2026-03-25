@@ -17,6 +17,13 @@ use crate::parse::source::SourceFile;
 /// expected=3,134, actual=3,162, CI baseline=3,127, raw excess=28,
 /// missing=0, file-drop noise=103. The rerun passes against the CI baseline
 /// once that existing parser-crash noise is applied.
+///
+/// ## FP fix: character literal `?\ ,` (2026-03-25)
+///
+/// All 5 FPs were from Ruby character literals using escaped space (`?\ `).
+/// In `?\ ,`, the space is part of the character literal, not whitespace
+/// before the comma. Fixed by checking for `?\` immediately before the
+/// whitespace run and skipping those offenses.
 pub struct SpaceBeforeComma;
 
 fn whitespace_before_comma_start(bytes: &[u8], comma_offset: usize) -> Option<usize> {
@@ -52,6 +59,11 @@ impl Cop for SpaceBeforeComma {
                 let Some(start) = whitespace_before_comma_start(bytes, i) else {
                     continue;
                 };
+
+                // Skip Ruby character literal for escaped space: ?\ ,
+                if start >= 2 && bytes[start - 1] == b'\\' && bytes[start - 2] == b'?' {
+                    continue;
+                }
 
                 let (line, column) = source.offset_to_line_col(start);
                 let mut diag = self.diagnostic(
