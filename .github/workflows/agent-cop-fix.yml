@@ -128,18 +128,39 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
         run: |
+          HEAD_SHA=$(git rev-parse HEAD)
           MAX_WAIT=600  # 10 minutes
           INTERVAL=30
           ELAPSED=0
           while [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
-            CONCLUSION=$(gh run list --workflow=checks.yml --branch=main \
+            # Get the latest checks.yml run for main
+            RUN_JSON=$(gh run list --workflow=checks.yml --branch=main \
               --repo "${{ github.repository }}" --limit 1 \
-              --json conclusion,status -q '.[0].conclusion // .[0].status // "unknown"')
-            if [ "$CONCLUSION" = "success" ]; then
-              echo "::notice::Main Checks is green — proceeding"
+              --json headSha,conclusion,status -q '.[0] // empty')
+
+            if [ -z "$RUN_JSON" ]; then
+              echo "::notice::No checks.yml runs found — proceeding"
               exit 0
             fi
-            echo "Main Checks status: $CONCLUSION — waiting ${INTERVAL}s (${ELAPSED}s/${MAX_WAIT}s)"
+
+            RUN_SHA=$(echo "$RUN_JSON" | jq -r '.headSha // empty')
+            CONCLUSION=$(echo "$RUN_JSON" | jq -r '.conclusion // .status // "unknown"')
+
+            # If HEAD is a [skip ci] commit, checks.yml won't run for it.
+            # Accept success from the most recent run that did execute.
+            if [ "$CONCLUSION" = "success" ]; then
+              echo "::notice::Main Checks is green (${RUN_SHA:0:7}) — proceeding"
+              exit 0
+            fi
+
+            # If the latest run is for an older SHA (HEAD is [skip ci]),
+            # and it's not in_progress/queued, don't wait for it to change.
+            if [ "$RUN_SHA" != "$HEAD_SHA" ] && [ "$CONCLUSION" != "in_progress" ] && [ "$CONCLUSION" != "queued" ]; then
+              echo "::warning::Latest checks (${RUN_SHA:0:7}) were $CONCLUSION but HEAD (${HEAD_SHA:0:7}) has no checks — proceeding"
+              exit 0
+            fi
+
+            echo "Main Checks status: $CONCLUSION (${RUN_SHA:0:7}) — waiting ${INTERVAL}s (${ELAPSED}s/${MAX_WAIT}s)"
             sleep "$INTERVAL"
             ELAPSED=$((ELAPSED + INTERVAL))
           done
