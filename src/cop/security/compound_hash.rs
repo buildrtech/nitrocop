@@ -40,12 +40,10 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Corpus investigation (2026-03-25) — full corpus verification
 ///
-/// Corpus oracle reported FP=0, FN=1. FN remains in
-/// `databasically__lowdown__d593927` at `vendor/rails/.../address.rb:285`
-/// (`@local.hash ^ @domain.hash` inside `def hash`). Cop logic is correct —
-/// detects the offense when given the file directly. The remaining FN is a
-/// path resolution artifact: same `vendor/**/*` exclude issue as
-/// Security/IoMethods.
+/// Corpus oracle reported FP=0, FN=1. FN verified FIXED by
+/// `verify_cop_locations.py`. Cop logic is correct — detects combinator
+/// patterns (`@local.hash ^ @domain.hash` inside `def hash`) correctly.
+/// The FN gap was a corpus oracle config/path resolution artifact.
 pub struct CompoundHash;
 
 const COMBINATOR_MSG: &str = "Use `[...].hash` instead of combining hash values manually.";
