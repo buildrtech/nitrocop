@@ -266,9 +266,23 @@ def test_build_start_here_section_empty_when_no_corpus_examples():
 
 
 def test_choose_issue_state_preserves_blocked_without_open_pr():
-    issue = {"labels": [{"name": "state:blocked"}]}
+    issue = {"labels": [{"name": "state:blocked"}],
+             "body": "<!-- nitrocop-cop-tracker: cop=X/Y fp=0 fn=4 total=4 matches=100 difficulty=simple -->"}
+    # Same numbers — stays blocked
+    assert gct.choose_issue_state(issue, has_open_pr=False, entry={"fp": 0, "fn": 4}) == "state:blocked"
+    # Open PR overrides blocked
+    assert gct.choose_issue_state(issue, has_open_pr=True, entry={"fp": 0, "fn": 4}) == "state:pr-open"
+    # No entry — stays blocked (backwards compat)
     assert gct.choose_issue_state(issue, has_open_pr=False) == "state:blocked"
-    assert gct.choose_issue_state(issue, has_open_pr=True) == "state:pr-open"
+
+
+def test_choose_issue_state_unblocks_when_numbers_change():
+    issue = {"labels": [{"name": "state:blocked"}],
+             "body": "<!-- nitrocop-cop-tracker: cop=X/Y fp=0 fn=4 total=4 matches=100 difficulty=simple -->"}
+    # FN decreased — unblock
+    assert gct.choose_issue_state(issue, has_open_pr=False, entry={"fp": 0, "fn": 2}) == "state:backlog"
+    # FP changed — unblock
+    assert gct.choose_issue_state(issue, has_open_pr=False, entry={"fp": 1, "fn": 4}) == "state:backlog"
 
 
 def test_sorted_dispatch_candidates_orders_by_tier_then_total_then_cop():

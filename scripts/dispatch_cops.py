@@ -1496,10 +1496,22 @@ def issue_label_names(issue: dict) -> set[str]:
     return {label["name"] for label in issue.get("labels", [])}
 
 
-def choose_issue_state(existing_issue: dict | None, has_open_pr: bool) -> str:
+def choose_issue_state(
+    existing_issue: dict | None,
+    has_open_pr: bool,
+    entry: dict | None = None,
+) -> str:
     if has_open_pr:
         return STATE_PR_OPEN
     if existing_issue and STATE_BLOCKED in issue_label_names(existing_issue):
+        # Unblock if corpus numbers changed — the situation may have improved
+        # (e.g., another cop fix reduced the FN, or a config change resolved it).
+        if entry is not None:
+            old = parse_marker_fields(existing_issue.get("body", ""), TRACKER_RE)
+            old_fp, old_fn = old.get("fp"), old.get("fn")
+            new_fp, new_fn = str(entry.get("fp", 0)), str(entry.get("fn", 0))
+            if (old_fp, old_fn) != (new_fp, new_fn):
+                return STATE_BACKLOG
         return STATE_BLOCKED
     return STATE_BACKLOG
 
@@ -1860,7 +1872,7 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
         difficulty = classify_issue_difficulty(entry, recommendation)
         open_pr = open_prs_by_cop.get(cop)
         existing_issue = issues_by_cop.get(cop)
-        state_label = choose_issue_state(existing_issue, open_pr is not None)
+        state_label = choose_issue_state(existing_issue, open_pr is not None, entry)
         labels = [state_label, DIFFICULTY_LABELS[difficulty]]
         title = make_issue_title(cop)
         body = render_issue_body(
