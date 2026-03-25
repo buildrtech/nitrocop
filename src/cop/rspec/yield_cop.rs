@@ -27,6 +27,14 @@ use crate::parse::source::SourceFile;
 /// so `receive(:foo).with(bar)` becomes an argument to `.to`. The argument-checking code
 /// only looked at the top-level argument name (which was `with`, not `receive`). Fixed by
 /// recursively walking the argument's receiver chain via `call_chain_includes_receive_shallow`.
+///
+/// ## Corpus investigation (2026-03-25)
+///
+/// Corpus oracle reported FP=4, FN=0.
+///
+/// FP=4: All from `block&.call` (safe navigation). RuboCop only matches `block.call`
+/// (regular dot call), not `block&.call`. Fixed by checking `call_operator_loc` for `&.`
+/// and skipping safe navigation calls.
 pub struct Yield;
 
 /// Flags `receive(:method) { |&block| block.call }` — should use `.and_yield` instead.
@@ -130,7 +138,7 @@ impl Cop for Yield {
             return;
         }
 
-        // Every statement must be `block.call` or `block.call(args)`
+        // Every statement must be `block.call` or `block.call(args)` (regular dot, not safe navigation)
         for stmt in &stmts {
             let stmt_call = match stmt.as_call_node() {
                 Some(c) => c,
@@ -138,6 +146,14 @@ impl Cop for Yield {
             };
 
             if stmt_call.name().as_slice() != b"call" {
+                return;
+            }
+
+            // RuboCop only matches `block.call` (regular dot), not `block&.call` (safe navigation).
+            if stmt_call
+                .call_operator_loc()
+                .is_some_and(|loc| loc.as_slice() == b"&.")
+            {
                 return;
             }
 

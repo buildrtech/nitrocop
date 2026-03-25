@@ -28,4 +28,15 @@ RSpec.describe 'test' do
   it 'allows block with multiple extra params' do
     allow(Dir).to receive(:chdir) { |_, &b| b.call }
   end
+
+  # RuboCop only flags block.call (regular dot), not block&.call (safe navigation)
+  it 'allows safe navigation block call' do
+    allow(obj).to receive(:find_item) do |&block|
+      block&.call(value)
+    end
+  end
+
+  it 'allows safe navigation inline' do
+    allow(obj).to receive(:save_state) { |&block| block&.call }
+  end
 end
