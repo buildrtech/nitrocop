@@ -3,6 +3,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for comparison chains like `x < y < z`.
+///
+/// ## FP fix (2026-03): Skip set operations as center value
+/// RuboCop skips flagging when the center value (RHS of the inner comparison)
+/// is a set operation (`&`, `|`, `^`). Due to Ruby operator precedence,
+/// `x >= y & z < w` parses as `(x >= (y & z)) < w`. The center value `(y & z)`
+/// uses set operation `&`, so RuboCop does not flag it.
 pub struct MultipleComparison;
 
 impl Cop for MultipleComparison {
@@ -55,6 +62,21 @@ impl Cop for MultipleComparison {
             return;
         }
 
+        // Check if the center value (RHS of inner comparison) is a set operation.
+        // Due to Ruby operator precedence, `x >= y & z < w` parses as
+        // `(x >= (y & z)) < w`. RuboCop skips these cases.
+        if let Some(inner_args) = inner_call.arguments() {
+            let args = inner_args.arguments();
+            if args.len() == 1 {
+                if let Some(center_call) = args.iter().next().and_then(|a| a.as_call_node()) {
+                    let center_method = center_call.name().as_slice();
+                    if is_set_operation(center_method) {
+                        return;
+                    }
+                }
+            }
+        }
+
         let loc = outer_call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(
@@ -68,6 +90,10 @@ impl Cop for MultipleComparison {
 
 fn is_comparison(method: &[u8]) -> bool {
     matches!(method, b"<" | b">" | b"<=" | b">=")
+}
+
+fn is_set_operation(method: &[u8]) -> bool {
+    matches!(method, b"&" | b"|" | b"^")
 }
 
 #[cfg(test)]
