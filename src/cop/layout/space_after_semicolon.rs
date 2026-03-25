@@ -18,6 +18,17 @@ use crate::parse::source::SourceFile;
 /// `ging` plus one baseline FP each in `natalie` and `facets`. Remaining local
 /// noise is dominated by `jruby` file drops and one generated `.rbnext` file in
 /// `ruby-next` that CI did not count.
+///
+/// ## Corpus investigation (2026-03-25)
+///
+/// Corpus oracle reported FP=13, FN=0.
+///
+/// FP=13 root cause: semicolons followed by backslash line continuation (`;\`)
+/// were flagged as missing a space after the semicolon. RuboCop does not flag
+/// these because the backslash is a line continuation character, not ordinary
+/// code following the semicolon.
+///
+/// Fix: skip semicolons where the next byte is `\`.
 pub struct SpaceAfterSemicolon;
 
 impl Cop for SpaceAfterSemicolon {
@@ -47,6 +58,12 @@ impl Cop for SpaceAfterSemicolon {
 
                 let next = bytes.get(i + 1).copied();
                 if matches!(next, Some(b';')) {
+                    continue;
+                }
+
+                // Backslash after semicolon is a line continuation, not a
+                // missing space. RuboCop does not flag these.
+                if matches!(next, Some(b'\\')) {
                     continue;
                 }
 

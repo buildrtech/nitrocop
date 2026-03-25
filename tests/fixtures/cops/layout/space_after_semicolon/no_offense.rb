@@ -10,3 +10,12 @@ old_value, $; = $;, ","
 def split_on_default(pattern = $;, *limit)
   text.split(pattern, *limit)
 end
+
+# Semicolons followed by backslash line continuation
+if condition ;\
+  do_something
+end
+
+begin ;\
+  replace_output = @output_stream.equal?($stdout) ;\
+end
