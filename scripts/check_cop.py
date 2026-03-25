@@ -278,6 +278,53 @@ def _run_one_repo(args: tuple[str, str]) -> tuple[str, int]:
         return (repo_id, -1)
 
 
+def _run_batch(args: tuple[str, list[str]]) -> dict[str, int]:
+    """Run nitrocop on a batch of repos in one process call.
+
+    Passes multiple repo paths to a single nitrocop invocation and
+    groups offenses by repo from the file paths. Much faster than
+    one process per repo due to eliminated startup overhead.
+    """
+    cop_name, repo_dirs = args
+    symlink_dir = _ensure_symlink_dir()
+    links = [str(symlink_dir / "repos" / Path(d).name) for d in repo_dirs]
+    repo_ids = [Path(d).name for d in repo_dirs]
+
+    cmd = [
+        str(NITROCOP_BIN), "--only", cop_name, "--preview",
+        "--format", "json", "--no-cache",
+        "--config", str(BASELINE_CONFIG),
+    ] + links
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300,
+            cwd=str(symlink_dir), env=corpus_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return {rid: -1 for rid in repo_ids}
+
+    if result.returncode not in (0, 1):
+        return {rid: -1 for rid in repo_ids}
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {rid: -1 for rid in repo_ids}
+
+    # Group offenses by repo — path starts with "repos/<repo_id>/..."
+    counts: dict[str, set[tuple]] = {rid: set() for rid in repo_ids}
+    for o in data.get("offenses", []):
+        path = o.get("path", "")
+        # Path format: repos/<repo_id>/path/to/file.rb
+        parts = path.split("/", 2)
+        if len(parts) >= 2 and parts[0] == "repos":
+            repo_id = parts[1]
+            if repo_id in counts:
+                key = (path, o.get("line", 0), o.get("cop_name", ""))
+                counts[repo_id].add(key)
+    return {rid: len(offenses) for rid, offenses in counts.items()}
+
+
 def load_manifest() -> dict[str, dict]:
     """Load repo info from manifest.jsonl, keyed by repo ID."""
     repos = {}
@@ -471,20 +518,30 @@ def run_nitrocop_per_repo(
               f"(skipping {skipped} with zero baseline activity)", file=sys.stderr)
 
     total = len(repos)
-    work = [(cop_name, str(r)) for r in repos]
 
-    workers = min(os.cpu_count() or 4, 16)
-    counts = {}
+    # Batch repos into groups for fewer nitrocop process invocations.
+    # Each batch runs one nitrocop process scanning ~50 repos at once,
+    # eliminating per-repo startup overhead (~10ms × 1291 = ~13s saved,
+    # plus reduced process scheduling overhead).
+    BATCH_SIZE = 50
+    repo_strs = [str(r) for r in repos]
+    batches = [
+        (cop_name, repo_strs[i:i + BATCH_SIZE])
+        for i in range(0, len(repo_strs), BATCH_SIZE)
+    ]
+
+    workers = min(os.cpu_count() or 4, 8)
+    counts: dict[str, int] = {}
     done = 0
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_run_one_repo, w): w for w in work}
+        futures = {pool.submit(_run_batch, b): b for b in batches}
         for future in as_completed(futures):
-            repo_id, count = future.result()
-            counts[repo_id] = count
-            done += 1
-            if done % 50 == 0:
-                print(f"  [{done}/{total}] {repo_id}...", file=sys.stderr)
+            batch_counts = future.result()
+            counts.update(batch_counts)
+            done += len(batch_counts)
+            if done % 50 < BATCH_SIZE:
+                print(f"  [{done}/{total}] ...", file=sys.stderr)
 
     # Fill in 0 for skipped repos
     if relevant_repos is not None:
