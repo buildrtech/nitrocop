@@ -757,59 +757,74 @@ def main():
         new_fn = 0
         fp_repos = []
         fn_repos = []
-        activity_counts = {}
-
-        # Build per-repo RuboCop counts as the ground truth target.
-        # FP = local > rubocop (nitrocop flags code RuboCop accepts)
-        # FN = local < rubocop (nitrocop misses code RuboCop flags)
-        # This way, a cop fix that moves nitrocop closer to RuboCop is always
-        # an improvement, never a regression.
+        # Build per-repo baseline counts from the oracle.
+        # oracle_nitrocop = matches + FP (what the oracle's nitrocop found)
+        # oracle_rubocop = matches + FN (what rubocop found)
+        # A regression is when the PR's nitrocop diverges MORE from rubocop
+        # than the oracle's nitrocop already did. Pre-existing FP/FN are not
+        # regressions — they were already there on main.
+        oracle_nitrocop_counts = {}
+        oracle_rubocop_counts = {}
         for repo_id, cops in by_repo_cop.items():
             if args.cop in cops:
                 entry = cops[args.cop]
-                # RuboCop count = matches + FN (what RuboCop found)
-                activity_counts[repo_id] = entry.get("matches", 0) + entry.get("fn", 0)
+                matches = entry.get("matches", 0)
+                fp = entry.get("fp", 0)
+                fn = entry.get("fn", 0)
+                oracle_nitrocop_counts[repo_id] = matches + fp
+                oracle_rubocop_counts[repo_id] = matches + fn
 
-        # For repos with oracle activity but not in by_repo_cop divergence,
-        # rubocop == nitrocop (perfect match). Use local count as proxy.
+        # For repos with oracle activity but no divergence, oracle nitrocop
+        # matched rubocop exactly. Use local count as proxy for both.
         for repo_id in data.get("cop_activity_repos", {}).get(args.cop, []):
-            if repo_id not in activity_counts:
-                activity_counts.setdefault(repo_id, per_repo.get(repo_id, 0))
+            if repo_id not in oracle_nitrocop_counts:
+                local = per_repo.get(repo_id, 0)
+                oracle_nitrocop_counts[repo_id] = local
+                oracle_rubocop_counts[repo_id] = local
 
         for repo_id, local_count in per_repo.items():
             if repo_id == "__ci_baseline_matching_repos__" or local_count < 0:
                 continue
-            oracle_count = activity_counts.get(repo_id)
-            if oracle_count is None:
+            baseline_nc = oracle_nitrocop_counts.get(repo_id)
+            baseline_rc = oracle_rubocop_counts.get(repo_id)
+            if baseline_nc is None or baseline_rc is None:
                 continue
-            diff = local_count - oracle_count
-            if diff > 0:
-                new_fp += diff
-                fp_repos.append((repo_id, local_count, oracle_count, diff))
-            elif diff < 0:
-                new_fn += abs(diff)
-                fn_repos.append((repo_id, local_count, oracle_count, abs(diff)))
+            # How far was the oracle's nitrocop from rubocop?
+            baseline_fp = max(0, baseline_nc - baseline_rc)
+            baseline_fn = max(0, baseline_rc - baseline_nc)
+            # How far is the local nitrocop from rubocop?
+            local_fp = max(0, local_count - baseline_rc)
+            local_fn = max(0, baseline_rc - local_count)
+            # Only flag if the PR made things WORSE
+            fp_increase = max(0, local_fp - baseline_fp)
+            fn_increase = max(0, local_fn - baseline_fn)
+            if fp_increase > 0:
+                new_fp += fp_increase
+                fp_repos.append((repo_id, local_count, baseline_nc, baseline_rc, fp_increase))
+            if fn_increase > 0:
+                new_fn += fn_increase
+                fn_repos.append((repo_id, local_count, baseline_nc, baseline_rc, fn_increase))
 
-        print("  Gate: per-repo vs RuboCop (ground truth)")
-        print(f"  New FP (local > rubocop): {new_fp:>6,}")
-        print(f"  New FN (local < rubocop): {new_fn:>6,}")
+        print("  Gate: per-repo regression vs oracle baseline")
+        print(f"  New FP (worse than baseline): {new_fp:>6,}")
+        print(f"  New FN (worse than baseline): {new_fn:>6,}")
         print()
 
         failed = False
         if new_fp > args.threshold:
             print(f"FAIL: FP regression detected (+{new_fp:,})")
-            for repo_id, local, oracle, diff in sorted(fp_repos, key=lambda x: -x[3])[:10]:
-                print(f"  +{diff:>4}  {repo_id}  (local={local}, oracle={oracle})")
+            for repo_id, local, bl_nc, bl_rc, diff in sorted(fp_repos, key=lambda x: -x[4])[:10]:
+                print(f"  +{diff:>4}  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
             failed = True
         if new_fn > args.threshold:
             print(f"FAIL: FN regression detected (+{new_fn:,})")
-            for repo_id, local, oracle, diff in sorted(fn_repos, key=lambda x: -x[3])[:10]:
-                print(f"  +{diff:>4}  {repo_id}  (local={local}, oracle={oracle})")
+            for repo_id, local, bl_nc, bl_rc, diff in sorted(fn_repos, key=lambda x: -x[4])[:10]:
+                print(f"  +{diff:>4}  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
             failed = True
 
         if failed:
             sys.exit(1)
-        print("PASS: no per-repo regressions detected")
+        print("PASS: no per-repo regressions vs baseline")
         sys.exit(0)
 
     # Per-repo gate should have handled this — if we reach here, something is wrong
