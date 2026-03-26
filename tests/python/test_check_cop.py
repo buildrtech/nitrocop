@@ -154,37 +154,96 @@ def test_rerun_local_per_repo_always_uses_per_repo_mode():
         check_cop.run_nitrocop_per_repo = original_run_nitrocop_per_repo
 
 
-def test_per_repo_gate_compares_against_rubocop_not_old_nitrocop():
-    """The per-repo gate should compare local nitrocop vs RuboCop count (matches+fn),
-    not vs old nitrocop count (matches+fp). A cop fix that moves closer to RuboCop
-    should pass, even if it changes the nitrocop count."""
+def _compute_gate(by_repo_cop, cop, per_repo):
+    """Replicate the gate logic from check_cop.py for testing."""
+    oracle_nitrocop_counts = {}
+    oracle_rubocop_counts = {}
+    for repo_id, cops in by_repo_cop.items():
+        if cop in cops:
+            entry = cops[cop]
+            matches = entry.get("matches", 0)
+            fp = entry.get("fp", 0)
+            fn = entry.get("fn", 0)
+            oracle_nitrocop_counts[repo_id] = matches + fp
+            oracle_rubocop_counts[repo_id] = matches + fn
+
+    new_fp, new_fn = 0, 0
+    for repo_id, local_count in per_repo.items():
+        bl_nc = oracle_nitrocop_counts.get(repo_id)
+        bl_rc = oracle_rubocop_counts.get(repo_id)
+        if bl_nc is None or bl_rc is None:
+            continue
+        baseline_fp = max(0, bl_nc - bl_rc)
+        baseline_fn = max(0, bl_rc - bl_nc)
+        local_fp = max(0, local_count - bl_rc)
+        local_fn = max(0, bl_rc - local_count)
+        new_fp += max(0, local_fp - baseline_fp)
+        new_fn += max(0, local_fn - baseline_fn)
+    return new_fp, new_fn
+
+
+def test_gate_preexisting_fn_does_not_regress():
+    """Pre-existing FN (already on main) should not be flagged."""
     by_repo_cop = {
         "repo-a": {
-            "Style/Foo": {"matches": 10, "fp": 2, "fn": 3, "nitro_unfiltered": 12},
-            # Old nitrocop: 12 (matches+fp), RuboCop: 13 (matches+fn)
+            # Oracle: nitrocop=12 (10+2fp), rubocop=13 (10+3fn) → baseline FN=1
+            "Style/Foo": {"matches": 10, "fp": 2, "fn": 3},
         },
     }
-    activity_counts = {}
-    for repo_id, cops in by_repo_cop.items():
-        if "Style/Foo" in cops:
-            entry = cops["Style/Foo"]
-            # Should use matches + fn (RuboCop = 13), not matches + fp (old nitrocop = 12)
-            activity_counts[repo_id] = entry.get("matches", 0) + entry.get("fn", 0)
+    # Local produces same as oracle nitrocop → no regression
+    fp, fn = _compute_gate(by_repo_cop, "Style/Foo", {"repo-a": 12})
+    assert fp == 0 and fn == 0
 
-    # Case 1: local=13 matches RuboCop exactly → no regression
-    local_count = 13
-    diff = local_count - activity_counts["repo-a"]
-    assert diff == 0, f"Expected 0 diff, got {diff} (local={local_count}, rubocop={activity_counts['repo-a']})"
 
-    # Case 2: local=12 (old nitrocop count) → FN=1 vs RuboCop
-    local_count = 12
-    diff = local_count - activity_counts["repo-a"]
-    assert diff == -1, f"Expected -1 diff (FN), got {diff}"
+def test_gate_improvement_passes():
+    """Moving closer to rubocop is not a regression."""
+    by_repo_cop = {
+        "repo-a": {
+            # Oracle: nitrocop=12, rubocop=13 → baseline FN=1
+            "Style/Foo": {"matches": 10, "fp": 2, "fn": 3},
+        },
+    }
+    # Local=13 matches rubocop exactly (fixed the FN)
+    fp, fn = _compute_gate(by_repo_cop, "Style/Foo", {"repo-a": 13})
+    assert fp == 0 and fn == 0
 
-    # Case 3: local=14 → FP=1 vs RuboCop
-    local_count = 14
-    diff = local_count - activity_counts["repo-a"]
-    assert diff == 1, f"Expected +1 diff (FP), got {diff}"
+
+def test_gate_new_fp_detected():
+    """New FP beyond baseline is flagged."""
+    by_repo_cop = {
+        "repo-a": {
+            # Oracle: nitrocop=12, rubocop=13 → baseline FP=0
+            "Style/Foo": {"matches": 10, "fp": 2, "fn": 3},
+        },
+    }
+    # Local=15 → 2 more FP than rubocop, baseline had 0 excess over rubocop
+    # Wait: baseline_fp = max(0, 12-13) = 0, local_fp = max(0, 15-13) = 2
+    fp, fn = _compute_gate(by_repo_cop, "Style/Foo", {"repo-a": 15})
+    assert fp == 2 and fn == 0
+
+
+def test_gate_new_fn_detected():
+    """New FN beyond baseline is flagged."""
+    by_repo_cop = {
+        "repo-a": {
+            # Oracle: nitrocop=12, rubocop=13 → baseline FN=1
+            "Style/Foo": {"matches": 10, "fp": 2, "fn": 3},
+        },
+    }
+    # Local=9 → FN=4 vs rubocop, baseline had FN=1, so +3 new FN
+    fp, fn = _compute_gate(by_repo_cop, "Style/Foo", {"repo-a": 9})
+    assert fp == 0 and fn == 3
+
+
+def test_gate_exact_match_no_regression():
+    """Cop with zero baseline divergence — same count passes."""
+    by_repo_cop = {
+        "repo-a": {
+            "Style/Foo": {"matches": 50, "fp": 0, "fn": 0},
+        },
+    }
+    fp, fn = _compute_gate(by_repo_cop, "Style/Foo", {"repo-a": 50})
+    assert fp == 0 and fn == 0
 
 
 if __name__ == "__main__":
