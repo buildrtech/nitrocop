@@ -463,6 +463,15 @@ jobs:
               print(f'Consolidated {count} rubocop results')
           PYEOF
 
+      - name: Free disk after consolidation
+        run: |
+          # Remove raw per-shard rubocop results — they've been copied into
+          # rubocop-cache/ with SHA-indexed names. Keeps all-results/results/nitrocop
+          # and all-results/results/context intact for the diff step.
+          rm -rf all-results/results/rubocop
+          echo "Freed rubocop shard results"
+          df -h / | tail -1
+
       - name: Compute rubocop cache key
         id: rubocop-cache-key
         run: |
