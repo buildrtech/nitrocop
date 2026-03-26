@@ -470,6 +470,23 @@ scripts/list_include_gated_cops.py --json | \
   done
 ```
 
+## Implementation: Parallel Include-gated comparison (2026-03-26)
+
+The recommended parallel oracle job from Session 3 was implemented. Changes:
+
+- **`.github/workflows/corpus-oracle.yml`**: Added include-gated comparison inside the
+  existing `oracle-repo` batch loop. For each repo, writes `.rubocop_include_check.yml`
+  in the repo dir (so `base_dir = repo_dir`), then runs both tools with `--only` for
+  the 20 cops. Results go to `results/ig-nitrocop/` and `results/ig-rubocop/`. In
+  `collect-results`, a second `diff_results.py` run produces `include-gated-results.json`,
+  which `merge_include_gated.py` splices into the main `corpus-results.json` before
+  downstream scripts run.
+
+- **`bench/corpus/merge_include_gated.py`**: New script. Replaces zero-activity `by_cop`
+  entries with include-gated data, rebuilds `by_department` and `summary`, merges
+  `by_repo_cop` and `cop_activity_repos`. Safety check: only replaces cops with zero
+  main data.
+
 ## Key Code Locations
 
 - `src/config/mod.rs:294-343` — `is_cop_match()` (Include/Exclude checking)
