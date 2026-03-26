@@ -11,8 +11,8 @@ inputs:
   actions_read_token:
     description: Read-only GitHub token (used for GH_TOKEN and masked via guard_backend_secrets)
     required: true
-  minimax_api_key:
-    description: MiniMax API key secret
+  anthropic_auth_token:
+    description: Anthropic auth token (used by MiniMax backend via Claude CLI)
     default: ''
   anthropic_api_key:
     description: Anthropic API key secret
@@ -36,8 +36,7 @@ runs:
         CARGO_INCREMENTAL: '1'
         # Every secret under every name a backend might need.
         # Unused ones are empty strings — the backend ignores them.
-        MINIMAX_API_KEY: ${{ inputs.minimax_api_key }}
-        ANTHROPIC_AUTH_TOKEN: ${{ inputs.minimax_api_key }}
+        ANTHROPIC_AUTH_TOKEN: ${{ inputs.anthropic_auth_token }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         CODEX_AUTH_JSON: ${{ inputs.codex_auth_json }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}

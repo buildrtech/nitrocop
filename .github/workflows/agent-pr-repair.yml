@@ -416,7 +416,7 @@ jobs:
         with:
           backend: ${{ steps.repair.outputs.backend }}
           actions_read_token: ${{ steps.actions-read-token.outputs.token }}
-          minimax_api_key: ${{ secrets.MINIMAX_API_KEY }}
+          anthropic_auth_token: ${{ secrets.MINIMAX_API_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           codex_auth_json: ${{ secrets.CODEX_AUTH_JSON }}
 
@@ -784,14 +784,14 @@ jobs:
         if: always() && steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         id: leak_scan
         env:
-          MINIMAX_API_KEY: ${{ steps.repair.outputs.backend == 'minimax' && secrets.MINIMAX_API_KEY || '' }}
+          ANTHROPIC_AUTH_TOKEN: ${{ steps.repair.outputs.backend == 'minimax' && secrets.MINIMAX_API_KEY || '' }}
           ANTHROPIC_API_KEY: ${{ (steps.repair.outputs.backend == 'claude-normal' || steps.repair.outputs.backend == 'claude-hard') && secrets.ANTHROPIC_API_KEY || '' }}
           CODEX_AUTH_JSON: ${{ (steps.repair.outputs.backend == 'codex-normal' || steps.repair.outputs.backend == 'codex-hard') && secrets.CODEX_AUTH_JSON || '' }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
           python3 scripts/workflows/guard_backend_secrets.py \
             --ignore-missing \
-            --from-env MINIMAX_API_KEY \
+            --from-env ANTHROPIC_AUTH_TOKEN \
             --from-env ANTHROPIC_API_KEY \
             --from-env CODEX_AUTH_JSON \
             --from-env GH_TOKEN_FOR_ACTIONS_READ \
