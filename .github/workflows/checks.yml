@@ -205,19 +205,48 @@ jobs:
     if: always()
     needs: [cop-detect, cop-check]
     runs-on: ubuntu-24.04
-    timeout-minutes: 1
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      - run: |
+      - name: Gate check
+        id: gate
+        run: |
           if [ "${{ needs.cop-detect.outputs.has_cops }}" != "true" ]; then
             echo "No cops changed — gate passes"
+            echo "result=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "${{ needs.cop-check.result }}" = "success" ]; then
             echo "All shards passed"
+            echo "result=pass" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "result=fail" >> "$GITHUB_OUTPUT"
           echo "cop-check failed: ${{ needs.cop-check.result }}"
           exit 1
+
+      - name: Comment cop-check summary on PR
+        if: always() && github.event_name == 'pull_request' && steps.gate.outputs.result != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COPS="${{ needs.cop-detect.outputs.changed_cops }}"
+          RESULT="${{ steps.gate.outputs.result }}"
+          ICON="✅"
+          [ "$RESULT" = "fail" ] && ICON="❌"
+
+          BODY="${ICON} **Cop-check results** (8 shards)\n\n"
+          BODY+="| Cop | Result |\n|-----|--------|\n"
+          IFS=',' read -ra COP_LIST <<< "$COPS"
+          for cop in "${COP_LIST[@]}"; do
+            [ -z "$cop" ] && continue
+            BODY+="| \`${cop}\` | ${RESULT} |\n"
+          done
+
+          printf "$BODY" | gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" --body-file -
 
   # Corpus smoke test: run nitrocop + rubocop on a few cheap sentinel repos to
   # catch systemic regressions (file discovery, config, plugin loading, directives)
