@@ -57,10 +57,10 @@ jobs:
           python3 << 'PYEOF'
           import json, os, sys, hashlib
 
-          # 50 repos/batch → ~112 batches. Rubocop cache is consolidated
+          # 30 repos/batch → ~187 batches. Rubocop cache is consolidated
           # (not per-batch), so batch size can be changed freely without
           # causing cold caches.
-          BATCH_SIZE = 50
+          BATCH_SIZE = 30
 
           repos = []
           with open('bench/corpus/manifest.jsonl') as f:
