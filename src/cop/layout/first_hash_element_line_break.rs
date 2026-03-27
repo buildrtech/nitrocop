@@ -32,7 +32,7 @@ impl Cop for FirstHashElementLineBreak {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let _allow_multiline_final = config.get_bool("AllowMultilineFinalElement", false);
+        let allow_multiline_final = config.get_bool("AllowMultilineFinalElement", false);
 
         // Skip keyword hashes (no braces)
         if node.as_keyword_hash_node().is_some() {
@@ -76,6 +76,15 @@ impl Cop for FirstHashElementLineBreak {
             return;
         }
 
+        // RuboCop also allows this form when the final element itself is multiline
+        // and AllowMultilineFinalElement is true.
+        if allow_multiline_final {
+            let (last_start_line, _) = source.offset_to_line_col(last.location().start_offset());
+            if last_elem_line > last_start_line {
+                return;
+            }
+        }
+
         if first_line == open_line {
             diagnostics.push(self.diagnostic(
                 source,
@@ -90,9 +99,32 @@ impl Cop for FirstHashElementLineBreak {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use crate::testutil::run_cop_full_with_config;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         FirstHashElementLineBreak,
         "cops/layout/first_hash_element_line_break"
     );
+
+    #[test]
+    fn allow_multiline_final_element_true_skips_single_pair_hash() {
+        // Gap repro from docs/nitrocop/current_gaps.md:
+        // RuboCop does not flag this when AllowMultilineFinalElement=true.
+        let config = CopConfig {
+            options: HashMap::from([(
+                "AllowMultilineFinalElement".to_string(),
+                serde_yml::Value::Bool(true),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let source = b"{\"nodes\" => [\n  { \"id\" => 1 },\n  { \"id\" => 2 }\n]}\n";
+        let diags = run_cop_full_with_config(&FirstHashElementLineBreak, source, config);
+        assert!(
+            diags.is_empty(),
+            "AllowMultilineFinalElement=true should allow multiline final element without forcing line break before first hash pair"
+        );
+    }
 }

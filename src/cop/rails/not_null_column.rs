@@ -74,6 +74,22 @@ impl Cop for NotNullColumn {
             }
         }
 
+        // Generated/virtual columns are allowed to be NOT NULL without an explicit default.
+        // Common shape: add_column ..., :virtual, ..., as: "...", stored: true, null: false
+        if has_keyword_arg(&call, b"as") {
+            return;
+        }
+        if let Some(args) = call.arguments() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() >= 3 {
+                if let Some(sym) = arg_list[2].as_symbol_node() {
+                    if sym.unescaped() == b"virtual" {
+                        return;
+                    }
+                }
+            }
+        }
+
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(
@@ -126,6 +142,20 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "MySQL should still flag non-text columns"
+        );
+    }
+
+    #[test]
+    fn generated_virtual_column_with_null_false_is_allowed() {
+        use crate::testutil::run_cop_full;
+
+        // Gap repro from docs/nitrocop/current_gaps.md.
+        // RuboCop allows generated/virtual columns with null: false.
+        let source = b"add_column :events, :search_name, :virtual, type: :string, as: \"lower(name)\", stored: true, null: false\n";
+        let diags = run_cop_full(&NotNullColumn, source);
+        assert!(
+            diags.is_empty(),
+            "virtual generated columns should not be flagged by Rails/NotNullColumn"
         );
     }
 }

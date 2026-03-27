@@ -62,6 +62,15 @@ impl Cop for CompactBlank {
             None => return,
         };
 
+        // RuboCop's node patterns target regular sends, not safe-navigation calls.
+        // `foo&.reject(&:blank?)` should not be flagged.
+        if call
+            .call_operator_loc()
+            .is_some_and(|loc| loc.as_slice() == b"&.")
+        {
+            return;
+        }
+
         let method_name = call.name().as_slice();
 
         // Expected predicate for each method family:
@@ -240,5 +249,20 @@ mod tests {
             "test.rb",
         );
         assert!(diagnostics.is_empty(), "Should not fire on Rails < 6.1");
+    }
+
+    #[test]
+    fn safe_navigation_reject_is_not_flagged() {
+        let source = b"raw_data&.reject(&:blank?)\n";
+        let diagnostics = crate::testutil::run_cop_full_internal(
+            &CompactBlank,
+            source,
+            config_with_rails(6.1),
+            "test.rb",
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "safe-navigation calls should not be flagged"
+        );
     }
 }

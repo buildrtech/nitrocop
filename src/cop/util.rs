@@ -530,6 +530,17 @@ pub fn assignment_context_base_col(source: &SourceFile, keyword_offset: usize) -
         j += 1;
     }
 
+    // RuboCop's variable-style alignment also treats common binary operator
+    // contexts like `foo == if ...` as start-of-line alignment contexts.
+    if before_keyword.windows(2).any(|w| {
+        matches!(
+            w,
+            [b'=', b'='] | [b'!', b'='] | [b'<', b'='] | [b'>', b'='] | [b'&', b'&'] | [b'|', b'|']
+        )
+    }) {
+        return before_keyword.iter().position(|&b| b != b' ' && b != b'\t');
+    }
+
     None
 }
 

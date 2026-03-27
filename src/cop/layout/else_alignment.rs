@@ -282,7 +282,14 @@ impl Cop for ElseAlignment {
             }
             let (unless_line, unless_col) = source.offset_to_line_col(unless_kw_loc.start_offset());
 
-            let end_style = config.get_str("EndAlignmentStyle", "keyword");
+            let end_style = {
+                let s = config.get_str("EnforcedStyleAlignWith", "");
+                if s.is_empty() {
+                    config.get_str("EndAlignmentStyle", "keyword")
+                } else {
+                    s
+                }
+            };
             let expected_col = if end_style == "variable" {
                 if let Some(var_col) =
                     assignment_context_base_col(source, unless_kw_loc.start_offset())
@@ -340,7 +347,14 @@ impl Cop for ElseAlignment {
         // When `if` is the RHS of an assignment (e.g., `x = if cond`) and
         // Layout/EndAlignment.EnforcedStyleAlignWith is "variable", else/elsif
         // align with the assignment variable (start of line), not `if`.
-        let end_style = config.get_str("EndAlignmentStyle", "keyword");
+        let end_style = {
+            let s = config.get_str("EnforcedStyleAlignWith", "");
+            if s.is_empty() {
+                config.get_str("EndAlignmentStyle", "keyword")
+            } else {
+                s
+            }
+        };
         let expected_col = if end_style == "variable" {
             if let Some(var_col) = assignment_context_base_col(source, if_kw_loc.start_offset()) {
                 var_col
@@ -597,6 +611,28 @@ mod tests {
         assert!(
             diags.is_empty(),
             "variable style << context should not flag else aligned with @buffer: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_with_equality_operator_context_no_offense() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyleAlignWith".into(),
+                serde_yml::Value::String("variable".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let source = b"def custom?\n  level1 == if legacy?\n    a\n  else\n    b\n  end\nend\n";
+        let diags = run_cop_full_with_config(&ElseAlignment, source, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should allow else aligned to start of line in binary-operator context: {:?}",
             diags
         );
     }

@@ -153,6 +153,11 @@ impl Cop for TransactionExitStatement {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // RuboCop disables this cop on Rails >= 7.2.
+        if config.rails_version_at_least(7.2) {
+            return;
+        }
+
         let custom_methods = config.get_string_array("TransactionMethods");
 
         let call = match node.as_call_node() {
@@ -219,8 +224,36 @@ impl Cop for TransactionExitStatement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use crate::testutil::run_cop_full_with_config;
+    use std::collections::HashMap;
+
     crate::cop_fixture_tests!(
         TransactionExitStatement,
         "cops/rails/transaction_exit_statement"
     );
+
+    fn config_with_rails(version: f64) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(version)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn rails_7_2_disables_cop() {
+        let source = b"transaction do\n  return if bad?\nend\n";
+        let diags =
+            run_cop_full_with_config(&TransactionExitStatement, source, config_with_rails(7.2));
+        assert!(diags.is_empty(), "cop should be disabled on Rails >= 7.2");
+    }
 }

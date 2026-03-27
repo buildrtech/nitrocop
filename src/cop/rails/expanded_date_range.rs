@@ -65,6 +65,24 @@ impl Cop for ExpandedDateRange {
             return;
         }
 
+        // RuboCop only flags expanded ranges when both sides share the same receiver,
+        // e.g. `date.beginning_of_day..date.end_of_day`.
+        // `start_date.beginning_of_day..end_date.end_of_day` should be allowed.
+        let left_recv = match left_call.receiver() {
+            Some(r) => r.location(),
+            None => return,
+        };
+        let right_recv = match right_call.receiver() {
+            Some(r) => r.location(),
+            None => return,
+        };
+        let bytes = source.as_bytes();
+        let left_src = &bytes[left_recv.start_offset()..left_recv.end_offset()];
+        let right_src = &bytes[right_recv.start_offset()..right_recv.end_offset()];
+        if left_src != right_src {
+            return;
+        }
+
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(
@@ -79,5 +97,34 @@ impl Cop for ExpandedDateRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::run_cop_full_internal;
+
     crate::cop_rails_fixture_tests!(ExpandedDateRange, "cops/rails/expanded_date_range", 5.1);
+
+    #[test]
+    fn different_receivers_are_not_flagged() {
+        let source = b"where(recorded_at: start_date.beginning_of_day..end_date.end_of_day)\n";
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(6.1)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        let diags = run_cop_full_internal(&ExpandedDateRange, source, config, "test.rb");
+        assert!(
+            diags.is_empty(),
+            "start_date..end_date expanded ranges should not be flagged"
+        );
+    }
 }

@@ -67,6 +67,51 @@ fn is_only_whitespace_and_comma(bytes: &[u8]) -> bool {
     found_comma
 }
 
+fn contains_heredoc(arg: &ruby_prism::Node<'_>, bytes: &[u8]) -> bool {
+    fn opening_is_heredoc(loc: Option<ruby_prism::Location<'_>>, bytes: &[u8]) -> bool {
+        let Some(opening) = loc else {
+            return false;
+        };
+        let start = opening.start_offset();
+        let end = opening.end_offset();
+        if end > bytes.len() || start >= end {
+            return false;
+        }
+        bytes[start..end].starts_with(b"<<")
+    }
+
+    if let Some(s) = arg.as_string_node() {
+        return opening_is_heredoc(s.opening_loc(), bytes);
+    }
+    if let Some(s) = arg.as_interpolated_string_node() {
+        return opening_is_heredoc(s.opening_loc(), bytes);
+    }
+    if let Some(call) = arg.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            return contains_heredoc(&recv, bytes);
+        }
+    }
+    false
+}
+
+fn has_heredoc_line_trailing_comma(arg: ruby_prism::Node<'_>, bytes: &[u8]) -> bool {
+    if !contains_heredoc(&arg, bytes) {
+        return false;
+    }
+
+    let loc = arg.location();
+    let end = loc.end_offset();
+    if end >= bytes.len() {
+        return false;
+    }
+
+    let mut line_end = end;
+    while line_end < bytes.len() && bytes[line_end] != b'\n' {
+        line_end += 1;
+    }
+    is_only_whitespace_and_comma(&bytes[end..line_end])
+}
+
 impl Cop for TrailingCommaInArguments {
     fn name(&self) -> &'static str {
         "Style/TrailingCommaInArguments"
@@ -126,8 +171,9 @@ impl Cop for TrailingCommaInArguments {
         let has_comma = if last_end < closing_start {
             let search_range = &bytes[last_end..closing_start];
             is_only_whitespace_and_comma(search_range)
+                || has_heredoc_line_trailing_comma(last_arg, bytes)
         } else {
-            false
+            has_heredoc_line_trailing_comma(last_arg, bytes)
         };
 
         let style = config.get_str("EnforcedStyleForMultiline", "no_comma");
@@ -391,6 +437,31 @@ mod tests {
         assert!(
             diags.is_empty(),
             "comma style should not flag when keyword args share a line (mixed args)"
+        );
+    }
+
+    #[test]
+    fn comma_style_heredoc_last_arg_with_marker_comma_no_offense() {
+        // Gap repro from docs/nitrocop/current_gaps.md:
+        // the trailing comma can appear after the heredoc marker (<<~SQL,), not
+        // between heredoc body end and closing paren. RuboCop treats this as a
+        // valid trailing comma, so no offense should be reported.
+        let source = b"foo(\n  bar,\n  <<~SQL,\n    SELECT 1\n  SQL\n)\n";
+        let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
+        assert!(
+            diags.is_empty(),
+            "comma style should not flag heredoc last arg when comma is on marker"
+        );
+    }
+
+    #[test]
+    fn comma_style_heredoc_chained_call_with_line_comma_no_offense() {
+        // Real-world shape from app: <<~SQL.squish,
+        let source = b"foo(\n  <<~SQL.squish,\n    SELECT 1\n  SQL\n)\n";
+        let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
+        assert!(
+            diags.is_empty(),
+            "comma style should not flag heredoc chained-call argument with trailing comma on the opening line"
         );
     }
 }

@@ -576,4 +576,26 @@ mod tests {
             "variable style should flag end not aligned with keyword when no assignment"
         );
     }
+
+    #[test]
+    fn variable_style_binary_operator_context_allows_line_start_end() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyleAlignWith".into(),
+                serde_yml::Value::String("variable".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let src = b"def custom?\n  level1 == if legacy?\n    a\n  else\n    b\n  end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should allow end aligned to start of line for == if context: {:?}",
+            diags
+        );
+    }
 }

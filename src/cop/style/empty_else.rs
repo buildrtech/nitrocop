@@ -165,7 +165,25 @@ impl EmptyElse {
             Some(stmts) => {
                 // Check if the only statement is `nil`
                 let body: Vec<_> = stmts.body().iter().collect();
-                body.len() == 1 && body[0].as_nil_node().is_some() && check_nil
+                if body.len() == 1 && body[0].as_nil_node().is_some() && check_nil {
+                    // RuboCop's AllowComments also permits `else` with explanatory
+                    // comments even when the body is `nil`.
+                    if allow_comments {
+                        if let Some(end_kw) = else_node.end_keyword_loc() {
+                            let else_end = kw_loc.end_offset();
+                            let body_end = end_kw.start_offset();
+                            if else_end < body_end {
+                                let body_bytes = &source.as_bytes()[else_end..body_end];
+                                if body_bytes.contains(&b'#') {
+                                    return Vec::new();
+                                }
+                            }
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
             }
         };
 
@@ -258,6 +276,16 @@ mod tests {
             diags.len(),
             1,
             "AllowComments: true should still flag empty else without comment"
+        );
+    }
+
+    #[test]
+    fn allow_comments_else_nil_with_comment_no_offense() {
+        let source = b"if condition\n  statement\nelse\n  # Not all models support creating\n  nil\nend\n";
+        let diags = run_cop_full_with_config(&EmptyElse, source, allow_comments_config());
+        assert!(
+            diags.is_empty(),
+            "AllowComments: true should skip else nil when explanatory comment exists"
         );
     }
 }

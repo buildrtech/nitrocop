@@ -1,3 +1,5 @@
+use ruby_prism::Visit;
+
 use crate::cop::node_type::{
     ARRAY_NODE, BLOCK_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE,
     LOCAL_VARIABLE_READ_NODE, REQUIRED_PARAMETER_NODE, STATEMENTS_NODE,
@@ -8,6 +10,22 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 pub struct IndexWith;
+
+fn contains_nested_block(node: &ruby_prism::Node<'_>) -> bool {
+    struct Finder {
+        found: bool,
+    }
+
+    impl<'pr> Visit<'pr> for Finder {
+        fn visit_block_node(&mut self, _node: &ruby_prism::BlockNode<'pr>) {
+            self.found = true;
+        }
+    }
+
+    let mut f = Finder { found: false };
+    f.visit(node);
+    f.found
+}
 
 /// Check if the block body is an array literal `[block_param, value_expr]`
 /// where the first element is a local variable reference matching the block parameter name.
@@ -183,10 +201,16 @@ fn is_each_with_object_index_with(
             return false;
         }
         // Value must NOT be the element itself
-        if let Some(val_lvar) = arg_list[1].as_local_variable_read_node() {
+        let value = &arg_list[1];
+        if let Some(val_lvar) = value.as_local_variable_read_node() {
             if val_lvar.name().as_slice() == el_name {
                 return false;
             }
+        }
+        // RuboCop does not flag complex RHS expressions that contain nested blocks.
+        // Example from app: value built with `.map do ... end`.
+        if contains_nested_block(value) {
+            return false;
         }
         true
     } else {
@@ -332,5 +356,35 @@ impl Cop for IndexWith {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use crate::testutil::run_cop_full_internal;
+    use std::collections::HashMap;
+
     crate::cop_rails_fixture_tests!(IndexWith, "cops/rails/index_with", 6.0);
+
+    fn config_with_rails(version: f64) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(version)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn each_with_object_with_nested_block_rhs_is_not_flagged() {
+        let source = b"SUPPORTED_COUNTRIES.each_with_object({}) do |code, subdivisions|\n  subdivisions[code] = ISO3166::Country[code].subdivisions.values.map do |subdivision|\n    [subdivision.name, subdivision.code]\n  end\nend\n";
+        let diags = run_cop_full_internal(&IndexWith, source, config_with_rails(7.1), "test.rb");
+        assert!(
+            diags.is_empty(),
+            "complex each_with_object RHS with nested block should not be flagged"
+        );
+    }
 }
