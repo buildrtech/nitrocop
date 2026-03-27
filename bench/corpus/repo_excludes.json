@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-repo file exclusions for the corpus oracle. Files listed here are excluded from RuboCop inspection via AllCops/Exclude overlay. With rescue_parser_crashes.rb loaded, crashes no longer kill subsequent files, but these exclusions still prevent known-crashy files from producing misleading 0-offense entries. Paths are relative to the repo root (glob syntax, same as AllCops/Exclude).",
+  "_comment": "Per-repo file exclusions for the corpus oracle. Files listed here are excluded from RuboCop inspection via AllCops/Exclude overlay. With rescue_parser_crashes.rb loaded, crashes no longer kill subsequent files, but these exclusions still prevent known-crashy files from producing misleading 0-offense entries. Paths are relative to the repo root (glob syntax, same as AllCops/Exclude). Note: vendor/**/* is excluded globally in gen_repo_config.py.",
   "jruby__jruby__0303464": {
     "comment": "Lint/LiteralAsCondition crash on bench_compilation.rb; Prism::Translation::Parser crashes on invalid multibyte regex escapes in test files, killing ~1000 files as collateral",
     "exclude": [
@@ -19,12 +19,6 @@
       "heroku/**/*"
     ]
   },
-  "liaoziyang__stackneveroverflow__8f4dce2": {
-    "comment": "Vendored bundle gems — not project code, RuboCop excludes via AllCops.Exclude but corpus base_dir mismatch prevents resolution. Contributes ~15k phantom FP/FN.",
-    "exclude": [
-      "vendor/bundle/**/*"
-    ]
-  },
   "infochimps-labs__wukong__437eff1": {
     "comment": "Abandoned old/ directory with stale code — not part of active project. Parser crash in asciize.rb plus phantom FP/FN from old code paths.",
     "exclude": [
@@ -35,20 +29,6 @@
     "comment": "Vendored puppet distribution — not project code, RuboCop excludes via AllCops.Exclude but corpus base_dir mismatch prevents resolution.",
     "exclude": [
       "examples/vendored-puppet/**/*"
-    ]
-  },
-  "databasically__lowdown__d593927": {
-    "comment": "Vendored Rails checkout — not project code, RuboCop excludes via AllCops.Exclude but corpus base_dir mismatch prevents resolution.",
-    "exclude": [
-      "vendor/rails/**/*"
-    ]
-  },
-  "noosfero__noosfero__299a0b9": {
-    "comment": "Vendored root libraries/tests under vendor/ began surfacing as clone-only Metrics/ClassLength FP noise. Exclude the affected vendored subtrees in corpus reruns via absolute-path overlay.",
-    "exclude": [
-      "vendor/ezcrypto/**/*",
-      "vendor/gdata/**/*",
-      "vendor/plugins/action_tracker/test/**/*"
     ]
   }
 }

@@ -33,7 +33,15 @@ def main():
         excludes = json.load(f)
 
     entry = excludes.get(repo_id)
-    if not entry or not entry.get("exclude"):
+    repo_patterns = entry.get("exclude", []) if entry else []
+
+    # Always exclude vendor/ — RuboCop's default config excludes it via
+    # AllCops.Exclude but the glob fails when running from outside the repo
+    # dir (base_dir mismatch).  This matches RuboCop's intended behavior.
+    global_patterns = ["vendor/**/*"]
+
+    all_patterns = global_patterns + repo_patterns
+    if not all_patterns:
         print(base_config)
         return
 
@@ -47,7 +55,7 @@ def main():
     # RuboCop merges AllCops/Exclude by default (union), so we only need
     # to list the additional excludes here.
     lines = [f"inherit_from: {abs_base}", "", "AllCops:", "  Exclude:"]
-    for pattern in entry["exclude"]:
+    for pattern in all_patterns:
         lines.append(f'    - "{abs_repo}/{pattern}"')
 
     tmp_dir = Path(tempfile.gettempdir()) / "nitrocop_corpus_configs"
