@@ -525,6 +525,20 @@ mod tests {
         ));
     }
 
+    /// Force a stat mismatch by mutating the cached mtime directly.
+    ///
+    /// This avoids relying on `sleep()` to wait for filesystem timestamp
+    /// granularity and makes tests faster + less flaky.
+    fn force_cached_mtime_mismatch(cache: &ResultCache, path: &Path) {
+        let key = compute_path_hash(path);
+        let mut entries = cache.entries.write().unwrap();
+        let entry = entries
+            .get_mut(&key)
+            .expect("cache entry should exist before forcing stat mismatch");
+        entry.mtime_secs = 0;
+        entry.mtime_nanos = 0;
+    }
+
     #[test]
     fn cache_roundtrip_with_real_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -582,9 +596,9 @@ mod tests {
         // Store results
         cache.put(&rb_file, b"y = 2\n", &[]);
 
-        // Simulate mtime change by touching the file (same content)
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(&rb_file, b"y = 2\n").unwrap();
+        // Simulate stale cached metadata without changing content.
+        // This exercises the content-hash fallback path deterministically.
+        force_cached_mtime_mismatch(&cache, &rb_file);
 
         // Stat miss (mtime changed)
         assert!(matches!(cache.get_by_stat(&rb_file), CacheLookup::Miss));
@@ -738,9 +752,6 @@ mod tests {
         std::fs::write(&f, b"x0").unwrap();
         cache1.put(&f, b"x0", &[]);
         cache1.flush();
-
-        // Small delay so mtimes differ
-        std::thread::sleep(std::time::Duration::from_millis(50));
 
         // Create session 2 and flush
         let mut config2 = CopConfig::default();

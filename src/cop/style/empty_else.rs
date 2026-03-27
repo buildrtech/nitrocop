@@ -281,7 +281,8 @@ mod tests {
 
     #[test]
     fn allow_comments_else_nil_with_comment_no_offense() {
-        let source = b"if condition\n  statement\nelse\n  # Not all models support creating\n  nil\nend\n";
+        let source =
+            b"if condition\n  statement\nelse\n  # Not all models support creating\n  nil\nend\n";
         let diags = run_cop_full_with_config(&EmptyElse, source, allow_comments_config());
         assert!(
             diags.is_empty(),
