@@ -414,6 +414,17 @@ jobs:
           retention-days: 7
           include-hidden-files: false
 
+      - name: Retry upload on failure
+        if: failure() && steps.run-batch.conclusion == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: corpus-results-${{ matrix.batch_id }}
+          path: |
+            results/
+            nitrocop-cops.txt
+          retention-days: 7
+          include-hidden-files: false
+
   # ── Run synthetic benchmark (parallel with corpus batches) ────
   run-synthetic:
     needs: [build-nitrocop]
@@ -479,6 +490,16 @@ jobs:
           persist-credentials: false
 
       - name: Download all results
+        uses: actions/download-artifact@v8
+        id: download-results
+        with:
+          pattern: corpus-results-*
+          path: all-results/
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Retry download on failure
+        if: steps.download-results.outcome == 'failure'
         uses: actions/download-artifact@v8
         with:
           pattern: corpus-results-*
