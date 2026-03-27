@@ -10,8 +10,8 @@ from pathlib import Path
 
 ALLOWLISTS = {
     "agent-cop-fix": [
-        "src/cop/**",
-        "tests/fixtures/cops/**",
+        "src/**",
+        "tests/**",
     ],
     "repair-rust-test": [
         "src/**",
