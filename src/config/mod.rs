@@ -3,12 +3,16 @@ pub mod lockfile;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use regex::RegexSet;
+use serde::{Deserialize, Serialize};
 use serde_yml::Value;
+use sha2::{Digest, Sha256};
 
+use crate::cache::cache_root_dir;
 use crate::cop::registry::CopRegistry;
 use crate::cop::{CopConfig, EnabledState};
 use crate::diagnostic::Severity;
@@ -24,7 +28,7 @@ pub enum NewCopsPolicy {
 ///
 /// Plugin default configs use bare department keys to set Include/Exclude
 /// patterns and Enabled state for all cops in that department.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DepartmentConfig {
     enabled: EnabledState,
     include: Vec<String>,
@@ -35,7 +39,7 @@ struct DepartmentConfig {
 ///
 /// By default, Exclude arrays are appended and Include arrays are replaced.
 /// `inherit_mode` lets configs override this per-key.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct InheritMode {
     /// Keys whose arrays should be appended (merged) instead of replaced.
     merge: HashSet<String>,
@@ -135,7 +139,9 @@ pub struct CopFilterSet {
     global_exclude: GlobSet,
     global_exclude_patterns: Vec<String>, // Raw glob patterns for Ruby-like confirmation
     global_exclude_re: Option<RegexSet>,  // Ruby regexp global exclude patterns
-    filters: Vec<CopFilter>,              // indexed by cop position in registry
+    /// Whether global exclude globs require Ruby-compatible per-pattern confirmation.
+    global_exclude_needs_confirmation: bool,
+    filters: Vec<CopFilter>, // indexed by cop position in registry
     /// Config directory for relativizing file paths before glob matching.
     /// Cop Include/Exclude patterns are relative to the project root
     /// (where `.rubocop.yml` lives), but file paths may include a prefix
@@ -165,11 +171,44 @@ pub struct CopFilterSet {
 
 impl CopFilterSet {
     fn matches_global_exclude_glob(&self, path: &Path) -> bool {
-        self.global_exclude.is_match(path)
-            && self
-                .global_exclude_patterns
-                .iter()
-                .any(|pattern| glob_matches(pattern, path))
+        // Fast reject: when all global exclude globs are anchored by a literal
+        // top-level path segment (e.g. `vendor/**`, `db/schema.rb`), paths
+        // whose first segment does not appear in any pattern cannot match.
+        if let Some(first_component) = first_relative_path_component(path) {
+            let mut all_patterns_are_top_level_anchored = true;
+            let mut first_component_can_match = false;
+            for pattern in &self.global_exclude_patterns {
+                match top_level_literal_prefix(pattern) {
+                    Some(prefix) => {
+                        if prefix == first_component {
+                            first_component_can_match = true;
+                        }
+                    }
+                    None => {
+                        all_patterns_are_top_level_anchored = false;
+                        break;
+                    }
+                }
+            }
+            if all_patterns_are_top_level_anchored && !first_component_can_match {
+                return false;
+            }
+        }
+
+        if !self.global_exclude.is_match(path) {
+            return false;
+        }
+
+        // Fast path: when global exclude globs are simple forms where
+        // globset semantics match our Ruby-compatible matcher, skip per-pattern
+        // confirmation in hot file loops.
+        if !self.global_exclude_needs_confirmation {
+            return true;
+        }
+
+        self.global_exclude_patterns
+            .iter()
+            .any(|pattern| glob_matches(pattern, path))
     }
 
     /// Check whether a file is globally excluded (AllCops.Exclude).
@@ -446,6 +485,13 @@ impl CopFilterSet {
 /// (excluding the root). Returns directories sorted deepest-first so that
 /// `nearest_config_dir` finds the most specific match first.
 fn discover_sub_config_dirs(root: &Path) -> Vec<PathBuf> {
+    if let Some(mut dirs) = git_ls_sub_config_dirs(root) {
+        // Sort deepest-first: longer paths first
+        dirs.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
+        dirs.dedup();
+        return dirs;
+    }
+
     let mut dirs = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
@@ -468,6 +514,43 @@ fn discover_sub_config_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+fn git_ls_sub_config_dirs(root: &Path) -> Option<Vec<PathBuf>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "**/.rubocop.yml",
+            ".rubocop.yml",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut dirs = Vec::new();
+    for rel in String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|line| !line.is_empty())
+    {
+        let full_path = root.join(rel);
+        if let Some(parent) = full_path.parent() {
+            if parent != root {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+
+    Some(dirs)
+}
+
 /// Load per-directory config layers from nested `.rubocop.yml` files.
 ///
 /// For each subdirectory containing a `.rubocop.yml`, parses the local config
@@ -478,9 +561,17 @@ fn discover_sub_config_dirs(root: &Path) -> Vec<PathBuf> {
 /// Returns a list of (directory, config_layer) pairs sorted deepest-first.
 fn load_dir_overrides(root: &Path) -> Vec<(PathBuf, ConfigLayer)> {
     let sub_dirs = discover_sub_config_dirs(root);
+    load_dir_overrides_from_dirs(&sub_dirs)
+}
+
+fn load_dir_overrides_from_dirs(sub_dirs: &[PathBuf]) -> Vec<(PathBuf, ConfigLayer)> {
+    let mut sorted_dirs = sub_dirs.to_vec();
+    sorted_dirs.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
+    sorted_dirs.dedup();
+
     let mut overrides = Vec::new();
 
-    for dir in sub_dirs {
+    for dir in sorted_dirs {
         let config_path = dir.join(".rubocop.yml");
         let contents = match std::fs::read_to_string(&config_path) {
             Ok(c) => c,
@@ -531,6 +622,78 @@ fn extract_ruby_regexp(s: &str) -> Option<&str> {
 /// Build a `GlobSet` from a list of pattern strings, skipping any that are
 /// Ruby regexp patterns (these are handled separately by `build_regex_set`).
 /// Returns `None` if no glob patterns remain.
+fn first_relative_path_component(path: &Path) -> Option<&str> {
+    use std::path::Component;
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(seg) => return seg.to_str(),
+            // Absolute or otherwise non-relative path forms.
+            _ => return None,
+        }
+    }
+
+    None
+}
+
+fn top_level_literal_prefix(pattern: &str) -> Option<&str> {
+    let mut p = pattern;
+    while let Some(stripped) = p.strip_prefix("./") {
+        p = stripped;
+    }
+
+    if p.is_empty() || p.starts_with('/') {
+        return None;
+    }
+
+    let first = p.split('/').next().unwrap_or(p);
+    if first.is_empty()
+        || first.contains('*')
+        || first.contains('?')
+        || first.contains('[')
+        || first.contains(']')
+        || first.contains('{')
+        || first.contains('}')
+        || first.contains('\\')
+    {
+        return None;
+    }
+
+    Some(first)
+}
+
+fn glob_pattern_needs_ruby_confirmation(pattern: &str) -> bool {
+    if pattern.contains('{')
+        || pattern.contains('}')
+        || pattern.contains('[')
+        || pattern.contains(']')
+        || pattern.contains('?')
+        || pattern.contains('\\')
+    {
+        return true;
+    }
+
+    // Plain literal path pattern.
+    if !pattern.contains('*') {
+        return false;
+    }
+
+    // Accept only trailing wildcard forms where globset behavior matches our
+    // Ruby-compatible matcher closely (common AllCops.Exclude shapes).
+    if let Some(prefix) = pattern.strip_suffix("/**/*") {
+        return prefix.contains('*');
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return prefix.contains('*');
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return prefix.contains('*');
+    }
+
+    true
+}
+
 fn build_glob_set(patterns: &[&str]) -> Option<GlobSet> {
     if patterns.is_empty() {
         return None;
@@ -670,7 +833,7 @@ impl ResolvedConfig {
 }
 
 /// A single parsed config layer (before merging).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConfigLayer {
     cop_configs: HashMap<String, CopConfig>,
     department_configs: HashMap<String, DepartmentConfig>,
@@ -926,6 +1089,25 @@ pub fn load_config(
     target_dir: Option<&Path>,
     gem_cache: Option<&HashMap<String, PathBuf>>,
 ) -> Result<ResolvedConfig> {
+    load_config_internal(path, target_dir, gem_cache, false)
+}
+
+pub fn load_config_deferred_dir_overrides(
+    path: Option<&Path>,
+    target_dir: Option<&Path>,
+    gem_cache: Option<&HashMap<String, PathBuf>>,
+) -> Result<ResolvedConfig> {
+    load_config_internal(path, target_dir, gem_cache, true)
+}
+
+fn load_config_internal(
+    path: Option<&Path>,
+    target_dir: Option<&Path>,
+    gem_cache: Option<&HashMap<String, PathBuf>>,
+    defer_dir_overrides: bool,
+) -> Result<ResolvedConfig> {
+    let profile_config = std::env::var_os("NITROCOP_PROFILE_CONFIG").is_some();
+    let profile_total_start = std::time::Instant::now();
     let start_dir = target_dir
         .map(|p| {
             if p.is_file() {
@@ -962,9 +1144,14 @@ pub fn load_config(
             // .rubocop.yml. Without this, repos without config files get zero file
             // exclusion, causing false positives on vendored code.
             let defaults = fallback_default_excludes();
+            let dir_overrides = if defer_dir_overrides {
+                Vec::new()
+            } else {
+                load_dir_overrides(&config_dir)
+            };
             return Ok(ResolvedConfig {
                 config_dir: Some(config_dir.clone()),
-                dir_overrides: load_dir_overrides(&config_dir),
+                dir_overrides,
                 base_dir: Some(base_dir),
                 global_excludes: defaults.global_excludes,
                 ..ResolvedConfig::empty()
@@ -996,12 +1183,28 @@ pub fn load_config(
         }
     };
 
+    // Discover and parse nested .rubocop.yml files for per-directory config
+    // layers in parallel with the rest of config loading.
+    let dir_overrides_handle = if defer_dir_overrides {
+        None
+    } else {
+        let config_dir = config_dir.clone();
+        Some(std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let overrides = load_dir_overrides(&config_dir);
+            (overrides, start.elapsed())
+        }))
+    };
+
     // Load rubocop's own config/default.yml as the lowest-priority base layer.
     // This provides correct default Enabled states, EnforcedStyle values, etc.
     // Also collect the set of known cops for version awareness.
+    let defaults_start = std::time::Instant::now();
     let (mut base, rubocop_known_cops) = try_load_rubocop_defaults(&config_dir, gem_cache);
+    let defaults_elapsed = defaults_start.elapsed();
 
     let mut visited = HashSet::new();
+    let project_layer_start = std::time::Instant::now();
     let is_standard_yml = config_path
         .file_name()
         .is_some_and(|f| f == ".standard.yml");
@@ -1018,6 +1221,7 @@ pub fn load_config(
     } else {
         load_config_recursive(&config_path, &config_dir, &mut visited, gem_cache)?
     };
+    let project_layer_elapsed = project_layer_start.elapsed();
 
     // Collect cop/department names explicitly mentioned in user config files
     // (inherit_from, inherit_gem, local config), excluding require: gem defaults.
@@ -1087,8 +1291,7 @@ pub fn load_config(
             None
         });
 
-    // Fall back to Gemfile.lock if TargetRailsVersion wasn't set in config.
-    // RuboCop looks for the 'railties' gem in the lockfile.
+    // Resolve lockfile-derived gem versions once (railties/rack) and reuse.
     //
     // Use `base_dir` (not `config_dir`) for lockfile resolution to match
     // RuboCop's `bundler_lock_file_path` which uses `base_dir_for_path_parameters`:
@@ -1096,52 +1299,57 @@ pub fn load_config(
     // config file's parent for `.rubocop*` dotfiles. This prevents reading
     // a Gemfile.lock from an unrelated directory when `--config` points to
     // a config file outside the target project (e.g. corpus oracle CI).
+    let lockfile_scan_start = std::time::Instant::now();
     let lockfile_dir = &base_dir;
-    let mut railties_in_lockfile = false;
-    let target_rails_version = base.target_rails_version.or_else(|| {
-        for lock_name in &["Gemfile.lock", "gems.locked"] {
-            let lock_path = lockfile_dir.join(lock_name);
-            if let Ok(content) = std::fs::read_to_string(&lock_path) {
-                if let Some(ver) = parse_gem_version_from_lockfile(&content, "railties") {
-                    railties_in_lockfile = true;
-                    return Some(ver);
-                }
-            }
-        }
-        None
-    });
-
-    // If TargetRailsVersion was set in config (not from lockfile), still check
-    // the lockfile for railties presence. RuboCop 1.84+ uses `requires_gem
-    // 'railties'` which gates cops based on actual lockfile presence, independent
-    // of the TargetRailsVersion config option.
-    if !railties_in_lockfile && base.target_rails_version.is_some() {
-        for lock_name in &["Gemfile.lock", "gems.locked"] {
-            let lock_path = lockfile_dir.join(lock_name);
-            if let Ok(content) = std::fs::read_to_string(&lock_path) {
-                if parse_gem_version_from_lockfile(&content, "railties").is_some() {
-                    railties_in_lockfile = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Parse rack gem version from lockfile for HttpStatusNameConsistency cops.
-    // RuboCop uses `requires_gem 'rack', '>= 3.1.0'` to gate these cops.
+    let mut railties_version_from_lock: Option<f64> = None;
     let mut rack_version: Option<f64> = None;
+
     for lock_name in &["Gemfile.lock", "gems.locked"] {
         let lock_path = lockfile_dir.join(lock_name);
-        if let Ok(content) = std::fs::read_to_string(&lock_path) {
-            if let Some(ver) = parse_gem_version_from_lockfile(&content, "rack") {
-                rack_version = Some(ver);
-                break;
-            }
+        let Ok(content) = std::fs::read_to_string(&lock_path) else {
+            continue;
+        };
+
+        if railties_version_from_lock.is_none() {
+            railties_version_from_lock = parse_gem_version_from_lockfile(&content, "railties");
+        }
+        if rack_version.is_none() {
+            rack_version = parse_gem_version_from_lockfile(&content, "rack");
+        }
+
+        if railties_version_from_lock.is_some() && rack_version.is_some() {
+            break;
         }
     }
 
-    // Discover and parse nested .rubocop.yml files for per-directory config layers.
-    let dir_overrides = load_dir_overrides(&config_dir);
+    // Fall back to railties version from lockfile when TargetRailsVersion isn't set.
+    let target_rails_version = base.target_rails_version.or(railties_version_from_lock);
+
+    // RuboCop 1.84+ `requires_gem 'railties'` gating depends on actual lockfile presence,
+    // independent of whether TargetRailsVersion was configured explicitly.
+    let railties_in_lockfile = railties_version_from_lock.is_some();
+
+    let lockfile_scan_elapsed = lockfile_scan_start.elapsed();
+
+    // Join nested .rubocop.yml discovery worker (or defer to caller).
+    let (dir_overrides, dir_overrides_elapsed) = match dir_overrides_handle {
+        Some(handle) => match handle.join() {
+            Ok(result) => result,
+            Err(_) => {
+                let start = std::time::Instant::now();
+                let overrides = load_dir_overrides(&config_dir);
+                (overrides, start.elapsed())
+            }
+        },
+        None => (Vec::new(), std::time::Duration::ZERO),
+    };
+
+    if profile_config {
+        eprintln!(
+            "debug: config profile: defaults={defaults_elapsed:.0?}, project_layer={project_layer_elapsed:.0?}, lockfile_scan={lockfile_scan_elapsed:.0?}, dir_overrides={dir_overrides_elapsed:.0?}, total={:.0?}",
+            profile_total_start.elapsed()
+        );
+    }
 
     Ok(ResolvedConfig {
         cop_configs: base.cop_configs,
@@ -1194,6 +1402,263 @@ fn fallback_default_excludes() -> ConfigLayer {
     layer
 }
 
+const RUBOCOP_DEFAULTS_CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RubocopDefaultsCache {
+    version: u32,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size: u64,
+    known_cops: Vec<String>,
+    layer: ConfigLayer,
+}
+
+fn systemtime_to_parts(time: Option<SystemTime>) -> (u64, u32) {
+    match time {
+        Some(t) => match t.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(d) => (d.as_secs(), d.subsec_nanos()),
+            Err(_) => (0, 0),
+        },
+        None => (0, 0),
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<(u64, u32, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let (mtime_secs, mtime_nanos) = systemtime_to_parts(meta.modified().ok());
+    Some((mtime_secs, mtime_nanos, meta.len()))
+}
+
+fn rubocop_defaults_cache_path(default_config: &Path) -> PathBuf {
+    let canonical = default_config
+        .canonicalize()
+        .unwrap_or_else(|_| default_config.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    cache_root_dir()
+        .join("config")
+        .join(format!("rubocop-defaults-{}.json", &hash[..16]))
+}
+
+fn load_cached_rubocop_defaults(
+    default_config: &Path,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size: u64,
+) -> Option<(ConfigLayer, HashSet<String>)> {
+    let cache_path = rubocop_defaults_cache_path(default_config);
+    let bytes = std::fs::read(cache_path).ok()?;
+    let cache: RubocopDefaultsCache = serde_json::from_slice(&bytes).ok()?;
+    if cache.version != RUBOCOP_DEFAULTS_CACHE_VERSION
+        || cache.mtime_secs != mtime_secs
+        || cache.mtime_nanos != mtime_nanos
+        || cache.size != size
+    {
+        return None;
+    }
+
+    Some((cache.layer, cache.known_cops.into_iter().collect()))
+}
+
+fn write_cached_rubocop_defaults(
+    default_config: &Path,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size: u64,
+    layer: &ConfigLayer,
+    known_cops: &HashSet<String>,
+) {
+    let mut known_cops_sorted: Vec<String> = known_cops.iter().cloned().collect();
+    known_cops_sorted.sort();
+
+    let cache = RubocopDefaultsCache {
+        version: RUBOCOP_DEFAULTS_CACHE_VERSION,
+        mtime_secs,
+        mtime_nanos,
+        size,
+        known_cops: known_cops_sorted,
+        layer: layer.clone(),
+    };
+
+    let Ok(bytes) = serde_json::to_vec(&cache) else {
+        return;
+    };
+
+    let cache_path = rubocop_defaults_cache_path(default_config);
+    if let Some(parent) = cache_path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+
+    let _ = std::fs::write(cache_path, bytes);
+}
+
+const GEM_CONFIG_LAYER_CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GemConfigPathStamp {
+    path: String,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GemConfigLayerCache {
+    version: u32,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size: u64,
+    loaded_paths: Vec<String>,
+    dep_stamps: Vec<GemConfigPathStamp>,
+    layer: ConfigLayer,
+}
+
+fn gem_config_layer_cache_path(config_path: &Path) -> PathBuf {
+    let canonical = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    cache_root_dir()
+        .join("config")
+        .join(format!("gem-layer-{}.json", &hash[..16]))
+}
+
+fn load_cached_gem_config_layer(
+    config_path: &Path,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size: u64,
+) -> Option<(ConfigLayer, Vec<PathBuf>)> {
+    let cache_path = gem_config_layer_cache_path(config_path);
+    let bytes = std::fs::read(cache_path).ok()?;
+    let cache: GemConfigLayerCache = serde_json::from_slice(&bytes).ok()?;
+    if cache.version != GEM_CONFIG_LAYER_CACHE_VERSION
+        || cache.mtime_secs != mtime_secs
+        || cache.mtime_nanos != mtime_nanos
+        || cache.size != size
+    {
+        return None;
+    }
+
+    let deps_valid = cache.dep_stamps.iter().all(|stamp| {
+        file_stamp(Path::new(&stamp.path)).is_some_and(|(secs, nanos, len)| {
+            secs == stamp.mtime_secs && nanos == stamp.mtime_nanos && len == stamp.size
+        })
+    });
+    if !deps_valid {
+        return None;
+    }
+
+    let loaded_paths = cache.loaded_paths.into_iter().map(PathBuf::from).collect();
+    Some((cache.layer, loaded_paths))
+}
+
+fn write_cached_gem_config_layer(
+    config_path: &Path,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size: u64,
+    loaded_paths: &[PathBuf],
+    layer: &ConfigLayer,
+) {
+    let mut loaded_paths_sorted: Vec<String> = loaded_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    loaded_paths_sorted.sort();
+
+    let mut dep_stamps: Vec<GemConfigPathStamp> = loaded_paths_sorted
+        .iter()
+        .filter_map(|path| {
+            let (secs, nanos, len) = file_stamp(Path::new(path))?;
+            Some(GemConfigPathStamp {
+                path: path.clone(),
+                mtime_secs: secs,
+                mtime_nanos: nanos,
+                size: len,
+            })
+        })
+        .collect();
+    dep_stamps.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let cache = GemConfigLayerCache {
+        version: GEM_CONFIG_LAYER_CACHE_VERSION,
+        mtime_secs,
+        mtime_nanos,
+        size,
+        loaded_paths: loaded_paths_sorted,
+        dep_stamps,
+        layer: layer.clone(),
+    };
+
+    let Ok(bytes) = serde_json::to_vec(&cache) else {
+        return;
+    };
+
+    let cache_path = gem_config_layer_cache_path(config_path);
+    if let Some(parent) = cache_path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+
+    let _ = std::fs::write(cache_path, bytes);
+}
+
+fn load_gem_config_recursive_cached(
+    config_path: &Path,
+    working_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+    gem_cache: Option<&HashMap<String, PathBuf>>,
+) -> Result<ConfigLayer> {
+    let abs_path = if config_path.is_absolute() {
+        config_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(config_path)
+    };
+
+    if visited.contains(&abs_path) {
+        return Ok(ConfigLayer::empty());
+    }
+
+    let Some((mtime_secs, mtime_nanos, size)) = file_stamp(config_path) else {
+        return load_config_recursive(config_path, working_dir, visited, gem_cache);
+    };
+
+    if let Some((layer, loaded_paths)) =
+        load_cached_gem_config_layer(config_path, mtime_secs, mtime_nanos, size)
+    {
+        for path in loaded_paths {
+            visited.insert(path);
+        }
+        return Ok(layer);
+    }
+
+    let visited_before = visited.clone();
+    let layer = load_config_recursive(config_path, working_dir, visited, gem_cache)?;
+    let mut loaded_paths: Vec<PathBuf> = visited.difference(&visited_before).cloned().collect();
+    loaded_paths.sort();
+
+    write_cached_gem_config_layer(
+        config_path,
+        mtime_secs,
+        mtime_nanos,
+        size,
+        &loaded_paths,
+        &layer,
+    );
+
+    Ok(layer)
+}
+
 fn try_load_rubocop_defaults(
     working_dir: &Path,
     gem_cache: Option<&HashMap<String, PathBuf>>,
@@ -1210,6 +1675,19 @@ fn try_load_rubocop_defaults(
     let default_config = gem_root.join("config").join("default.yml");
     if !default_config.exists() {
         return (fallback_default_excludes(), HashSet::new());
+    }
+
+    let metadata = match std::fs::metadata(&default_config) {
+        Ok(m) => m,
+        Err(_) => return (fallback_default_excludes(), HashSet::new()),
+    };
+    let size = metadata.len();
+    let (mtime_secs, mtime_nanos) = systemtime_to_parts(metadata.modified().ok());
+
+    if let Some((layer, known_cops)) =
+        load_cached_rubocop_defaults(&default_config, mtime_secs, mtime_nanos, size)
+    {
+        return (layer, known_cops);
     }
 
     let contents = match std::fs::read_to_string(&default_config) {
@@ -1242,7 +1720,16 @@ fn try_load_rubocop_defaults(
         HashSet::new()
     };
 
-    (parse_config_layer(&raw), known_cops)
+    let layer = parse_config_layer(&raw);
+    write_cached_rubocop_defaults(
+        &default_config,
+        mtime_secs,
+        mtime_nanos,
+        size,
+        &layer,
+        &known_cops,
+    );
+    (layer, known_cops)
 }
 
 /// Recursively load a config file and all its inherited configs.
@@ -1419,8 +1906,12 @@ fn load_config_recursive_inner(
                     if !gem_name.starts_with("rubocop-") {
                         let fallback = gem_root.join("config").join("base.yml");
                         if fallback.exists() {
-                            match load_config_recursive(&fallback, working_dir, visited, gem_cache)
-                            {
+                            match load_gem_config_recursive_cached(
+                                &fallback,
+                                working_dir,
+                                visited,
+                                gem_cache,
+                            ) {
                                 Ok(layer) => merge_layer_into(&mut base_layer, &layer, None),
                                 Err(e) => {
                                     eprintln!(
@@ -1433,7 +1924,12 @@ fn load_config_recursive_inner(
                     }
                     continue;
                 }
-                match load_config_recursive(&config_file, working_dir, visited, gem_cache) {
+                match load_gem_config_recursive_cached(
+                    &config_file,
+                    working_dir,
+                    visited,
+                    gem_cache,
+                ) {
                     // WARNING: Do NOT make gem Exclude patterns absolute relative to
                     // the gem's config directory. Gem default configs (e.g., rubocop's
                     // config/default.yml) contain Exclude patterns like `spec/**/*`
@@ -1632,7 +2128,7 @@ fn resolve_inherit_gem(
                 full_path.display(),
             );
         }
-        match load_config_recursive(&full_path, working_dir, visited, gem_cache) {
+        match load_gem_config_recursive_cached(&full_path, working_dir, visited, gem_cache) {
             // See WARNING in load_config_recursive_inner — do NOT make excludes
             // absolute relative to the gem config dir. Patterns are project-relative.
             Ok(layer) => layers.push(layer),
@@ -2382,6 +2878,12 @@ impl ResolvedConfig {
         !self.dir_overrides.is_empty()
     }
 
+    /// Populate directory overrides from already-discovered nested `.rubocop.yml`
+    /// parent directories.
+    pub fn set_dir_overrides_from_discovered_dirs(&mut self, discovered_dirs: &[PathBuf]) {
+        self.dir_overrides = load_dir_overrides_from_dirs(discovered_dirs);
+    }
+
     /// Pre-compute base CopConfig for each cop in the registry (indexed by cop index).
     /// This avoids repeated HashMap lookups and cloning in the per-file hot loop.
     pub fn precompute_cop_configs(&self, registry: &CopRegistry) -> Vec<CopConfig> {
@@ -2390,6 +2892,34 @@ impl ResolvedConfig {
             .iter()
             .map(|cop| self.cop_config(cop.name()))
             .collect()
+    }
+
+    /// Build deterministic cache fingerprint configs for session hashing.
+    ///
+    /// Includes root cop configs and one block per directory override so result
+    /// cache sessions invalidate when nested `.rubocop.yml` path or content changes.
+    pub fn precompute_cache_session_configs(&self, registry: &CopRegistry) -> Vec<CopConfig> {
+        let mut configs = self.precompute_cop_configs(registry);
+
+        let mut override_dirs: Vec<&PathBuf> =
+            self.dir_overrides.iter().map(|(dir, _)| dir).collect();
+        override_dirs.sort();
+
+        for dir in override_dirs {
+            let mut marker = CopConfig::default();
+            marker.options.insert(
+                "__DirOverridePath".to_string(),
+                Value::String(dir.to_string_lossy().to_string()),
+            );
+            configs.push(marker);
+
+            let probe_path = dir.join("__nitrocop_cache_probe__.rb");
+            if let Some(effective) = self.effective_config_for_file(&probe_path) {
+                configs.extend(effective.precompute_cop_configs(registry));
+            }
+        }
+
+        configs
     }
 
     /// Build the effective config for a file under a nested `.rubocop.yml`.
@@ -2540,12 +3070,15 @@ impl ResolvedConfig {
         let global_exclude_pats: Vec<&str> =
             self.global_excludes.iter().map(|s| s.as_str()).collect();
         let global_exclude = build_glob_set(&global_exclude_pats).unwrap_or_else(GlobSet::empty);
-        let global_exclude_patterns = self
+        let global_exclude_patterns: Vec<String> = self
             .global_excludes
             .iter()
             .filter(|pattern| extract_ruby_regexp(pattern).is_none())
             .cloned()
             .collect();
+        let global_exclude_needs_confirmation = global_exclude_patterns
+            .iter()
+            .any(|pattern| glob_pattern_needs_ruby_confirmation(pattern));
         let global_exclude_re = build_regex_set(&global_exclude_pats);
 
         // Cross-cop dependency: Style/RedundantConstantBase disables itself when
@@ -2756,6 +3289,7 @@ impl ResolvedConfig {
             global_exclude,
             global_exclude_patterns,
             global_exclude_re,
+            global_exclude_needs_confirmation,
             filters,
             config_dir: self.config_dir.clone(),
             base_dir: self.base_dir.clone(),
@@ -2788,30 +3322,32 @@ impl ResolvedConfig {
         tier_map: &crate::cop::tiers::TierMap,
         preview: bool,
     ) -> crate::cop::tiers::SkipSummary {
-        use std::collections::HashSet;
-
-        let registry_names: HashSet<&str> = registry.cops().iter().map(|c| c.name()).collect();
-        let baseline: HashSet<&str> = self
-            .rubocop_known_cops
-            .iter()
-            .map(|s| s.as_str())
-            .chain(self.require_known_cops.iter().map(|s| s.as_str()))
-            .collect();
-
         let mut summary = crate::cop::tiers::SkipSummary::default();
 
-        for name in self.enabled_cop_names() {
-            if registry_names.contains(name.as_str()) {
+        for (name, cfg) in &self.cop_configs {
+            let enabled = match cfg.enabled {
+                EnabledState::True => true,
+                EnabledState::Unset => !self.disabled_by_default,
+                EnabledState::Pending => self.new_cops == NewCopsPolicy::Enable,
+                EnabledState::False => false,
+            };
+            if !enabled {
+                continue;
+            }
+
+            if registry.get(name.as_str()).is_some() {
                 // Implemented — check if preview-gated
-                if !preview && tier_map.tier_for(&name) == crate::cop::tiers::Tier::Preview {
-                    summary.preview_gated.push(name);
+                if !preview && tier_map.tier_for(name) == crate::cop::tiers::Tier::Preview {
+                    summary.preview_gated.push(name.clone());
                 }
-            } else if baseline.contains(name.as_str()) {
+            } else if self.rubocop_known_cops.contains(name)
+                || self.require_known_cops.contains(name)
+            {
                 // In vendor baseline but not implemented
-                summary.unimplemented.push(name);
+                summary.unimplemented.push(name.clone());
             } else {
                 // Not in vendor baseline at all
-                summary.outside_baseline.push(name);
+                summary.outside_baseline.push(name.clone());
             }
         }
 
@@ -3455,6 +3991,7 @@ mod tests {
             global_exclude,
             global_exclude_patterns: pats.iter().map(|pat| (*pat).to_string()).collect(),
             global_exclude_re,
+            global_exclude_needs_confirmation: true,
             filters: Vec::new(),
             config_dir: config.config_dir().map(|p| p.to_path_buf()),
             base_dir: None,
@@ -3492,6 +4029,7 @@ mod tests {
             global_exclude,
             global_exclude_patterns: pats.iter().map(|pat| (*pat).to_string()).collect(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: Vec::new(),
             config_dir: Some(PathBuf::from(".")),
             base_dir: None,
@@ -4514,6 +5052,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/mastodon")),
             base_dir: None,
@@ -4537,6 +5076,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/tmp/test")),
             base_dir: None,
@@ -4561,6 +5101,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/discourse")),
             base_dir: None,
@@ -4585,6 +5126,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/discourse")),
             base_dir: None,
@@ -4608,6 +5150,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: None,
             base_dir: None,
@@ -4627,6 +5170,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: None,
             base_dir: None,
@@ -4647,6 +5191,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/project")),
             base_dir: None,
@@ -4669,6 +5214,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/project")),
             base_dir: None,
@@ -4696,6 +5242,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/mastodon")),
             base_dir: None,
@@ -4722,6 +5269,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: Vec::new(),
             config_dir: None,
             base_dir: None,
@@ -4749,6 +5297,7 @@ mod tests {
             global_exclude: GlobSet::empty(),
             global_exclude_patterns: Vec::new(),
             global_exclude_re: None,
+            global_exclude_needs_confirmation: false,
             filters: Vec::new(),
             config_dir: None,
             base_dir: None,

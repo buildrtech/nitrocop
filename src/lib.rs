@@ -126,7 +126,7 @@ fn collect_corpus_check_results(
                 .to_string();
 
             // Discover .rb files in this repo
-            let discovered = match fs::discover_files(std::slice::from_ref(repo_path), config) {
+            let discovered = match fs::discover_files(std::slice::from_ref(repo_path)) {
                 Ok(d) => d,
                 Err(_) => return (repo_id, 0),
             };
@@ -304,9 +304,37 @@ pub fn run(args: Args) -> Result<i32> {
         && !args.force_default_config
         && args.stdin.is_none();
 
+    // Overlap file discovery with config loading for the main lint/list-target-files path.
+    // Discovery is independent from ResolvedConfig (global excludes are applied later).
+    let needs_main_discovery = args.stdin.is_none()
+        && !args.verify
+        && args.corpus_check.is_none()
+        && !args.rubocop_only
+        && !args.migrate
+        && !args.doctor;
+    let can_defer_dir_overrides = needs_main_discovery && args.paths.iter().all(|p| p.is_dir());
+    let discovery_handle = if needs_main_discovery {
+        let paths = args.paths.clone();
+        Some(std::thread::spawn(move || discover_files(&paths)))
+    } else {
+        None
+    };
+
+    let load_config_with_mode = |gem_cache: Option<&HashMap<String, std::path::PathBuf>>| {
+        if can_defer_dir_overrides {
+            config::load_config_deferred_dir_overrides(
+                args.config.as_deref(),
+                target_dir,
+                gem_cache,
+            )
+        } else {
+            load_config(args.config.as_deref(), target_dir, gem_cache)
+        }
+    };
+
     // Load config — use lockfile if available
     let config_start = std::time::Instant::now();
-    let config = if args.force_default_config {
+    let mut config = if args.force_default_config {
         config::ResolvedConfig::empty()
     } else if use_cache {
         // Try to find config dir for lockfile lookup
@@ -317,7 +345,7 @@ pub fn run(args: Args) -> Result<i32> {
                 if args.debug {
                     eprintln!("debug: using lockfile ({} cached gems)", lock.gems.len());
                 }
-                load_config(args.config.as_deref(), target_dir, Some(&lock.gems))?
+                load_config_with_mode(Some(&lock.gems))?
             }
             Err(e) => {
                 // If lockfile is missing, fail with helpful message
@@ -325,7 +353,7 @@ pub fn run(args: Args) -> Result<i32> {
             }
         }
     } else {
-        load_config(args.config.as_deref(), target_dir, None)?
+        load_config_with_mode(None)?
     };
     let config_elapsed = config_start.elapsed();
 
@@ -425,7 +453,17 @@ pub fn run(args: Args) -> Result<i32> {
         };
     }
 
-    let discovered = discover_files(&args.paths, &config)?;
+    let discovered = if let Some(handle) = discovery_handle {
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("file discovery thread panicked"))??
+    } else {
+        discover_files(&args.paths)?
+    };
+
+    if can_defer_dir_overrides {
+        config.set_dir_overrides_from_discovered_dirs(&discovered.sub_config_dirs);
+    }
 
     // --list-target-files (-L): print files that would be linted, then exit
     if args.list_target_files {

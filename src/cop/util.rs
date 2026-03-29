@@ -532,12 +532,10 @@ pub fn assignment_context_base_col(source: &SourceFile, keyword_offset: usize) -
 
     // RuboCop's variable-style alignment also treats common binary operator
     // contexts like `foo == if ...` as start-of-line alignment contexts.
-    if before_keyword.windows(2).any(|w| {
-        matches!(
-            w,
-            [b'=', b'='] | [b'!', b'='] | [b'<', b'='] | [b'>', b'='] | [b'&', b'&'] | [b'|', b'|']
-        )
-    }) {
+    if before_keyword
+        .windows(2)
+        .any(|w| matches!(w, [b'=', b'='] | [b'!', b'='] | [b'<', b'='] | [b'>', b'=']))
+    {
         return before_keyword.iter().position(|&b| b != b' ' && b != b'\t');
     }
 
@@ -1444,9 +1442,9 @@ mod tests {
         let src = SourceFile::from_bytes("test.rb", b"x ||= if foo\n  bar\nend\n".to_vec());
         assert_eq!(assignment_context_base_col(&src, 6), Some(0));
 
-        // Comparison (not assignment): `x == if ...`
+        // Comparison context: RuboCop variable-style aligns to line start.
         let src = SourceFile::from_bytes("test.rb", b"x == if foo\n  bar\nend\n".to_vec());
-        assert_eq!(assignment_context_base_col(&src, 5), None);
+        assert_eq!(assignment_context_base_col(&src, 5), Some(0));
 
         // Not assignment: `x =~ /pattern/`
         let src = SourceFile::from_bytes("test.rb", b"x =~ if foo\n  bar\nend\n".to_vec());

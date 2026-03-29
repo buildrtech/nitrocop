@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use crate::cop::node_type::{
     ASSOC_NODE, CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, FALSE_NODE, HASH_NODE,
     KEYWORD_HASH_NODE, SYMBOL_NODE, TRUE_NODE,
@@ -93,6 +96,17 @@ const SKIP_METHODS: &[&[u8]] = &[
     b"update_counters",
 ];
 
+#[derive(Default)]
+struct CachedMethodLists {
+    forbidden: Option<Vec<Vec<u8>>>,
+    allowed: Option<Vec<Vec<u8>>>,
+}
+
+thread_local! {
+    static CONFIG_METHOD_LIST_CACHE: RefCell<HashMap<usize, CachedMethodLists>> =
+        RefCell::new(HashMap::new());
+}
+
 impl Cop for SkipsModelValidations {
     fn name(&self) -> &'static str {
         "Rails/SkipsModelValidations"
@@ -125,32 +139,44 @@ impl Cop for SkipsModelValidations {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let forbidden = config.get_string_array("ForbiddenMethods");
-        let allowed = config.get_string_array("AllowedMethods");
-
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
         };
         let method_name = call.name().as_slice();
-        let method_str = std::str::from_utf8(method_name).unwrap_or("");
 
-        // Use ForbiddenMethods if configured, otherwise fall back to hardcoded list
-        let is_forbidden = if let Some(ref list) = forbidden {
-            list.iter().any(|m| m == method_str)
-        } else {
-            SKIP_METHODS.contains(&method_name)
-        };
+        let (is_forbidden, is_allowed) = CONFIG_METHOD_LIST_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let entry = cache
+                .entry(config as *const CopConfig as usize)
+                .or_insert_with(|| CachedMethodLists {
+                    forbidden: config
+                        .get_string_array("ForbiddenMethods")
+                        .map(|methods| methods.into_iter().map(|m| m.into_bytes()).collect()),
+                    allowed: config
+                        .get_string_array("AllowedMethods")
+                        .map(|methods| methods.into_iter().map(|m| m.into_bytes()).collect()),
+                });
+
+            let forbidden = if let Some(methods) = entry.forbidden.as_ref() {
+                methods.iter().any(|m| m.as_slice() == method_name)
+            } else {
+                SKIP_METHODS.contains(&method_name)
+            };
+            let allowed = entry
+                .allowed
+                .as_ref()
+                .is_some_and(|methods| methods.iter().any(|m| m.as_slice() == method_name));
+
+            (forbidden, allowed)
+        });
 
         if !is_forbidden {
             return;
         }
 
-        // Skip if method is in AllowedMethods
-        if let Some(ref list) = allowed {
-            if list.iter().any(|m| m == method_str) {
-                return;
-            }
+        if is_allowed {
+            return;
         }
 
         // RuboCop: METHODS_WITH_ARGUMENTS — skip if the method is in this list
@@ -257,6 +283,7 @@ impl Cop for SkipsModelValidations {
         // Report at method name location (node.loc.selector in RuboCop)
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let method_str = std::str::from_utf8(method_name).unwrap_or("unknown method");
         let msg = format!("Avoid using `{}` because it skips validations.", method_str);
         diagnostics.push(self.diagnostic(source, line, column, msg));
     }

@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use crate::cop::node_type::{
     ARRAY_NODE, INTERPOLATED_REGULAR_EXPRESSION_NODE, INTERPOLATED_STRING_NODE,
     INTERPOLATED_SYMBOL_NODE, INTERPOLATED_X_STRING_NODE, REGULAR_EXPRESSION_NODE, STRING_NODE,
@@ -6,7 +10,6 @@ use crate::cop::node_type::{
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
-use std::collections::HashMap;
 
 /// Style/PercentLiteralDelimiters enforces consistent %-literal delimiters.
 ///
@@ -18,6 +21,11 @@ use std::collections::HashMap;
 ///   `%w(foo( bar))`) — changing delimiters would require escaping. Added
 ///   `include_same_character_as_used_for_delimiter?` check matching RuboCop.
 pub struct PercentLiteralDelimiters;
+
+thread_local! {
+    static PREFERRED_DELIMITERS_CACHE: RefCell<HashMap<usize, Rc<HashMap<String, (u8, u8)>>>> =
+        RefCell::new(HashMap::new());
+}
 
 impl PercentLiteralDelimiters {
     /// Parse PreferredDelimiters config into a map from literal type to (open, close).
@@ -124,7 +132,13 @@ impl Cop for PercentLiteralDelimiters {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let preferred = Self::preferred_delimiters(config);
+        let preferred = PREFERRED_DELIMITERS_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache
+                .entry(config as *const CopConfig as usize)
+                .or_insert_with(|| Rc::new(Self::preferred_delimiters(config)))
+                .clone()
+        });
 
         // Get opening_loc from the node — only percent-literal node types have them
         let opening_loc = if let Some(a) = node.as_array_node() {

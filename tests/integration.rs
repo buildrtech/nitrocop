@@ -90,6 +90,7 @@ fn discovered(files: &[PathBuf]) -> DiscoveredFiles {
     DiscoveredFiles {
         files: files.to_vec(),
         explicit: std::collections::HashSet::new(),
+        sub_config_dirs: Vec::new(),
     }
 }
 

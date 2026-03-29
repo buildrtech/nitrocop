@@ -1,7 +1,8 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::LazyLock;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use rayon::prelude::*;
 use ruby_prism::Visit;
@@ -17,6 +18,51 @@ use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::fs::DiscoveredFiles;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
+
+type PreparedOverrideConfig = (CopFilterSet, Vec<CopConfig>);
+
+static LINT_THREAD_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+
+fn with_lint_thread_pool<T>(f: impl FnOnce() -> T + Send) -> T
+where
+    T: Send,
+{
+    let pool = LINT_THREAD_POOL.get_or_init(|| {
+        // Respect explicit user configuration first.
+        if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+            return None;
+        }
+
+        // Warm/cache-hit workloads are metadata-bound and can regress with very
+        // large worker pools. Cap to 8 threads by default while preserving full
+        // parallelism on smaller machines.
+        let available = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let capped = available.min(8);
+        if capped == available {
+            return None;
+        }
+
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(capped)
+            .build()
+            .ok()
+    });
+
+    match pool {
+        Some(pool) => pool.install(f),
+        None => f(),
+    }
+}
+
+thread_local! {
+    /// Per-worker cache of precomputed (filters + cop configs) for file directories.
+    /// Avoids rebuilding effective config/filter state for every file when nested
+    /// `.rubocop.yml` overrides are present.
+    static FILE_OVERRIDE_CONFIG_CACHE: RefCell<HashMap<PathBuf, Option<Arc<PreparedOverrideConfig>>>> =
+        RefCell::new(HashMap::new());
+}
 
 /// Thread-safe phase timing counters (nanoseconds) for profiling.
 pub(crate) struct PhaseTimers {
@@ -181,16 +227,24 @@ pub fn run_linter(
     let has_dir_overrides = config.has_dir_overrides();
 
     // Result cache: enabled by default, disable with --no-cache, --cache false,
-    // or autocorrect.
+    // stdin mode, or autocorrect.
     let cache_enabled = args.cache == "true"
         && !args.no_cache
         && args.stdin.is_none()
         && args.autocorrect_mode() == crate::cli::AutocorrectMode::Off;
-    let cache_enabled = cache_enabled && !has_dir_overrides;
     let cache = if cache_enabled {
-        let c = ResultCache::new(env!("CARGO_PKG_VERSION"), &base_configs, args);
+        let c = if has_dir_overrides {
+            let cache_session_configs = config.precompute_cache_session_configs(registry);
+            ResultCache::new(env!("CARGO_PKG_VERSION"), &cache_session_configs, args)
+        } else {
+            ResultCache::new(env!("CARGO_PKG_VERSION"), &base_configs, args)
+        };
         if args.debug {
-            eprintln!("debug: result cache enabled");
+            if has_dir_overrides {
+                eprintln!("debug: result cache enabled (directory-specific configs hashed)");
+            } else {
+                eprintln!("debug: result cache enabled");
+            }
         }
         c
     } else {
@@ -198,8 +252,6 @@ pub fn run_linter(
             eprintln!("debug: result cache disabled (--no-cache)");
         } else if args.debug && args.cache != "true" {
             eprintln!("debug: result cache disabled (--cache false)");
-        } else if args.debug && has_dir_overrides {
-            eprintln!("debug: result cache disabled (directory-specific configs)");
         }
         ResultCache::disabled()
     };
@@ -216,37 +268,39 @@ pub fn run_linter(
     let found_offense = AtomicBool::new(false);
     let total_corrected = std::sync::atomic::AtomicUsize::new(0);
 
-    let diagnostics: Vec<Diagnostic> = files
-        .par_iter()
-        .flat_map(|path| {
-            // --fail-fast: skip remaining files once an offense is found
-            if args.fail_fast && found_offense.load(Ordering::Relaxed) {
-                return Vec::new();
-            }
-            let result = lint_file(
-                path,
-                config,
-                registry,
-                args,
-                tier_map,
-                &cop_filters,
-                &base_configs,
-                has_dir_overrides,
-                timers.as_ref(),
-                &cache,
-                &cache_stat_hits,
-                &cache_content_hits,
-                &cache_misses,
-                &discovered.explicit,
-                &total_corrected,
-                allowlist,
-            );
-            if args.fail_fast && !result.is_empty() {
-                found_offense.store(true, Ordering::Relaxed);
-            }
-            result
-        })
-        .collect();
+    let diagnostics: Vec<Diagnostic> = with_lint_thread_pool(|| {
+        files
+            .par_iter()
+            .flat_map(|path| {
+                // --fail-fast: skip remaining files once an offense is found
+                if args.fail_fast && found_offense.load(Ordering::Relaxed) {
+                    return Vec::new();
+                }
+                let result = lint_file(
+                    path,
+                    config,
+                    registry,
+                    args,
+                    tier_map,
+                    &cop_filters,
+                    &base_configs,
+                    has_dir_overrides,
+                    timers.as_ref(),
+                    &cache,
+                    &cache_stat_hits,
+                    &cache_content_hits,
+                    &cache_misses,
+                    &discovered.explicit,
+                    &total_corrected,
+                    allowlist,
+                );
+                if args.fail_fast && !result.is_empty() {
+                    found_offense.store(true, Ordering::Relaxed);
+                }
+                result
+            })
+            .collect()
+    });
 
     let mut sorted = diagnostics;
     sorted.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
@@ -385,12 +439,22 @@ fn lint_file(
     // Explicitly-passed files bypass AllCops.Exclude (matching RuboCop default)
     // unless --force-exclusion is set.
     if cop_filters.is_globally_excluded(path) {
+        if args.force_exclusion {
+            return Vec::new();
+        }
+
+        // Common directory-scan path: no explicit file args, so excluded files
+        // are always skipped without canonicalization.
+        if explicit_files.is_empty() {
+            return Vec::new();
+        }
+
         let is_explicit = explicit_files.contains(path)
             || path
                 .canonicalize()
                 .ok()
                 .is_some_and(|c| explicit_files.contains(&c));
-        if args.force_exclusion || !is_explicit {
+        if !is_explicit {
             return Vec::new();
         }
     }
@@ -403,9 +467,16 @@ fn lint_file(
 
     // Tier 1: stat check (mtime + size) — no file read needed
     if cache.is_enabled() {
-        if let CacheLookup::StatHit(cached) = cache.get_by_stat(path) {
-            cache_stat_hits.fetch_add(1, Ordering::Relaxed);
-            return cached;
+        match cache.get_by_stat(path) {
+            CacheLookup::StatHit(cached) => {
+                cache_stat_hits.fetch_add(1, Ordering::Relaxed);
+                return cached;
+            }
+            CacheLookup::StatHitEmpty => {
+                cache_stat_hits.fetch_add(1, Ordering::Relaxed);
+                return Vec::new();
+            }
+            _ => {}
         }
     }
 
@@ -414,6 +485,13 @@ fn lint_file(
     let source = match SourceFile::from_path(path) {
         Ok(s) => s,
         Err(e) => {
+            // Git-backed discovery can surface tracked paths deleted in the
+            // working tree. Treat missing files as benign skips.
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|ioe| ioe.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Vec::new();
+            }
             eprintln!("error: {e:#}");
             return Vec::new();
         }
@@ -436,11 +514,19 @@ fn lint_file(
 
     // Tier 2: content hash check — file was read, mtime didn't match
     if cache.is_enabled() {
-        if let CacheLookup::ContentHit(cached) = cache.get_by_content(path, source.as_bytes()) {
-            cache_content_hits.fetch_add(1, Ordering::Relaxed);
-            return cached;
+        match cache.get_by_content(path, source.as_bytes()) {
+            CacheLookup::ContentHit(cached) => {
+                cache_content_hits.fetch_add(1, Ordering::Relaxed);
+                return cached;
+            }
+            CacheLookup::ContentHitEmpty => {
+                cache_content_hits.fetch_add(1, Ordering::Relaxed);
+                return Vec::new();
+            }
+            _ => {
+                cache_misses.fetch_add(1, Ordering::Relaxed);
+            }
         }
-        cache_misses.fetch_add(1, Ordering::Relaxed);
     }
 
     let (result, corrected_bytes, corrected_count) = lint_source_inner(
@@ -800,10 +886,12 @@ fn emit_syntax_diagnostics(
     if active_filters.is_cop_excluded(syntax_idx, &source.path) {
         return Vec::new();
     }
-    if !args.only.is_empty() && !args.only.iter().any(|o| o == SYNTAX_COP) {
+    let has_only = !args.only.is_empty();
+    let has_except = !args.except.is_empty();
+    if has_only && !args.only.iter().any(|o| o == SYNTAX_COP) {
         return Vec::new();
     }
-    if args.except.iter().any(|e| e == SYNTAX_COP) {
+    if has_except && args.except.iter().any(|e| e == SYNTAX_COP) {
         return Vec::new();
     }
 
@@ -897,17 +985,36 @@ fn lint_source_once(
     let cop_start = std::time::Instant::now();
     let filter_start = std::time::Instant::now();
 
-    let effective_config = if has_dir_overrides {
-        config.effective_config_for_file(&source.path)
-    } else {
-        None
-    };
-    let owned_filters;
-    let owned_base_configs;
-    let (active_filters, active_base_configs) = if let Some(ref file_config) = effective_config {
-        owned_filters = file_config.build_cop_filters(registry, tier_map, args.preview);
-        owned_base_configs = file_config.precompute_cop_configs(registry);
-        (&owned_filters, owned_base_configs.as_slice())
+    let mut prepared_override: Option<Arc<PreparedOverrideConfig>> = None;
+    if has_dir_overrides {
+        let cache_key = source
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+
+        prepared_override = FILE_OVERRIDE_CONFIG_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(existing) = cache.get(&cache_key) {
+                return existing.clone();
+            }
+
+            let prepared = config
+                .effective_config_for_file(&source.path)
+                .map(|file_config| {
+                    Arc::new((
+                        file_config.build_cop_filters(registry, tier_map, args.preview),
+                        file_config.precompute_cop_configs(registry),
+                    ))
+                });
+
+            cache.insert(cache_key, prepared.clone());
+            prepared
+        });
+    }
+
+    let (active_filters, active_base_configs) = if let Some(ref prepared) = prepared_override {
+        (&prepared.0, prepared.1.as_slice())
     } else {
         (cop_filters, base_configs)
     };
@@ -916,25 +1023,26 @@ fn lint_source_once(
 
     let cops = registry.cops();
     let has_only = !args.only.is_empty();
+    let has_except = !args.except.is_empty();
 
     // Pass 1: Universal cops
     for &i in active_filters.universal_cop_indices() {
         let cop = &cops[i];
-        let name = cop.name();
+        let name = registry.cop_name(i);
         if name == REDUNDANT_DISABLE_COP {
             continue;
         }
         if has_only && !args.only.iter().any(|o| o == name) {
             continue;
         }
-        if args.except.iter().any(|e| e == name) {
+        if has_except && args.except.iter().any(|e| e == name) {
             continue;
         }
 
         let cop_config = &active_base_configs[i];
 
         let should_correct = autocorrect_mode != crate::cli::AutocorrectMode::Off
-            && cop.supports_autocorrect()
+            && registry.cop_supports_autocorrect(i)
             && cop_config.should_autocorrect(autocorrect_mode)
             && (autocorrect_mode == crate::cli::AutocorrectMode::All || allowlist.contains(name));
 
@@ -965,14 +1073,14 @@ fn lint_source_once(
     // Pass 2: Pattern cops
     for &i in active_filters.pattern_cop_indices() {
         let cop = &cops[i];
-        let name = cop.name();
+        let name = registry.cop_name(i);
         if name == REDUNDANT_DISABLE_COP {
             continue;
         }
         if has_only && !args.only.iter().any(|o| o == name) {
             continue;
         }
-        if args.except.iter().any(|e| e == name) {
+        if has_except && args.except.iter().any(|e| e == name) {
             continue;
         }
 
@@ -983,7 +1091,7 @@ fn lint_source_once(
         let cop_config = &active_base_configs[i];
 
         let should_correct = autocorrect_mode != crate::cli::AutocorrectMode::Off
-            && cop.supports_autocorrect()
+            && registry.cop_supports_autocorrect(i)
             && cop_config.should_autocorrect(autocorrect_mode)
             && (autocorrect_mode == crate::cli::AutocorrectMode::All || allowlist.contains(name));
 
@@ -1020,7 +1128,7 @@ fn lint_source_once(
     if !ast_cop_indices.is_empty() {
         let ast_cops: Vec<(&dyn Cop, &CopConfig)> = ast_cop_indices
             .iter()
-            .map(|&i| (&*registry.cops()[i] as &dyn Cop, &active_base_configs[i]))
+            .map(|&i| (&*cops[i] as &dyn Cop, &active_base_configs[i]))
             .collect();
         let mut walker = BatchedCopWalker::new(ast_cops, source, &parse_result);
         if autocorrect_mode != crate::cli::AutocorrectMode::Off {
@@ -1054,17 +1162,16 @@ fn lint_source_once(
         diagnostics.retain(|d| !disabled.check_and_mark_used(&d.cop_name, d.location.line));
     }
 
+    let has_only = !args.only.is_empty();
+    let has_except_redundant_disable = args.except.iter().any(|e| e == REDUNDANT_DISABLE_COP);
     if !args.ignore_disable_comments
         && disabled.has_directives()
-        && args.only.is_empty()
-        && !args.except.iter().any(|e| e == REDUNDANT_DISABLE_COP)
+        && !has_only
+        && !has_except_redundant_disable
     {
         let cop_enabled = registry
-            .cops()
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.name() == REDUNDANT_DISABLE_COP)
-            .is_some_and(|(idx, _)| active_filters.is_cop_match(idx, &source.path));
+            .cop_index(REDUNDANT_DISABLE_COP)
+            .is_some_and(|idx| active_filters.is_cop_match(idx, &source.path));
 
         if cop_enabled {
             for directive in disabled.unused_directives() {

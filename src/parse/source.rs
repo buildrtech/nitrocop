@@ -46,8 +46,15 @@ impl SourceFile {
     }
 
     /// Returns an iterator over lines as byte slices (without newline terminators).
-    pub fn lines(&self) -> impl Iterator<Item = &[u8]> {
-        self.content.split(|&b| b == b'\n')
+    ///
+    /// Uses precomputed `line_starts` to avoid re-scanning bytes on every call.
+    pub fn lines(&self) -> SourceLines<'_> {
+        SourceLines {
+            content: &self.content,
+            line_starts: &self.line_starts,
+            index: 0,
+            emit_trailing_empty: self.content.ends_with(b"\n"),
+        }
     }
 
     /// Convert a byte offset into a (1-indexed line, 0-indexed column) pair.
@@ -58,10 +65,16 @@ impl SourceFile {
             Err(idx) => idx.saturating_sub(1),
         };
         let line_bytes = &self.content[self.line_starts[line_idx]..byte_offset];
-        // Count bytes that are NOT UTF-8 continuation bytes (0x80..0xBF).
-        // This equals the number of UTF-8 character starts, and works correctly
-        // even for partial or invalid UTF-8.
-        let col = line_bytes.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+        // Fast path for ASCII-only lines: byte count == character count.
+        // Fall back to UTF-8-aware counting when non-ASCII bytes are present.
+        let col = if line_bytes.iter().all(|&b| b < 0x80) {
+            line_bytes.len()
+        } else {
+            // Count bytes that are NOT UTF-8 continuation bytes (0x80..0xBF).
+            // This equals the number of UTF-8 character starts, and works correctly
+            // even for partial or invalid UTF-8.
+            line_bytes.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+        };
         (line_idx + 1, col)
     }
 
@@ -148,6 +161,43 @@ impl SourceFile {
             content,
             line_starts,
         }
+    }
+}
+
+pub struct SourceLines<'a> {
+    content: &'a [u8],
+    line_starts: &'a [usize],
+    index: usize,
+    emit_trailing_empty: bool,
+}
+
+impl<'a> Iterator for SourceLines<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.line_starts.len() {
+            let start = self.line_starts[self.index];
+            let mut end = if self.index + 1 < self.line_starts.len() {
+                // Next line starts immediately after this line's '\n'.
+                self.line_starts[self.index + 1] - 1
+            } else {
+                self.content.len()
+            };
+
+            if end > start && self.content[end - 1] == b'\n' {
+                end -= 1;
+            }
+
+            self.index += 1;
+            return Some(&self.content[start..end]);
+        }
+
+        if self.emit_trailing_empty {
+            self.emit_trailing_empty = false;
+            return Some(&self.content[0..0]);
+        }
+
+        None
     }
 }
 

@@ -4,6 +4,8 @@ use super::Cop;
 
 pub struct CopRegistry {
     cops: Vec<Box<dyn Cop>>,
+    names: Vec<&'static str>,
+    supports_autocorrect: Vec<bool>,
     index: HashMap<&'static str, usize>,
 }
 
@@ -13,6 +15,8 @@ impl CopRegistry {
     pub fn new() -> Self {
         Self {
             cops: Vec::new(),
+            names: Vec::new(),
+            supports_autocorrect: Vec::new(),
             index: HashMap::new(),
         }
     }
@@ -39,7 +43,10 @@ impl CopRegistry {
 
     pub fn register(&mut self, cop: Box<dyn Cop>) {
         let name = cop.name();
+        let supports_autocorrect = cop.supports_autocorrect();
         let idx = self.cops.len();
+        self.names.push(name);
+        self.supports_autocorrect.push(supports_autocorrect);
         self.cops.push(cop);
         self.index.insert(name, idx);
     }
@@ -52,8 +59,20 @@ impl CopRegistry {
         self.index.get(name).map(|&idx| &*self.cops[idx])
     }
 
+    pub fn cop_index(&self, name: &str) -> Option<usize> {
+        self.index.get(name).copied()
+    }
+
     pub fn names(&self) -> Vec<&'static str> {
-        self.cops.iter().map(|c| c.name()).collect()
+        self.names.clone()
+    }
+
+    pub fn cop_name(&self, idx: usize) -> &'static str {
+        self.names[idx]
+    }
+
+    pub fn cop_supports_autocorrect(&self, idx: usize) -> bool {
+        self.supports_autocorrect[idx]
     }
 
     pub fn len(&self) -> usize {

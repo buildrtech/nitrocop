@@ -94,9 +94,13 @@ impl CachedDiagnostic {
 pub enum CacheLookup {
     /// Cache hit via mtime+size — no file read was needed.
     StatHit(Vec<Diagnostic>),
+    /// Fast-path stat hit when no diagnostics were cached.
+    StatHitEmpty,
     /// Cache hit via content hash — file was read but didn't need re-linting.
     /// The mtime has been updated in the cache entry for next time.
     ContentHit(Vec<Diagnostic>),
+    /// Fast-path content hit when no diagnostics were cached.
+    ContentHitEmpty,
     /// Cache miss — file needs to be linted.
     Miss,
 }
@@ -173,6 +177,10 @@ impl ResultCache {
 
         if entry.mtime_secs == mtime_secs && entry.mtime_nanos == mtime_nanos && entry.size == size
         {
+            if entry.diagnostics.is_empty() {
+                return CacheLookup::StatHitEmpty;
+            }
+
             let path_str = path.to_string_lossy();
             CacheLookup::StatHit(
                 entry
@@ -227,20 +235,30 @@ impl ResultCache {
             None => return CacheLookup::Miss,
         };
 
+        let empty_hit = entry.diagnostics.is_empty();
+
         // Build result before mutating the entry
-        let path_str = path.to_string_lossy();
-        let result: Vec<Diagnostic> = entry
-            .diagnostics
-            .iter()
-            .map(|e| e.to_diagnostic(&path_str))
-            .collect();
+        let result: Vec<Diagnostic> = if empty_hit {
+            Vec::new()
+        } else {
+            let path_str = path.to_string_lossy();
+            entry
+                .diagnostics
+                .iter()
+                .map(|e| e.to_diagnostic(&path_str))
+                .collect()
+        };
 
         entry.mtime_secs = mtime_secs;
         entry.mtime_nanos = mtime_nanos;
         entry.size = size;
         self.dirty.store(true, Ordering::Relaxed);
 
-        CacheLookup::ContentHit(result)
+        if empty_hit {
+            CacheLookup::ContentHitEmpty
+        } else {
+            CacheLookup::ContentHit(result)
+        }
     }
 
     /// Store results for a file. Best-effort — writes to in-memory map only.
@@ -432,9 +450,14 @@ fn evict_old_sessions(cache_root: &Path, max_sessions: usize) -> std::io::Result
         .filter_map(|e| e.ok())
         .collect();
 
-    // Clean up leftover old-format session directories (not "lockfiles")
+    // Clean up leftover old-format session directories.
+    // Preserve dedicated cache subdirectories used by other features.
     for entry in &dir_entries {
-        if entry.path().is_dir() && entry.file_name() != "lockfiles" {
+        if entry.path().is_dir()
+            && entry.file_name() != "lockfiles"
+            && entry.file_name() != "discovery"
+            && entry.file_name() != "config"
+        {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -576,6 +599,8 @@ mod tests {
                 "Expected StatHit, got {:?}",
                 match other {
                     CacheLookup::ContentHit(_) => "ContentHit",
+                    CacheLookup::ContentHitEmpty => "ContentHitEmpty",
+                    CacheLookup::StatHitEmpty => "StatHitEmpty",
                     CacheLookup::Miss => "Miss",
                     _ => "StatHit",
                 }
@@ -608,10 +633,12 @@ mod tests {
             CacheLookup::ContentHit(cached) => {
                 assert!(cached.is_empty());
             }
+            CacheLookup::ContentHitEmpty => {}
             other => panic!(
                 "Expected ContentHit, got {:?}",
                 match other {
                     CacheLookup::StatHit(_) => "StatHit",
+                    CacheLookup::StatHitEmpty => "StatHitEmpty",
                     CacheLookup::Miss => "Miss",
                     _ => "ContentHit",
                 }
@@ -620,7 +647,7 @@ mod tests {
 
         // After content hit updated mtime, stat should now hit
         match cache.get_by_stat(&rb_file) {
-            CacheLookup::StatHit(_) => {} // expected
+            CacheLookup::StatHit(_) | CacheLookup::StatHitEmpty => {} // expected
             _ => panic!("Expected StatHit after mtime update"),
         }
     }
@@ -664,7 +691,7 @@ mod tests {
         // Same config = cache hit (same in-memory instance)
         assert!(matches!(
             cache1.get_by_stat(&rb_file),
-            CacheLookup::StatHit(_)
+            CacheLookup::StatHit(_) | CacheLookup::StatHitEmpty
         ));
 
         // Flush and reload — should still hit
@@ -672,7 +699,7 @@ mod tests {
         let cache1b = ResultCache::with_root(tmp.path(), "0.1.0-test", &configs1, &args);
         assert!(matches!(
             cache1b.get_by_stat(&rb_file),
-            CacheLookup::StatHit(_)
+            CacheLookup::StatHit(_) | CacheLookup::StatHitEmpty
         ));
 
         // Different config = different session = cache miss
@@ -787,10 +814,18 @@ mod tests {
         std::fs::create_dir_all(&old_session_dir).unwrap();
         std::fs::write(old_session_dir.join("somefile"), b"data").unwrap();
 
-        // Create a lockfiles directory (should be preserved)
+        // Create cache subdirectories that should be preserved
         let lockfiles_dir = tmp.path().join("lockfiles");
         std::fs::create_dir_all(&lockfiles_dir).unwrap();
         std::fs::write(lockfiles_dir.join("lock.json"), b"{}").unwrap();
+
+        let discovery_dir = tmp.path().join("discovery");
+        std::fs::create_dir_all(&discovery_dir).unwrap();
+        std::fs::write(discovery_dir.join("cache.json"), b"{}").unwrap();
+
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("defaults.json"), b"{}").unwrap();
 
         // Run eviction
         evict_old_sessions(tmp.path(), 100).unwrap();
@@ -800,10 +835,15 @@ mod tests {
             !old_session_dir.exists(),
             "old-format session directory should be cleaned up"
         );
-        // lockfiles directory should be preserved
+        // lockfiles/discovery/config directories should be preserved
         assert!(
             lockfiles_dir.exists(),
             "lockfiles directory should be preserved"
         );
+        assert!(
+            discovery_dir.exists(),
+            "discovery directory should be preserved"
+        );
+        assert!(config_dir.exists(), "config directory should be preserved");
     }
 }

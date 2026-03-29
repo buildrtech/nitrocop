@@ -406,6 +406,7 @@ mod tests {
         crate::fs::DiscoveredFiles {
             files: files.to_vec(),
             explicit: HashSet::new(),
+            sub_config_dirs: Vec::new(),
         }
     }
 

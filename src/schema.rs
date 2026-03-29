@@ -4,13 +4,16 @@
 //! before the parallel lint loop. Schema-aware cops call `schema::get()`
 //! to access parsed table/column/index metadata.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ruby_prism::Visit;
 
-/// Global schema singleton. Initialized once in `run_linter()`.
+/// Global schema singleton. Lazily loaded on first `get()` call.
 static SCHEMA: OnceLock<Option<Schema>> = OnceLock::new();
+
+/// Project root used for lazy `db/schema.rb` loading.
+static SCHEMA_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Thread-local schema override for tests. Checked before the global singleton.
 #[cfg(test)]
@@ -18,16 +21,11 @@ thread_local! {
     static TEST_SCHEMA: std::cell::RefCell<Option<Schema>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Initialize the global schema from `db/schema.rb` relative to `project_root`.
+/// Set the project root for lazy schema loading from `db/schema.rb`.
 ///
 /// Safe to call multiple times — only the first call takes effect.
 pub fn init(project_root: Option<&Path>) {
-    SCHEMA.get_or_init(|| {
-        let root = project_root?;
-        let schema_path = root.join("db/schema.rb");
-        let bytes = std::fs::read(&schema_path).ok()?;
-        Schema::parse(&bytes)
-    });
+    let _ = SCHEMA_ROOT.set(project_root.map(Path::to_path_buf));
 }
 
 /// Set a thread-local schema for testing. Call with `None` to clear.
@@ -43,7 +41,14 @@ pub fn set_test_schema(schema: Option<Schema>) {
 /// In test mode, checks thread-local override first.
 #[cfg(not(test))]
 pub fn get() -> Option<&'static Schema> {
-    SCHEMA.get().and_then(|o| o.as_ref())
+    SCHEMA
+        .get_or_init(|| {
+            let root = SCHEMA_ROOT.get().and_then(|o| o.as_ref())?;
+            let schema_path = root.join("db/schema.rb");
+            let bytes = std::fs::read(&schema_path).ok()?;
+            Schema::parse(&bytes)
+        })
+        .as_ref()
 }
 
 /// Get a reference to the parsed schema, if available.
@@ -60,7 +65,14 @@ pub fn get() -> Option<&'static Schema> {
             return Some(&*Box::leak(boxed));
         }
         drop(borrow);
-        SCHEMA.get().and_then(|o| o.as_ref())
+        SCHEMA
+            .get_or_init(|| {
+                let root = SCHEMA_ROOT.get().and_then(|o| o.as_ref())?;
+                let schema_path = root.join("db/schema.rb");
+                let bytes = std::fs::read(&schema_path).ok()?;
+                Schema::parse(&bytes)
+            })
+            .as_ref()
     })
 }
 

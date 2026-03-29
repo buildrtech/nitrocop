@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use crate::cop::node_type::{CALL_NODE, STRING_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -8,6 +10,9 @@ use crate::parse::source::SourceFile;
 /// RuboCop flags this with "Prefer `` instead." (empty preference). Fixed by detecting
 /// empty/whitespace-only string args as a special case that produces an empty preferred string.
 pub struct OrderArguments;
+
+static ORDER_ARGUMENT_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)^(\w+)\s*(asc|desc)?$").unwrap());
 
 impl Cop for OrderArguments {
     fn name(&self) -> &'static str {
@@ -52,7 +57,6 @@ impl Cop for OrderArguments {
         }
 
         // Check if all arguments are string literals that can be converted to symbols
-        let re = regex::Regex::new(r"(?i)^(\w+)\s*(asc|desc)?$").unwrap();
         let mut all_strings = true;
         let mut all_convertible = true;
         let mut all_empty = true;
@@ -69,12 +73,12 @@ impl Cop for OrderArguments {
                 // Check each comma-separated part
                 for part in text.split(',') {
                     let trimmed = part.trim();
-                    if !re.is_match(trimmed) {
+                    if !ORDER_ARGUMENT_RE.is_match(trimmed) {
                         all_convertible = false;
                         break;
                     }
                     // Check for positional columns (numeric)
-                    let caps = re.captures(trimmed).unwrap();
+                    let caps = ORDER_ARGUMENT_RE.captures(trimmed).unwrap();
                     let col = caps.get(1).unwrap().as_str();
                     if col.chars().all(|c| c.is_ascii_digit()) {
                         all_convertible = false;
@@ -107,7 +111,7 @@ impl Cop for OrderArguments {
                     }
                     for part in text.split(',') {
                         let trimmed = part.trim();
-                        let caps = re.captures(trimmed).unwrap();
+                        let caps = ORDER_ARGUMENT_RE.captures(trimmed).unwrap();
                         let col = caps.get(1).unwrap().as_str().to_lowercase();
                         let dir = caps.get(2).map(|m| m.as_str().to_lowercase());
                         let direction = dir.as_deref().unwrap_or("asc");

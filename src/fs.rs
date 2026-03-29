@@ -1,11 +1,14 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 use anyhow::Result;
 use ignore::WalkBuilder;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::config::ResolvedConfig;
+use crate::cache::cache_root_dir;
 
 /// Result of file discovery, including which files were explicitly passed.
 pub struct DiscoveredFiles {
@@ -13,13 +16,17 @@ pub struct DiscoveredFiles {
     /// Files passed directly on the command line (not discovered via directory walk).
     /// These bypass AllCops.Exclude unless --force-exclusion is set.
     pub explicit: HashSet<PathBuf>,
+    /// Directories containing nested `.rubocop.yml` files discovered while
+    /// scanning directory targets.
+    pub sub_config_dirs: Vec<PathBuf>,
 }
 
 /// Discover Ruby files from the given paths, respecting .gitignore
 /// and AllCops.Exclude patterns.
-pub fn discover_files(paths: &[PathBuf], config: &ResolvedConfig) -> Result<DiscoveredFiles> {
+pub fn discover_files(paths: &[PathBuf]) -> Result<DiscoveredFiles> {
     let mut files = Vec::new();
     let mut explicit = HashSet::new();
+    let mut sub_config_dirs = Vec::new();
 
     for path in paths {
         if path.is_file() {
@@ -28,8 +35,9 @@ pub fn discover_files(paths: &[PathBuf], config: &ResolvedConfig) -> Result<Disc
             explicit.insert(canonical);
             files.push(path.clone());
         } else if path.is_dir() {
-            let dir_files = walk_directory(path, config)?;
-            files.extend(dir_files);
+            let discovered = walk_directory(path)?;
+            files.extend(discovered.files);
+            sub_config_dirs.extend(discovered.sub_config_dirs);
         } else {
             anyhow::bail!("path does not exist: {}", path.display());
         }
@@ -37,11 +45,174 @@ pub fn discover_files(paths: &[PathBuf], config: &ResolvedConfig) -> Result<Disc
 
     files.sort();
     files.dedup();
-    Ok(DiscoveredFiles { files, explicit })
+    sub_config_dirs.sort();
+    sub_config_dirs.dedup();
+    Ok(DiscoveredFiles {
+        files,
+        explicit,
+        sub_config_dirs,
+    })
 }
 
 /// Exposed for testing only.
-fn walk_directory(dir: &Path, _config: &ResolvedConfig) -> Result<Vec<PathBuf>> {
+struct DiscoveredDirectory {
+    files: Vec<PathBuf>,
+    sub_config_dirs: Vec<PathBuf>,
+}
+
+const GIT_DISCOVERY_CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DiscoveryStamp {
+    rel_path: String,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GitDiscoveryCache {
+    version: u32,
+    ruby_files: Vec<String>,
+    sub_config_dirs: Vec<String>,
+    watched_dirs: Vec<DiscoveryStamp>,
+    watched_files: Vec<DiscoveryStamp>,
+}
+
+fn systemtime_to_parts(time: Option<SystemTime>) -> (u64, u32) {
+    match time {
+        Some(t) => match t.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(d) => (d.as_secs(), d.subsec_nanos()),
+            Err(_) => (0, 0),
+        },
+        None => (0, 0),
+    }
+}
+
+fn mtime_parts(path: &Path) -> Option<(u64, u32)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(systemtime_to_parts(meta.modified().ok()))
+}
+
+fn resolve_rel_path(root: &Path, rel: &str) -> PathBuf {
+    if rel == "." {
+        root.to_path_buf()
+    } else {
+        root.join(rel)
+    }
+}
+
+fn git_discovery_cache_path(dir: &Path) -> PathBuf {
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    cache_root_dir()
+        .join("discovery")
+        .join(format!("{}.json", &hash[..16]))
+}
+
+fn load_git_discovery_cache(dir: &Path) -> Option<DiscoveredDirectory> {
+    let cache_path = git_discovery_cache_path(dir);
+    let bytes = std::fs::read(cache_path).ok()?;
+    let cache: GitDiscoveryCache = serde_json::from_slice(&bytes).ok()?;
+    if cache.version != GIT_DISCOVERY_CACHE_VERSION {
+        return None;
+    }
+
+    let stamps_valid = cache
+        .watched_dirs
+        .iter()
+        .chain(cache.watched_files.iter())
+        .all(|stamp| {
+            let path = resolve_rel_path(dir, &stamp.rel_path);
+            mtime_parts(&path)
+                .is_some_and(|(secs, nanos)| secs == stamp.mtime_secs && nanos == stamp.mtime_nanos)
+        });
+
+    if !stamps_valid {
+        return None;
+    }
+
+    let files = cache
+        .ruby_files
+        .into_iter()
+        .map(|rel| dir.join(rel))
+        .collect();
+    let sub_config_dirs = cache
+        .sub_config_dirs
+        .into_iter()
+        .map(|rel| dir.join(rel))
+        .collect();
+
+    Some(DiscoveredDirectory {
+        files,
+        sub_config_dirs,
+    })
+}
+
+fn write_git_discovery_cache(
+    dir: &Path,
+    ruby_files: &[String],
+    sub_config_dirs: &[String],
+    watched_dirs: &HashSet<String>,
+    watched_files: &HashSet<String>,
+) {
+    let mut watched_dir_stamps: Vec<DiscoveryStamp> = watched_dirs
+        .iter()
+        .filter_map(|rel| {
+            let path = resolve_rel_path(dir, rel);
+            let (mtime_secs, mtime_nanos) = mtime_parts(&path)?;
+            Some(DiscoveryStamp {
+                rel_path: rel.clone(),
+                mtime_secs,
+                mtime_nanos,
+            })
+        })
+        .collect();
+    watched_dir_stamps.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    let mut watched_file_stamps: Vec<DiscoveryStamp> = watched_files
+        .iter()
+        .filter_map(|rel| {
+            let path = resolve_rel_path(dir, rel);
+            let (mtime_secs, mtime_nanos) = mtime_parts(&path)?;
+            Some(DiscoveryStamp {
+                rel_path: rel.clone(),
+                mtime_secs,
+                mtime_nanos,
+            })
+        })
+        .collect();
+    watched_file_stamps.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    let cache = GitDiscoveryCache {
+        version: GIT_DISCOVERY_CACHE_VERSION,
+        ruby_files: ruby_files.to_vec(),
+        sub_config_dirs: sub_config_dirs.to_vec(),
+        watched_dirs: watched_dir_stamps,
+        watched_files: watched_file_stamps,
+    };
+
+    let Ok(json) = serde_json::to_vec(&cache) else {
+        return;
+    };
+
+    let cache_path = git_discovery_cache_path(dir);
+    if let Some(parent) = cache_path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let _ = std::fs::write(&cache_path, json);
+}
+
+fn walk_directory(dir: &Path) -> Result<DiscoveredDirectory> {
+    // Fast path for git repos: one `git ls-files` call includes tracked files
+    // (even if ignored) plus untracked non-ignored files.
+    if let Some(discovered) = git_ls_ruby_files(dir) {
+        return Ok(discovered);
+    }
+
     let mut builder = WalkBuilder::new(dir);
     builder
         .hidden(true)
@@ -57,74 +228,131 @@ fn walk_directory(dir: &Path, _config: &ResolvedConfig) -> Result<Vec<PathBuf>> 
     // already compiled in CopFilterSet::is_globally_excluded().
 
     let mut files = Vec::new();
+    let mut sub_config_dirs = Vec::new();
     for entry in builder.build() {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue, // skip broken symlinks / permission errors
         };
         let path = entry.path();
+        if entry.file_type().is_some_and(|ft| ft.is_file()) && entry.file_name() == ".rubocop.yml" {
+            if let Some(parent) = path.parent() {
+                if parent != dir {
+                    sub_config_dirs.push(parent.to_path_buf());
+                }
+            }
+        }
         if path.is_file() && is_ruby_file(path) {
             files.push(path.to_path_buf());
         }
     }
 
-    // RuboCop includes tracked files even when they match .gitignore patterns.
-    // The ignore crate does not have git index awareness, so merge git-tracked
-    // Ruby files to avoid false negatives (for example, tracked files under
-    // ignored directories).
-    files.extend(tracked_ruby_files(dir));
+    sub_config_dirs.sort();
+    sub_config_dirs.dedup();
 
-    Ok(files)
+    Ok(DiscoveredDirectory {
+        files,
+        sub_config_dirs,
+    })
 }
 
-fn tracked_ruby_files(dir: &Path) -> Vec<PathBuf> {
-    let toplevel = match Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if root.is_empty() {
-                return Vec::new();
-            }
-            PathBuf::from(root)
-        }
-        _ => return Vec::new(),
-    };
-
-    let root = toplevel.canonicalize().unwrap_or(toplevel);
-    let dir_abs = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    let rel_prefix = dir_abs
-        .strip_prefix(&root)
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(&root).arg("ls-files");
-    if !rel_prefix.as_os_str().is_empty() {
-        cmd.arg("--").arg(&rel_prefix);
+/// Returns Ruby files for a git-backed directory using a single ls-files query.
+///
+/// The result includes tracked files (including tracked files under ignored
+/// directories) and untracked files that are not ignored.
+fn git_ls_ruby_files(dir: &Path) -> Option<DiscoveredDirectory> {
+    if let Some(cached) = load_git_discovery_cache(dir) {
+        return Some(cached);
     }
 
-    let output = match cmd.output() {
-        Ok(output) if output.status.success() => output,
-        _ => return Vec::new(),
-    };
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .output()
+        .ok()?;
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let rel_from_root = Path::new(line);
-            let rel_to_dir = if rel_prefix.as_os_str().is_empty() {
-                rel_from_root
-            } else {
-                rel_from_root.strip_prefix(&rel_prefix).ok()?
-            };
-            Some(dir.join(rel_to_dir))
-        })
-        .filter(|path| path.is_file() && is_ruby_file(path))
-        .collect()
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    let mut sub_config_dirs = Vec::new();
+    let mut ruby_files_rel = Vec::new();
+    let mut sub_config_dirs_rel = Vec::new();
+    let mut watched_dirs: HashSet<String> = HashSet::from([".".to_string()]);
+    let mut watched_files: HashSet<String> = HashSet::new();
+
+    for line in String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|line| !line.is_empty())
+    {
+        // Track all parent directories so we can detect file-set changes
+        // (create/delete/rename) on later runs without re-running git first.
+        let mut parent = line;
+        while let Some(idx) = parent.rfind('/') {
+            parent = &parent[..idx];
+            watched_dirs.insert(parent.to_string());
+        }
+
+        if line.ends_with(".gitignore") {
+            watched_files.insert(line.to_string());
+        }
+
+        if line.ends_with("/.rubocop.yml") {
+            let parent_rel = &line[..line.len() - "/.rubocop.yml".len()];
+            if !parent_rel.is_empty() {
+                sub_config_dirs.push(dir.join(parent_rel));
+                sub_config_dirs_rel.push(parent_rel.to_string());
+            }
+        }
+
+        let name = line.rsplit('/').next().unwrap_or(line);
+        if is_ruby_filename_or_extension(name) {
+            files.push(dir.join(line));
+            ruby_files_rel.push(line.to_string());
+            continue;
+        }
+
+        // Unknown extensionless filename: check shebang (e.g. bin/console).
+        if name.contains('.') {
+            continue;
+        }
+        let path = dir.join(line);
+        if has_ruby_shebang(&path) {
+            files.push(path);
+            ruby_files_rel.push(line.to_string());
+        }
+    }
+
+    let git_info_exclude = dir.join(".git").join("info").join("exclude");
+    if git_info_exclude.exists() {
+        watched_files.insert(".git/info/exclude".to_string());
+    }
+
+    sub_config_dirs.sort();
+    sub_config_dirs.dedup();
+    sub_config_dirs_rel.sort();
+    sub_config_dirs_rel.dedup();
+
+    write_git_discovery_cache(
+        dir,
+        &ruby_files_rel,
+        &sub_config_dirs_rel,
+        &watched_dirs,
+        &watched_files,
+    );
+
+    Some(DiscoveredDirectory {
+        files,
+        sub_config_dirs,
+    })
 }
 
 /// RuboCop-compatible Ruby file extensions (from AllCops.Include defaults).
@@ -187,37 +415,49 @@ const RUBY_FILENAMES: &[&str] = &[
     "Vagrantfile",
 ];
 
+/// Fast filename-only Ruby detection (extension, known names, Fastfile patterns,
+/// and dotfile pseudo-extensions like `.gemfile`).
+fn is_ruby_filename_or_extension(name: &str) -> bool {
+    if RUBY_FILENAMES.contains(&name) {
+        return true;
+    }
+
+    // Also match *Fastfile pattern (e.g., Matchfile, Appfile that end in Fastfile)
+    if name.ends_with("Fastfile") || name.ends_with("fastfile") {
+        return true;
+    }
+
+    // Extension-based match (case-insensitive)
+    if let Some(ext) = name.rsplit('.').next() {
+        if ext != name && RUBY_EXTENSIONS.iter().any(|&r| r.eq_ignore_ascii_case(ext)) {
+            return true;
+        }
+    }
+
+    // Dotfiles like `.gemfile` have no extension in Rust (Path::extension() returns None).
+    // Check if the name after the leading dot matches a known Ruby extension.
+    if let Some(after_dot) = name.strip_prefix('.') {
+        if !after_dot.is_empty()
+            && !after_dot.contains('.')
+            && RUBY_EXTENSIONS
+                .iter()
+                .any(|&r| r.eq_ignore_ascii_case(after_dot))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn is_ruby_file(path: &Path) -> bool {
-    // Check by extension
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if RUBY_EXTENSIONS.iter().any(|&r| r.eq_ignore_ascii_case(ext)) {
-            return true;
-        }
-    }
-    // Check by filename (for extensionless Ruby files like Gemfile)
+    // Fast filename/extension checks first.
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if RUBY_FILENAMES.contains(&name) {
+        if is_ruby_filename_or_extension(name) {
             return true;
-        }
-        // Also match *Fastfile pattern (e.g., Matchfile, Appfile that end in "Fastfile")
-        if name.ends_with("Fastfile") || name.ends_with("fastfile") {
-            return true;
-        }
-        // Dotfiles like `.gemfile` have no extension in Rust (Path::extension()
-        // returns None). Check if the name after the leading dot matches a known
-        // Ruby extension. This matches RuboCop's `**/*.gemfile` Include pattern
-        // which treats `.gemfile` as having the `gemfile` extension.
-        if let Some(after_dot) = name.strip_prefix('.') {
-            if !after_dot.is_empty()
-                && !after_dot.contains('.')
-                && RUBY_EXTENSIONS
-                    .iter()
-                    .any(|&r| r.eq_ignore_ascii_case(after_dot))
-            {
-                return true;
-            }
         }
     }
+
     // For extensionless files not in the known list, check for Ruby shebang.
     // This catches scripts like bin/console, bin/rails, etc.
     if path.extension().is_none() && has_ruby_shebang(path) {
@@ -261,7 +501,6 @@ fn has_ruby_shebang(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::load_config;
     use std::fs;
     use std::process::Command;
 
@@ -325,8 +564,7 @@ mod tests {
         fs::write(dir.join("b.rb"), "").unwrap();
         fs::write(dir.join("c.txt"), "").unwrap();
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
 
         assert_eq!(discovered.files.len(), 2);
         assert!(
@@ -344,8 +582,7 @@ mod tests {
         let txt = dir.join("script");
         fs::write(&txt, "puts 'hi'").unwrap();
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[txt.clone()], &config).unwrap();
+        let discovered = discover_files(&[txt.clone()]).unwrap();
 
         assert_eq!(discovered.files.len(), 1);
         assert_eq!(discovered.files[0], txt);
@@ -354,8 +591,7 @@ mod tests {
 
     #[test]
     fn nonexistent_path_errors() {
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let result = discover_files(&[PathBuf::from("/no/such/path")], &config);
+        let result = discover_files(&[PathBuf::from("/no/such/path")]);
         assert!(result.is_err());
     }
 
@@ -366,8 +602,7 @@ mod tests {
         fs::write(dir.join("a.rb"), "").unwrap();
         fs::write(dir.join("m.rb"), "").unwrap();
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
 
         let names: Vec<_> = discovered
             .files
@@ -388,8 +623,7 @@ mod tests {
         fs::write(bin.join("setup"), "#!/bin/bash\necho hi\n").unwrap();
         fs::write(bin.join("server"), "#!/usr/bin/env ruby\nputs 'serve'\n").unwrap();
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
 
         assert_eq!(
             discovered.files.len(),
@@ -462,8 +696,7 @@ mod tests {
         fs::write(bin.join("poetics"), "#!/usr/bin/env rbx\nputs 'hi'\n").unwrap();
         fs::write(bin.join("setup"), "#!/bin/bash\necho hi\n").unwrap();
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
 
         let names: Vec<_> = discovered
             .files
@@ -590,8 +823,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink("../shared/models", app.join("models")).unwrap();
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
 
         // Should discover user.rb via both the real path AND the symlink path
         let paths: Vec<String> = discovered
@@ -618,8 +850,7 @@ mod tests {
         // Create a broken symlink: bad.rb -> nonexistent.rb
         std::os::unix::fs::symlink("nonexistent.rb", dir.join("bad.rb")).unwrap();
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
 
         let names: Vec<String> = discovered
             .files
@@ -645,8 +876,7 @@ mod tests {
         fs::write(dir.join("top.rb"), "").unwrap();
         fs::write(sub.join("nested.rb"), "").unwrap();
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
 
         assert_eq!(discovered.files.len(), 2);
         fs::remove_dir_all(&dir).ok();
@@ -664,8 +894,7 @@ mod tests {
         git(&dir, &["init", "-q"]);
         git(&dir, &["add", ".irbrc"]);
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
         let contains = discovered
             .files
             .iter()
@@ -691,8 +920,7 @@ mod tests {
         git(&dir, &["init", "-q"]);
         git(&dir, &["add", ".gemfile"]);
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
         let contains = discovered
             .files
             .iter()
@@ -719,8 +947,7 @@ mod tests {
         git(&dir, &["add", ".gitignore"]);
         git(&dir, &["add", "-f", "work/sandbox/multiton2.rb"]);
 
-        let config = load_config(Some(Path::new("/nonexistent")), None, None).unwrap();
-        let discovered = discover_files(&[dir.clone()], &config).unwrap();
+        let discovered = discover_files(&[dir.clone()]).unwrap();
         let contains = discovered
             .files
             .iter()

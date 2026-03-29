@@ -5,11 +5,11 @@ use clap::Parser;
 use nitrocop::cli::Args;
 
 fn main() {
-    // Use 32 MB stacks for rayon worker threads (default is ~8 MB).
-    // Pathological Ruby files (e.g. mruby regression tests with 250+ nesting levels)
-    // overflow the default stack during Prism AST visitor traversal.
+    // Use 4 MB stacks for rayon worker threads.
+    // This further trims per-thread stack reservation overhead for typical
+    // project lint runs while still leaving reasonable recursion headroom.
     rayon::ThreadPoolBuilder::new()
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(4 * 1024 * 1024)
         .build_global()
         .ok();
 

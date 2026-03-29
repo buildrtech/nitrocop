@@ -109,17 +109,16 @@ impl<'a, 'pr> BatchedCopWalker<'a, 'pr> {
             );
         }
 
-        if let Some(cops) = self.dispatch_table.get(tag) {
-            for &(cop, cop_config) in cops {
-                cop.check_node(
-                    self.source,
-                    node,
-                    self.parse_result,
-                    cop_config,
-                    &mut self.diagnostics,
-                    self.corrections.as_mut(),
-                );
-            }
+        let cops = &self.dispatch_table[tag];
+        for &(cop, cop_config) in cops {
+            cop.check_node(
+                self.source,
+                node,
+                self.parse_result,
+                cop_config,
+                &mut self.diagnostics,
+                self.corrections.as_mut(),
+            );
         }
     }
 }

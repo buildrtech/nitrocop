@@ -102,7 +102,7 @@ pub fn run_verify(
     allowlist: &AutocorrectAllowlist,
 ) -> Result<VerifyResult> {
     // 1. Run nitrocop internally
-    let discovered = discover_files(&args.paths, config)?;
+    let discovered = discover_files(&args.paths)?;
     let lint_result = run_linter(&discovered, config, registry, args, tier_map, allowlist);
     let nitrocop_set = diagnostics_to_set(&lint_result.diagnostics);
 
