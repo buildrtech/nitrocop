@@ -13,6 +13,10 @@ impl Cop for IncompatibleIoSelectWithFiberScheduler {
         "Lint/IncompatibleIoSelectWithFiberScheduler"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -28,7 +32,7 @@ impl Cop for IncompatibleIoSelectWithFiberScheduler {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -110,12 +114,25 @@ impl Cop for IncompatibleIoSelectWithFiberScheduler {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{}` instead of `{}`.", preferred, call_src),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: preferred,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -166,6 +183,10 @@ fn node_source<'a>(source: &'a SourceFile, node: &ruby_prism::Node<'_>) -> &'a s
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        IncompatibleIoSelectWithFiberScheduler,
+        "cops/lint/incompatible_io_select_with_fiber_scheduler"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         IncompatibleIoSelectWithFiberScheduler,
         "cops/lint/incompatible_io_select_with_fiber_scheduler"
     );

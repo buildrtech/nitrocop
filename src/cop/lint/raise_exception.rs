@@ -69,9 +69,41 @@ fn is_exception_reference(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
+fn exception_constant_replacement(
+    node: &ruby_prism::Node<'_>,
+) -> Option<(usize, usize, &'static str)> {
+    if let Some(cr) = node.as_constant_read_node() {
+        if cr.name().as_slice() == b"Exception" {
+            let loc = cr.location();
+            return Some((loc.start_offset(), loc.end_offset(), "StandardError"));
+        }
+    }
+
+    if let Some(cp) = node.as_constant_path_node() {
+        if cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"Exception") {
+            let loc = cp.location();
+            return Some((loc.start_offset(), loc.end_offset(), "::StandardError"));
+        }
+    }
+
+    if let Some(call) = node.as_call_node() {
+        if call.name().as_slice() == b"new" {
+            if let Some(recv) = call.receiver() {
+                return exception_constant_replacement(&recv);
+            }
+        }
+    }
+
+    None
+}
+
 impl Cop for RaiseException {
     fn name(&self) -> &'static str {
         "Lint/RaiseException"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_severity(&self) -> Severity {
@@ -89,7 +121,7 @@ impl Cop for RaiseException {
         parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_namespaces = config.get_string_array("AllowedImplicitNamespaces");
         let call = match node.as_call_node() {
@@ -173,12 +205,27 @@ impl Cop for RaiseException {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Use a subclass of `Exception` instead of raising `Exception` directly.".to_string(),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            if let Some((start, end, replacement)) = exception_constant_replacement(&first_arg) {
+                corr.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: replacement.to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -186,6 +233,7 @@ impl Cop for RaiseException {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RaiseException, "cops/lint/raise_exception");
+    crate::cop_autocorrect_fixture_tests!(RaiseException, "cops/lint/raise_exception");
 
     #[test]
     fn config_allowed_implicit_namespaces() {
