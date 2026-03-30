@@ -13,6 +13,10 @@ impl Cop for HashTransformKeys {
         "Style/HashTransformKeys"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             BLOCK_NODE,
@@ -33,7 +37,7 @@ impl Cop for HashTransformKeys {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for CallNode `each_with_object({})` with a block
         let call = match node.as_call_node() {
@@ -113,8 +117,11 @@ impl Cop for HashTransformKeys {
             return;
         }
 
-        // Extract the value parameter name (second element of the destructured pair)
-        // e.g., in |(k, v), h|, the value param is `v`
+        // Extract key/value parameter names from the destructured pair.
+        let key_param_name = match targets[0].as_required_parameter_node() {
+            Some(p) => p.name(),
+            None => return,
+        };
         let value_param_name = match targets[1].as_required_parameter_node() {
             Some(p) => p.name(),
             None => return,
@@ -157,12 +164,53 @@ impl Cop for HashTransformKeys {
                             if val_lvar.name().as_slice() == value_param_name.as_slice() {
                                 let loc = call.location();
                                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                                diagnostics.push(self.diagnostic(
+                                let mut diag = self.diagnostic(
                                     source,
                                     line,
                                     column,
                                     "Prefer `transform_keys` over `each_with_object`.".to_string(),
-                                ));
+                                );
+
+                                if let Some(corr) = corrections.as_mut() {
+                                    let receiver_src = call.receiver().map_or_else(
+                                        || "".to_string(),
+                                        |recv| {
+                                            String::from_utf8_lossy(
+                                                &source.as_bytes()[recv.location().start_offset()
+                                                    ..recv.location().end_offset()],
+                                            )
+                                            .to_string()
+                                        },
+                                    );
+                                    let key_expr_src = String::from_utf8_lossy(
+                                        &source.as_bytes()[aargs[0].location().start_offset()
+                                            ..aargs[0].location().end_offset()],
+                                    )
+                                    .to_string();
+                                    let key_name =
+                                        String::from_utf8_lossy(key_param_name.as_slice());
+                                    let replacement = if receiver_src.is_empty() {
+                                        format!(
+                                            "transform_keys {{ |{}| {} }}",
+                                            key_name, key_expr_src
+                                        )
+                                    } else {
+                                        format!(
+                                            "{}.transform_keys {{ |{}| {} }}",
+                                            receiver_src, key_name, key_expr_src
+                                        )
+                                    };
+                                    corr.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement,
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+
+                                diagnostics.push(diag);
                             }
                         }
                     }
@@ -176,4 +224,5 @@ impl Cop for HashTransformKeys {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashTransformKeys, "cops/style/hash_transform_keys");
+    crate::cop_autocorrect_fixture_tests!(HashTransformKeys, "cops/style/hash_transform_keys");
 }
