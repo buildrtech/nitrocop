@@ -11,6 +11,10 @@ impl Cop for DisjunctiveAssignmentInConstructor {
         "Lint/DisjunctiveAssignmentInConstructor"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -22,15 +26,19 @@ impl Cop for DisjunctiveAssignmentInConstructor {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = InitVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -38,6 +46,7 @@ struct InitVisitor<'a, 'src> {
     cop: &'a DisjunctiveAssignmentInConstructor,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 /// Returns true if the node is any kind of `||=` (disjunctive/or-write) assignment.
@@ -85,12 +94,21 @@ impl<'pr> Visit<'pr> for InitVisitor<'_, '_> {
                 if let Some(ivar_or) = stmt.as_instance_variable_or_write_node() {
                     let loc = ivar_or.operator_loc();
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diag = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
                         "Unnecessary disjunctive assignment. Use plain assignment.".to_string(),
-                    ));
+                    );
+                    self.corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "=".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                    self.diagnostics.push(diag);
                 }
             } else {
                 // Non-||= statement encountered; stop checking
@@ -107,12 +125,21 @@ fn check_or_asgn(visitor: &mut InitVisitor<'_, '_>, node: &ruby_prism::Node<'_>)
     if let Some(ivar_or) = node.as_instance_variable_or_write_node() {
         let loc = ivar_or.operator_loc();
         let (line, column) = visitor.source.offset_to_line_col(loc.start_offset());
-        visitor.diagnostics.push(visitor.cop.diagnostic(
+        let mut diag = visitor.cop.diagnostic(
             visitor.source,
             line,
             column,
             "Unnecessary disjunctive assignment. Use plain assignment.".to_string(),
-        ));
+        );
+        visitor.corrections.push(crate::correction::Correction {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+            replacement: "=".to_string(),
+            cop_name: visitor.cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+        visitor.diagnostics.push(diag);
     }
 }
 
@@ -120,6 +147,10 @@ fn check_or_asgn(visitor: &mut InitVisitor<'_, '_>, node: &ruby_prism::Node<'_>)
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        DisjunctiveAssignmentInConstructor,
+        "cops/lint/disjunctive_assignment_in_constructor"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         DisjunctiveAssignmentInConstructor,
         "cops/lint/disjunctive_assignment_in_constructor"
     );

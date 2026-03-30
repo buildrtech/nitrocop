@@ -49,6 +49,10 @@ impl Cop for LiteralInInterpolation {
         "Lint/LiteralInInterpolation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -60,18 +64,22 @@ impl Cop for LiteralInInterpolation {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = LiteralInterpVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             in_heredoc: false,
             in_array_percent_literal: false,
             in_regexp: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -195,10 +203,60 @@ fn is_heredoc_literal(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool 
     false
 }
 
+fn escape_for_double_quoted(content: &[u8]) -> String {
+    let mut out = String::new();
+    for &b in content {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            _ => out.push(b as char),
+        }
+    }
+    out
+}
+
+fn interpolation_replacement(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<String> {
+    if let Some(str_node) = node.as_string_node() {
+        return Some(escape_for_double_quoted(str_node.unescaped()));
+    }
+    if let Some(sym_node) = node.as_symbol_node() {
+        return Some(escape_for_double_quoted(sym_node.unescaped()));
+    }
+    if node.as_true_node().is_some() {
+        return Some("true".to_string());
+    }
+    if node.as_false_node().is_some() {
+        return Some("false".to_string());
+    }
+    if node.as_nil_node().is_some() {
+        return Some(String::new());
+    }
+
+    let loc = node.location();
+    if node.as_integer_node().is_some()
+        || node.as_float_node().is_some()
+        || node.as_rational_node().is_some()
+        || node.as_imaginary_node().is_some()
+        || node.as_range_node().is_some()
+    {
+        return Some(
+            source
+                .byte_slice(loc.start_offset(), loc.end_offset(), "")
+                .to_string(),
+        );
+    }
+
+    None
+}
+
 struct LiteralInterpVisitor<'a, 'src> {
     cop: &'a LiteralInInterpolation,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     in_heredoc: bool,
     in_array_percent_literal: bool,
     in_regexp: bool,
@@ -247,12 +305,26 @@ impl<'a, 'src> LiteralInterpVisitor<'a, 'src> {
 
         let loc = final_node.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diag = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Literal interpolation detected.".to_string(),
-        ));
+        );
+
+        if let Some(replacement) = interpolation_replacement(self.source, final_node) {
+            let embed_loc = embedded.location();
+            self.corrections.push(crate::correction::Correction {
+                start: embed_loc.start_offset(),
+                end: embed_loc.end_offset(),
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        self.diagnostics.push(diag);
     }
 }
 
@@ -310,6 +382,10 @@ impl<'pr> Visit<'pr> for LiteralInterpVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(LiteralInInterpolation, "cops/lint/literal_in_interpolation");
+    crate::cop_autocorrect_fixture_tests!(
+        LiteralInInterpolation,
+        "cops/lint/literal_in_interpolation"
+    );
 
     #[test]
     fn keyword_hash_is_treated_as_literal() {
