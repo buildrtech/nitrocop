@@ -37,6 +37,7 @@ impl FileEmpty {
         file_recv: &ruby_prism::Node<'_>,
         arg: &ruby_prism::Node<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let (line, column) = source.offset_to_line_col(call_loc.start_offset());
         let file_str = String::from_utf8_lossy(
@@ -46,12 +47,26 @@ impl FileEmpty {
         let arg_str = String::from_utf8_lossy(
             &source.as_bytes()[arg.location().start_offset()..arg.location().end_offset()],
         );
-        diagnostics.push(self.diagnostic(
+        let replacement = format!("{}.empty?({})", file_str, arg_str);
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{}.empty?({})` instead.", file_str, arg_str),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            corr.push(crate::correction::Correction {
+                start: call_loc.start_offset(),
+                end: call_loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -69,6 +84,10 @@ impl Cop for FileEmpty {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -76,7 +95,7 @@ impl Cop for FileEmpty {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -100,6 +119,7 @@ impl Cop for FileEmpty {
                                 &recv,
                                 &arg_list[0],
                                 diagnostics,
+                                &mut corrections,
                             );
                         }
                     }
@@ -118,6 +138,7 @@ impl Cop for FileEmpty {
                                             &file_recv,
                                             &sa[0],
                                             diagnostics,
+                                            &mut corrections,
                                         );
                                     }
                                 }
@@ -154,6 +175,7 @@ impl Cop for FileEmpty {
                                                             &file_recv,
                                                             &ia[0],
                                                             diagnostics,
+                                                            &mut corrections,
                                                         );
                                                     }
                                                 }
@@ -170,6 +192,7 @@ impl Cop for FileEmpty {
                                                             &file_recv,
                                                             &ia[0],
                                                             diagnostics,
+                                                            &mut corrections,
                                                         );
                                                     }
                                                 }
@@ -201,6 +224,7 @@ impl Cop for FileEmpty {
                                             &file_recv,
                                             &ra[0],
                                             diagnostics,
+                                            &mut corrections,
                                         );
                                     }
                                 }
@@ -217,4 +241,5 @@ impl Cop for FileEmpty {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FileEmpty, "cops/style/file_empty");
+    crate::cop_autocorrect_fixture_tests!(FileEmpty, "cops/style/file_empty");
 }
