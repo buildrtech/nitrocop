@@ -1,0 +1,6 @@
+JSON.parse(data)
+JSON.parse("{}")
+::JSON.parse(x)
+JSON.parse(arg)
+::JSON.parse(arg)
+JSON.parse(arg, max_nesting: 1)
