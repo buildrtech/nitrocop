@@ -18,6 +18,10 @@ impl Cop for StringMethods {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for StringMethods {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let preferred_methods = config.get_string_hash("PreferredMethods");
 
@@ -60,12 +64,23 @@ impl Cop for StringMethods {
         if let Some(replacement) = preferred {
             let loc = call.message_loc().unwrap_or(call.location());
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Prefer `{}` over `{}`.", replacement, name_str),
-            ));
+            );
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: replacement.clone(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+            diagnostics.push(diag);
         }
     }
 }
@@ -74,4 +89,5 @@ impl Cop for StringMethods {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(StringMethods, "cops/style/string_methods");
+    crate::cop_autocorrect_fixture_tests!(StringMethods, "cops/style/string_methods");
 }

@@ -14,6 +14,10 @@ impl Cop for ObjectThen {
         &[BLOCK_ARGUMENT_NODE, CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for ObjectThen {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "then");
 
@@ -58,24 +62,46 @@ impl Cop for ObjectThen {
                 None => return,
             };
             let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `then` over `yield_self`.".to_string(),
-            ));
+            );
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: msg_loc.start_offset(),
+                    end: msg_loc.end_offset(),
+                    replacement: "then".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+            diagnostics.push(diag);
         } else if enforced_style == "yield_self" && method_bytes == b"then" {
             let msg_loc = match call.message_loc() {
                 Some(l) => l,
                 None => return,
             };
             let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `yield_self` over `then`.".to_string(),
-            ));
+            );
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: msg_loc.start_offset(),
+                    end: msg_loc.end_offset(),
+                    replacement: "yield_self".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+            diagnostics.push(diag);
         }
     }
 }
@@ -84,4 +110,5 @@ impl Cop for ObjectThen {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ObjectThen, "cops/style/object_then");
+    crate::cop_autocorrect_fixture_tests!(ObjectThen, "cops/style/object_then");
 }

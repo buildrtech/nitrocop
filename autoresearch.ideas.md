@@ -1,0 +1,4 @@
+- Build a reusable helper for selector/operator rewrites (`replace_selector(call, "new_name")`, `replace_call_operator(call, ".")`) to speed up low-risk cop conversions and reduce copy/paste bugs.
+- Introduce a small visitor utility trait for source cops that need autocorrect (`collect_offense_ranges + diagnostics`), to avoid repeating ad-hoc range vectors in each visitor-based cop.
+- Tackle Layout department in themed batches (spacing-only first: `SpaceBeforeBrackets`, `SpaceBeforeFirstArg`, `SpaceAroundMethodCallOperator`; then alignment/indentation cops) with shared whitespace-edit helpers and stricter fixture expansion.
+- Add a focused parity harness for newly-autocorrectable cops that runs each changed cop against a tiny Ruby corpus snippet set (outside full corpus) to catch syntactic breakages before expensive corpus checks.
