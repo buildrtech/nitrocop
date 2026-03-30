@@ -19,6 +19,10 @@ impl Cop for MapToSet {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -26,7 +30,7 @@ impl Cop for MapToSet {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Looking for: foo.map { ... }.to_set  or  foo.collect { ... }.to_set
         let call = match node.as_call_node() {
@@ -81,12 +85,40 @@ impl Cop for MapToSet {
             .message_loc()
             .unwrap_or_else(|| recv_call.location());
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             format!("Pass a block to `to_set` instead of calling `{method_str}.to_set`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            // map/collect -> to_set
+            corr.push(crate::correction::Correction {
+                start: msg_loc.start_offset(),
+                end: msg_loc.end_offset(),
+                replacement: "to_set".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+
+            // Remove trailing .to_set call from the outer call
+            let outer_msg_loc = call.message_loc().unwrap_or_else(|| call.location());
+            let remove_start = call
+                .call_operator_loc()
+                .map(|op| op.start_offset())
+                .unwrap_or(outer_msg_loc.start_offset());
+            corr.push(crate::correction::Correction {
+                start: remove_start,
+                end: outer_msg_loc.end_offset(),
+                replacement: "".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -94,4 +126,5 @@ impl Cop for MapToSet {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MapToSet, "cops/style/map_to_set");
+    crate::cop_autocorrect_fixture_tests!(MapToSet, "cops/style/map_to_set");
 }
