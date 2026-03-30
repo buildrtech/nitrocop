@@ -114,7 +114,9 @@ fn git_discovery_cache_path(dir: &Path) -> PathBuf {
 fn load_git_discovery_cache(dir: &Path) -> Option<DiscoveredDirectory> {
     let cache_path = git_discovery_cache_path(dir);
     let bytes = std::fs::read(cache_path).ok()?;
-    let cache: GitDiscoveryCache = serde_json::from_slice(&bytes).ok()?;
+    let cache: GitDiscoveryCache = bincode::deserialize(&bytes)
+        .or_else(|_| serde_json::from_slice(&bytes))
+        .ok()?;
     if cache.version != GIT_DISCOVERY_CACHE_VERSION {
         return None;
     }
@@ -193,7 +195,7 @@ fn write_git_discovery_cache(
         watched_files: watched_file_stamps,
     };
 
-    let Ok(json) = serde_json::to_vec(&cache) else {
+    let Ok(bytes) = bincode::serialize(&cache) else {
         return;
     };
 
@@ -203,7 +205,7 @@ fn write_git_discovery_cache(
             return;
         }
     }
-    let _ = std::fs::write(&cache_path, json);
+    let _ = std::fs::write(&cache_path, bytes);
 }
 
 fn walk_directory(dir: &Path) -> Result<DiscoveredDirectory> {
