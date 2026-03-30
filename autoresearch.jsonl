@@ -1,0 +1,1 @@
+{"type":"config","name":"Close RuboCop core autocorrect gap","metricName":"missing_core_autocorrect_cops","metricUnit":"","bestDirection":"lower"}
