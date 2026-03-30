@@ -66,6 +66,10 @@ impl Cop for AssignmentInCondition {
         "Lint/AssignmentInCondition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -81,7 +85,7 @@ impl Cop for AssignmentInCondition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_safe = config.get_bool("AllowSafeAssignment", true);
 
@@ -116,7 +120,21 @@ impl Cop for AssignmentInCondition {
             MSG_WITHOUT_SAFE_ASSIGNMENT
         };
 
-        traverse_condition(source, &predicate, allow_safe, msg, self, diagnostics);
+        let can_autocorrect = allow_safe && corrections.is_some();
+        let mut pending_corrections = Vec::new();
+        traverse_condition(
+            source,
+            &predicate,
+            allow_safe,
+            msg,
+            self,
+            diagnostics,
+            can_autocorrect,
+            &mut pending_corrections,
+        );
+        if let Some(corr) = corrections {
+            corr.extend(pending_corrections);
+        }
     }
 }
 
@@ -133,6 +151,8 @@ fn traverse_condition(
     msg: &str,
     cop: &AssignmentInCondition,
     diagnostics: &mut Vec<Diagnostic>,
+    can_autocorrect: bool,
+    corrections: &mut Vec<crate::correction::Correction>,
 ) {
     // Block nodes halt traversal — assignments inside blocks are irrelevant
     if node.as_block_node().is_some() || node.as_lambda_node().is_some() {
@@ -158,16 +178,43 @@ fn traverse_condition(
                 }
             }
             // Not a safe assignment, recurse into the body
-            traverse_condition(source, &body, allow_safe, msg, cop, diagnostics);
+            traverse_condition(
+                source,
+                &body,
+                allow_safe,
+                msg,
+                cop,
+                diagnostics,
+                can_autocorrect,
+                corrections,
+            );
         }
         // Empty parens — nothing to do
         return;
     }
 
     // Check for equals assignments (lvar, ivar, cvar, gvar, constant write)
-    if let Some(op_loc) = get_equals_assignment_operator_loc(node) {
+    if let Some((op_loc, start, end)) = get_equals_assignment_info(node) {
         let (line, column) = source.offset_to_line_col(op_loc);
-        diagnostics.push(cop.diagnostic(source, line, column, msg.to_string()));
+        let mut diag = cop.diagnostic(source, line, column, msg.to_string());
+        if can_autocorrect {
+            corrections.push(crate::correction::Correction {
+                start,
+                end: start,
+                replacement: "(".to_string(),
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+            corrections.push(crate::correction::Correction {
+                start: end,
+                end,
+                replacement: ")".to_string(),
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+        diagnostics.push(diag);
         return;
     }
 
@@ -177,7 +224,26 @@ fn traverse_condition(
             // This is an assignment method — report on the `=` operator
             if let Some(eq_offset) = find_call_assignment_equals(source, &call) {
                 let (line, column) = source.offset_to_line_col(eq_offset);
-                diagnostics.push(cop.diagnostic(source, line, column, msg.to_string()));
+                let mut diag = cop.diagnostic(source, line, column, msg.to_string());
+                if can_autocorrect {
+                    let loc = call.location();
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.start_offset(),
+                        replacement: "(".to_string(),
+                        cop_name: cop.name(),
+                        cop_index: 0,
+                    });
+                    corrections.push(crate::correction::Correction {
+                        start: loc.end_offset(),
+                        end: loc.end_offset(),
+                        replacement: ")".to_string(),
+                        cop_name: cop.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
             return;
         }
@@ -191,7 +257,16 @@ fn traverse_condition(
     }
 
     // For other node types, recurse into children
-    recurse_children(source, node, allow_safe, msg, cop, diagnostics);
+    recurse_children(
+        source,
+        node,
+        allow_safe,
+        msg,
+        cop,
+        diagnostics,
+        can_autocorrect,
+        corrections,
+    );
 }
 
 /// Check if a node is an equals assignment (lvar=, ivar=, cvar=, gvar=, const=)
@@ -206,28 +281,56 @@ fn is_assignment_node(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_call_node().is_some_and(|c| c.is_attribute_write())
 }
 
-/// Get the operator location (byte offset of `=`) for equals assignment nodes
-fn get_equals_assignment_operator_loc(node: &ruby_prism::Node<'_>) -> Option<usize> {
+/// Get operator location and assignment node range for equals assignments.
+fn get_equals_assignment_info(node: &ruby_prism::Node<'_>) -> Option<(usize, usize, usize)> {
     if let Some(n) = node.as_local_variable_write_node() {
-        return Some(n.operator_loc().start_offset());
+        return Some((
+            n.operator_loc().start_offset(),
+            n.location().start_offset(),
+            n.location().end_offset(),
+        ));
     }
     if let Some(n) = node.as_instance_variable_write_node() {
-        return Some(n.operator_loc().start_offset());
+        return Some((
+            n.operator_loc().start_offset(),
+            n.location().start_offset(),
+            n.location().end_offset(),
+        ));
     }
     if let Some(n) = node.as_class_variable_write_node() {
-        return Some(n.operator_loc().start_offset());
+        return Some((
+            n.operator_loc().start_offset(),
+            n.location().start_offset(),
+            n.location().end_offset(),
+        ));
     }
     if let Some(n) = node.as_global_variable_write_node() {
-        return Some(n.operator_loc().start_offset());
+        return Some((
+            n.operator_loc().start_offset(),
+            n.location().start_offset(),
+            n.location().end_offset(),
+        ));
     }
     if let Some(n) = node.as_constant_write_node() {
-        return Some(n.operator_loc().start_offset());
+        return Some((
+            n.operator_loc().start_offset(),
+            n.location().start_offset(),
+            n.location().end_offset(),
+        ));
     }
     if let Some(n) = node.as_constant_path_write_node() {
-        return Some(n.operator_loc().start_offset());
+        return Some((
+            n.operator_loc().start_offset(),
+            n.location().start_offset(),
+            n.location().end_offset(),
+        ));
     }
     if let Some(n) = node.as_multi_write_node() {
-        return Some(n.operator_loc().start_offset());
+        return Some((
+            n.operator_loc().start_offset(),
+            n.location().start_offset(),
+            n.location().end_offset(),
+        ));
     }
     None
 }
@@ -296,89 +399,207 @@ fn recurse_children(
     msg: &str,
     cop: &AssignmentInCondition,
     diagnostics: &mut Vec<Diagnostic>,
+    can_autocorrect: bool,
+    corrections: &mut Vec<crate::correction::Correction>,
 ) {
-    // OrNode (||)
     if let Some(or_node) = node.as_or_node() {
-        traverse_condition(source, &or_node.left(), allow_safe, msg, cop, diagnostics);
-        traverse_condition(source, &or_node.right(), allow_safe, msg, cop, diagnostics);
+        traverse_condition(
+            source,
+            &or_node.left(),
+            allow_safe,
+            msg,
+            cop,
+            diagnostics,
+            can_autocorrect,
+            corrections,
+        );
+        traverse_condition(
+            source,
+            &or_node.right(),
+            allow_safe,
+            msg,
+            cop,
+            diagnostics,
+            can_autocorrect,
+            corrections,
+        );
         return;
     }
-    // AndNode (&&)
+
     if let Some(and_node) = node.as_and_node() {
-        traverse_condition(source, &and_node.left(), allow_safe, msg, cop, diagnostics);
-        traverse_condition(source, &and_node.right(), allow_safe, msg, cop, diagnostics);
+        traverse_condition(
+            source,
+            &and_node.left(),
+            allow_safe,
+            msg,
+            cop,
+            diagnostics,
+            can_autocorrect,
+            corrections,
+        );
+        traverse_condition(
+            source,
+            &and_node.right(),
+            allow_safe,
+            msg,
+            cop,
+            diagnostics,
+            can_autocorrect,
+            corrections,
+        );
         return;
     }
-    // StatementsNode — multiple statements in a begin block
+
     if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+            traverse_condition(
+                source,
+                &stmt,
+                allow_safe,
+                msg,
+                cop,
+                diagnostics,
+                can_autocorrect,
+                corrections,
+            );
         }
         return;
     }
-    // RangeNode (flip-flop conditions)
+
     if let Some(range) = node.as_range_node() {
         if let Some(left) = range.left() {
-            traverse_condition(source, &left, allow_safe, msg, cop, diagnostics);
+            traverse_condition(
+                source,
+                &left,
+                allow_safe,
+                msg,
+                cop,
+                diagnostics,
+                can_autocorrect,
+                corrections,
+            );
         }
         if let Some(right) = range.right() {
-            traverse_condition(source, &right, allow_safe, msg, cop, diagnostics);
+            traverse_condition(
+                source,
+                &right,
+                allow_safe,
+                msg,
+                cop,
+                diagnostics,
+                can_autocorrect,
+                corrections,
+            );
         }
         return;
     }
-    // DefinedNode
+
     if let Some(defined) = node.as_defined_node() {
-        traverse_condition(source, &defined.value(), allow_safe, msg, cop, diagnostics);
+        traverse_condition(
+            source,
+            &defined.value(),
+            allow_safe,
+            msg,
+            cop,
+            diagnostics,
+            can_autocorrect,
+            corrections,
+        );
         return;
     }
-    // BeginNode — explicit begin..end blocks used inside conditions
-    // e.g., `if valid? && begin; result = compute; result.present?; end`
+
     if let Some(begin_node) = node.as_begin_node() {
         if let Some(stmts) = begin_node.statements() {
             for stmt in stmts.body().iter() {
-                traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                traverse_condition(
+                    source,
+                    &stmt,
+                    allow_safe,
+                    msg,
+                    cop,
+                    diagnostics,
+                    can_autocorrect,
+                    corrections,
+                );
             }
         }
-        // Also traverse rescue/ensure clauses inside begin blocks
         if let Some(rescue) = begin_node.rescue_clause() {
-            traverse_condition(source, &rescue.as_node(), allow_safe, msg, cop, diagnostics);
+            traverse_condition(
+                source,
+                &rescue.as_node(),
+                allow_safe,
+                msg,
+                cop,
+                diagnostics,
+                can_autocorrect,
+                corrections,
+            );
         }
         if let Some(ensure) = begin_node.ensure_clause() {
-            traverse_condition(source, &ensure.as_node(), allow_safe, msg, cop, diagnostics);
+            traverse_condition(
+                source,
+                &ensure.as_node(),
+                allow_safe,
+                msg,
+                cop,
+                diagnostics,
+                can_autocorrect,
+                corrections,
+            );
         }
         return;
     }
-    // CaseNode — case expressions used inside conditions
-    // e.g., `if (case x; when :a; found = lookup; end)` or bare `case; when match = scan(...)`
+
     if let Some(case_node) = node.as_case_node() {
         for condition in case_node.conditions().iter() {
             if let Some(when_node) = condition.as_when_node() {
-                // Traverse when conditions (the expressions after `when`)
                 for cond in when_node.conditions().iter() {
-                    traverse_condition(source, &cond, allow_safe, msg, cop, diagnostics);
+                    traverse_condition(
+                        source,
+                        &cond,
+                        allow_safe,
+                        msg,
+                        cop,
+                        diagnostics,
+                        can_autocorrect,
+                        corrections,
+                    );
                 }
-                // Traverse when body (statements inside the when clause)
                 if let Some(stmts) = when_node.statements() {
                     for stmt in stmts.body().iter() {
-                        traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                        traverse_condition(
+                            source,
+                            &stmt,
+                            allow_safe,
+                            msg,
+                            cop,
+                            diagnostics,
+                            can_autocorrect,
+                            corrections,
+                        );
                     }
                 }
             }
         }
-        // Also check else clause
         if let Some(else_clause) = case_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
-                    traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                    traverse_condition(
+                        source,
+                        &stmt,
+                        allow_safe,
+                        msg,
+                        cop,
+                        diagnostics,
+                        can_autocorrect,
+                        corrections,
+                    );
                 }
             }
         }
         return;
     }
-    // IfNode / UnlessNode / WhileNode / UntilNode — when these appear nested
-    // inside a condition tree (e.g., `if modifier` inside a `when` body of a `case`
-    // that's used as an `elsif` condition), we recurse into both predicate and body.
-    // RuboCop's traverse_node walks all children unconditionally.
+
     if let Some(if_node) = node.as_if_node() {
         traverse_condition(
             source,
@@ -387,17 +608,38 @@ fn recurse_children(
             msg,
             cop,
             diagnostics,
+            can_autocorrect,
+            corrections,
         );
         if let Some(stmts) = if_node.statements() {
             for stmt in stmts.body().iter() {
-                traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                traverse_condition(
+                    source,
+                    &stmt,
+                    allow_safe,
+                    msg,
+                    cop,
+                    diagnostics,
+                    can_autocorrect,
+                    corrections,
+                );
             }
         }
         if let Some(subsequent) = if_node.subsequent() {
-            traverse_condition(source, &subsequent, allow_safe, msg, cop, diagnostics);
+            traverse_condition(
+                source,
+                &subsequent,
+                allow_safe,
+                msg,
+                cop,
+                diagnostics,
+                can_autocorrect,
+                corrections,
+            );
         }
         return;
     }
+
     if let Some(unless_node) = node.as_unless_node() {
         traverse_condition(
             source,
@@ -406,10 +648,21 @@ fn recurse_children(
             msg,
             cop,
             diagnostics,
+            can_autocorrect,
+            corrections,
         );
         if let Some(stmts) = unless_node.statements() {
             for stmt in stmts.body().iter() {
-                traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                traverse_condition(
+                    source,
+                    &stmt,
+                    allow_safe,
+                    msg,
+                    cop,
+                    diagnostics,
+                    can_autocorrect,
+                    corrections,
+                );
             }
         }
         if let Some(else_clause) = unless_node.else_clause() {
@@ -420,10 +673,13 @@ fn recurse_children(
                 msg,
                 cop,
                 diagnostics,
+                can_autocorrect,
+                corrections,
             );
         }
         return;
     }
+
     if let Some(while_node) = node.as_while_node() {
         traverse_condition(
             source,
@@ -432,14 +688,26 @@ fn recurse_children(
             msg,
             cop,
             diagnostics,
+            can_autocorrect,
+            corrections,
         );
         if let Some(stmts) = while_node.statements() {
             for stmt in stmts.body().iter() {
-                traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                traverse_condition(
+                    source,
+                    &stmt,
+                    allow_safe,
+                    msg,
+                    cop,
+                    diagnostics,
+                    can_autocorrect,
+                    corrections,
+                );
             }
         }
         return;
     }
+
     if let Some(until_node) = node.as_until_node() {
         traverse_condition(
             source,
@@ -448,31 +716,59 @@ fn recurse_children(
             msg,
             cop,
             diagnostics,
+            can_autocorrect,
+            corrections,
         );
         if let Some(stmts) = until_node.statements() {
             for stmt in stmts.body().iter() {
-                traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                traverse_condition(
+                    source,
+                    &stmt,
+                    allow_safe,
+                    msg,
+                    cop,
+                    diagnostics,
+                    can_autocorrect,
+                    corrections,
+                );
             }
         }
         return;
     }
-    // ElseNode — else clause of if/unless/case
+
     if let Some(else_node) = node.as_else_node() {
         if let Some(stmts) = else_node.statements() {
             for stmt in stmts.body().iter() {
-                traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                traverse_condition(
+                    source,
+                    &stmt,
+                    allow_safe,
+                    msg,
+                    cop,
+                    diagnostics,
+                    can_autocorrect,
+                    corrections,
+                );
             }
         }
         return;
     }
-    // RescueNode — individual rescue clause (e.g., `rescue => e; stmts`)
+
     if let Some(rescue_node) = node.as_rescue_node() {
         if let Some(stmts) = rescue_node.statements() {
             for stmt in stmts.body().iter() {
-                traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                traverse_condition(
+                    source,
+                    &stmt,
+                    allow_safe,
+                    msg,
+                    cop,
+                    diagnostics,
+                    can_autocorrect,
+                    corrections,
+                );
             }
         }
-        // Chain to subsequent rescue clauses
         if let Some(subsequent) = rescue_node.subsequent() {
             traverse_condition(
                 source,
@@ -481,20 +777,31 @@ fn recurse_children(
                 msg,
                 cop,
                 diagnostics,
+                can_autocorrect,
+                corrections,
             );
         }
         return;
     }
-    // EnsureNode
+
     if let Some(ensure_node) = node.as_ensure_node() {
         if let Some(stmts) = ensure_node.statements() {
             for stmt in stmts.body().iter() {
-                traverse_condition(source, &stmt, allow_safe, msg, cop, diagnostics);
+                traverse_condition(
+                    source,
+                    &stmt,
+                    allow_safe,
+                    msg,
+                    cop,
+                    diagnostics,
+                    can_autocorrect,
+                    corrections,
+                );
             }
         }
         return;
     }
-    // RescueModifierNode — `expr rescue fallback` inline rescue
+
     if let Some(rescue_mod) = node.as_rescue_modifier_node() {
         traverse_condition(
             source,
@@ -503,6 +810,8 @@ fn recurse_children(
             msg,
             cop,
             diagnostics,
+            can_autocorrect,
+            corrections,
         );
         traverse_condition(
             source,
@@ -511,14 +820,19 @@ fn recurse_children(
             msg,
             cop,
             diagnostics,
+            can_autocorrect,
+            corrections,
         );
     }
-    // For other node types we don't recurse — they're leaf nodes or types
-    // where assignments aren't relevant (e.g., literals, method args)
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AssignmentInCondition, "cops/lint/assignment_in_condition");
+    crate::cop_autocorrect_fixture_tests!(
+        AssignmentInCondition,
+        "cops/lint/assignment_in_condition"
+    );
 }
