@@ -62,6 +62,10 @@ impl Cop for CaseEquality {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -69,7 +73,7 @@ impl Cop for CaseEquality {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_on_constant = config.get_bool("AllowOnConstant", false);
         let allow_on_self_class = config.get_bool("AllowOnSelfClass", false);
@@ -124,12 +128,57 @@ impl Cop for CaseEquality {
             .message_loc()
             .unwrap_or_else(|| call_node.location());
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Avoid the use of the case equality operator `===`.".to_string(),
-        ));
+        );
+
+        if let Some(args) = call_node.arguments() {
+            if let Some(rhs) = args.arguments().iter().next() {
+                let rhs_src = std::str::from_utf8(rhs.location().as_slice()).unwrap_or("");
+                let lhs_src = std::str::from_utf8(receiver.location().as_slice()).unwrap_or("");
+                let replacement = if receiver.as_constant_read_node().is_some()
+                    || receiver.as_constant_path_node().is_some()
+                {
+                    Some(format!("{rhs_src}.is_a?({lhs_src})"))
+                } else if let Some(recv_call) = receiver.as_call_node() {
+                    if recv_call.name().as_slice() == b"class"
+                        && recv_call
+                            .receiver()
+                            .is_some_and(|inner| inner.as_self_node().is_some())
+                    {
+                        Some(format!("{rhs_src}.is_a?({lhs_src})"))
+                    } else {
+                        None
+                    }
+                } else if lhs_src.starts_with('(')
+                    && lhs_src.ends_with(')')
+                    && lhs_src.contains("..")
+                {
+                    Some(format!("{lhs_src}.include?({rhs_src})"))
+                } else {
+                    None
+                };
+
+                if let Some(replacement) = replacement {
+                    if let Some(ref mut corr) = corrections {
+                        let loc = call_node.location();
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -137,4 +186,5 @@ impl Cop for CaseEquality {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CaseEquality, "cops/style/case_equality");
+    crate::cop_autocorrect_fixture_tests!(CaseEquality, "cops/style/case_equality");
 }
