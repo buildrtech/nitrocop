@@ -12,6 +12,10 @@ impl Cop for NestedFileDirname {
         "Style/NestedFileDirname"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -19,7 +23,7 @@ impl Cop for NestedFileDirname {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_ruby_version 3.1
         let ruby_ver = config
@@ -35,9 +39,14 @@ impl Cop for NestedFileDirname {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            emit_corrections: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -45,6 +54,8 @@ struct DirnameVisitor<'a, 'src> {
     cop: &'a NestedFileDirname,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    emit_corrections: bool,
 }
 
 impl<'pr> Visit<'pr> for DirnameVisitor<'_, '_> {
@@ -62,12 +73,26 @@ impl<'pr> Visit<'pr> for DirnameVisitor<'_, '_> {
                             let msg_loc = node.message_loc().unwrap_or_else(|| node.location());
                             let (line, column) =
                                 self.source.offset_to_line_col(msg_loc.start_offset());
-                            self.diagnostics.push(self.cop.diagnostic(
+                            let replacement = format!("dirname({}, {})", inner_path_src, level);
+                            let mut diag = self.cop.diagnostic(
                                 self.source,
                                 line,
                                 column,
-                                format!("Use `dirname({}, {})` instead.", inner_path_src, level),
-                            ));
+                                format!("Use `{}` instead.", replacement),
+                            );
+
+                            if self.emit_corrections {
+                                self.corrections.push(crate::correction::Correction {
+                                    start: msg_loc.start_offset(),
+                                    end: node.location().end_offset(),
+                                    replacement,
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+
+                            self.diagnostics.push(diag);
                             // Skip visiting children — inner File.dirname calls
                             // are already counted; don't produce inner reports.
                             return;
@@ -146,4 +171,5 @@ fn is_file_const(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NestedFileDirname, "cops/style/nested_file_dirname");
+    crate::cop_autocorrect_fixture_tests!(NestedFileDirname, "cops/style/nested_file_dirname");
 }
