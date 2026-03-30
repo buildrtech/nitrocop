@@ -21,6 +21,10 @@ impl Cop for SuperWithArgsParentheses {
         &[SUPER_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -28,7 +32,7 @@ impl Cop for SuperWithArgsParentheses {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let super_node = match node.as_super_node() {
             Some(s) => s,
@@ -48,12 +52,44 @@ impl Cop for SuperWithArgsParentheses {
 
         let loc = super_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Use parentheses for `super` with arguments.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let keyword_loc = super_node.keyword_loc();
+            let arg_start = super_node
+                .arguments()
+                .map(|a| a.location().start_offset())
+                .or_else(|| super_node.block().map(|b| b.location().start_offset()));
+            let arg_end = super_node
+                .block()
+                .map(|b| b.location().end_offset())
+                .or_else(|| super_node.arguments().map(|a| a.location().end_offset()));
+
+            if let (Some(arg_start), Some(arg_end)) = (arg_start, arg_end) {
+                corr.push(crate::correction::Correction {
+                    start: keyword_loc.end_offset(),
+                    end: arg_start,
+                    replacement: "(".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                corr.push(crate::correction::Correction {
+                    start: arg_end,
+                    end: arg_end,
+                    replacement: ")".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -61,6 +97,10 @@ impl Cop for SuperWithArgsParentheses {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        SuperWithArgsParentheses,
+        "cops/style/super_with_args_parentheses"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         SuperWithArgsParentheses,
         "cops/style/super_with_args_parentheses"
     );

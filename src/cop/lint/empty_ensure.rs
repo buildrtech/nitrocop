@@ -18,6 +18,10 @@ impl Cop for EmptyEnsure {
         &[BEGIN_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for EmptyEnsure {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // EnsureNode is not visited directly by the generic walker.
         // It appears as ensure_clause() on BeginNode.
@@ -51,12 +55,25 @@ impl Cop for EmptyEnsure {
 
         let kw_loc = ensure_node.ensure_keyword_loc();
         let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Empty `ensure` block detected.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: kw_loc.start_offset(),
+                end: kw_loc.end_offset(),
+                replacement: "".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -64,4 +81,5 @@ impl Cop for EmptyEnsure {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyEnsure, "cops/lint/empty_ensure");
+    crate::cop_autocorrect_fixture_tests!(EmptyEnsure, "cops/lint/empty_ensure");
 }
