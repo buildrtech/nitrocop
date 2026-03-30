@@ -8,9 +8,60 @@ use crate::parse::source::SourceFile;
 /// Since Ruby 2.6, non-keyword arguments other than the first one are deprecated.
 pub struct ErbNewArguments;
 
+fn build_arguments_correction(
+    source: &SourceFile,
+    args: &[ruby_prism::Node<'_>],
+) -> Option<(usize, usize, String)> {
+    if args.is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    let first = &args[0];
+    let first_loc = first.location();
+    parts.push(
+        source
+            .byte_slice(first_loc.start_offset(), first_loc.end_offset(), "")
+            .to_string(),
+    );
+
+    // second arg (safe_level) is removed entirely
+    if args.len() > 2 {
+        let arg = &args[2];
+        if arg.as_keyword_hash_node().is_none() && arg.as_hash_node().is_none() {
+            let loc = arg.location();
+            let src = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+            parts.push(format!("trim_mode: {src}"));
+        }
+    }
+
+    if args.len() > 3 {
+        let arg = &args[3];
+        if arg.as_keyword_hash_node().is_none() && arg.as_hash_node().is_none() {
+            let loc = arg.location();
+            let src = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+            parts.push(format!("eoutvar: {src}"));
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    Some((
+        first_loc.start_offset(),
+        args.last()?.location().end_offset(),
+        parts.join(", "),
+    ))
+}
+
 impl Cop for ErbNewArguments {
     fn name(&self) -> &'static str {
         "Lint/ErbNewArguments"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_severity(&self) -> Severity {
@@ -28,7 +79,7 @@ impl Cop for ErbNewArguments {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -68,6 +119,8 @@ impl Cop for ErbNewArguments {
             return;
         }
 
+        let correction = build_arguments_correction(source, &args);
+
         // Check args at positions 1, 2, 3 (safe_level, trim_mode, eoutvar)
         for (i, arg) in args.iter().enumerate().skip(1).take(3) {
             // Skip if it's a hash (keyword args)
@@ -90,7 +143,22 @@ impl Cop for ErbNewArguments {
 
             let loc = arg.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(source, line, column, msg));
+            let mut diag = self.diagnostic(source, line, column, msg);
+
+            if let (Some(corr), Some((start, end, replacement))) =
+                (corrections.as_mut(), correction.as_ref())
+            {
+                corr.push(crate::correction::Correction {
+                    start: *start,
+                    end: *end,
+                    replacement: replacement.clone(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+
+            diagnostics.push(diag);
         }
     }
 }
@@ -99,4 +167,5 @@ impl Cop for ErbNewArguments {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ErbNewArguments, "cops/lint/erb_new_arguments");
+    crate::cop_autocorrect_fixture_tests!(ErbNewArguments, "cops/lint/erb_new_arguments");
 }
