@@ -52,6 +52,10 @@ impl Cop for HashTransformValues {
         "Style/HashTransformValues"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ARRAY_NODE,
@@ -74,7 +78,7 @@ impl Cop for HashTransformValues {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -85,18 +89,18 @@ impl Cop for HashTransformValues {
 
         match method_name {
             b"each_with_object" => {
-                self.check_each_with_object(source, &call, diagnostics);
+                self.check_each_with_object(source, &call, diagnostics, &mut corrections);
             }
             b"[]" => {
                 // Hash[x.map { |k, v| [k, expr(v)] }]
-                self.check_hash_brackets_map(source, &call, diagnostics);
+                self.check_hash_brackets_map(source, &call, diagnostics, &mut corrections);
             }
             b"to_h" => {
                 // Two sub-patterns:
                 // 1. x.map { |k, v| [k, expr(v)] }.to_h  (call on a block result)
                 // 2. x.to_h { |k, v| [k, expr(v)] }  (to_h with its own block)
-                self.check_map_to_h(source, &call, diagnostics);
-                self.check_to_h_with_block(source, &call, diagnostics);
+                self.check_map_to_h(source, &call, diagnostics, &mut corrections);
+                self.check_to_h_with_block(source, &call, diagnostics, &mut corrections);
             }
             _ => {}
         }
@@ -110,6 +114,7 @@ impl HashTransformValues {
         source: &SourceFile,
         call: &ruby_prism::CallNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Must have a block
         let block = match call.block() {
@@ -263,12 +268,38 @@ impl HashTransformValues {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Prefer `transform_values` over `each_with_object`.".to_string(),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            let receiver_src = call
+                .receiver()
+                .map_or_else(|| "".to_string(), |recv| node_source(source, &recv));
+            let value_name = String::from_utf8_lossy(value_param_name.as_slice());
+            let value_expr_src = node_source(source, &aargs[1]);
+            let replacement = if receiver_src.is_empty() {
+                format!("transform_values {{ |{}| {} }}", value_name, value_expr_src)
+            } else {
+                format!(
+                    "{}.transform_values {{ |{}| {} }}",
+                    receiver_src, value_name, value_expr_src
+                )
+            };
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 
     /// Pattern 2: `Hash[x.map { |k, v| [k, expr(v)] }]`
@@ -277,6 +308,7 @@ impl HashTransformValues {
         source: &SourceFile,
         call: &ruby_prism::CallNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Receiver must be `Hash` or `::Hash` constant
         let recv = match call.receiver() {
@@ -325,15 +357,39 @@ impl HashTransformValues {
         }
 
         // Validate block params and body as [k, expr(v)]
-        if self.validate_map_block(source, &block_node) {
+        if let Some((value_name, value_expr_src)) = self.extract_map_block(source, &block_node) {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `transform_values` over `Hash[_.map {...}]`.".to_string(),
-            ));
+            );
+
+            if let Some(corr) = corrections.as_mut() {
+                let receiver_src = inner_call
+                    .receiver()
+                    .map_or_else(|| "".to_string(), |recv| node_source(source, &recv));
+                let replacement = if receiver_src.is_empty() {
+                    format!("transform_values {{ |{}| {} }}", value_name, value_expr_src)
+                } else {
+                    format!(
+                        "{}.transform_values {{ |{}| {} }}",
+                        receiver_src, value_name, value_expr_src
+                    )
+                };
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+
+            diagnostics.push(diag);
         }
     }
 
@@ -343,6 +399,7 @@ impl HashTransformValues {
         source: &SourceFile,
         call: &ruby_prism::CallNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // The receiver of .to_h should be a map/collect call with a block
         let recv = match call.receiver() {
@@ -385,18 +442,41 @@ impl HashTransformValues {
             return;
         }
 
-        if self.validate_map_block(source, &block_node) {
+        if let Some((value_name, value_expr_src)) = self.extract_map_block(source, &block_node) {
             // Report from the map call start through the .to_h
             let loc = map_call.location();
             let end_loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            let _ = end_loc; // use call location for the full span
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `transform_values` over `map {...}.to_h`.".to_string(),
-            ));
+            );
+
+            if let Some(corr) = corrections.as_mut() {
+                let receiver_src = map_call
+                    .receiver()
+                    .map_or_else(|| "".to_string(), |recv| node_source(source, &recv));
+                let replacement = if receiver_src.is_empty() {
+                    format!("transform_values {{ |{}| {} }}", value_name, value_expr_src)
+                } else {
+                    format!(
+                        "{}.transform_values {{ |{}| {} }}",
+                        receiver_src, value_name, value_expr_src
+                    )
+                };
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: end_loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+
+            diagnostics.push(diag);
         }
     }
 
@@ -406,6 +486,7 @@ impl HashTransformValues {
         source: &SourceFile,
         call: &ruby_prism::CallNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Must have a block
         let block = match call.block() {
@@ -427,94 +508,89 @@ impl HashTransformValues {
             return;
         }
 
-        if self.validate_map_block(source, &block_node) {
+        if let Some((value_name, value_expr_src)) = self.extract_map_block(source, &block_node) {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `transform_values` over `to_h {...}`.".to_string(),
-            ));
+            );
+
+            if let Some(corr) = corrections.as_mut() {
+                let receiver_src = call
+                    .receiver()
+                    .map_or_else(|| "".to_string(), |recv| node_source(source, &recv));
+                let replacement = if receiver_src.is_empty() {
+                    format!("transform_values {{ |{}| {} }}", value_name, value_expr_src)
+                } else {
+                    format!(
+                        "{}.transform_values {{ |{}| {} }}",
+                        receiver_src, value_name, value_expr_src
+                    )
+                };
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+
+            diagnostics.push(diag);
         }
     }
 
-    /// Validates a block for map/collect/to_h patterns:
-    /// - Block params must be `|k, v|` (two required params)
-    /// - Body must be `[k, expr(v)]` where k passes through unchanged
-    ///   and expr(v) references v but not k, and is not a noop
-    fn validate_map_block(
+    /// Extract transform-values block details for map/collect/to_h patterns.
+    ///
+    /// Returns `(value_param_name, value_expression_source)` when the block matches
+    /// `[k, expr(v)]` with the existing safety guards.
+    fn extract_map_block(
         &self,
         source: &SourceFile,
         block_node: &ruby_prism::BlockNode<'_>,
-    ) -> bool {
+    ) -> Option<(String, String)> {
         // Block params must be |k, v| (two simple params, NOT destructured)
-        let params = match block_node.parameters() {
-            Some(p) => p,
-            None => return false,
-        };
-        let block_params = match params.as_block_parameters_node() {
-            Some(bp) => bp,
-            None => return false,
-        };
-        let bp_params = match block_params.parameters() {
-            Some(p) => p,
-            None => return false,
-        };
+        let params = block_node.parameters()?;
+        let block_params = params.as_block_parameters_node()?;
+        let bp_params = block_params.parameters()?;
 
         let reqs: Vec<_> = bp_params.requireds().iter().collect();
         if reqs.len() != 2 {
-            return false;
+            return None;
         }
 
         // Both params must be simple required parameters (not destructured)
-        let key_param_name = match reqs[0].as_required_parameter_node() {
-            Some(p) => p.name(),
-            None => return false,
-        };
-        let value_param_name = match reqs[1].as_required_parameter_node() {
-            Some(p) => p.name(),
-            None => return false,
-        };
+        let key_param_name = reqs[0].as_required_parameter_node()?.name();
+        let value_param_name = reqs[1].as_required_parameter_node()?.name();
 
         // Body must be a single statement that's an array with 2 elements
-        let body = match block_node.body() {
-            Some(b) => b,
-            None => return false,
-        };
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
-            None => return false,
-        };
+        let body = block_node.body()?;
+        let stmts = body.as_statements_node()?;
         let body_nodes: Vec<_> = stmts.body().iter().collect();
         if body_nodes.len() != 1 {
-            return false;
+            return None;
         }
 
-        let array = match body_nodes[0].as_array_node() {
-            Some(a) => a,
-            None => return false,
-        };
-
+        let array = body_nodes[0].as_array_node()?;
         let elements: Vec<_> = array.elements().iter().collect();
         if elements.len() != 2 {
-            return false;
+            return None;
         }
 
         // First element must be the key param unchanged
-        let key_elem = match elements[0].as_local_variable_read_node() {
-            Some(l) => l,
-            None => return false,
-        };
+        let key_elem = elements[0].as_local_variable_read_node()?;
         if key_elem.name().as_slice() != key_param_name.as_slice() {
-            return false;
+            return None;
         }
 
-        // Second element: the value expression
-        // Must NOT be a noop (just passing v through)
+        // Second element: value expression must not be noop (just `v`)
         if let Some(val_lvar) = elements[1].as_local_variable_read_node() {
             if val_lvar.name().as_slice() == value_param_name.as_slice() {
-                return false; // noop: [k, v]
+                return None;
             }
         }
 
@@ -522,17 +598,27 @@ impl HashTransformValues {
         let value_loc = elements[1].location();
         let value_src = value_loc.as_slice();
         if !contains_identifier(value_src, value_param_name.as_slice()) {
-            return false;
+            return None;
         }
 
         // Value expression must NOT reference the key param
         if contains_identifier(value_src, key_param_name.as_slice()) {
-            return false;
+            return None;
         }
 
-        let _ = source; // used for byte access if needed
-        true
+        let _ = source;
+        Some((
+            String::from_utf8_lossy(value_param_name.as_slice()).to_string(),
+            String::from_utf8_lossy(value_src).to_string(),
+        ))
     }
+}
+
+fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    String::from_utf8_lossy(
+        &source.as_bytes()[node.location().start_offset()..node.location().end_offset()],
+    )
+    .to_string()
 }
 
 /// Check if the receiver of a call is an array literal.
@@ -603,4 +689,5 @@ fn is_ident_char(b: u8) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashTransformValues, "cops/style/hash_transform_values");
+    crate::cop_autocorrect_fixture_tests!(HashTransformValues, "cops/style/hash_transform_values");
 }
