@@ -14,6 +14,10 @@ impl Cop for RedundantPercentQ {
         &[STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for RedundantPercentQ {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let string_node = match node.as_string_node() {
             Some(s) => s,
@@ -52,15 +56,31 @@ impl Cop for RedundantPercentQ {
 
             let loc = string_node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(
-                self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use `%q` only for strings that contain both single quotes and double quotes."
-                        .to_string(),
-                ),
+            let mut diag = self.diagnostic(
+                source,
+                line,
+                column,
+                "Use `%q` only for strings that contain both single quotes and double quotes."
+                    .to_string(),
             );
+
+            if !raw_content.contains(&b'\\') {
+                if let Some(ref mut corr) = corrections {
+                    if let Ok(content) = std::str::from_utf8(raw_content) {
+                        let quote = if has_single { '"' } else { '\'' };
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: format!("{quote}{content}{quote}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+            }
+
+            diagnostics.push(diag);
         }
 
         if opening.starts_with(b"%Q") {
@@ -74,13 +94,35 @@ impl Cop for RedundantPercentQ {
 
             let loc = string_node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Use `%Q` only for strings that contain both single quotes and double quotes, or for dynamic strings that contain double quotes."
                     .to_string(),
-            ));
+            );
+
+            if !raw_content.contains(&b'\\') && !contains_interpolation_pattern(raw_content) {
+                if let Some(ref mut corr) = corrections {
+                    if let Ok(content) = std::str::from_utf8(raw_content) {
+                        let quote = if raw_content.contains(&b'\'') {
+                            '"'
+                        } else {
+                            '\''
+                        };
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: format!("{quote}{content}{quote}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+            }
+
+            diagnostics.push(diag);
         }
     }
 }
@@ -110,4 +152,5 @@ fn contains_interpolation_pattern(raw: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantPercentQ, "cops/style/redundant_percent_q");
+    crate::cop_autocorrect_fixture_tests!(RedundantPercentQ, "cops/style/redundant_percent_q");
 }
