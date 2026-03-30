@@ -70,6 +70,10 @@ impl Cop for EachWithObject {
         "Style/EachWithObject"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ARRAY_NODE,
@@ -100,7 +104,7 @@ impl Cop for EachWithObject {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -229,12 +233,58 @@ impl Cop for EachWithObject {
 
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             format!("Use `each_with_object` instead of `{}`.", method_name),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            // Conservative autocorrect subset: exactly two required block parameters.
+            if let Some(params) = block_node.parameters() {
+                if let Some(block_params) = params.as_block_parameters_node() {
+                    if let Some(inner_params) = block_params.parameters() {
+                        let requireds: Vec<_> = inner_params.requireds().iter().collect();
+                        if requireds.len() == 2 {
+                            if let (Some(first_param), Some(second_param)) = (
+                                requireds[0].as_required_parameter_node(),
+                                requireds[1].as_required_parameter_node(),
+                            ) {
+                                corr.push(crate::correction::Correction {
+                                    start: loc.start_offset(),
+                                    end: loc.end_offset(),
+                                    replacement: "each_with_object".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                corr.push(crate::correction::Correction {
+                                    start: first_param.location().start_offset(),
+                                    end: second_param.location().end_offset(),
+                                    replacement: format!(
+                                        "{}, {}",
+                                        String::from_utf8_lossy(second_param.name().as_slice()),
+                                        String::from_utf8_lossy(first_param.name().as_slice())
+                                    ),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                corr.push(crate::correction::Correction {
+                                    start: last.location().start_offset(),
+                                    end: last.location().end_offset(),
+                                    replacement: "".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -242,4 +292,5 @@ impl Cop for EachWithObject {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EachWithObject, "cops/style/each_with_object");
+    crate::cop_autocorrect_fixture_tests!(EachWithObject, "cops/style/each_with_object");
 }
