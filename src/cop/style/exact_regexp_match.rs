@@ -99,11 +99,50 @@ impl ExactRegexpMatch {
         }
         true
     }
+
+    fn exact_match_literal(node: &ruby_prism::Node<'_>) -> Option<String> {
+        let regex = node.as_regular_expression_node()?;
+        let bytes = regex.unescaped();
+        if bytes.len() < 4 || !bytes.starts_with(b"\\A") || !bytes.ends_with(b"\\z") {
+            return None;
+        }
+        let inner = &bytes[2..bytes.len() - 2];
+        let mut out = Vec::with_capacity(inner.len());
+        let mut i = 0;
+        while i < inner.len() {
+            if inner[i] == b'\\' {
+                if i + 1 >= inner.len() {
+                    return None;
+                }
+                out.push(inner[i + 1]);
+                i += 2;
+            } else {
+                out.push(inner[i]);
+                i += 1;
+            }
+        }
+        Some(String::from_utf8_lossy(&out).to_string())
+    }
+
+    fn single_quoted_literal_content(raw: &str) -> String {
+        raw.replace('\\', "\\\\").replace('\'', "\\'")
+    }
+}
+
+fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    String::from_utf8_lossy(
+        &source.as_bytes()[node.location().start_offset()..node.location().end_offset()],
+    )
+    .to_string()
 }
 
 impl Cop for ExactRegexpMatch {
     fn name(&self) -> &'static str {
         "Style/ExactRegexpMatch"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -117,7 +156,7 @@ impl Cop for ExactRegexpMatch {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -136,12 +175,34 @@ impl Cop for ExactRegexpMatch {
                         let loc = call.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
                         let op = if method_bytes == b"!~" { "!=" } else { "==" };
-                        diagnostics.push(self.diagnostic(
+                        let mut diag = self.diagnostic(
                             source,
                             line,
                             column,
                             format!("Use `string {} 'string'`.", op),
-                        ));
+                        );
+
+                        if let (Some(corr), Some(receiver), Some(literal)) = (
+                            corrections.as_mut(),
+                            call.receiver(),
+                            Self::exact_match_literal(&arg_list[0]),
+                        ) {
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: format!(
+                                    "{} {} '{}'",
+                                    node_source(source, &receiver),
+                                    op,
+                                    Self::single_quoted_literal_content(&literal)
+                                ),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+
+                        diagnostics.push(diag);
                     }
                 }
             }
@@ -155,12 +216,33 @@ impl Cop for ExactRegexpMatch {
                     if arg_list.len() == 1 && Self::is_exact_match_regex(&arg_list[0]) {
                         let loc = call.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diag = self.diagnostic(
                             source,
                             line,
                             column,
                             "Use `string == 'string'`.".to_string(),
-                        ));
+                        );
+
+                        if let (Some(corr), Some(receiver), Some(literal)) = (
+                            corrections.as_mut(),
+                            call.receiver(),
+                            Self::exact_match_literal(&arg_list[0]),
+                        ) {
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: format!(
+                                    "{} == '{}'",
+                                    node_source(source, &receiver),
+                                    Self::single_quoted_literal_content(&literal)
+                                ),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+
+                        diagnostics.push(diag);
                     }
                 }
             }
@@ -173,4 +255,5 @@ impl Cop for ExactRegexpMatch {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ExactRegexpMatch, "cops/style/exact_regexp_match");
+    crate::cop_autocorrect_fixture_tests!(ExactRegexpMatch, "cops/style/exact_regexp_match");
 }
