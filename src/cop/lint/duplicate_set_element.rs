@@ -17,6 +17,10 @@ impl Cop for DuplicateSetElement {
         "Lint/DuplicateSetElement"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -48,7 +52,7 @@ impl Cop for DuplicateSetElement {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -74,6 +78,7 @@ impl Cop for DuplicateSetElement {
         };
 
         let mut seen = HashSet::new();
+        let mut duplicate_offsets = Vec::new();
 
         for elem in &elements {
             // Only check literals, constants, and variables
@@ -86,15 +91,41 @@ impl Cop for DuplicateSetElement {
             let key = elem_src.to_vec();
 
             if !seen.insert(key) {
-                let loc = elem.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("Remove the duplicate element in {}.", class_name),
-                ));
+                duplicate_offsets.push(elem.location().start_offset());
             }
+        }
+
+        if duplicate_offsets.is_empty() {
+            return;
+        }
+
+        let mut corrected = false;
+        if let Some(corr) = corrections.as_mut() {
+            if let Some((start, end, replacement)) = deduped_elements_replacement(&elements, source)
+            {
+                corr.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                corrected = true;
+            }
+        }
+
+        for offset in duplicate_offsets {
+            let (line, column) = source.offset_to_line_col(offset);
+            let mut diag = self.diagnostic(
+                source,
+                line,
+                column,
+                format!("Remove the duplicate element in {}.", class_name),
+            );
+            if corrected {
+                diag.corrected = true;
+            }
+            diagnostics.push(diag);
         }
     }
 }
@@ -151,8 +182,46 @@ fn is_literal_const_or_var(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_global_variable_read_node().is_some()
 }
 
+fn deduped_elements_replacement(
+    elements: &[ruby_prism::Node<'_>],
+    source: &SourceFile,
+) -> Option<(usize, usize, String)> {
+    let first = elements.first()?;
+    let last = elements.last()?;
+
+    let mut seen = HashSet::new();
+    let mut kept = Vec::new();
+    let mut removed_any = false;
+
+    for elem in elements {
+        let loc = elem.location();
+        let src = source
+            .as_bytes()
+            .get(loc.start_offset()..loc.end_offset())?
+            .to_vec();
+
+        if is_literal_const_or_var(elem) && !seen.insert(src.clone()) {
+            removed_any = true;
+            continue;
+        }
+
+        kept.push(String::from_utf8_lossy(&src).to_string());
+    }
+
+    if !removed_any {
+        return None;
+    }
+
+    Some((
+        first.location().start_offset(),
+        last.location().end_offset(),
+        kept.join(", "),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicateSetElement, "cops/lint/duplicate_set_element");
+    crate::cop_autocorrect_fixture_tests!(DuplicateSetElement, "cops/lint/duplicate_set_element");
 }
