@@ -64,6 +64,10 @@ impl Cop for HashFetchChain {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -71,7 +75,7 @@ impl Cop for HashFetchChain {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -164,12 +168,26 @@ impl Cop for HashFetchChain {
 
         let (line, column) = source.offset_to_line_col(msg_offset);
 
-        diagnostics.push(self.diagnostic(
+        let replacement = format!("dig({})", dig_args.join(", "));
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
-            format!("Use `dig({})` instead.", dig_args.join(", ")),
-        ));
+            format!("Use `{}` instead.", replacement),
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: msg_offset,
+                end: call.location().end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -177,4 +195,5 @@ impl Cop for HashFetchChain {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashFetchChain, "cops/style/hash_fetch_chain");
+    crate::cop_autocorrect_fixture_tests!(HashFetchChain, "cops/style/hash_fetch_chain");
 }
