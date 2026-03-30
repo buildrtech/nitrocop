@@ -156,11 +156,12 @@ Implemented autocorrect in this session:
 - `Style/EachWithObject`
 - `Style/ZeroLengthPredicate`
 - `Style/ReverseFind`
+- `Style/RedundantFilterChain`
 
 Current progress snapshot:
-- `missing_core_autocorrect_cops`: **275** (down from 372, -97)
-- `nitrocop_autocorrectable_cops`: **184** (up from 87, +97)
-- Missing by department now: Style (147), Lint (67), Layout (56), Naming (3), Security (1), Migration (1)
+- `missing_core_autocorrect_cops`: **274** (down from 372, -98)
+- `nitrocop_autocorrectable_cops`: **185** (up from 87, +98)
+- Missing by department now: Style (146), Lint (67), Layout (56), Naming (3), Security (1), Migration (1)
 
 Repeatable successful pattern:
 1. Add `supports_autocorrect()`

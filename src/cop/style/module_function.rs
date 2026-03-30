@@ -28,6 +28,10 @@ impl Cop for ModuleFunction {
         "Style/ModuleFunction"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -35,7 +39,7 @@ impl Cop for ModuleFunction {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "module_function");
         // Autocorrect config key acknowledged (autocorrect not yet implemented)
@@ -45,9 +49,14 @@ impl Cop for ModuleFunction {
             source,
             style,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            autocorrect_enabled: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections.as_mut() {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -56,6 +65,8 @@ struct ModuleFunctionVisitor<'a> {
     source: &'a SourceFile,
     style: &'a str,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    autocorrect_enabled: bool,
 }
 
 impl<'pr> Visit<'pr> for ModuleFunctionVisitor<'_> {
@@ -92,15 +103,24 @@ impl<'pr> Visit<'pr> for ModuleFunctionVisitor<'_> {
                                         let loc = call.location();
                                         let (line, column) =
                                             self.source.offset_to_line_col(loc.start_offset());
-                                        self.diagnostics.push(
-                                            self.cop.diagnostic(
-                                                self.source,
-                                                line,
-                                                column,
-                                                "Use `module_function` instead of `extend self`."
-                                                    .to_string(),
-                                            ),
+                                        let mut diag = self.cop.diagnostic(
+                                            self.source,
+                                            line,
+                                            column,
+                                            "Use `module_function` instead of `extend self`."
+                                                .to_string(),
                                         );
+                                        if self.autocorrect_enabled {
+                                            self.corrections.push(crate::correction::Correction {
+                                                start: loc.start_offset(),
+                                                end: loc.end_offset(),
+                                                replacement: "module_function".to_string(),
+                                                cop_name: self.cop.name(),
+                                                cop_index: 0,
+                                            });
+                                            diag.corrected = true;
+                                        }
+                                        self.diagnostics.push(diag);
                                     }
                                 }
                             }
@@ -111,12 +131,23 @@ impl<'pr> Visit<'pr> for ModuleFunctionVisitor<'_> {
                                 let loc = call.location();
                                 let (line, column) =
                                     self.source.offset_to_line_col(loc.start_offset());
-                                self.diagnostics.push(self.cop.diagnostic(
+                                let mut diag = self.cop.diagnostic(
                                     self.source,
                                     line,
                                     column,
                                     "Use `extend self` instead of `module_function`.".to_string(),
-                                ));
+                                );
+                                if self.autocorrect_enabled {
+                                    self.corrections.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement: "extend self".to_string(),
+                                        cop_name: self.cop.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                                self.diagnostics.push(diag);
                             }
                         } else if self.style == "forbidden" {
                             if method_bytes == b"module_function" && call.receiver().is_none() {
@@ -170,4 +201,5 @@ fn is_private_directive(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ModuleFunction, "cops/style/module_function");
+    crate::cop_autocorrect_fixture_tests!(ModuleFunction, "cops/style/module_function");
 }
