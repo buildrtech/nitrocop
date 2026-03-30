@@ -1,5 +1,5 @@
-- Evaluate `Style/HashConversion` for deterministic `Hash[...]` replacements (`to_h` or literal hash) with strict argument-shape guards.
 - Evaluate `Style/ArrayFirstLast` for conservative autocorrect limited to plain index reads (`arr[0]`/`arr[-1]`, explicit `.[]` forms) while skipping index-write variants.
+- Evaluate `Style/HashFetchChain` / `Style/HashSlice` for deterministic chain-to-helper rewrites if existing guards already isolate safe argument shapes.
 - Evaluate `Lint/AmbiguousRegexpLiteral` only with very conservative correction boundaries (likely offense-only unless a safe transformation is proven).
 - Keep Layout backlog in staged batches (spacing cops first, then alignment/indentation) after easy Style/Lint wins taper off.
 - Optional throughput refactor if implementation churn grows: tiny helper for selector/operator/full-call replacements to reduce duplicate correction code.

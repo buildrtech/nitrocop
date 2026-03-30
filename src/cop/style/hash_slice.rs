@@ -26,6 +26,10 @@ impl Cop for HashSlice {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -33,7 +37,7 @@ impl Cop for HashSlice {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -148,12 +152,26 @@ impl Cop for HashSlice {
 
                 let loc = call.message_loc().unwrap_or_else(|| call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let replacement = format!("slice({})", value_str);
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Use `slice({})` instead.", value_str),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: block.location().end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+
+                diagnostics.push(diag);
             }
 
             // Check for array.include?(k) pattern (select -> slice(*array))
@@ -189,12 +207,26 @@ impl Cop for HashSlice {
 
                 let loc = call.message_loc().unwrap_or_else(|| call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let replacement = format!("slice(*{})", recv_str);
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Use `slice(*{})` instead.", recv_str),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: block.location().end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+
+                diagnostics.push(diag);
             }
         }
     }
@@ -204,4 +236,5 @@ impl Cop for HashSlice {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashSlice, "cops/style/hash_slice");
+    crate::cop_autocorrect_fixture_tests!(HashSlice, "cops/style/hash_slice");
 }

@@ -129,11 +129,15 @@ Implemented autocorrect in this session:
 - `Style/FileRead`
 - `Style/HashEachMethods`
 - `Style/FileWrite`
+- `Style/HashConversion`
+- `Style/FileTouch`
+- `Style/FileEmpty`
+- `Style/GlobalStdStream`
 
 Current progress snapshot:
-- `missing_core_autocorrect_cops`: **302** (down from 372, -70)
-- `nitrocop_autocorrectable_cops`: **157** (up from 87, +70)
-- Missing by department now: Style (174), Lint (67), Layout (56), Naming (3), Security (1), Migration (1)
+- `missing_core_autocorrect_cops`: **298** (down from 372, -74)
+- `nitrocop_autocorrectable_cops`: **161** (up from 87, +74)
+- Missing by department now: Style (170), Lint (67), Layout (56), Naming (3), Security (1), Migration (1)
 
 Repeatable successful pattern:
 1. Add `supports_autocorrect()`
