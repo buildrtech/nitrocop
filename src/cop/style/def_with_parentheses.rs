@@ -14,6 +14,10 @@ impl Cop for DefWithParentheses {
         &[DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for DefWithParentheses {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -79,15 +83,35 @@ impl Cop for DefWithParentheses {
         }
 
         let (line, column) = source.offset_to_line_col(lparen_loc.start_offset());
-        diagnostics.push(
-            self.diagnostic(
-                source,
-                line,
-                column,
-                "Omit the parentheses in defs when the method doesn't accept any arguments."
-                    .to_string(),
-            ),
+        let mut diag = self.diagnostic(
+            source,
+            line,
+            column,
+            "Omit the parentheses in defs when the method doesn't accept any arguments."
+                .to_string(),
         );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: lparen_loc.start_offset(),
+                end: lparen_loc.end_offset(),
+                replacement: "".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            if let Some(rparen_loc) = def_node.rparen_loc() {
+                corr.push(crate::correction::Correction {
+                    start: rparen_loc.start_offset(),
+                    end: rparen_loc.end_offset(),
+                    replacement: "".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -95,4 +119,5 @@ impl Cop for DefWithParentheses {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DefWithParentheses, "cops/style/def_with_parentheses");
+    crate::cop_autocorrect_fixture_tests!(DefWithParentheses, "cops/style/def_with_parentheses");
 }

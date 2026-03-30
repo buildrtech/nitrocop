@@ -14,6 +14,10 @@ impl Cop for MethodDefParentheses {
         &[DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for MethodDefParentheses {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "require_parentheses");
 
@@ -55,12 +59,31 @@ impl Cop for MethodDefParentheses {
                 // RuboCop points at the arguments (parameters), not the `def` keyword
                 let params_loc = params.location();
                 let (line, column) = source.offset_to_line_col(params_loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use `def` with parentheses when there are parameters.".to_string(),
-                ));
+                );
+                if let Some(ref mut corr) = corrections {
+                    let name_end = def_node.name_loc().end_offset();
+                    corr.push(crate::correction::Correction {
+                        start: name_end,
+                        end: params_loc.start_offset(),
+                        replacement: "(".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    corr.push(crate::correction::Correction {
+                        start: params_loc.end_offset(),
+                        end: params_loc.end_offset(),
+                        replacement: ")".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
             "require_no_parentheses" if has_parens => {
                 // RuboCop points at the args node including parens — use lparen_loc
@@ -68,12 +91,34 @@ impl Cop for MethodDefParentheses {
                     .lparen_loc()
                     .map_or_else(|| params.location().start_offset(), |lp| lp.start_offset());
                 let (line, column) = source.offset_to_line_col(start);
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use `def` without parentheses.".to_string(),
-                ));
+                );
+                if let Some(ref mut corr) = corrections {
+                    if let Some(lp) = def_node.lparen_loc() {
+                        corr.push(crate::correction::Correction {
+                            start: lp.start_offset(),
+                            end: lp.end_offset(),
+                            replacement: "".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                    }
+                    if let Some(rp) = def_node.rparen_loc() {
+                        corr.push(crate::correction::Correction {
+                            start: rp.start_offset(),
+                            end: rp.end_offset(),
+                            replacement: "".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                    }
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
             _ => {}
         }
@@ -84,4 +129,8 @@ impl Cop for MethodDefParentheses {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MethodDefParentheses, "cops/style/method_def_parentheses");
+    crate::cop_autocorrect_fixture_tests!(
+        MethodDefParentheses,
+        "cops/style/method_def_parentheses"
+    );
 }
