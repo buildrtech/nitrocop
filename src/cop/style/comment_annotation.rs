@@ -49,6 +49,10 @@ impl Cop for CommentAnnotation {
         "Style/CommentAnnotation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -56,7 +60,7 @@ impl Cop for CommentAnnotation {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let require_colon = config.get_bool("RequireColon", true);
         let keywords_opt = config.get_string_array("Keywords");
@@ -152,37 +156,38 @@ impl Cop for CommentAnnotation {
                 }
 
                 let keyword_text = &trimmed[..keyword.len()];
-                let after_kw = &trimmed[keyword.len()..];
 
-                // Parse the annotation parts matching RuboCop's AnnotationComment regex:
-                // /^(# ?)(\bKEYWORD\b)(\s*:)?(\s+)?(\S+)?/i
-                //
-                // after_kw is everything after the keyword match.
-                // Parse colon, space, note groups from after_kw.
-                let mut rest = after_kw;
+                // Parse RuboCop-style groups after the keyword:
+                // (\s*:)?(\s+)?(\S+)?
+                let trimmed_bytes = trimmed.as_bytes();
+                let mut cursor = keyword.len();
 
-                // (\s*:)? — optional whitespace then colon
-                let has_colon = {
-                    let trimmed_rest = rest.trim_start();
-                    if let Some(after_colon) = trimmed_rest.strip_prefix(':') {
-                        rest = after_colon; // consume the colon
+                // Optional whitespace + colon group
+                let mut lookahead = cursor;
+                while lookahead < trimmed_bytes.len()
+                    && trimmed_bytes[lookahead].is_ascii_whitespace()
+                {
+                    lookahead += 1;
+                }
+                let has_colon =
+                    if lookahead < trimmed_bytes.len() && trimmed_bytes[lookahead] == b':' {
+                        cursor = lookahead + 1;
                         true
                     } else {
                         false
-                    }
-                };
+                    };
 
-                // (\s+)? — optional whitespace after keyword/colon
-                let has_space = if !rest.is_empty() && rest.as_bytes()[0].is_ascii_whitespace() {
-                    let trimmed = rest.trim_start();
-                    rest = trimmed;
-                    true
-                } else {
-                    false
-                };
+                // Optional whitespace group after keyword/colon
+                let mut note_start = cursor;
+                while note_start < trimmed_bytes.len()
+                    && trimmed_bytes[note_start].is_ascii_whitespace()
+                {
+                    note_start += 1;
+                }
+                let has_space = note_start > cursor;
 
-                // (\S+)? — first non-space word (note)
-                let has_note = !rest.is_empty();
+                // Optional note token
+                let has_note = note_start < trimmed_bytes.len();
 
                 // RuboCop's annotation? = keyword_appearance? && !just_keyword_of_sentence?
                 // keyword_appearance? = keyword && (colon || space)
@@ -228,7 +233,29 @@ impl Cop for CommentAnnotation {
                 // Column of the keyword within the comment
                 let (_, comment_col) = source.offset_to_line_col(comment_start_offset);
                 let kw_col = comment_col + 1 + margin_len;
-                diagnostics.push(self.diagnostic(source, comment_line, kw_col, msg));
+                let mut diag = self.diagnostic(source, comment_line, kw_col, msg);
+
+                if has_note {
+                    if let Some(corr) = corrections.as_mut() {
+                        let kw_start = comment_start_offset + 1 + margin_len;
+                        let replace_end = kw_start + note_start;
+                        let replacement = if require_colon {
+                            format!("{}: ", kw_upper)
+                        } else {
+                            format!("{} ", kw_upper)
+                        };
+                        corr.push(crate::correction::Correction {
+                            start: kw_start,
+                            end: replace_end,
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diag);
                 break;
             }
         }
@@ -239,4 +266,5 @@ impl Cop for CommentAnnotation {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CommentAnnotation, "cops/style/comment_annotation");
+    crate::cop_autocorrect_fixture_tests!(CommentAnnotation, "cops/style/comment_annotation");
 }

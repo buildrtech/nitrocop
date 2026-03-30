@@ -87,6 +87,7 @@ struct RequireVisitor<'a, 'src, 'pr> {
     source: &'src SourceFile,
     ruby_version: f64,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     _phantom: std::marker::PhantomData<&'pr ()>,
 }
 
@@ -103,12 +104,38 @@ impl<'a, 'src, 'pr> Visit<'pr> for RequireVisitor<'a, 'src, 'pr> {
                                 let loc = node.location();
                                 let (line, column) =
                                     self.source.offset_to_line_col(loc.start_offset());
-                                self.diagnostics.push(self.cop.diagnostic(
+                                let mut diag = self.cop.diagnostic(
                                     self.source,
                                     line,
                                     column,
                                     "Remove unnecessary `require` statement.".to_string(),
-                                ));
+                                );
+
+                                if let Some(corr) = self.corrections.as_mut() {
+                                    let source_bytes = self.source.as_bytes();
+                                    let mut end = loc.end_offset();
+                                    if end < source_bytes.len() {
+                                        if source_bytes[end] == b'\n' {
+                                            end += 1;
+                                        } else if source_bytes[end] == b'\r'
+                                            && end + 1 < source_bytes.len()
+                                            && source_bytes[end + 1] == b'\n'
+                                        {
+                                            end += 2;
+                                        }
+                                    }
+
+                                    (*corr).push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end,
+                                        replacement: "".to_string(),
+                                        cop_name: self.cop.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+
+                                self.diagnostics.push(diag);
                             }
                         }
                     }
@@ -126,6 +153,10 @@ impl Cop for RedundantRequireStatement {
         "Lint/RedundantRequireStatement"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -137,7 +168,7 @@ impl Cop for RedundantRequireStatement {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let ruby_ver = target_ruby_version(config);
 
@@ -146,6 +177,7 @@ impl Cop for RedundantRequireStatement {
             source,
             ruby_version: ruby_ver,
             diagnostics: Vec::new(),
+            corrections,
             _phantom: std::marker::PhantomData,
         };
         visitor.visit(&parse_result.node());
@@ -162,6 +194,10 @@ mod tests {
     use crate::testutil::assert_cop_offenses_full_with_config;
 
     crate::cop_fixture_tests!(
+        RedundantRequireStatement,
+        "cops/lint/redundant_require_statement"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RedundantRequireStatement,
         "cops/lint/redundant_require_statement"
     );
