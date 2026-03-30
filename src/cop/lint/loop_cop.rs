@@ -24,6 +24,20 @@ fn body_source_from_statements(stmts: Option<ruby_prism::StatementsNode<'_>>) ->
         .to_string()
 }
 
+fn indent_body(body: &str) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    for line in body.lines() {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 impl Cop for Loop {
     fn name(&self) -> &'static str {
         "Lint/Loop"
@@ -68,13 +82,7 @@ impl Cop for Loop {
                     let body = body_source_from_statements(while_node.statements());
                     let cond = std::str::from_utf8(while_node.predicate().location().as_slice())
                         .unwrap_or("");
-                    let body_with_newline = if body.is_empty() {
-                        String::new()
-                    } else if body.ends_with('\n') {
-                        body
-                    } else {
-                        format!("{body}\n")
-                    };
+                    let body_with_newline = indent_body(&body);
                     let replacement =
                         format!("loop do\n{body_with_newline}  break unless {cond}\nend");
                     let loc = while_node.location();
@@ -109,13 +117,7 @@ impl Cop for Loop {
                     let body = body_source_from_statements(until_node.statements());
                     let cond = std::str::from_utf8(until_node.predicate().location().as_slice())
                         .unwrap_or("");
-                    let body_with_newline = if body.is_empty() {
-                        String::new()
-                    } else if body.ends_with('\n') {
-                        body
-                    } else {
-                        format!("{body}\n")
-                    };
+                    let body_with_newline = indent_body(&body);
                     let replacement = format!("loop do\n{body_with_newline}  break if {cond}\nend");
                     let loc = until_node.location();
                     corr.push(crate::correction::Correction {
