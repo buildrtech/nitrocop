@@ -14,6 +14,10 @@ impl Cop for BarePercentLiterals {
         &[INTERPOLATED_STRING_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for BarePercentLiterals {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "bare_percent");
 
@@ -46,12 +50,23 @@ impl Cop for BarePercentLiterals {
                 // Flag %Q usage
                 if opening_bytes.starts_with(b"%Q") {
                     let (line, column) = source.offset_to_line_col(node_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
                         "Use `%` instead of `%Q`.".to_string(),
-                    ));
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: opening.start_offset(),
+                            end: opening.start_offset() + 2,
+                            replacement: "%".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
                 }
             }
             "percent_q" => {
@@ -63,12 +78,23 @@ impl Cop for BarePercentLiterals {
                     && !opening_bytes[1].is_ascii_alphabetic()
                 {
                     let (line, column) = source.offset_to_line_col(node_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
                         "Use `%Q` instead of `%`.".to_string(),
-                    ));
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: opening.start_offset(),
+                            end: opening.start_offset() + 1,
+                            replacement: "%Q".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
                 }
             }
             _ => {}
@@ -80,4 +106,5 @@ impl Cop for BarePercentLiterals {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BarePercentLiterals, "cops/style/bare_percent_literals");
+    crate::cop_autocorrect_fixture_tests!(BarePercentLiterals, "cops/style/bare_percent_literals");
 }

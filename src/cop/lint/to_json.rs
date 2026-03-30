@@ -20,6 +20,10 @@ impl Cop for ToJSON {
         &[DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -27,7 +31,7 @@ impl Cop for ToJSON {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -73,15 +77,27 @@ impl Cop for ToJSON {
 
         let loc = def_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(
-            self.diagnostic(
-                source,
-                line,
-                column,
-                "`#to_json` requires an optional argument to be parsable via JSON.generate(obj)."
-                    .to_string(),
-            ),
+        let mut diag = self.diagnostic(
+            source,
+            line,
+            column,
+            "`#to_json` requires an optional argument to be parsable via JSON.generate(obj)."
+                .to_string(),
         );
+
+        if let Some(ref mut corr) = corrections {
+            let name_loc = def_node.name_loc();
+            corr.push(crate::correction::Correction {
+                start: name_loc.end_offset(),
+                end: name_loc.end_offset(),
+                replacement: "(*_args)".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -89,4 +105,5 @@ impl Cop for ToJSON {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ToJSON, "cops/lint/to_json");
+    crate::cop_autocorrect_fixture_tests!(ToJSON, "cops/lint/to_json");
 }
