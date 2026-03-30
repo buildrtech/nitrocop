@@ -26,6 +26,10 @@ impl Cop for HashExcept {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -33,7 +37,7 @@ impl Cop for HashExcept {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -172,12 +176,26 @@ impl Cop for HashExcept {
 
             let loc = call.message_loc().unwrap_or_else(|| call.location());
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let replacement = format!("except({})", value_str);
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Use `except({})` instead.", value_str),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: block.location().end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+
+            diagnostics.push(diag);
         }
     }
 }
@@ -186,4 +204,5 @@ impl Cop for HashExcept {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashExcept, "cops/style/hash_except");
+    crate::cop_autocorrect_fixture_tests!(HashExcept, "cops/style/hash_except");
 }
