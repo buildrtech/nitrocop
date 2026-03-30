@@ -20,9 +20,101 @@ use crate::parse::source::SourceFile;
 ///   Limit the skip to the digest alias only.
 pub struct DeprecatedOpenSSLConstant;
 
+const NO_ARG_ALGORITHM: &[&str] = &["BF", "DES", "IDEA", "RC4"];
+
+fn algo_name_for_cipher(algo_const: &str) -> String {
+    if algo_const.len() <= 3 {
+        return algo_const.to_string();
+    }
+
+    algo_const
+        .as_bytes()
+        .chunks(3)
+        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn build_cipher_arguments(algo_const: &str, arg_sources: &[String]) -> String {
+    if algo_const == "Cipher" {
+        return arg_sources
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "''".to_string());
+    }
+
+    let algorithm_name = algo_name_for_cipher(algo_const);
+    let mut algorithm_parts: Vec<String> = algorithm_name
+        .split('-')
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+
+    let mut size_and_mode = Vec::new();
+    for arg in arg_sources {
+        let cleaned = arg.trim_matches(|c| c == ':' || c == '\'' || c == '"');
+        for part in cleaned.split('-') {
+            if !part.is_empty() {
+                size_and_mode.push(part.to_ascii_lowercase());
+            }
+        }
+    }
+
+    if NO_ARG_ALGORITHM.contains(&algorithm_parts[0].to_ascii_uppercase().as_str())
+        && arg_sources.is_empty()
+    {
+        return format!("'{}'", algorithm_parts[0]);
+    }
+
+    if size_and_mode.is_empty() {
+        size_and_mode.push("cbc".to_string());
+    }
+
+    algorithm_parts.extend(size_and_mode);
+    let combined = algorithm_parts
+        .into_iter()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("-");
+    format!("'{}'", combined)
+}
+
+fn build_replacement(
+    parent_class: &str,
+    algo_const: &str,
+    method_name: &[u8],
+    arg_sources: &[String],
+) -> Option<String> {
+    match parent_class {
+        "OpenSSL::Cipher" => {
+            if method_name != b"new" {
+                return None;
+            }
+            let replacement_args = build_cipher_arguments(algo_const, arg_sources);
+            Some(format!("OpenSSL::Cipher.new({replacement_args})"))
+        }
+        "OpenSSL::Digest" => {
+            let mut args = vec![format!("'{}'", algo_const)];
+            args.extend(arg_sources.iter().cloned());
+            let args_joined = args.join(", ");
+            if method_name == b"new" {
+                Some(format!("OpenSSL::Digest.new({args_joined})"))
+            } else if method_name == b"digest" {
+                Some(format!("OpenSSL::Digest.digest({args_joined})"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 impl Cop for DeprecatedOpenSSLConstant {
     fn name(&self) -> &'static str {
         "Lint/DeprecatedOpenSSLConstant"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_severity(&self) -> Severity {
@@ -48,7 +140,7 @@ impl Cop for DeprecatedOpenSSLConstant {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -145,15 +237,48 @@ impl Cop for DeprecatedOpenSSLConstant {
 
         let recv_src =
             std::str::from_utf8(recv.location().as_slice()).unwrap_or("OpenSSL::Cipher::AES");
+        let algo_const = std::str::from_utf8(algo_name_str).unwrap_or("AES");
+
+        let arg_sources: Vec<String> = call
+            .arguments()
+            .map(|args| {
+                args.arguments()
+                    .iter()
+                    .map(|arg| {
+                        let loc = arg.location();
+                        source
+                            .byte_slice(loc.start_offset(), loc.end_offset(), "")
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{parent_class}` instead of `{recv_src}`."),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            if let Some(replacement) =
+                build_replacement(parent_class, algo_const, method_name, &arg_sources)
+            {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -161,6 +286,10 @@ impl Cop for DeprecatedOpenSSLConstant {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        DeprecatedOpenSSLConstant,
+        "cops/lint/deprecated_open_ssl_constant"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         DeprecatedOpenSSLConstant,
         "cops/lint/deprecated_open_ssl_constant"
     );
