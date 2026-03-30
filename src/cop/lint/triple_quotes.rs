@@ -10,6 +10,10 @@ impl Cop for TripleQuotes {
         "Lint/TripleQuotes"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -25,24 +29,24 @@ impl Cop for TripleQuotes {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let interp = match node.as_interpolated_string_node() {
             Some(n) => n,
             None => return,
         };
 
-        // Check if any child is an empty StringNode (indicating implicit concatenation
-        // with empty strings, which is what triple quotes produce).
-        let has_empty_str = interp.parts().iter().any(|part| {
-            if let Some(s) = part.as_string_node() {
-                s.unescaped().is_empty()
-            } else {
-                false
-            }
-        });
+        // Empty string pieces are the extra adjacent literals created by triple-quote syntax.
+        let mut empty_parts: Vec<ruby_prism::Node<'_>> = interp
+            .parts()
+            .iter()
+            .filter(|part| {
+                part.as_string_node()
+                    .is_some_and(|s| s.unescaped().is_empty())
+            })
+            .collect();
 
-        if !has_empty_str {
+        if empty_parts.is_empty() {
             return;
         }
 
@@ -56,12 +60,33 @@ impl Cop for TripleQuotes {
         }
 
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Triple quotes found. Did you mean to use a heredoc?".to_string(),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            // If all parts are empty literals, keep one so the resulting source remains a string.
+            if empty_parts.len() == interp.parts().len() {
+                empty_parts.remove(0);
+            }
+
+            for part in empty_parts {
+                let part_loc = part.location();
+                corr.push(crate::correction::Correction {
+                    start: part_loc.start_offset(),
+                    end: part_loc.end_offset(),
+                    replacement: String::new(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -69,6 +94,7 @@ impl Cop for TripleQuotes {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(TripleQuotes, "cops/lint/triple_quotes");
+    crate::cop_autocorrect_fixture_tests!(TripleQuotes, "cops/lint/triple_quotes");
 
     #[test]
     fn skip_in_heredoc() {

@@ -61,6 +61,10 @@ impl Cop for RedundantTypeConversion {
         "Lint/RedundantTypeConversion"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -89,7 +93,7 @@ impl Cop for RedundantTypeConversion {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -174,12 +178,27 @@ impl Cop for RedundantTypeConversion {
         let method_str = std::str::from_utf8(method_name).unwrap_or("to_s");
         let msg_loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             format!("Redundant `{}` detected.", method_str),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            if let Some(op_loc) = call.call_operator_loc() {
+                corr.push(crate::correction::Correction {
+                    start: op_loc.start_offset(),
+                    end: msg_loc.end_offset(),
+                    replacement: "".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -246,6 +265,10 @@ fn is_kernel_method(node: &ruby_prism::Node<'_>, method: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        RedundantTypeConversion,
+        "cops/lint/redundant_type_conversion"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RedundantTypeConversion,
         "cops/lint/redundant_type_conversion"
     );
