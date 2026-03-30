@@ -15,6 +15,10 @@ impl Cop for TopLevelReturnWithArgument {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -22,14 +26,31 @@ impl Cop for TopLevelReturnWithArgument {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = TopLevelReturnVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            offense_ranges: Vec::new(),
         };
         visitor.visit(&parse_result.node());
+
+        if let Some(ref mut corr) = corrections {
+            for &(start, end) in &visitor.offense_ranges {
+                corr.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: "return".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+            for diag in &mut visitor.diagnostics {
+                diag.corrected = true;
+            }
+        }
+
         diagnostics.extend(visitor.diagnostics);
     }
 }
@@ -38,6 +59,7 @@ struct TopLevelReturnVisitor<'a, 'src> {
     cop: &'a TopLevelReturnWithArgument,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    offense_ranges: Vec<(usize, usize)>,
 }
 
 impl<'pr> Visit<'pr> for TopLevelReturnVisitor<'_, '_> {
@@ -52,6 +74,8 @@ impl<'pr> Visit<'pr> for TopLevelReturnVisitor<'_, '_> {
                 column,
                 "Top level return with argument detected.".to_string(),
             ));
+            self.offense_ranges
+                .push((loc.start_offset(), loc.end_offset()));
         }
     }
 
@@ -68,6 +92,10 @@ impl<'pr> Visit<'pr> for TopLevelReturnVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        TopLevelReturnWithArgument,
+        "cops/lint/top_level_return_with_argument"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         TopLevelReturnWithArgument,
         "cops/lint/top_level_return_with_argument"
     );
