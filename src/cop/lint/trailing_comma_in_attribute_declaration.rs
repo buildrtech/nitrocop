@@ -24,6 +24,10 @@ impl Cop for TrailingCommaInAttributeDeclaration {
         &[CALL_NODE, DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -31,7 +35,7 @@ impl Cop for TrailingCommaInAttributeDeclaration {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -76,12 +80,25 @@ impl Cop for TrailingCommaInAttributeDeclaration {
                 .map(|pos| search_start + pos);
             let offset = comma_offset.unwrap_or(search_start);
             let (line, column) = source.offset_to_line_col(offset);
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Avoid leaving a trailing comma in attribute declarations.".to_string(),
-            ));
+            );
+            if let Some(comma_offset) = comma_offset {
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: comma_offset,
+                        end: comma_offset + 1,
+                        replacement: "".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+            }
+            diagnostics.push(diag);
         }
     }
 }
@@ -90,6 +107,10 @@ impl Cop for TrailingCommaInAttributeDeclaration {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        TrailingCommaInAttributeDeclaration,
+        "cops/lint/trailing_comma_in_attribute_declaration"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         TrailingCommaInAttributeDeclaration,
         "cops/lint/trailing_comma_in_attribute_declaration"
     );
