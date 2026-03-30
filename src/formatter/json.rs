@@ -20,11 +20,11 @@ impl JsonFormatter {
 }
 
 #[derive(Serialize)]
-struct JsonOutput {
+struct JsonOutput<'a> {
     metadata: Metadata,
-    offenses: Vec<Offense>,
+    offenses: Vec<OffenseRef<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    skipped: Option<SkippedOutput>,
+    skipped: Option<SkippedOutput<'a>>,
 }
 
 #[derive(Serialize)]
@@ -35,21 +35,21 @@ struct Metadata {
 }
 
 #[derive(Serialize)]
-struct Offense {
-    path: String,
+struct OffenseRef<'a> {
+    path: &'a str,
     line: usize,
     column: usize,
     severity: String,
-    cop_name: String,
-    message: String,
+    cop_name: &'a str,
+    message: &'a str,
     corrected: bool,
 }
 
 #[derive(Serialize)]
-struct SkippedOutput {
-    preview_gated: Vec<String>,
-    unimplemented: Vec<String>,
-    outside_baseline: Vec<String>,
+struct SkippedOutput<'a> {
+    preview_gated: &'a [String],
+    unimplemented: &'a [String],
+    outside_baseline: &'a [String],
     total: usize,
 }
 
@@ -63,9 +63,9 @@ impl Formatter for JsonFormatter {
 
         let skipped = self.skip_summary.as_ref().map(|s| SkippedOutput {
             total: s.total(),
-            preview_gated: s.preview_gated.clone(),
-            unimplemented: s.unimplemented.clone(),
-            outside_baseline: s.outside_baseline.clone(),
+            preview_gated: &s.preview_gated,
+            unimplemented: &s.unimplemented,
+            outside_baseline: &s.outside_baseline,
         });
 
         let output = JsonOutput {
@@ -76,13 +76,13 @@ impl Formatter for JsonFormatter {
             },
             offenses: diagnostics
                 .iter()
-                .map(|d| Offense {
-                    path: d.path.clone(),
+                .map(|d| OffenseRef {
+                    path: &d.path,
                     line: d.location.line,
                     column: d.location.column,
                     severity: d.severity.letter().to_string(),
-                    cop_name: d.cop_name.clone(),
-                    message: d.message.clone(),
+                    cop_name: &d.cop_name,
+                    message: &d.message,
                     corrected: d.corrected,
                 })
                 .collect(),
