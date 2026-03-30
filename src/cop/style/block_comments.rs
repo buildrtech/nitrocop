@@ -27,6 +27,10 @@ impl Cop for BlockComments {
         "Style/BlockComments"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -34,17 +38,20 @@ impl Cop for BlockComments {
         code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let mut inside_block_comment = false;
-        for (i, line) in source.lines().enumerate() {
-            if inside_block_comment {
-                // =end must be at the start of a line to close a block comment
-                if line.starts_with(b"=end") && (line.len() == 4 || line[4].is_ascii_whitespace()) {
-                    inside_block_comment = false;
-                }
-                continue;
-            }
+        let lines: Vec<&[u8]> = source.lines().collect();
+        let mut line_offsets = Vec::with_capacity(lines.len());
+        let mut offset = 0usize;
+        for line in &lines {
+            line_offsets.push(offset);
+            offset += line.len() + 1;
+        }
+
+        let mut i = 0usize;
+        while i < lines.len() {
+            let line = lines[i];
+
             // =begin must be at the start of a line
             if line.starts_with(b"=begin") && (line.len() == 6 || line[6].is_ascii_whitespace()) {
                 // Skip =begin inside heredocs (e.g., test files for rdoc/yard)
@@ -52,17 +59,59 @@ impl Cop for BlockComments {
                 // is_not_string() returns false for heredocs, strings, and __END__ data.
                 if let Some(offset) = source.line_col_to_offset(i + 1, 0) {
                     if !code_map.is_not_string(offset) {
+                        i += 1;
                         continue;
                     }
                 }
-                inside_block_comment = true;
-                diagnostics.push(self.diagnostic(
-                    source,
-                    i + 1,
-                    0,
-                    "Do not use block comments.".to_string(),
-                ));
+
+                let mut diag =
+                    self.diagnostic(source, i + 1, 0, "Do not use block comments.".to_string());
+
+                // Find matching =end; nested =begin inside the block are plain text.
+                let mut end_line = i + 1;
+                while end_line < lines.len() {
+                    let candidate = lines[end_line];
+                    if candidate.starts_with(b"=end")
+                        && (candidate.len() == 4 || candidate[4].is_ascii_whitespace())
+                    {
+                        break;
+                    }
+                    end_line += 1;
+                }
+
+                if end_line < lines.len() {
+                    if let Some(ref mut corr) = corrections {
+                        let mut replacement_lines = Vec::new();
+                        for content_line in &lines[i + 1..end_line] {
+                            let text = std::str::from_utf8(content_line).unwrap_or("");
+                            if text.is_empty() {
+                                replacement_lines.push("#".to_string());
+                            } else {
+                                replacement_lines.push(format!("# {text}"));
+                            }
+                        }
+                        let replacement = replacement_lines.join("\n");
+                        let start = line_offsets[i];
+                        let end = line_offsets[end_line] + lines[end_line].len();
+                        corr.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+
+                    diagnostics.push(diag);
+                    i = end_line + 1;
+                    continue;
+                }
+
+                diagnostics.push(diag);
             }
+
+            i += 1;
         }
     }
 }
@@ -71,4 +120,5 @@ impl Cop for BlockComments {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BlockComments, "cops/style/block_comments");
+    crate::cop_autocorrect_fixture_tests!(BlockComments, "cops/style/block_comments");
 }
