@@ -10,6 +10,10 @@ impl Cop for ComparableBetween {
         "Style/ComparableBetween"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[AND_NODE, CALL_NODE]
     }
@@ -21,7 +25,7 @@ impl Cop for ComparableBetween {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check for `x >= min && x <= max` pattern
         if let Some(and_node) = node.as_and_node() {
@@ -30,6 +34,7 @@ impl Cop for ComparableBetween {
                 source,
                 &and_node.left(),
                 &and_node.right(),
+                &mut corrections,
             ));
         }
     }
@@ -40,6 +45,7 @@ fn check_between(
     source: &SourceFile,
     left: &ruby_prism::Node<'_>,
     right: &ruby_prism::Node<'_>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) -> Vec<Diagnostic> {
     let left_cmp = parse_comparison(source, left);
     let right_cmp = parse_comparison(source, right);
@@ -82,14 +88,32 @@ fn check_between(
         // Also handle reversed form: x <= max && x >= min
         // where l_small == r_big
         if l_big == r_small || l_small == r_big {
-            let and_node_loc = left.location();
-            let (line, column) = source.offset_to_line_col(and_node_loc.start_offset());
-            return vec![cop.diagnostic(
+            let (value, min, max) = if l_big == r_small {
+                (l_big, l_small, r_big)
+            } else {
+                (l_small, r_small, l_big)
+            };
+
+            let and_start = left.location().start_offset();
+            let and_end = right.location().end_offset();
+            let (line, column) = source.offset_to_line_col(and_start);
+            let mut diag = cop.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `between?` over logical comparison.".to_string(),
-            )];
+            );
+            if let Some(corr) = corrections.as_mut() {
+                corr.push(crate::correction::Correction {
+                    start: and_start,
+                    end: and_end,
+                    replacement: format!("{}.between?({}, {})", value, min, max),
+                    cop_name: cop.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+            return vec![diag];
         }
     }
 
@@ -142,4 +166,5 @@ fn parse_comparison(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ComparableBetween, "cops/style/comparable_between");
+    crate::cop_autocorrect_fixture_tests!(ComparableBetween, "cops/style/comparable_between");
 }
