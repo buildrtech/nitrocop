@@ -115,11 +115,16 @@ Implemented autocorrect in this session:
 - `Style/WhileUntilDo`
 - `Style/BlockComments`
 - `Style/EmptyHeredoc`
+- `Style/RedundantInterpolationUnfreeze`
+- `Style/VariableInterpolation`
+- `Lint/RescueType`
+- `Style/PerlBackrefs`
+- `Style/CaseEquality`
 
 Current progress snapshot:
-- `missing_core_autocorrect_cops`: **316** (down from 372, -56)
-- `nitrocop_autocorrectable_cops`: **143** (up from 87, +56)
-- Missing by department now: Style (187), Lint (68), Layout (56), Naming (3), Security (1), Migration (1)
+- `missing_core_autocorrect_cops`: **311** (down from 372, -61)
+- `nitrocop_autocorrectable_cops`: **148** (up from 87, +61)
+- Missing by department now: Style (183), Lint (67), Layout (56), Naming (3), Security (1), Migration (1)
 
 Repeatable successful pattern:
 1. Add `supports_autocorrect()`

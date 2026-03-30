@@ -47,6 +47,10 @@ impl Cop for CollectionMethods {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -54,7 +58,7 @@ impl Cop for CollectionMethods {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let preferred_methods = config
             .get_string_hash("PreferredMethods")
@@ -98,12 +102,25 @@ impl Cop for CollectionMethods {
 
             let loc = call.message_loc().unwrap_or(call.location());
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Prefer `{}` over `{}`.", preferred, method_name),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: preferred.to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+
+            diagnostics.push(diag);
         }
     }
 }
@@ -112,4 +129,5 @@ impl Cop for CollectionMethods {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CollectionMethods, "cops/style/collection_methods");
+    crate::cop_autocorrect_fixture_tests!(CollectionMethods, "cops/style/collection_methods");
 }
