@@ -494,6 +494,10 @@ impl Cop for FetchEnvVar {
         "Style/FetchEnvVar"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -501,7 +505,7 @@ impl Cop for FetchEnvVar {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_vars = config.get_string_array("AllowedVars");
         let default_to_nil = config.get_bool("DefaultToNil", true);
@@ -510,6 +514,8 @@ impl Cop for FetchEnvVar {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            emit_corrections: corrections.is_some(),
             allowed_vars,
             default_to_nil,
             suppressed_offsets: HashSet::new(),
@@ -517,6 +523,9 @@ impl Cop for FetchEnvVar {
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -524,6 +533,8 @@ struct FetchEnvVarVisitor<'a> {
     cop: &'a FetchEnvVar,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    emit_corrections: bool,
     allowed_vars: Option<Vec<String>>,
     default_to_nil: bool,
     /// Start offsets of ENV['X'] nodes that should NOT be reported.
@@ -703,12 +714,25 @@ impl<'pr> Visit<'pr> for FetchEnvVarVisitor<'_> {
             };
 
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diag = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 format!("Use `{}` instead of `{}`.", replacement, call_str),
-            ));
+            );
+
+            if self.emit_corrections {
+                self.corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+
+            self.diagnostics.push(diag);
 
             // Don't recurse into this node (we already processed it)
             return;
@@ -785,4 +809,5 @@ impl FetchEnvVarVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FetchEnvVar, "cops/style/fetch_env_var");
+    crate::cop_autocorrect_fixture_tests!(FetchEnvVar, "cops/style/fetch_env_var");
 }
