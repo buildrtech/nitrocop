@@ -136,11 +136,15 @@ Implemented autocorrect in this session:
 - `Style/HashSlice`
 - `Style/HashFetchChain`
 - `Style/HashExcept`
+- `Style/FetchEnvVar`
+- `Style/ArrayFirstLast`
+- `Style/NegativeArrayIndex`
+- `Style/NestedFileDirname`
 
 Current progress snapshot:
-- `missing_core_autocorrect_cops`: **295** (down from 372, -77)
-- `nitrocop_autocorrectable_cops`: **164** (up from 87, +77)
-- Missing by department now: Style (167), Lint (67), Layout (56), Naming (3), Security (1), Migration (1)
+- `missing_core_autocorrect_cops`: **291** (down from 372, -81)
+- `nitrocop_autocorrectable_cops`: **168** (up from 87, +81)
+- Missing by department now: Style (163), Lint (67), Layout (56), Naming (3), Security (1), Migration (1)
 
 Repeatable successful pattern:
 1. Add `supports_autocorrect()`

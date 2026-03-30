@@ -26,6 +26,10 @@ impl Cop for HashAsLastArrayItem {
         &[ARRAY_NODE, HASH_NODE, KEYWORD_HASH_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -33,7 +37,7 @@ impl Cop for HashAsLastArrayItem {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let array = match node.as_array_node() {
             Some(a) => a,
@@ -85,12 +89,26 @@ impl Cop for HashAsLastArrayItem {
                     }
                     let loc = last.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
                         "Wrap hash in `{` and `}`.".to_string(),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        let src = std::str::from_utf8(loc.as_slice()).unwrap_or("");
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: format!("{{ {src} }}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+
+                    diagnostics.push(diag);
                 }
             }
             "no_braces" => {
@@ -126,12 +144,35 @@ impl Cop for HashAsLastArrayItem {
                     }
                     let loc = hash.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
                         "Omit the braces around the hash.".to_string(),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        let open = hash.opening_loc();
+                        let close = hash.closing_loc();
+                        let inner_start = open.end_offset();
+                        let inner_end = close.start_offset();
+                        let inner = if inner_start <= inner_end {
+                            std::str::from_utf8(&source.as_bytes()[inner_start..inner_end])
+                                .unwrap_or("")
+                        } else {
+                            ""
+                        };
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: inner.to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+
+                    diagnostics.push(diag);
                 }
             }
             _ => {}
@@ -143,4 +184,8 @@ impl Cop for HashAsLastArrayItem {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashAsLastArrayItem, "cops/style/hash_as_last_array_item");
+    crate::cop_autocorrect_fixture_tests!(
+        HashAsLastArrayItem,
+        "cops/style/hash_as_last_array_item"
+    );
 }
