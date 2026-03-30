@@ -14,6 +14,10 @@ impl Cop for RedundantDoubleSplatHashBraces {
         &[ASSOC_NODE, ASSOC_SPLAT_NODE, HASH_NODE, KEYWORD_HASH_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for RedundantDoubleSplatHashBraces {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for **{key: val, ...} in keyword arguments (KeywordHashNode in method calls)
         // Only check KeywordHashNode (method call keyword args), not plain HashNode
@@ -30,16 +34,26 @@ impl Cop for RedundantDoubleSplatHashBraces {
             None => return,
         };
 
-        diagnostics.extend(self.check_hash_elements(source, keyword_hash.elements().iter()));
+        self.check_hash_elements(
+            source,
+            keyword_hash.elements().iter(),
+            diagnostics,
+            corrections.as_deref_mut(),
+        );
     }
 }
 
 impl RedundantDoubleSplatHashBraces {
-    fn check_hash_elements<'a, I>(&self, source: &SourceFile, elements: I) -> Vec<Diagnostic>
-    where
+    fn check_hash_elements<'a, I>(
+        &self,
+        source: &SourceFile,
+        elements: I,
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) where
         I: Iterator<Item = ruby_prism::Node<'a>>,
     {
-        let mut diagnostics = Vec::new();
+        let mut corrections = corrections;
 
         for element in elements {
             if let Some(splat) = element.as_assoc_splat_node() {
@@ -65,18 +79,39 @@ impl RedundantDoubleSplatHashBraces {
                         }
                         let loc = element.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diag = self.diagnostic(
                             source,
                             line,
                             column,
                             "Remove the redundant double splat and braces, use keyword arguments directly.".to_string(),
-                        ));
+                        );
+
+                        if let Some(ref mut corr) = corrections {
+                            let first = hash.elements().iter().next();
+                            let last = hash.elements().iter().last();
+                            if let (Some(first), Some(last)) = (first, last) {
+                                let start = first.location().start_offset();
+                                let end = last.location().end_offset();
+                                if let Ok(replacement) =
+                                    std::str::from_utf8(&source.as_bytes()[start..end])
+                                {
+                                    corr.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement: replacement.to_string(),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                            }
+                        }
+
+                        diagnostics.push(diag);
                     }
                 }
             }
         }
-
-        diagnostics
     }
 }
 
@@ -84,6 +119,10 @@ impl RedundantDoubleSplatHashBraces {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        RedundantDoubleSplatHashBraces,
+        "cops/style/redundant_double_splat_hash_braces"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RedundantDoubleSplatHashBraces,
         "cops/style/redundant_double_splat_hash_braces"
     );
