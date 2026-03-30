@@ -14,6 +14,10 @@ impl Cop for QuotedSymbols {
         &[SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for QuotedSymbols {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "same_as_string_literals");
 
@@ -74,12 +78,32 @@ impl Cop for QuotedSymbols {
 
             if prefer_single && !has_single_quote {
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     "Prefer single-quoted symbols when you don't need string interpolation or special symbols.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    if let Ok(inner_str) = std::str::from_utf8(inner) {
+                        let replacement = if is_hash_key_double {
+                            format!("'{inner_str}':")
+                        } else {
+                            format!(":'{inner_str}'")
+                        };
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diag);
             }
         } else if is_single_quoted {
             let inner = if is_hash_key_single {
@@ -95,12 +119,34 @@ impl Cop for QuotedSymbols {
 
             if style == "double_quotes" && !has_double_quote {
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     "Prefer double-quoted symbols.".to_string(),
-                ));
+                );
+
+                if !inner.contains(&b'\\') {
+                    if let Some(ref mut corr) = corrections {
+                        if let Ok(inner_str) = std::str::from_utf8(inner) {
+                            let replacement = if is_hash_key_single {
+                                format!("\"{inner_str}\":")
+                            } else {
+                                format!(":\"{inner_str}\"")
+                            };
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement,
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                    }
+                }
+
+                diagnostics.push(diag);
             }
         }
     }
@@ -110,4 +156,5 @@ impl Cop for QuotedSymbols {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(QuotedSymbols, "cops/style/quoted_symbols");
+    crate::cop_autocorrect_fixture_tests!(QuotedSymbols, "cops/style/quoted_symbols");
 }
