@@ -39,6 +39,10 @@ impl Cop for NumericLiteralPrefix {
         &[INTEGER_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -46,7 +50,7 @@ impl Cop for NumericLiteralPrefix {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let int_node = match node.as_integer_node() {
             Some(i) => i,
@@ -76,11 +80,12 @@ impl Cop for NumericLiteralPrefix {
         // Strip leading +/- sign, like RuboCop's integer_part helper.
         // Do NOT strip underscores — RuboCop's regexes match the original source
         // including underscores, so `0_30` correctly does NOT match octal patterns.
-        let (literal, sign_offset) = if src_str.starts_with('+') || src_str.starts_with('-') {
-            (&src_str[1..], 1usize)
-        } else {
-            (src_str, 0usize)
-        };
+        let (sign_prefix, literal, sign_offset) =
+            if src_str.starts_with('+') || src_str.starts_with('-') {
+                (&src_str[..1], &src_str[1..], 1usize)
+            } else {
+                ("", src_str, 0usize)
+            };
 
         let enforced_octal_style = config.get_str("EnforcedOctalStyle", "zero_with_o");
 
@@ -89,46 +94,57 @@ impl Cop for NumericLiteralPrefix {
         // the numeric literal, not the sign.
         let col = column + sign_offset;
 
+        let mut emit = |message: &str, replacement: String| {
+            let mut diag = self.diagnostic(source, line, col, message.to_string());
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+            diagnostics.push(diag);
+        };
+
         // Check uppercase hex prefix: 0X...
         if literal.starts_with("0X") {
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                col,
-                "Use 0x for hexadecimal literals.".to_string(),
-            ));
+            emit(
+                "Use 0x for hexadecimal literals.",
+                format!("{sign_prefix}0x{}", &literal[2..]),
+            );
+            return;
         }
 
         // Check uppercase binary prefix: 0B...
         if literal.starts_with("0B") {
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                col,
-                "Use 0b for binary literals.".to_string(),
-            ));
+            emit(
+                "Use 0b for binary literals.",
+                format!("{sign_prefix}0b{}", &literal[2..]),
+            );
+            return;
         }
 
         // Check decimal prefix: 0d... or 0D...
         if literal.starts_with("0d") || literal.starts_with("0D") {
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                col,
-                "Do not use prefixes for decimal literals.".to_string(),
-            ));
+            emit(
+                "Do not use prefixes for decimal literals.",
+                format!("{sign_prefix}{}", &literal[2..]),
+            );
+            return;
         }
 
         // Octal handling
         if enforced_octal_style == "zero_with_o" {
             // Bad: 0O... (uppercase)
             if literal.starts_with("0O") {
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    col,
-                    "Use 0o for octal literals.".to_string(),
-                ));
+                emit(
+                    "Use 0o for octal literals.",
+                    format!("{sign_prefix}0o{}", &literal[2..]),
+                );
+                return;
             }
             // Bad: plain 0... without 'o' (e.g., 01234)
             // Must be octal: starts with 0, followed by digits 0-7 only, not 0x/0b/0d/0o
@@ -141,22 +157,18 @@ impl Cop for NumericLiteralPrefix {
                 && !literal.starts_with("0o")
                 && literal[1..].bytes().all(|b| b.is_ascii_digit() && b < b'8')
             {
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    col,
-                    "Use 0o for octal literals.".to_string(),
-                ));
+                emit(
+                    "Use 0o for octal literals.",
+                    format!("{sign_prefix}0o{}", &literal[1..]),
+                );
             }
         } else if enforced_octal_style == "zero_only" {
             // Bad: 0o... or 0O...
             if literal.starts_with("0o") || literal.starts_with("0O") {
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    col,
-                    "Use 0 for octal literals.".to_string(),
-                ));
+                emit(
+                    "Use 0 for octal literals.",
+                    format!("{sign_prefix}0{}", &literal[2..]),
+                );
             }
         }
     }
@@ -166,4 +178,8 @@ impl Cop for NumericLiteralPrefix {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NumericLiteralPrefix, "cops/style/numeric_literal_prefix");
+    crate::cop_autocorrect_fixture_tests!(
+        NumericLiteralPrefix,
+        "cops/style/numeric_literal_prefix"
+    );
 }
