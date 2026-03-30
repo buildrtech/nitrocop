@@ -35,6 +35,10 @@ impl Cop for HashEachMethods {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -42,7 +46,7 @@ impl Cop for HashEachMethods {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -121,18 +125,32 @@ impl Cop for HashEachMethods {
                     .unwrap_or_else(|| recv_call.location());
                 let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
 
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Use `{}` instead of `{}`.", replacement, display_original),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    let each_loc = call.message_loc().unwrap_or(call.location());
+                    corr.push(crate::correction::Correction {
+                        start: msg_loc.start_offset(),
+                        end: each_loc.end_offset(),
+                        replacement: replacement.to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+
+                diagnostics.push(diag);
                 return;
             }
         }
 
         // Pattern 2: hash.each { |k, _unused_v| ... } — unused block arg
-        self.check_each_block(source, &call, config, diagnostics);
+        self.check_each_block(source, &call, config, diagnostics, &mut corrections);
     }
 }
 
@@ -149,6 +167,7 @@ impl HashEachMethods {
         call: &ruby_prism::CallNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if call.name().as_slice() != b"each" {
             return;
@@ -257,12 +276,53 @@ impl HashEachMethods {
 
         let _ = config.get_string_array("AllowedReceivers");
 
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
-            format!("Use `{replacement}` instead of `each` and remove the unused `{unused_code}` block argument."),
-        ));
+            format!(
+                "Use `{replacement}` instead of `each` and remove the unused `{unused_code}` block argument."
+            ),
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            let selector_loc = call.message_loc().unwrap_or(call.location());
+            corr.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: selector_loc.end_offset(),
+                replacement: replacement.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+
+            let removal = if value_unused {
+                Some((
+                    key_param.location().end_offset(),
+                    value_param.location().end_offset(),
+                ))
+            } else {
+                Some((
+                    key_param.location().start_offset(),
+                    value_param.location().start_offset(),
+                ))
+            };
+
+            if let Some((start, end)) = removal {
+                if start < end {
+                    corr.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                }
+            }
+
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -347,4 +407,5 @@ impl<'pr> Visit<'pr> for BracketAssignFinder<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashEachMethods, "cops/style/hash_each_methods");
+    crate::cop_autocorrect_fixture_tests!(HashEachMethods, "cops/style/hash_each_methods");
 }
