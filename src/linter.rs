@@ -318,8 +318,10 @@ pub fn run_linter(
         );
     }
 
-    // Flush in-memory cache to disk, then run eviction (best-effort)
-    if cache.is_enabled() {
+    // Flush in-memory cache to disk, then run eviction (best-effort).
+    // On warm all-stat-hit runs the cache is typically unchanged, so skip
+    // filesystem-heavy eviction work.
+    if cache.is_enabled() && cache.is_dirty() {
         cache.flush();
         cache.evict(50);
     }

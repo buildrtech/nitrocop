@@ -1,2 +1,2 @@
-- Explore adaptive thread-pool sizing for warm/cache-hit workloads using measurable signals (cache-hit ratio and file count), not fixed caps. Fixed caps 4 and 6 and manual thread sweeps were already tried; no reliable win yet.
-- Investigate larger startup costs (process init/config load/result-cache read) with targeted instrumentation; micro-optimizing session-hash clone/sort was tried and regressed.
+- Investigate larger startup costs (process init/config load/result-cache read) with targeted instrumentation; tried micro-optimizations (session-hash clone/sort, compact JSON output), lazy schema init, and thread-pool refactors all regressed or were noise.
+- Consider lightweight fast-path when `--format json` + warm stat-hit cache: avoid non-essential end-of-run work while preserving output compatibility and parity guarantees.

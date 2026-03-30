@@ -172,6 +172,11 @@ impl ResultCache {
         self.enabled
     }
 
+    /// Whether entries were added/updated during this run.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Relaxed)
+    }
+
     /// Try to get cached results using only a stat() call (no file read).
     ///
     /// Returns `StatHit` if mtime+size match the cached entry.
