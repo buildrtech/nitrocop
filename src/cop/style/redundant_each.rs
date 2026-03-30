@@ -14,6 +14,10 @@ impl Cop for RedundantEach {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for RedundantEach {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -72,13 +76,23 @@ impl Cop for RedundantEach {
         } else {
             msg_loc.start_offset()
         };
+        let dot_end = msg_loc.end_offset();
         let (line, column) = source.offset_to_line_col(dot_start);
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Remove redundant `each`.".to_string(),
-        ));
+        let mut diag =
+            self.diagnostic(source, line, column, "Remove redundant `each`.".to_string());
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: dot_start,
+                end: dot_end,
+                replacement: "".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -86,4 +100,5 @@ impl Cop for RedundantEach {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantEach, "cops/style/redundant_each");
+    crate::cop_autocorrect_fixture_tests!(RedundantEach, "cops/style/redundant_each");
 }
