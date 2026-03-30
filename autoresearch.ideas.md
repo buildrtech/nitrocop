@@ -1,4 +1,5 @@
-- Build a reusable helper for selector/operator rewrites (`replace_selector(call, "new_name")`, `replace_call_operator(call, ".")`) to speed up low-risk cop conversions and reduce copy/paste bugs.
-- Introduce a small visitor utility trait for source cops that need autocorrect (`collect_offense_ranges + diagnostics`), to avoid repeating ad-hoc range vectors in each visitor-based cop.
-- Tackle Layout department in themed batches (spacing-only first: `SpaceBeforeBrackets`, `SpaceBeforeFirstArg`, `SpaceAroundMethodCallOperator`; then alignment/indentation cops) with shared whitespace-edit helpers and stricter fixture expansion.
-- Add a focused parity harness for newly-autocorrectable cops that runs each changed cop against a tiny Ruby corpus snippet set (outside full corpus) to catch syntactic breakages before expensive corpus checks.
+- Implement `Lint/BooleanSymbol` autocorrect (`:true`/`:false` -> boolean literals, plus keyword-hash `true:`/`false:` -> `:true =>`/`:false =>`) to match RuboCop safety semantics.
+- Add `Style/QuotedSymbols` autocorrect by swapping quote delimiters when no interpolation/escape hazards exist, honoring `EnforcedStyle` and hash-key symbol forms.
+- Add `Style/RedundantPercentQ` autocorrect by rewriting `%q/%Q` delimiters to `'`/`"` with strict guards (no unsafe interpolation activation, no required escape semantics).
+- Keep Layout backlog in staged batches (spacing cops first, then alignment/indentation) after easy Style/Lint wins taper off.
+- Optional throughput refactor if implementation churn grows: tiny helper for selector/operator/full-call replacements to reduce duplicate correction code.

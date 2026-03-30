@@ -30,6 +30,10 @@ impl Cop for BooleanSymbol {
         &[ASSOC_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -37,7 +41,7 @@ impl Cop for BooleanSymbol {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(symbol_node) = node.as_symbol_node() {
             // Skip %i[] / %I[] array entries, which have no normal symbol opening.
@@ -57,6 +61,8 @@ impl Cop for BooleanSymbol {
                 symbol_node.location(),
                 boolean_name,
                 diagnostics,
+                corrections.as_deref_mut(),
+                boolean_name.to_string(),
             );
             return;
         }
@@ -82,6 +88,8 @@ impl Cop for BooleanSymbol {
             symbol_node.location(),
             boolean_name,
             diagnostics,
+            corrections.as_deref_mut(),
+            format!(":{boolean_name} =>"),
         );
     }
 }
@@ -102,18 +110,34 @@ fn add_boolean_symbol_offense(
     loc: ruby_prism::Location<'_>,
     boolean_name: &str,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
+    replacement: String,
 ) {
     let (line, column) = source.offset_to_line_col(loc.start_offset());
-    diagnostics.push(cop.diagnostic(
+    let mut diag = cop.diagnostic(
         source,
         line,
         column,
         format!("Symbol with a boolean name - you probably meant to use `{boolean_name}`."),
-    ));
+    );
+
+    if let Some(corr) = corrections {
+        corr.push(crate::correction::Correction {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+            replacement,
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+
+    diagnostics.push(diag);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BooleanSymbol, "cops/lint/boolean_symbol");
+    crate::cop_autocorrect_fixture_tests!(BooleanSymbol, "cops/lint/boolean_symbol");
 }
