@@ -20,6 +20,10 @@ impl Cop for HashNewWithKeywordArgumentsAsDefault {
         "Lint/HashNewWithKeywordArgumentsAsDefault"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -35,7 +39,7 @@ impl Cop for HashNewWithKeywordArgumentsAsDefault {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -96,12 +100,28 @@ impl Cop for HashNewWithKeywordArgumentsAsDefault {
 
         let loc = first_arg.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Use a hash literal instead of keyword arguments.".to_string(),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            let arg_source = source
+                .byte_slice(loc.start_offset(), loc.end_offset(), "")
+                .to_string();
+            corr.push(crate::correction::Correction {
+                start: call.location().start_offset(),
+                end: call.location().end_offset(),
+                replacement: format!("{{{arg_source}}}"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -109,6 +129,10 @@ impl Cop for HashNewWithKeywordArgumentsAsDefault {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        HashNewWithKeywordArgumentsAsDefault,
+        "cops/lint/hash_new_with_keyword_arguments_as_default"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         HashNewWithKeywordArgumentsAsDefault,
         "cops/lint/hash_new_with_keyword_arguments_as_default"
     );

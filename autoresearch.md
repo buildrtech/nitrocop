@@ -163,11 +163,23 @@ Implemented autocorrect in this session:
 - `Style/MapToHash`
 - `Lint/RedundantDirGlobSort`
 - `Style/NilLambda`
+- `Lint/DeprecatedClassMethods`
+- `Style/CommentAnnotation`
+- `Lint/RedundantRequireStatement`
+- `Lint/DuplicateSetElement`
+- `Lint/DuplicateRequire`
+- `Lint/TripleQuotes`
+- `Lint/DeprecatedConstants`
+- `Lint/PercentStringArray`
+- `Lint/ArrayLiteralInRegexp`
+- `Lint/DeprecatedOpenSSLConstant`
+- `Lint/AmbiguousRange`
+- `Lint/NumberConversion`
 
 Current progress snapshot:
-- `missing_core_autocorrect_cops`: **268** (down from 372, -104)
-- `nitrocop_autocorrectable_cops`: **191** (up from 87, +104)
-- Missing by department now: Style (141), Lint (66), Layout (56), Naming (3), Security (1), Migration (1)
+- `missing_core_autocorrect_cops`: **251** (down from 372, -121)
+- `nitrocop_autocorrectable_cops`: **208** (up from 87, +121)
+- Missing by department now: Style (140), Lint (50), Layout (56), Naming (3), Security (1), Migration (1)
 
 Repeatable successful pattern:
 1. Add `supports_autocorrect()`

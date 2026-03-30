@@ -40,6 +40,10 @@ impl Cop for MixedCaseRange {
         "Lint/MixedCaseRange"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -59,7 +63,7 @@ impl Cop for MixedCaseRange {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(range) = node.as_range_node() {
             diagnostics.extend(self.check_range(source, range));
@@ -67,12 +71,12 @@ impl Cop for MixedCaseRange {
         }
 
         if let Some(regexp) = node.as_regular_expression_node() {
-            self.check_regexp(source, regexp, diagnostics);
+            self.check_regexp(source, regexp, diagnostics, &mut corrections);
             return;
         }
 
         if let Some(regexp) = node.as_interpolated_regular_expression_node() {
-            self.check_interpolated_regexp(source, regexp, diagnostics);
+            self.check_interpolated_regexp(source, regexp, diagnostics, &mut corrections);
         }
     }
 }
@@ -127,6 +131,7 @@ impl MixedCaseRange {
         source: &SourceFile,
         regexp: ruby_prism::RegularExpressionNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let Ok(content) = std::str::from_utf8(regexp.content_loc().as_slice()) else {
             return;
@@ -144,6 +149,7 @@ impl MixedCaseRange {
             &content.chars().collect::<Vec<_>>(),
             &offsets,
             diagnostics,
+            corrections,
         );
     }
 
@@ -152,6 +158,7 @@ impl MixedCaseRange {
         source: &SourceFile,
         regexp: ruby_prism::InterpolatedRegularExpressionNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut chars = Vec::new();
         let mut offsets = Vec::new();
@@ -174,7 +181,7 @@ impl MixedCaseRange {
             offsets.push(None);
         }
 
-        self.check_regexp_chars(source, &chars, &offsets, diagnostics);
+        self.check_regexp_chars(source, &chars, &offsets, diagnostics, corrections);
     }
 
     fn check_regexp_chars(
@@ -183,6 +190,7 @@ impl MixedCaseRange {
         chars: &[char],
         offsets: &[Option<usize>],
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         debug_assert_eq!(chars.len(), offsets.len());
 
@@ -193,7 +201,15 @@ impl MixedCaseRange {
                     i += 1;
                     continue;
                 };
-                self.check_regexp_class(source, chars, offsets, i + 1, class_end, diagnostics);
+                self.check_regexp_class(
+                    source,
+                    chars,
+                    offsets,
+                    i + 1,
+                    class_end,
+                    diagnostics,
+                    corrections,
+                );
                 i = class_end + 1;
             } else {
                 i += 1;
@@ -209,6 +225,7 @@ impl MixedCaseRange {
         start: usize,
         end: usize,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut i = start;
         if i < end && chars[i] == '^' {
@@ -240,7 +257,25 @@ impl MixedCaseRange {
                 if is_unsafe_regexp_range(chars[i], range_end) {
                     if let Some(abs_offset) = offsets.get(i).copied().flatten() {
                         let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+                        let mut diag = self.diagnostic(source, line, column, MSG.to_string());
+
+                        if let Some(corr) = corrections.as_mut() {
+                            if let (Some(end_start), Some(replacement)) = (
+                                offsets.get(i + 2).copied().flatten(),
+                                regexp_range_replacement(chars[i], range_end),
+                            ) {
+                                corr.push(crate::correction::Correction {
+                                    start: abs_offset,
+                                    end: end_start + range_end.len_utf8(),
+                                    replacement,
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                        }
+
+                        diagnostics.push(diag);
                     }
                 }
 
@@ -374,6 +409,37 @@ fn is_unsafe_char_range(start: char, end: char) -> bool {
     char_range(start) != char_range(end)
 }
 
+fn regexp_range_replacement(start: char, end: char) -> Option<String> {
+    let (_start_min, start_max) = if start.is_ascii_lowercase() {
+        ('a', 'z')
+    } else if start.is_ascii_uppercase() {
+        ('A', 'Z')
+    } else {
+        return None;
+    };
+
+    let (end_min, _end_max) = if end.is_ascii_lowercase() {
+        ('a', 'z')
+    } else if end.is_ascii_uppercase() {
+        ('A', 'Z')
+    } else {
+        return None;
+    };
+
+    let first = if start == start_max {
+        start.to_string()
+    } else {
+        format!("{start}-{start_max}")
+    };
+    let second = if end == end_min {
+        end.to_string()
+    } else {
+        format!("{end_min}-{end}")
+    };
+
+    Some(format!("{first}{second}"))
+}
+
 fn is_unsafe_regexp_range(start: char, end: char) -> bool {
     let start_range = char_range(start);
     let end_range = char_range(end);
@@ -388,4 +454,5 @@ fn is_unsafe_regexp_range(start: char, end: char) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MixedCaseRange, "cops/lint/mixed_case_range");
+    crate::cop_autocorrect_fixture_tests!(MixedCaseRange, "cops/lint/mixed_case_range");
 }
