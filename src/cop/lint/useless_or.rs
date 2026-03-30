@@ -70,6 +70,10 @@ impl Cop for UselessOr {
         "Lint/UselessOr"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -85,7 +89,7 @@ impl Cop for UselessOr {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let or_node = match node.as_or_node() {
             Some(n) => n,
@@ -94,12 +98,19 @@ impl Cop for UselessOr {
 
         let lhs = or_node.left();
         if is_truthy_method_call(&lhs) {
-            report_offense(self, source, &or_node, &lhs, diagnostics);
+            report_offense(self, source, &or_node, &lhs, diagnostics, &mut corrections);
             return;
         }
 
         if let Some(truthy_node) = nested_truthy_middle(&lhs) {
-            report_offense(self, source, &or_node, &truthy_node, diagnostics);
+            report_offense(
+                self,
+                source,
+                &or_node,
+                &truthy_node,
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
@@ -111,7 +122,14 @@ impl Cop for UselessOr {
         // a plain parenthesized truthy call (e.g. `a || (x.to_s)`) which is NOT
         // an offense — only when the parens contain an `||` with a truthy RHS.
         if let Some(truthy_node) = rhs_parenthesized_or_truthy(&or_node.right()) {
-            report_offense(self, source, &or_node, &truthy_node, diagnostics);
+            report_offense(
+                self,
+                source,
+                &or_node,
+                &truthy_node,
+                diagnostics,
+                &mut corrections,
+            );
         }
     }
 }
@@ -196,12 +214,13 @@ fn report_offense(
     or_node: &ruby_prism::OrNode<'_>,
     truthy_node: &ruby_prism::Node<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     let lhs_src = node_source(source, truthy_node);
     let rhs_src = node_source(source, &or_node.right());
     let op_loc = or_node.operator_loc();
     let (line, column) = source.offset_to_line_col(op_loc.start_offset());
-    diagnostics.push(cop.diagnostic(
+    let mut diag = cop.diagnostic(
         source,
         line,
         column,
@@ -209,7 +228,25 @@ fn report_offense(
             "`{}` will never evaluate because `{}` always returns a truthy value.",
             rhs_src, lhs_src
         ),
-    ));
+    );
+
+    if let Some(corr) = corrections.as_mut() {
+        let lhs_loc = or_node.left().location();
+        let replacement = source
+            .byte_slice(lhs_loc.start_offset(), lhs_loc.end_offset(), "")
+            .to_string();
+        let or_loc = or_node.location();
+        corr.push(crate::correction::Correction {
+            start: or_loc.start_offset(),
+            end: or_loc.end_offset(),
+            replacement,
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+
+    diagnostics.push(diag);
 }
 
 fn node_source<'a>(source: &'a SourceFile, node: &ruby_prism::Node<'_>) -> &'a str {
@@ -221,4 +258,5 @@ fn node_source<'a>(source: &'a SourceFile, node: &ruby_prism::Node<'_>) -> &'a s
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UselessOr, "cops/lint/useless_or");
+    crate::cop_autocorrect_fixture_tests!(UselessOr, "cops/lint/useless_or");
 }

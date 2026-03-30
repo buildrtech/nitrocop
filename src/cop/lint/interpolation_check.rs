@@ -112,6 +112,10 @@ impl Cop for InterpolationCheck {
         "Lint/InterpolationCheck"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -123,15 +127,19 @@ impl Cop for InterpolationCheck {
         code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = InterpolationVisitor {
             cop: self,
             source,
             code_map,
             diagnostics,
+            corrections: Vec::new(),
         };
         ruby_prism::Visit::visit(&mut visitor, &parse_result.node());
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -140,6 +148,7 @@ struct InterpolationVisitor<'a> {
     source: &'a SourceFile,
     code_map: &'a CodeMap,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 impl InterpolationVisitor<'_> {
@@ -195,12 +204,25 @@ impl InterpolationVisitor<'_> {
         }
 
         let (line, column) = self.source.offset_to_line_col(node_start);
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diag = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Interpolation in single quoted string detected. Use double quoted strings if you need interpolation.".to_string(),
-        ));
+        );
+
+        if let Some(replacement) = build_double_quoted_replacement(string_node) {
+            self.corrections.push(crate::correction::Correction {
+                start: node_start,
+                end: node_end,
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        self.diagnostics.push(diag);
     }
 }
 
@@ -239,6 +261,41 @@ fn has_unescaped_interpolation(source: &[u8]) -> bool {
         i += 1;
     }
     false
+}
+
+fn escape_for_double_quotes(content: &str) -> String {
+    let mut escaped = String::new();
+    for ch in content.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn build_double_quoted_replacement(node: &ruby_prism::StringNode<'_>) -> Option<String> {
+    let opening = node.opening_loc()?;
+    let closing = node.closing_loc()?;
+    let open = opening.as_slice();
+    let close = closing.as_slice();
+
+    // Single-quoted string: '...'
+    if open == b"'" && close == b"'" {
+        let content = node.content_loc().as_slice();
+        let content_str = std::str::from_utf8(content).ok()?;
+        return Some(format!("\"{}\"", escape_for_double_quotes(content_str)));
+    }
+
+    // %q-delimited string: %q{...}, %q|...|, %q(...)
+    if open.starts_with(b"%q") {
+        let content = node.content_loc().as_slice();
+        let content_str = std::str::from_utf8(content).ok()?;
+        return Some(format!("\"{}\"", escape_for_double_quotes(content_str)));
+    }
+
+    None
 }
 
 /// Convert the single-quoted string source to double-quoted and check if it
@@ -338,6 +395,7 @@ fn has_parser_rejected_escape(content: &str) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(InterpolationCheck, "cops/lint/interpolation_check");
+    crate::cop_autocorrect_fixture_tests!(InterpolationCheck, "cops/lint/interpolation_check");
 
     #[test]
     fn test_has_unescaped_interpolation() {
