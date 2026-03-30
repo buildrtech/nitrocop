@@ -22,6 +22,10 @@ impl Cop for WhileUntilDo {
         &[UNTIL_NODE, WHILE_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -29,17 +33,28 @@ impl Cop for WhileUntilDo {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check while ... do
         if let Some(while_node) = node.as_while_node() {
-            if let Some(diagnostic) = check_loop(
+            if let Some((mut diagnostic, remove_start, remove_end)) = check_loop(
                 self,
                 source,
                 &while_node.location(),
+                while_node.predicate().location().end_offset(),
                 while_node.do_keyword_loc(),
                 "while",
             ) {
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: remove_start,
+                        end: remove_end,
+                        replacement: "".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
                 diagnostics.push(diagnostic);
             }
             return;
@@ -47,13 +62,24 @@ impl Cop for WhileUntilDo {
 
         // Check until ... do
         if let Some(until_node) = node.as_until_node() {
-            if let Some(diagnostic) = check_loop(
+            if let Some((mut diagnostic, remove_start, remove_end)) = check_loop(
                 self,
                 source,
                 &until_node.location(),
+                until_node.predicate().location().end_offset(),
                 until_node.do_keyword_loc(),
                 "until",
             ) {
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: remove_start,
+                        end: remove_end,
+                        replacement: "".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
                 diagnostics.push(diagnostic);
             }
         }
@@ -64,9 +90,10 @@ fn check_loop(
     cop: &WhileUntilDo,
     source: &SourceFile,
     loop_loc: &ruby_prism::Location<'_>,
+    condition_end: usize,
     do_loc: Option<ruby_prism::Location<'_>>,
     keyword: &str,
-) -> Option<Diagnostic> {
+) -> Option<(Diagnostic, usize, usize)> {
     let do_loc = do_loc?;
 
     let (start_line, _) = source.offset_to_line_col(loop_loc.start_offset());
@@ -82,11 +109,15 @@ fn check_loop(
 
     let (line, column) = source.offset_to_line_col(do_loc.start_offset());
 
-    Some(cop.diagnostic(
-        source,
-        line,
-        column,
-        format!("Do not use `do` with multi-line `{}`.", keyword),
+    Some((
+        cop.diagnostic(
+            source,
+            line,
+            column,
+            format!("Do not use `do` with multi-line `{}`.", keyword),
+        ),
+        condition_end,
+        do_loc.end_offset(),
     ))
 }
 
@@ -94,4 +125,5 @@ fn check_loop(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(WhileUntilDo, "cops/style/while_until_do");
+    crate::cop_autocorrect_fixture_tests!(WhileUntilDo, "cops/style/while_until_do");
 }
