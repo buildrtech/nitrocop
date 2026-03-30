@@ -14,6 +14,10 @@ impl Cop for RedundantCurrentDirectoryInPath {
         &[CALL_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for RedundantCurrentDirectoryInPath {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -59,12 +63,41 @@ impl Cop for RedundantCurrentDirectoryInPath {
 
         let str_loc = str_node.location();
         let (line, column) = source.offset_to_line_col(str_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Remove the redundant current directory path.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let src = source.as_bytes();
+            let start = str_loc.start_offset();
+
+            // For quoted strings, remove the leading `./+` prefix from content.
+            if matches!(src.get(start), Some(b'\'') | Some(b'"')) {
+                let mut end = start + 1;
+                if src.get(end) == Some(&b'.') {
+                    end += 1;
+                    let slash_start = end;
+                    while src.get(end) == Some(&b'/') {
+                        end += 1;
+                    }
+                    if end > slash_start {
+                        corr.push(crate::correction::Correction {
+                            start: start + 1,
+                            end,
+                            replacement: "".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -72,6 +105,10 @@ impl Cop for RedundantCurrentDirectoryInPath {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        RedundantCurrentDirectoryInPath,
+        "cops/style/redundant_current_directory_in_path"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RedundantCurrentDirectoryInPath,
         "cops/style/redundant_current_directory_in_path"
     );
