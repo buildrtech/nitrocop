@@ -27,6 +27,10 @@ impl Cop for RedundantFilterChain {
         "Style/RedundantFilterChain"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
@@ -38,7 +42,7 @@ impl Cop for RedundantFilterChain {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -109,12 +113,33 @@ impl Cop for RedundantFilterChain {
             .message_loc()
             .unwrap_or_else(|| recv_call.location());
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{replacement}` instead of `{filter_str}.{predicate_str}`."),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            let pred_loc = call.message_loc().unwrap_or_else(|| call.location());
+            corr.push(crate::correction::Correction {
+                start: msg_loc.start_offset(),
+                end: msg_loc.end_offset(),
+                replacement: replacement.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            corr.push(crate::correction::Correction {
+                start: recv_call.location().end_offset(),
+                end: pred_loc.end_offset(),
+                replacement: "".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -122,6 +147,10 @@ impl Cop for RedundantFilterChain {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantFilterChain, "cops/style/redundant_filter_chain");
+    crate::cop_autocorrect_fixture_tests!(
+        RedundantFilterChain,
+        "cops/style/redundant_filter_chain"
+    );
 
     #[test]
     fn present_with_active_support() {
