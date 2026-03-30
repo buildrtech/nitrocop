@@ -21,6 +21,10 @@ impl Cop for PreferredHashMethods {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -28,7 +32,7 @@ impl Cop for PreferredHashMethods {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -60,12 +64,23 @@ impl Cop for PreferredHashMethods {
                 let current = std::str::from_utf8(method_bytes).unwrap_or("");
                 let msg_loc = call.message_loc().unwrap();
                 let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Use `Hash#{}` instead of `Hash#{}`.", prefer, current),
-                ));
+                );
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: msg_loc.start_offset(),
+                        end: msg_loc.end_offset(),
+                        replacement: prefer.to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
         } else if enforced_style == "verbose" {
             // Flag key? and value?
@@ -78,12 +93,23 @@ impl Cop for PreferredHashMethods {
                 let current = std::str::from_utf8(method_bytes).unwrap_or("");
                 let msg_loc = call.message_loc().unwrap();
                 let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Use `Hash#{}` instead of `Hash#{}`.", prefer, current),
-                ));
+                );
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: msg_loc.start_offset(),
+                        end: msg_loc.end_offset(),
+                        replacement: prefer.to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
         }
     }
@@ -93,4 +119,8 @@ impl Cop for PreferredHashMethods {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(PreferredHashMethods, "cops/style/preferred_hash_methods");
+    crate::cop_autocorrect_fixture_tests!(
+        PreferredHashMethods,
+        "cops/style/preferred_hash_methods"
+    );
 }
