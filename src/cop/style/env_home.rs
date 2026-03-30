@@ -26,6 +26,10 @@ impl Cop for EnvHome {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -33,7 +37,7 @@ impl Cop for EnvHome {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle ENV['HOME'] ||= value (IndexOrWriteNode)
         if let Some(write) = node.as_index_or_write_node() {
@@ -92,12 +96,20 @@ impl Cop for EnvHome {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Use `Dir.home` instead.".to_string(),
-        ));
+        let mut diag = self.diagnostic(source, line, column, "Use `Dir.home` instead.".to_string());
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "Dir.home".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -128,4 +140,5 @@ fn has_home_first_arg(arguments: Option<ruby_prism::ArgumentsNode<'_>>) -> bool 
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EnvHome, "cops/style/env_home");
+    crate::cop_autocorrect_fixture_tests!(EnvHome, "cops/style/env_home");
 }
