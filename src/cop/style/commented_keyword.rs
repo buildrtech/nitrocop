@@ -36,6 +36,10 @@ impl Cop for CommentedKeyword {
         "Style/CommentedKeyword"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -43,7 +47,7 @@ impl Cop for CommentedKeyword {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let bytes = source.as_bytes();
 
@@ -129,7 +133,7 @@ impl Cop for CommentedKeyword {
             // Check if the code before the comment starts with a keyword
             for &keyword in KEYWORDS {
                 if starts_with_keyword(before_comment, keyword) {
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line_num,
                         comment_col,
@@ -137,7 +141,46 @@ impl Cop for CommentedKeyword {
                             "Do not place comments on the same line as the `{}` keyword.",
                             keyword
                         ),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        // Remove the trailing comment from the original line,
+                        // including any preceding spaces/tabs.
+                        let mut remove_start = comment_start;
+                        while remove_start > line_start_offset {
+                            let prev = bytes[remove_start - 1];
+                            if prev == b' ' || prev == b'\t' {
+                                remove_start -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        corr.push(crate::correction::Correction {
+                            start: remove_start,
+                            end: comment_end,
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+
+                        // Match RuboCop behavior: keep comments for begin/class/def/module
+                        // by moving them above the keyword line; remove comments for end.
+                        if keyword != "end" {
+                            let comment_text = String::from_utf8_lossy(comment_text).to_string();
+                            corr.push(crate::correction::Correction {
+                                start: line_start_offset,
+                                end: line_start_offset,
+                                replacement: format!("{comment_text}\n"),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                        }
+
+                        diag.corrected = true;
+                    }
+
+                    diagnostics.push(diag);
                     break;
                 }
             }
@@ -173,4 +216,5 @@ fn contains_allowed_annotation(comment_body: &str, annotation: &str) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CommentedKeyword, "cops/style/commented_keyword");
+    crate::cop_autocorrect_fixture_tests!(CommentedKeyword, "cops/style/commented_keyword");
 }

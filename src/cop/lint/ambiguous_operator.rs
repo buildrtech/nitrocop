@@ -2,6 +2,7 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Checks for ambiguous operators in the first argument of a method invocation
 /// without parentheses. For example, `do_something *some_array` where `*` could
@@ -75,6 +76,10 @@ impl Cop for AmbiguousOperator {
         "Lint/AmbiguousOperator"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -86,8 +91,10 @@ impl Cop for AmbiguousOperator {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let call_ranges = collect_ambiguous_argument_ranges(parse_result);
+
         for warning in parse_result.warnings() {
             let message = warning.message();
             let info = match classify_warning(message) {
@@ -106,13 +113,101 @@ impl Cop for AmbiguousOperator {
                 info.actual, info.actual, info.operator, info.possible
             );
 
-            diagnostics.push(self.diagnostic(source, line, column, msg));
+            let mut diag = self.diagnostic(source, line, column, msg);
+            if let Some(corr) = corrections.as_mut() {
+                if let Some(range) = call_ranges.iter().find(|r| r.warning_offset == start) {
+                    corr.push(crate::correction::Correction {
+                        start: range.open_replace_start,
+                        end: range.open_replace_end,
+                        replacement: "(".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    corr.push(crate::correction::Correction {
+                        start: range.args_end,
+                        end: range.args_end,
+                        replacement: ")".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+            }
+
+            diagnostics.push(diag);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AmbiguousArgumentRange {
+    warning_offset: usize,
+    open_replace_start: usize,
+    open_replace_end: usize,
+    args_end: usize,
+}
+
+struct AmbiguousArgumentRangeVisitor {
+    ranges: Vec<AmbiguousArgumentRange>,
+}
+
+impl AmbiguousArgumentRangeVisitor {
+    fn new() -> Self {
+        Self { ranges: Vec::new() }
+    }
+}
+
+impl<'pr> Visit<'pr> for AmbiguousArgumentRangeVisitor {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if node.opening_loc().is_none() {
+            let mut warning_offset = None;
+            let mut args_end = None;
+
+            if let Some(args) = node.arguments() {
+                let mut iter = args.arguments().iter();
+                if let Some(first) = iter.next() {
+                    warning_offset = Some(first.location().start_offset());
+                    let mut end = first.location().end_offset();
+                    for arg in iter {
+                        end = arg.location().end_offset();
+                    }
+                    args_end = Some(end);
+                }
+            }
+
+            if warning_offset.is_none() {
+                if let Some(block_arg) = node.block().and_then(|b| b.as_block_argument_node()) {
+                    warning_offset = Some(block_arg.location().start_offset());
+                    args_end = Some(block_arg.location().end_offset());
+                }
+            }
+
+            if let (Some(warning_offset), Some(args_end), Some(message_loc)) =
+                (warning_offset, args_end, node.message_loc())
+            {
+                self.ranges.push(AmbiguousArgumentRange {
+                    warning_offset,
+                    open_replace_start: message_loc.end_offset(),
+                    open_replace_end: warning_offset,
+                    args_end,
+                });
+            }
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+fn collect_ambiguous_argument_ranges(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> Vec<AmbiguousArgumentRange> {
+    let mut visitor = AmbiguousArgumentRangeVisitor::new();
+    visitor.visit(&parse_result.node());
+    visitor.ranges
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AmbiguousOperator, "cops/lint/ambiguous_operator");
+    crate::cop_autocorrect_fixture_tests!(AmbiguousOperator, "cops/lint/ambiguous_operator");
 }

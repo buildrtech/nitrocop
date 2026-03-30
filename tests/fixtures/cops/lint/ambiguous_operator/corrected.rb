@@ -1,0 +1,7 @@
+do_something(*some_array)
+foo(*bar)
+method(*args)
+do_something(+42)
+do_something(-42)
+do_something(&block)
+do_something(**kwargs)
