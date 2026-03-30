@@ -1,5 +1,5 @@
-- Evaluate `Style/EachWithObject` for a conservative rewrite subset (`inject/reduce` with clear accumulator return and no reassignment), keeping block-shape handling strict.
-- Evaluate `Style/RedundantFetchBlock` with scenario-fixture autocorrect coverage if replacement boundaries stay selector-to-block-end and literal/default-only.
+- Evaluate `Style/MapIntoArray` for a conservative subset where detected `each_with_object([])` forms can be rewritten to `map` without changing block semantics.
+- Evaluate `Style/ReverseFind` / `Style/RedundantFilterChain` only where current matches already provide one-expression canonical rewrites.
 - Evaluate `Security/YAMLLoad` only with strict target-Ruby guards (Ruby <= 3.0 behavior) and real offense parity; avoid metric-only toggles.
 - Evaluate `Lint/AmbiguousRegexpLiteral` only with very conservative correction boundaries (likely offense-only unless a safe transformation is proven).
 - Keep Layout backlog in staged batches (spacing cops first, then alignment/indentation) after easy Style/Lint wins taper off.

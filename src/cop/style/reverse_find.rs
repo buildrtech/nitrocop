@@ -36,6 +36,10 @@ impl Cop for ReverseFind {
         "Style/ReverseFind"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -51,7 +55,7 @@ impl Cop for ReverseFind {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // rfind is only available in Ruby >= 4.0
         let ruby_version = config
@@ -127,12 +131,24 @@ impl Cop for ReverseFind {
             .message_loc()
             .unwrap_or_else(|| recv_call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Use `rfind` instead of `reverse.find`.".to_string(),
-        ));
+        );
+        if let Some(corr) = corrections.as_mut() {
+            let outer_msg_loc = call.message_loc().unwrap_or_else(|| call.location());
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: outer_msg_loc.end_offset(),
+                replacement: "rfind".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+        diagnostics.push(diag);
     }
 }
 
@@ -170,6 +186,17 @@ mod tests {
         crate::testutil::assert_cop_no_offenses_full_with_config(
             &ReverseFind,
             include_bytes!("../../../tests/fixtures/cops/style/reverse_find/no_offense.rb"),
+            config,
+        );
+    }
+
+    #[test]
+    fn autocorrect_fixture() {
+        let config = config_with_ruby(4.0);
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ReverseFind,
+            include_bytes!("../../../tests/fixtures/cops/style/reverse_find/offense.rb"),
+            include_bytes!("../../../tests/fixtures/cops/style/reverse_find/corrected.rb"),
             config,
         );
     }
