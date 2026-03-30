@@ -109,6 +109,10 @@ impl Cop for PercentLiteralDelimiters {
         "Style/PercentLiteralDelimiters"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ARRAY_NODE,
@@ -130,7 +134,7 @@ impl Cop for PercentLiteralDelimiters {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let preferred = PREFERRED_DELIMITERS_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -219,9 +223,8 @@ impl Cop for PercentLiteralDelimiters {
                 }
             }
 
-            let loc = opening;
-            let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let (line, column) = source.offset_to_line_col(opening.start_offset());
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
@@ -229,7 +232,29 @@ impl Cop for PercentLiteralDelimiters {
                     "`{literal_type}`-literals should be delimited by `{}` and `{}`.",
                     expected_open as char, expected_close as char,
                 ),
-            ));
+            );
+
+            if let Some(corr) = corrections.as_mut() {
+                let open_delim_start = opening.end_offset().saturating_sub(1);
+                corr.push(crate::correction::Correction {
+                    start: open_delim_start,
+                    end: opening.end_offset(),
+                    replacement: (expected_open as char).to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+
+                corr.push(crate::correction::Correction {
+                    start: node_loc.end_offset().saturating_sub(1),
+                    end: node_loc.end_offset(),
+                    replacement: (expected_close as char).to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+
+            diagnostics.push(diag);
         }
     }
 }
@@ -249,6 +274,10 @@ fn matchpair(delim: u8) -> (u8, u8) {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        PercentLiteralDelimiters,
+        "cops/style/percent_literal_delimiters"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         PercentLiteralDelimiters,
         "cops/style/percent_literal_delimiters"
     );
