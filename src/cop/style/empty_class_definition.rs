@@ -20,6 +20,10 @@ impl Cop for EmptyClassDefinition {
         "Style/EmptyClassDefinition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
@@ -40,24 +44,55 @@ impl Cop for EmptyClassDefinition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "class_definition");
 
         match enforced_style {
-            "class_definition" => {
-                diagnostics.extend(check_class_definition_style(self, source, node))
-            }
+            "class_definition" => diagnostics.extend(check_class_definition_style(
+                self,
+                source,
+                node,
+                &mut corrections,
+            )),
             "class_new" => diagnostics.extend(check_class_new_style(self, source, node)),
             _ => {}
         }
     }
 }
 
+fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    String::from_utf8_lossy(
+        &source.as_bytes()[node.location().start_offset()..node.location().end_offset()],
+    )
+    .to_string()
+}
+
+fn build_class_definition_replacement(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    call: &ruby_prism::CallNode<'_>,
+) -> Option<String> {
+    let full = node_source(source, node);
+    let eq_idx = full.find('=')?;
+    let class_name = full[..eq_idx].trim();
+    let parent = call
+        .arguments()
+        .and_then(|args| args.arguments().iter().next())
+        .map(|arg| node_source(source, &arg));
+    let indent = " ".repeat(source.offset_to_line_col(node.location().start_offset()).1);
+
+    Some(match parent {
+        Some(parent) => format!("class {class_name} < {parent}\n{indent}end"),
+        None => format!("class {class_name}\n{indent}end"),
+    })
+}
+
 fn check_class_definition_style(
     cop: &EmptyClassDefinition,
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) -> Vec<Diagnostic> {
     let value = node
         .as_constant_write_node()
@@ -102,23 +137,53 @@ fn check_class_definition_style(
 
                                 let loc = node.location();
                                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                                return vec![cop.diagnostic(
+                                let mut diag = cop.diagnostic(
                                     source,
                                     line,
                                     column,
                                     "Prefer a two-line class definition over `Class.new` for classes with no body.".to_string(),
-                                )];
+                                );
+                                if let Some(corr) = corrections.as_mut() {
+                                    if let Some(replacement) =
+                                        build_class_definition_replacement(source, node, &call)
+                                    {
+                                        corr.push(crate::correction::Correction {
+                                            start: loc.start_offset(),
+                                            end: loc.end_offset(),
+                                            replacement,
+                                            cop_name: cop.name(),
+                                            cop_index: 0,
+                                        });
+                                        diag.corrected = true;
+                                    }
+                                }
+                                return vec![diag];
                             }
                         } else {
                             // Class.new with no args
                             let loc = node.location();
                             let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            return vec![cop.diagnostic(
+                            let mut diag = cop.diagnostic(
                                 source,
                                 line,
                                 column,
                                 "Prefer a two-line class definition over `Class.new` for classes with no body.".to_string(),
-                            )];
+                            );
+                            if let Some(corr) = corrections.as_mut() {
+                                if let Some(replacement) =
+                                    build_class_definition_replacement(source, node, &call)
+                                {
+                                    corr.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement,
+                                        cop_name: cop.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                            }
+                            return vec![diag];
                         }
                     }
                 }
@@ -176,4 +241,8 @@ fn is_class_const(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyClassDefinition, "cops/style/empty_class_definition");
+    crate::cop_autocorrect_fixture_tests!(
+        EmptyClassDefinition,
+        "cops/style/empty_class_definition"
+    );
 }
