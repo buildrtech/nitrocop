@@ -14,6 +14,10 @@ impl Cop for ConcatArrayLiterals {
         &[ARRAY_NODE, CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for ConcatArrayLiterals {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -34,9 +38,10 @@ impl Cop for ConcatArrayLiterals {
         }
 
         // Must have a receiver
-        if call.receiver().is_none() {
-            return;
-        }
+        let receiver = match call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
 
         // Must have arguments
         let args = match call.arguments() {
@@ -58,10 +63,44 @@ impl Cop for ConcatArrayLiterals {
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
 
-        // Build a message about the elements
         let msg = "Use `push` with elements as arguments instead of `concat` with array brackets.";
+        let mut diag = self.diagnostic(source, line, column, msg.to_string());
 
-        diagnostics.push(self.diagnostic(source, line, column, msg.to_string()));
+        if let Some(ref mut corr) = corrections {
+            let receiver_src = std::str::from_utf8(receiver.location().as_slice()).unwrap_or("");
+            let operator = call
+                .call_operator_loc()
+                .and_then(|op| std::str::from_utf8(op.as_slice()).ok())
+                .unwrap_or(".");
+
+            let mut elements = Vec::new();
+            for arg in arg_list {
+                let Some(array_node) = arg.as_array_node() else {
+                    return;
+                };
+                for element in array_node.elements().iter() {
+                    let Ok(elem_src) = std::str::from_utf8(element.location().as_slice()) else {
+                        return;
+                    };
+                    elements.push(elem_src.to_string());
+                }
+            }
+
+            if !receiver_src.is_empty() {
+                let replacement = format!("{receiver_src}{operator}push({})", elements.join(", "));
+                let call_loc = call.location();
+                corr.push(crate::correction::Correction {
+                    start: call_loc.start_offset(),
+                    end: call_loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -69,4 +108,5 @@ impl Cop for ConcatArrayLiterals {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ConcatArrayLiterals, "cops/style/concat_array_literals");
+    crate::cop_autocorrect_fixture_tests!(ConcatArrayLiterals, "cops/style/concat_array_literals");
 }

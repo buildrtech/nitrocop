@@ -86,11 +86,22 @@ Implemented autocorrect in this session:
 - `Style/ArrayIntersectWithSingleElement`
 - `Style/DefWithParentheses`
 - `Style/MethodDefParentheses`
+- `Style/SingleArgumentDig`
+- `Style/RedundantArrayConstructor`
+- `Style/EmptyLambdaParameter`
+- `Style/EmptyBlockParameter`
+- `Style/SuperWithArgsParentheses`
+- `Lint/EmptyEnsure`
+- `Style/HashLookupMethod`
+- `Lint/BooleanSymbol`
+- `Style/RedundantPercentQ`
+- `Style/QuotedSymbols`
+- `Lint/UriRegexp`
 
 Current progress snapshot:
-- `missing_core_autocorrect_cops`: **345** (down from 372, -27)
-- `nitrocop_autocorrectable_cops`: **114** (up from 87, +27)
-- Missing by department now: Style (211), Lint (73), Layout (56), Naming (3), Security (1), Migration (1)
+- `missing_core_autocorrect_cops`: **334** (down from 372, -38)
+- `nitrocop_autocorrectable_cops`: **125** (up from 87, +38)
+- Missing by department now: Style (203), Lint (70), Layout (56), Naming (3), Security (1), Migration (1)
 
 Repeatable successful pattern:
 1. Add `supports_autocorrect()`
