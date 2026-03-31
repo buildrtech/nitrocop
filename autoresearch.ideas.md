@@ -1,3 +1,3 @@
-- `Style/RescueStandardError`: add bounded explicit/implicit keyword-range autocorrect parity (`rescue` <-> `rescue StandardError`) while leaving multi-exception clauses untouched.
+- `Lint/NonDeterministicRequireOrder`: investigate conservative local reordering/autocorrect only for contiguous duplicate-order-safe `require` groups already flagged by the cop.
 - `Style/Semicolon`: consider expanding autocorrect beyond current conservative subset to expression-separator lines only if newline rewrites can be made robust without structural regressions.
 - Keep Layout backlog staged (spacing-first, then alignment/indentation) until remaining non-Layout low-risk cops are exhausted.
