@@ -93,9 +93,23 @@ fn is_interpolation(node: &ruby_prism::Node<'_>) -> bool {
         || (node.as_interpolated_regular_expression_node().is_some())
 }
 
+fn reverse_operator(op: &[u8]) -> String {
+    match op {
+        b"<" => ">".to_string(),
+        b">" => "<".to_string(),
+        b"<=" => ">=".to_string(),
+        b">=" => "<=".to_string(),
+        _ => std::str::from_utf8(op).unwrap_or("==").to_string(),
+    }
+}
+
 impl Cop for YodaCondition {
     fn name(&self) -> &'static str {
         "Style/YodaCondition"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -118,7 +132,7 @@ impl Cop for YodaCondition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "forbid_for_all_comparison_operators");
         let call = match node.as_call_node() {
@@ -174,31 +188,52 @@ impl Cop for YodaCondition {
             return;
         }
 
-        if require_yoda {
-            // Require Yoda: flag when literal is on the RIGHT (non-Yoda)
-            if !lhs_constant && rhs_constant {
-                let loc = call.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Prefer Yoda conditions.".to_string(),
-                ));
-            }
+        let should_flag = if require_yoda {
+            !lhs_constant && rhs_constant
         } else {
-            // Forbid Yoda: flag when literal is on the LEFT (Yoda)
-            if lhs_constant && !rhs_constant {
-                let loc = call.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Prefer non-Yoda conditions.".to_string(),
-                ));
-            }
+            lhs_constant && !rhs_constant
+        };
+
+        if !should_flag {
+            return;
         }
+
+        let loc = call.location();
+        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let mut diag = self.diagnostic(
+            source,
+            line,
+            column,
+            if require_yoda {
+                "Prefer Yoda conditions.".to_string()
+            } else {
+                "Prefer non-Yoda conditions.".to_string()
+            },
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            let lhs = source.byte_slice(
+                receiver.location().start_offset(),
+                receiver.location().end_offset(),
+                "",
+            );
+            let rhs = source.byte_slice(
+                arg_list[0].location().start_offset(),
+                arg_list[0].location().end_offset(),
+                "",
+            );
+            let op = reverse_operator(name);
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("{rhs} {op} {lhs}"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -208,6 +243,7 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(YodaCondition, "cops/style/yoda_condition");
+    crate::cop_autocorrect_fixture_tests!(YodaCondition, "cops/style/yoda_condition");
 
     #[test]
     fn both_literals_not_flagged() {
