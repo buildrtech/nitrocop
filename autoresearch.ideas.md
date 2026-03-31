@@ -2,4 +2,4 @@
 - Extend `Lint/NumberConversion` autocorrect to symbol/block-pass forms (`map(&:to_i)`, `try(:to_f)`) only after implementing syntax-safe parenthesis/block rewrites.
 - Extend `Style/DigChain` autocorrect to fully collapse longer dig chains in one pass (currently pairwise collapse per autocorrect iteration).
 - Keep Layout backlog staged (spacing-first, then alignment/indentation) after low-risk Style/Lint chain/selector wins taper off.
-- Explore `Style/ClassMethodsDefinitions` conservative autocorrect only for `class << self` bodies containing plain public `def` nodes (rewrite to `def self.name`), while skipping mixed-visibility and comment-sensitive blocks.
+- Extend `Style/ClassMethodsDefinitions` autocorrect from current defs-only subset to mixed `class << self` blocks (e.g., `attr_reader` + public defs) with comment/visibility-preserving extraction.

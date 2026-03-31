@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -62,6 +63,30 @@ fn contains_unexpected_char(name: &str) -> bool {
 /// Note: RuboCop's `DISABLING_COPS_CONTENT_TOKEN` regex (`/[A-Za-z]+\/[A-Za-z]+|all/`)
 /// is unanchored, so `all` matches as a *substring* (e.g. "MultilineMethodC**all**Indentation").
 /// We replicate this with `contains("all")` for corpus conformance.
+static SHORT_COP_TO_QUALIFIED: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+    let registry = crate::cop::registry::CopRegistry::default_registry();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for cop in registry.cops() {
+        if let Some((_, short)) = cop.name().split_once('/') {
+            *counts.entry(short.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let mut unique = HashMap::new();
+    for cop in registry.cops() {
+        if let Some((_, short)) = cop.name().split_once('/') {
+            if counts.get(short) == Some(&1usize) {
+                unique.insert(short.to_string(), cop.name().to_string());
+            }
+        }
+    }
+    unique
+});
+
+fn qualify_short_cop_name(short_name: &str) -> Option<String> {
+    SHORT_COP_TO_QUALIFIED.get(short_name).cloned()
+}
+
 fn valid_content_token(content_token: &str) -> bool {
     content_token.contains("all")
         || NON_WORD_RE.is_match(content_token)
@@ -72,6 +97,10 @@ fn valid_content_token(content_token: &str) -> bool {
 impl Cop for DepartmentName {
     fn name(&self) -> &'static str {
         "Migration/DepartmentName"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_severity(&self) -> Severity {
@@ -85,7 +114,7 @@ impl Cop for DepartmentName {
         code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut byte_offset: usize = 0;
 
@@ -137,12 +166,30 @@ impl Cop for DepartmentName {
 
                 if !valid_content_token(trimmed) {
                     let leading_ws = token.len() - token.trim_start().len();
-                    diagnostics.push(self.diagnostic(
+                    let col = offset + leading_ws;
+                    let mut diag = self.diagnostic(
                         source,
                         line_num,
-                        offset + leading_ws,
+                        col,
                         "Department name is missing.".to_string(),
-                    ));
+                    );
+
+                    if let Some(corrections) = corrections.as_mut() {
+                        if let Some(qualified) = qualify_short_cop_name(trimmed) {
+                            let start = byte_offset + col;
+                            let end = start + trimmed.len();
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: qualified,
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                    }
+
+                    diagnostics.push(diag);
                 }
 
                 // Stop if token contains unexpected characters (e.g. `--`, `#`)
@@ -164,6 +211,7 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(DepartmentName, "cops/migration/department_name");
+    crate::cop_autocorrect_fixture_tests!(DepartmentName, "cops/migration/department_name");
 
     #[test]
     fn detects_missing_department_in_disable() {
