@@ -5,6 +5,13 @@ use crate::parse::source::SourceFile;
 
 pub struct TrailingBodyOnMethodDefinition;
 
+fn find_body_separator(bytes: &[u8], header_start: usize, body_start: usize) -> Option<usize> {
+    if body_start > bytes.len() || header_start >= body_start {
+        return None;
+    }
+    (header_start..body_start).find(|&i| bytes[i] == b';')
+}
+
 impl Cop for TrailingBodyOnMethodDefinition {
     fn name(&self) -> &'static str {
         "Style/TrailingBodyOnMethodDefinition"
@@ -14,6 +21,10 @@ impl Cop for TrailingBodyOnMethodDefinition {
         &[BEGIN_NODE, DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +32,7 @@ impl Cop for TrailingBodyOnMethodDefinition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(def_node) = node.as_def_node() {
             // Skip endless methods (def foo = ...)
@@ -79,13 +90,30 @@ impl Cop for TrailingBodyOnMethodDefinition {
             };
 
             if def_line == body_line {
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     body_line,
                     body_column,
                     "Place the first line of a multi-line method definition's body on its own line."
                         .to_string(),
-                ));
+                );
+                if let Some(ref mut corr) = corrections {
+                    let body_start = body.location().start_offset();
+                    if let Some(semi_offset) =
+                        find_body_separator(source.as_bytes(), def_loc.end_offset(), body_start)
+                    {
+                        let indent = " ".repeat(source.offset_to_line_col(def_loc.start_offset()).1 + 2);
+                        corr.push(crate::correction::Correction {
+                            start: semi_offset,
+                            end: body_start,
+                            replacement: format!("\n{indent}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+                diagnostics.push(diag);
             }
         }
     }
@@ -95,6 +123,10 @@ impl Cop for TrailingBodyOnMethodDefinition {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        TrailingBodyOnMethodDefinition,
+        "cops/style/trailing_body_on_method_definition"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         TrailingBodyOnMethodDefinition,
         "cops/style/trailing_body_on_method_definition"
     );
