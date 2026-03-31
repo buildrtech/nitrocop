@@ -1,3 +1,3 @@
-- `Lint/RedundantSplatExpansion`: investigate conservative autocorrect for offense-matched literal splats by removing only the splat operator or outer literal brackets in contexts already flagged by current detection.
+- `Lint/RedundantSafeNavigation`: investigate conservative autocorrect for offense-matched safe-navigation chains by replacing `&.` with `.` only where receiver nil-guarding is already redundant per current detection.
 - `Style/Semicolon`: consider expanding autocorrect beyond current conservative subset to expression-separator lines only if newline rewrites can be made robust without structural regressions.
 - Keep Layout backlog staged (spacing-first, then alignment/indentation) until remaining non-Layout low-risk cops are exhausted.

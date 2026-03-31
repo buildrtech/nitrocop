@@ -125,6 +125,10 @@ impl Cop for RedundantSplatExpansion {
         "Lint/RedundantSplatExpansion"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -165,7 +169,7 @@ impl Cop for RedundantSplatExpansion {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_percent = config.get_bool("AllowPercentLiteralArrayArgument", true);
 
@@ -233,7 +237,22 @@ impl Cop for RedundantSplatExpansion {
             "Replace splat expansion with comma separated values."
         };
 
-        diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+        let mut diag = self.diagnostic(source, line, column, message.to_string());
+
+        if let Some(corr) = corrections.as_mut() {
+            if let Some(replacement) = autocorrect_replacement(source, &splat, &child) {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -351,6 +370,86 @@ fn trim_leading_whitespace(bytes: &[u8]) -> &[u8] {
         i += 1;
     }
     &bytes[i..]
+}
+
+fn autocorrect_replacement(
+    source: &SourceFile,
+    splat: &ruby_prism::SplatNode<'_>,
+    child: &ruby_prism::Node<'_>,
+) -> Option<String> {
+    if let Some(array) = child.as_array_node() {
+        let in_array_literal = is_inside_array_literal(source, splat);
+        let is_bracketed_arg = is_bracketed_call(source, splat);
+        let start = splat.location().start_offset();
+        if in_array_literal || is_bracketed_arg || is_preceded_by_keyword(source.as_bytes(), start)
+        {
+            return Some(remove_array_brackets(source, &array));
+        }
+    }
+
+    Some(
+        source
+            .byte_slice(
+                child.location().start_offset(),
+                child.location().end_offset(),
+                "",
+            )
+            .to_string(),
+    )
+}
+
+fn remove_array_brackets(source: &SourceFile, array: &ruby_prism::ArrayNode<'_>) -> String {
+    if let Some(opening) = array.opening_loc() {
+        let open = opening.as_slice();
+        let elems: Vec<String> = array
+            .elements()
+            .iter()
+            .map(|n| {
+                source
+                    .byte_slice(n.location().start_offset(), n.location().end_offset(), "")
+                    .to_string()
+            })
+            .collect();
+
+        if open.starts_with(b"%w") {
+            return elems
+                .iter()
+                .map(|e| format!("'{}'", e))
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        if open.starts_with(b"%W") {
+            return elems
+                .iter()
+                .map(|e| format!("\"{}\"", e))
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        if open.starts_with(b"%i") {
+            return elems
+                .iter()
+                .map(|e| format!(":{}", e))
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        if open.starts_with(b"%I") {
+            return elems
+                .iter()
+                .map(|e| format!(":\"{}\"", e))
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+
+        return elems.join(", ");
+    }
+
+    source
+        .byte_slice(
+            array.location().start_offset(),
+            array.location().end_offset(),
+            "",
+        )
+        .to_string()
 }
 
 /// Check if a `[` at the given position is a method call bracket (e.g., `Foo[`).
@@ -542,6 +641,10 @@ fn is_assignment_node(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        RedundantSplatExpansion,
+        "cops/lint/redundant_splat_expansion"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RedundantSplatExpansion,
         "cops/lint/redundant_splat_expansion"
     );
