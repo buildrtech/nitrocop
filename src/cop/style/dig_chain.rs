@@ -10,6 +10,10 @@ impl Cop for DigChain {
         "Style/DigChain"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE]
     }
@@ -21,7 +25,7 @@ impl Cop for DigChain {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -94,12 +98,56 @@ impl Cop for DigChain {
 
                 let loc = recv_call.message_loc().unwrap_or(recv_call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use `dig` with multiple parameters instead of chaining.".to_string(),
-                ));
+                );
+
+                if let Some(corr) = corrections.as_mut() {
+                    if let Some(base_receiver) = recv_call.receiver() {
+                        let base_loc = base_receiver.location();
+                        let base_source = source
+                            .byte_slice(base_loc.start_offset(), base_loc.end_offset(), "")
+                            .to_string();
+
+                        let mut combined_args = Vec::new();
+                        if let Some(inner_args) = recv_call.arguments() {
+                            for arg in inner_args.arguments().iter() {
+                                let arg_loc = arg.location();
+                                combined_args.push(
+                                    source
+                                        .byte_slice(
+                                            arg_loc.start_offset(),
+                                            arg_loc.end_offset(),
+                                            "",
+                                        )
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        for arg in &arg_list {
+                            let arg_loc = arg.location();
+                            combined_args.push(
+                                source
+                                    .byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "")
+                                    .to_string(),
+                            );
+                        }
+
+                        corr.push(crate::correction::Correction {
+                            start: call.location().start_offset(),
+                            end: call.location().end_offset(),
+                            replacement: format!("{base_source}.dig({})", combined_args.join(", ")),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diag);
             }
         }
     }
@@ -109,4 +157,5 @@ impl Cop for DigChain {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DigChain, "cops/style/dig_chain");
+    crate::cop_autocorrect_fixture_tests!(DigChain, "cops/style/dig_chain");
 }
