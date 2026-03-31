@@ -40,6 +40,10 @@ impl Cop for RedundantArgument {
         &[CALL_NODE, FALSE_NODE, INTEGER_NODE, STRING_NODE, TRUE_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -47,7 +51,7 @@ impl Cop for RedundantArgument {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let _methods = config.get_string_hash("Methods");
 
@@ -116,12 +120,27 @@ impl Cop for RedundantArgument {
             };
 
             let (line, column) = source.offset_to_line_col(offset);
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Argument `{arg_src}` is redundant because it is implied by default."),
-            ));
+            );
+
+            if let Some(corr) = corrections.as_deref_mut() {
+                if let (Some(open), Some(close)) = (call.opening_loc(), call.closing_loc()) {
+                    corr.push(crate::correction::Correction {
+                        start: open.start_offset(),
+                        end: close.end_offset(),
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+            }
+
+            diagnostics.push(diag);
         }
     }
 }
@@ -168,4 +187,5 @@ impl RedundantArgument {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantArgument, "cops/style/redundant_argument");
+    crate::cop_autocorrect_fixture_tests!(RedundantArgument, "cops/style/redundant_argument");
 }
