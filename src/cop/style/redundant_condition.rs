@@ -58,6 +58,12 @@ impl RedundantCondition {
         a_bytes == b_bytes
     }
 
+    fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+        let loc = node.location();
+        let bytes = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+        String::from_utf8_lossy(bytes).to_string()
+    }
+
     fn make_diagnostic_at(&self, source: &SourceFile, offset: usize, msg: &str) -> Diagnostic {
         let (line, column) = source.offset_to_line_col(offset);
         self.diagnostic(source, line, column, msg.to_string())
@@ -308,6 +314,7 @@ impl RedundantCondition {
     fn check_if(
         &self,
         source: &SourceFile,
+        if_node_loc: ruby_prism::Location,
         condition: &ruby_prism::Node<'_>,
         true_stmts: Option<ruby_prism::StatementsNode<'_>>,
         else_stmts: Option<ruby_prism::StatementsNode<'_>>,
@@ -315,6 +322,7 @@ impl RedundantCondition {
         kw_offset: usize,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Get true branch
         let true_stmts = match true_stmts {
@@ -330,11 +338,22 @@ impl RedundantCondition {
         // No-else pattern: `if cond; cond; end` → "This condition is not needed."
         if else_stmts.is_none() {
             if Self::nodes_equal(source, condition, true_value) {
-                diagnostics.push(self.make_diagnostic_at(
+                let mut diag = self.make_diagnostic_at(
                     source,
                     kw_offset,
                     "This condition is not needed.",
-                ));
+                );
+                if let Some(corr) = corrections.as_mut() {
+                    corr.push(crate::correction::Correction {
+                        start: if_node_loc.start_offset(),
+                        end: if_node_loc.end_offset(),
+                        replacement: Self::node_source(source, condition),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
             return;
         }
@@ -356,11 +375,25 @@ impl RedundantCondition {
 
         // Pattern 1: condition == true_branch
         if Self::nodes_equal(source, condition, true_value) {
-            diagnostics.push(self.make_diagnostic_at(
-                source,
-                kw_offset,
-                "Use double pipes `||` instead.",
-            ));
+            let mut diag = self.make_diagnostic_at(source, kw_offset, "Use double pipes `||` instead.");
+            if let Some(corr) = corrections.as_mut() {
+                let else_body: Vec<_> = else_stmts_unwrapped.body().into_iter().collect();
+                if else_body.len() == 1 {
+                    corr.push(crate::correction::Correction {
+                        start: if_node_loc.start_offset(),
+                        end: if_node_loc.end_offset(),
+                        replacement: format!(
+                            "{} || {}",
+                            Self::node_source(source, condition),
+                            Self::node_source(source, &else_body[0]),
+                        ),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+            }
+            diagnostics.push(diag);
             return;
         }
 
@@ -422,6 +455,10 @@ impl Cop for RedundantCondition {
         "Style/RedundantCondition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
@@ -445,7 +482,7 @@ impl Cop for RedundantCondition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle IfNode (includes ternary)
         if let Some(if_node) = node.as_if_node() {
@@ -491,6 +528,7 @@ impl Cop for RedundantCondition {
 
             self.check_if(
                 source,
+                if_node.location(),
                 &if_node.predicate(),
                 if_node.statements(),
                 else_stmts,
@@ -498,6 +536,7 @@ impl Cop for RedundantCondition {
                 kw_offset,
                 config,
                 diagnostics,
+                corrections.as_deref_mut(),
             );
             return;
         }
@@ -530,4 +569,5 @@ impl Cop for RedundantCondition {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantCondition, "cops/style/redundant_condition");
+    crate::cop_autocorrect_fixture_tests!(RedundantCondition, "cops/style/redundant_condition");
 }

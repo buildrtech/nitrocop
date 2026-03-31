@@ -33,6 +33,10 @@ impl Cop for LambdaWithoutLiteralBlock {
         "Lint/LambdaWithoutLiteralBlock"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -44,7 +48,7 @@ impl Cop for LambdaWithoutLiteralBlock {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut walker = LambdaWalker {
             source,
@@ -52,8 +56,13 @@ impl Cop for LambdaWithoutLiteralBlock {
             parent_is_block_body: false,
             saved_flags: Vec::new(),
             diagnostics,
+            autocorrect: corrections.is_some(),
+            emitted_corrections: Vec::new(),
         };
         walker.visit(&parse_result.node());
+        if let Some(corr) = corrections.as_mut() {
+            corr.extend(walker.emitted_corrections);
+        }
     }
 }
 
@@ -69,6 +78,8 @@ struct LambdaWalker<'a> {
     /// Stack for save/restore of parent_is_block_body across branch nodes.
     saved_flags: Vec<bool>,
     diagnostics: &'a mut Vec<Diagnostic>,
+    autocorrect: bool,
+    emitted_corrections: Vec<crate::correction::Correction>,
 }
 
 impl<'pr> Visit<'pr> for LambdaWalker<'_> {
@@ -170,6 +181,7 @@ impl LambdaWalker<'_> {
                 }
                 // lambda(&pr) — offense
                 self.add_offense(call);
+                self.maybe_add_autocorrect(call);
                 return;
             }
         }
@@ -186,6 +198,52 @@ impl LambdaWalker<'_> {
 
         // lambda('string'), lambda(var), etc. — no literal block
         self.add_offense(call);
+        self.maybe_add_autocorrect(call);
+    }
+
+    fn maybe_add_autocorrect(&mut self, call: &ruby_prism::CallNode<'_>) {
+        if !self.autocorrect || call.receiver().is_some() {
+            return;
+        }
+
+        if let Some(block) = call.block()
+            && let Some(block_arg) = block.as_block_argument_node()
+            && let Some(expr) = block_arg.expression()
+        {
+            let expr_loc = expr.location();
+            let replacement = String::from_utf8_lossy(
+                &self.source.as_bytes()[expr_loc.start_offset()..expr_loc.end_offset()],
+            )
+            .to_string();
+            let call_loc = call.location();
+            self.emitted_corrections.push(crate::correction::Correction {
+                start: call_loc.start_offset(),
+                end: call_loc.end_offset(),
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            return;
+        }
+
+        if let Some(args) = call.arguments() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() == 1 {
+                let arg_loc = arg_list[0].location();
+                let replacement = String::from_utf8_lossy(
+                    &self.source.as_bytes()[arg_loc.start_offset()..arg_loc.end_offset()],
+                )
+                .to_string();
+                let call_loc = call.location();
+                self.emitted_corrections.push(crate::correction::Correction {
+                    start: call_loc.start_offset(),
+                    end: call_loc.end_offset(),
+                    replacement,
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+            }
+        }
     }
 
     fn add_offense(&mut self, call: &ruby_prism::CallNode<'_>) {
@@ -205,6 +263,10 @@ impl LambdaWalker<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        LambdaWithoutLiteralBlock,
+        "cops/lint/lambda_without_literal_block"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         LambdaWithoutLiteralBlock,
         "cops/lint/lambda_without_literal_block"
     );

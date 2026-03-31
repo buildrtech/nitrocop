@@ -17,6 +17,10 @@ impl Cop for MultipleComparison {
         "Lint/MultipleComparison"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -32,7 +36,7 @@ impl Cop for MultipleComparison {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Pattern: (send (send _ COMP _) COMP _)
         // i.e., x < y < z
@@ -79,12 +83,50 @@ impl Cop for MultipleComparison {
 
         let loc = outer_call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Use the `&&` operator to compare multiple values.".to_string(),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut()
+            && let Some(inner_receiver) = inner_call.receiver()
+            && let Some(inner_args) = inner_call.arguments()
+            && let Some(outer_args) = outer_call.arguments()
+        {
+            let inner_arg_list: Vec<_> = inner_args.arguments().iter().collect();
+            let outer_arg_list: Vec<_> = outer_args.arguments().iter().collect();
+            if inner_arg_list.len() == 1 && outer_arg_list.len() == 1 {
+                let lhs_loc = inner_receiver.location();
+                let center_loc = inner_arg_list[0].location();
+                let rhs_loc = outer_arg_list[0].location();
+                let lhs = String::from_utf8_lossy(
+                    &source.as_bytes()[lhs_loc.start_offset()..lhs_loc.end_offset()],
+                );
+                let center = String::from_utf8_lossy(
+                    &source.as_bytes()[center_loc.start_offset()..center_loc.end_offset()],
+                );
+                let rhs = String::from_utf8_lossy(
+                    &source.as_bytes()[rhs_loc.start_offset()..rhs_loc.end_offset()],
+                );
+                let inner_op = std::str::from_utf8(inner_method).unwrap_or("<");
+                let outer_op = std::str::from_utf8(outer_method).unwrap_or("<");
+
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!(
+                        "{lhs} {inner_op} {center} && {center} {outer_op} {rhs}"
+                    ),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -100,4 +142,5 @@ fn is_set_operation(method: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MultipleComparison, "cops/lint/multiple_comparison");
+    crate::cop_autocorrect_fixture_tests!(MultipleComparison, "cops/lint/multiple_comparison");
 }

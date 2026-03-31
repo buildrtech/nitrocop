@@ -36,6 +36,10 @@ impl Cop for YodaExpression {
         "Style/YodaExpression"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -47,7 +51,7 @@ impl Cop for YodaExpression {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let supported_operators = config.get_string_array("SupportedOperators");
         let mut visitor = YodaVisitor {
@@ -55,10 +59,15 @@ impl Cop for YodaExpression {
             source,
             supported_operators,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            autocorrect: corrections.is_some(),
             offended_ranges: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections.as_mut() {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -67,6 +76,8 @@ struct YodaVisitor<'a> {
     source: &'a SourceFile,
     supported_operators: Option<Vec<String>>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    autocorrect: bool,
     /// Byte ranges (start..end) of nodes already flagged as Yoda expressions.
     /// Used to suppress nested Yoda expressions (offended_ancestor? equivalent).
     offended_ranges: Vec<(usize, usize)>,
@@ -110,13 +121,39 @@ impl<'pr> Visit<'pr> for YodaVisitor<'_> {
 
                         if !has_offended_ancestor {
                             let (line, column) = self.source.offset_to_line_col(start);
-                            self.diagnostics.push(self.cop.diagnostic(
+                            let mut diag = self.cop.diagnostic(
                                 self.source,
                                 line,
                                 column,
                                 "Prefer placing the expression on the left side of the operator."
                                     .to_string(),
-                            ));
+                            );
+
+                            if self.autocorrect
+                                && arg_list.len() == 1
+                                && node.block().is_none()
+                                && arg_list[0].as_splat_node().is_none()
+                                && arg_list[0].as_block_argument_node().is_none()
+                            {
+                                let lhs_loc = receiver.location();
+                                let rhs_loc = arg_list[0].location();
+                                let lhs = String::from_utf8_lossy(
+                                    &self.source.as_bytes()[lhs_loc.start_offset()..lhs_loc.end_offset()],
+                                );
+                                let rhs = String::from_utf8_lossy(
+                                    &self.source.as_bytes()[rhs_loc.start_offset()..rhs_loc.end_offset()],
+                                );
+                                self.corrections.push(crate::correction::Correction {
+                                    start,
+                                    end,
+                                    replacement: format!("{rhs} {name_str} {lhs}"),
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+
+                            self.diagnostics.push(diag);
                             self.offended_ranges.push((start, end));
                         }
                     }
@@ -163,4 +200,5 @@ fn is_constant_portion(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(YodaExpression, "cops/style/yoda_expression");
+    crate::cop_autocorrect_fixture_tests!(YodaExpression, "cops/style/yoda_expression");
 }

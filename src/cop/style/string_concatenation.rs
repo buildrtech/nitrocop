@@ -188,6 +188,10 @@ impl Cop for StringConcatenation {
         "Style/StringConcatenation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
@@ -199,7 +203,7 @@ impl Cop for StringConcatenation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -239,12 +243,61 @@ impl Cop for StringConcatenation {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Prefer string interpolation to string concatenation.".to_string(),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut()
+            && let Some(receiver) = call.receiver()
+            && let Some(receiver_str) = receiver.as_string_node()
+            && let Some(args) = call.arguments()
+        {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() == 1 && arg_list[0].as_string_node().is_none() {
+                let recv_loc = receiver_str.location();
+                let recv_src = String::from_utf8_lossy(
+                    &source.as_bytes()[recv_loc.start_offset()..recv_loc.end_offset()],
+                );
+                let arg_loc = arg_list[0].location();
+                let arg_src = String::from_utf8_lossy(
+                    &source.as_bytes()[arg_loc.start_offset()..arg_loc.end_offset()],
+                );
+
+                if recv_src.starts_with('"')
+                    && recv_src.ends_with('"')
+                    && !recv_src[1..recv_src.len() - 1].contains("\"")
+                {
+                    let inner = &recv_src[1..recv_src.len() - 1];
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: format!("\"{}#{{{}}}\"", inner, arg_src),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                } else if recv_src.starts_with('\'')
+                    && recv_src.ends_with('\'')
+                    && !recv_src[1..recv_src.len() - 1].contains("'")
+                    && !recv_src[1..recv_src.len() - 1].contains('\\')
+                {
+                    let inner = &recv_src[1..recv_src.len() - 1];
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: format!("\"{}#{{{}}}\"", inner, arg_src),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -252,4 +305,5 @@ impl Cop for StringConcatenation {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(StringConcatenation, "cops/style/string_concatenation");
+    crate::cop_autocorrect_fixture_tests!(StringConcatenation, "cops/style/string_concatenation");
 }
