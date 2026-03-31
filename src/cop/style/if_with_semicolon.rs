@@ -1,4 +1,5 @@
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
@@ -86,6 +87,10 @@ impl Cop for IfWithSemicolon {
         "Style/IfWithSemicolon"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -93,17 +98,21 @@ impl Cop for IfWithSemicolon {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = IfWithSemicolonVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             ignored_end_offset: 0,
             parent_is_if_offsets: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corrs) = corrections.as_mut() {
+            corrs.extend(visitor.corrections);
+        }
     }
 }
 
@@ -111,6 +120,7 @@ struct IfWithSemicolonVisitor<'a> {
     cop: &'a IfWithSemicolon,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
     /// End offset of the most recently flagged `if`/`unless` node.
     /// Any node starting before this offset is inside a flagged node and should be skipped
     /// (replicates RuboCop's `ignore_node`/`part_of_ignored_node?` mechanism).
@@ -224,8 +234,12 @@ impl IfWithSemicolonVisitor<'_> {
 
         // Check for semicolon: Prism's then_keyword_loc is ";" or "then".
         // Fallback: scan between predicate and body for semicolons.
-        let has_semicolon = if let Some(then_loc) = if_node.then_keyword_loc() {
-            then_loc.as_slice() == b";"
+        let semicolon_offset = if let Some(then_loc) = if_node.then_keyword_loc() {
+            if then_loc.as_slice() == b";" {
+                Some(then_loc.start_offset())
+            } else {
+                None
+            }
         } else {
             let pred_end = if_node.predicate().location().end_offset();
             let body_start = if let Some(stmts) = if_node.statements() {
@@ -237,12 +251,12 @@ impl IfWithSemicolonVisitor<'_> {
             } else {
                 return;
             };
-            has_semicolon_between(self.source, pred_end, body_start)
+            semicolon_offset_between(self.source, pred_end, body_start)
         };
 
-        if !has_semicolon {
+        let Some(semicolon_offset) = semicolon_offset else {
             return;
-        }
+        };
 
         // Flag this node and mark its range as ignored for descendants
         self.ignored_end_offset = loc.end_offset();
@@ -251,12 +265,28 @@ impl IfWithSemicolonVisitor<'_> {
         let cond_src =
             std::str::from_utf8(if_node.predicate().location().as_slice()).unwrap_or("...");
 
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             format!("Do not use `if {};` - use a newline instead.", cond_src),
-        ));
+        );
+
+        let replacement = if self.source.as_bytes().get(semicolon_offset + 1) == Some(&b'\n') {
+            ""
+        } else {
+            "\n"
+        };
+
+        self.corrections.push(Correction {
+            start: semicolon_offset,
+            end: semicolon_offset + 1,
+            replacement: replacement.to_string(),
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+        self.diagnostics.push(diagnostic);
     }
 
     fn check_unless_node(&mut self, unless_node: &ruby_prism::UnlessNode<'_>) {
@@ -278,8 +308,12 @@ impl IfWithSemicolonVisitor<'_> {
         }
 
         // Check for semicolon
-        let has_semicolon = if let Some(then_loc) = unless_node.then_keyword_loc() {
-            then_loc.as_slice() == b";"
+        let semicolon_offset = if let Some(then_loc) = unless_node.then_keyword_loc() {
+            if then_loc.as_slice() == b";" {
+                Some(then_loc.start_offset())
+            } else {
+                None
+            }
         } else {
             let pred_end = unless_node.predicate().location().end_offset();
             let body_start = if let Some(stmts) = unless_node.statements() {
@@ -289,12 +323,12 @@ impl IfWithSemicolonVisitor<'_> {
             } else {
                 return;
             };
-            has_semicolon_between(self.source, pred_end, body_start)
+            semicolon_offset_between(self.source, pred_end, body_start)
         };
 
-        if !has_semicolon {
+        let Some(semicolon_offset) = semicolon_offset else {
             return;
-        }
+        };
 
         // Flag this node and mark its range as ignored for descendants
         self.ignored_end_offset = loc.end_offset();
@@ -303,33 +337,55 @@ impl IfWithSemicolonVisitor<'_> {
         let cond_src =
             std::str::from_utf8(unless_node.predicate().location().as_slice()).unwrap_or("...");
 
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             format!("Do not use `unless {};` - use a newline instead.", cond_src),
-        ));
+        );
+
+        let replacement = if self.source.as_bytes().get(semicolon_offset + 1) == Some(&b'\n') {
+            ""
+        } else {
+            "\n"
+        };
+
+        self.corrections.push(Correction {
+            start: semicolon_offset,
+            end: semicolon_offset + 1,
+            replacement: replacement.to_string(),
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+        self.diagnostics.push(diagnostic);
     }
 }
 
-fn has_semicolon_between(source: &SourceFile, pred_end: usize, body_start: usize) -> bool {
-    if pred_end < body_start {
-        let between = &source.content[pred_end..body_start];
-        // Only check up to first newline, and stop at `#` (comment start) —
-        // semicolons inside comments should not trigger this cop.
-        between
-            .iter()
-            .take_while(|&&b| b != b'\n' && b != b'#')
-            .any(|&b| b == b';')
-    } else {
-        false
+fn semicolon_offset_between(
+    source: &SourceFile,
+    pred_end: usize,
+    body_start: usize,
+) -> Option<usize> {
+    if pred_end >= body_start {
+        return None;
     }
+
+    let between = &source.content[pred_end..body_start];
+    // Only check up to first newline, and stop at `#` (comment start) —
+    // semicolons inside comments should not trigger this cop.
+    between
+        .iter()
+        .take_while(|&&b| b != b'\n' && b != b'#')
+        .position(|&b| b == b';')
+        .map(|idx| pred_end + idx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(IfWithSemicolon, "cops/style/if_with_semicolon");
+    crate::cop_autocorrect_fixture_tests!(IfWithSemicolon, "cops/style/if_with_semicolon");
 
     #[test]
     fn single_line_if_semicolon() {
