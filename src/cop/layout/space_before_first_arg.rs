@@ -1,5 +1,6 @@
 use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -32,6 +33,8 @@ use crate::parse::source::SourceFile;
 ///    could falsely detect alignment from a 2nd non-blank line that RuboCop
 ///    wouldn't consider (FNs).
 pub struct SpaceBeforeFirstArg;
+
+const MESSAGE: &str = "Put one space between the method name and the first argument.";
 
 const OPERATOR_METHODS: &[&[u8]] = &[
     b"+", b"-", b"*", b"/", b"**", b"%", b"==", b"!=", b"<", b">", b"<=", b">=", b"<=>", b"===",
@@ -211,9 +214,36 @@ fn is_blank_or_comment(line: &[u8]) -> bool {
     }
 }
 
+fn push_space_before_first_arg_offense(
+    cop: &dyn Cop,
+    source: &SourceFile,
+    method_end: usize,
+    arg_start: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<Correction>>,
+) {
+    let (line, column) = source.offset_to_line_col(method_end);
+    let mut diagnostic = cop.diagnostic(source, line, column, MESSAGE.to_string());
+    if let Some(corrections) = corrections.as_mut() {
+        corrections.push(Correction {
+            start: method_end,
+            end: arg_start,
+            replacement: " ".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+    diagnostics.push(diagnostic);
+}
+
 impl Cop for SpaceBeforeFirstArg {
     fn name(&self) -> &'static str {
         "Layout/SpaceBeforeFirstArg"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -227,7 +257,7 @@ impl Cop for SpaceBeforeFirstArg {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let allow_for_alignment = config.get_bool("AllowForAlignment", true);
 
@@ -281,13 +311,14 @@ impl Cop for SpaceBeforeFirstArg {
 
         if gap == 0 {
             // No space at all between method name and first arg — always flag
-            let (line, column) = source.offset_to_line_col(method_end);
-            diagnostics.push(self.diagnostic(
+            push_space_before_first_arg_offense(
+                self,
                 source,
-                line,
-                column,
-                "Put one space between the method name and the first argument.".to_string(),
-            ));
+                method_end,
+                arg_start,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         if gap > 1 {
@@ -306,13 +337,14 @@ impl Cop for SpaceBeforeFirstArg {
                     }
                 }
 
-                let (line, column) = source.offset_to_line_col(method_end);
-                diagnostics.push(self.diagnostic(
+                push_space_before_first_arg_offense(
+                    self,
                     source,
-                    line,
-                    column,
-                    "Put one space between the method name and the first argument.".to_string(),
-                ));
+                    method_end,
+                    arg_start,
+                    diagnostics,
+                    &mut corrections,
+                );
             }
         }
     }
@@ -323,4 +355,17 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SpaceBeforeFirstArg, "cops/layout/space_before_first_arg");
+    crate::cop_autocorrect_fixture_tests!(
+        SpaceBeforeFirstArg,
+        "cops/layout/space_before_first_arg"
+    );
+
+    #[test]
+    fn autocorrect_inserts_missing_space() {
+        let source = b"puts\"hello\"\n";
+        let (_diagnostics, corrections) =
+            crate::testutil::run_cop_autocorrect(&SpaceBeforeFirstArg, source);
+        let corrected = crate::correction::CorrectionSet::from_vec(corrections).apply(source);
+        assert_eq!(corrected, b"puts \"hello\"\n");
+    }
 }
