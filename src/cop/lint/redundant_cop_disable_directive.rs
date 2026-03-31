@@ -34,6 +34,10 @@ impl Cop for RedundantCopDisableDirective {
         "Lint/RedundantCopDisableDirective"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }

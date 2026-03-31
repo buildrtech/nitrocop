@@ -695,6 +695,88 @@ fn is_directive_redundant(
 
 /// Validate that corrected bytes are still valid Ruby by re-parsing with Prism.
 /// Returns `None` (discarding corrections) if parse errors are found.
+fn redundant_disable_directive_correction_range(
+    source: &SourceFile,
+    directive: &crate::parse::directives::DisableDirective,
+    cop_name: &str,
+) -> Option<(usize, usize)> {
+    let line_start = source.line_start_offset(directive.line);
+    let line = source.lines().nth(directive.line.saturating_sub(1))?;
+    let hash_start = source.line_col_to_offset(directive.line, directive.column)?;
+    let hash_col = hash_start.checked_sub(line_start)?;
+    let comment = std::str::from_utf8(line.get(hash_col..)?)
+        .ok()?
+        .trim_start();
+
+    // Conservative safety guard: only remove directives that target exactly one
+    // cop token. Multi-cop directives are left offense-only to avoid deleting
+    // still-needed disables from mixed directives.
+    if !directive_has_single_cop(comment, cop_name) {
+        return None;
+    }
+
+    let start = if directive.is_inline {
+        if hash_start > line_start && source.as_bytes().get(hash_start - 1) == Some(&b' ') {
+            hash_start - 1
+        } else {
+            hash_start
+        }
+    } else {
+        line_start
+    };
+
+    let mut end = line_start + line.len();
+    if !directive.is_inline {
+        let bytes = source.as_bytes();
+        if end < bytes.len() {
+            if bytes[end] == b'\n' {
+                end += 1;
+            } else if bytes[end] == b'\r' && end + 1 < bytes.len() && bytes[end + 1] == b'\n' {
+                end += 2;
+            }
+        }
+    }
+
+    Some((start, end))
+}
+
+fn directive_has_single_cop(comment: &str, cop_name: &str) -> bool {
+    let after_hash = comment.strip_prefix('#').unwrap_or(comment).trim_start();
+    let Some(after_rubocop) = after_hash
+        .strip_prefix("rubocop")
+        .or_else(|| after_hash.strip_prefix("nitrocop"))
+    else {
+        return false;
+    };
+
+    let after_colon = after_rubocop.trim_start();
+    let Some(after_colon) = after_colon.strip_prefix(':') else {
+        return false;
+    };
+
+    let body = after_colon.trim_start();
+    let Some(rest) = body
+        .strip_prefix("disable")
+        .or_else(|| body.strip_prefix("todo"))
+    else {
+        return false;
+    };
+
+    let cop_list = rest.trim_start().split("--").next().unwrap_or("").trim();
+    if cop_list.is_empty() || cop_list.contains(',') {
+        return false;
+    }
+
+    let token = cop_list
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .trim_end_matches('.');
+
+    token.eq_ignore_ascii_case(cop_name)
+}
+
 fn validate_corrected_bytes(
     original_bytes: &[u8],
     current_bytes: Vec<u8>,
@@ -1195,11 +1277,22 @@ fn lint_source_once(
         && !has_only
         && !has_except_redundant_disable
     {
-        let cop_enabled = registry
-            .cop_index(REDUNDANT_DISABLE_COP)
+        let redundant_disable_idx = registry.cop_index(REDUNDANT_DISABLE_COP);
+        let cop_enabled = redundant_disable_idx
             .is_some_and(|idx| active_filters.is_cop_match(idx, &source.path));
 
         if cop_enabled {
+            let can_autocorrect_redundant_disable = redundant_disable_idx.is_some_and(|idx| {
+                let cop_config = &active_base_configs[idx];
+                let cop_name = registry.cop_name(idx);
+                autocorrect_mode != crate::cli::AutocorrectMode::Off
+                    && cop_config.should_autocorrect(autocorrect_mode)
+                    && (autocorrect_mode == crate::cli::AutocorrectMode::All
+                        || allowlist.contains(cop_name))
+            });
+
+            let mut seen_correction_ranges: HashSet<(usize, usize)> = HashSet::new();
+
             for directive in disabled.unused_directives() {
                 if !is_directive_redundant(
                     &directive.cop_name,
@@ -1208,6 +1301,26 @@ fn lint_source_once(
                     &source.path,
                 ) {
                     continue;
+                }
+
+                let mut corrected = false;
+                if can_autocorrect_redundant_disable {
+                    if let Some((start, end)) = redundant_disable_directive_correction_range(
+                        source,
+                        directive,
+                        &directive.cop_name,
+                    ) {
+                        if seen_correction_ranges.insert((start, end)) {
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: REDUNDANT_DISABLE_COP,
+                                cop_index: 0,
+                            });
+                        }
+                        corrected = true;
+                    }
                 }
 
                 let message = format!("Unnecessary disabling of `{}`.", directive.cop_name);
@@ -1220,7 +1333,7 @@ fn lint_source_once(
                     severity: Severity::Warning,
                     cop_name: REDUNDANT_DISABLE_COP.to_string(),
                     message,
-                    corrected: false,
+                    corrected,
                 });
             }
         }

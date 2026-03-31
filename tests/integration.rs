@@ -3557,6 +3557,92 @@ fn redundant_disable_disabled_cop() {
 }
 
 #[test]
+fn autocorrect_redundant_disable_removes_inline_directive() {
+    let dir = temp_dir("redundant_disable_autocorrect_inline");
+    let file = write_file(
+        &dir,
+        "test.rb",
+        b"# frozen_string_literal: true\n\nx = 1 # rubocop:disable Style/Copyright\n",
+    );
+    let config = load_config(None, None, None).unwrap();
+    let registry = CopRegistry::default_registry();
+    let args = Args {
+        autocorrect_all: true,
+        ..default_args()
+    };
+
+    let result = run_linter(
+        &discovered(&[file.clone()]),
+        &config,
+        &registry,
+        &args,
+        &TierMap::load(),
+        &AutocorrectAllowlist::load(),
+    );
+
+    let redundant: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.cop_name == "Lint/RedundantCopDisableDirective")
+        .collect();
+    assert_eq!(redundant.len(), 1, "expected one redundant disable offense");
+    assert!(redundant[0].corrected, "offense should be marked corrected");
+
+    let corrected = fs::read_to_string(&file).unwrap();
+    assert_eq!(corrected, "# frozen_string_literal: true\n\nx = 1\n");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn autocorrect_redundant_disable_keeps_mixed_multi_cop_directive() {
+    let dir = temp_dir("redundant_disable_autocorrect_mixed");
+    let file = write_file(
+        &dir,
+        "test.rb",
+        b"# frozen_string_literal: true\n\nx = 1 # rubocop:disable Style/Copyright, Layout/TrailingWhitespace\n",
+    );
+    let config = load_config(None, None, None).unwrap();
+    let registry = CopRegistry::default_registry();
+    let args = Args {
+        autocorrect_all: true,
+        ..default_args()
+    };
+
+    let result = run_linter(
+        &discovered(&[file.clone()]),
+        &config,
+        &registry,
+        &args,
+        &TierMap::load(),
+        &AutocorrectAllowlist::load(),
+    );
+
+    let redundant: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.cop_name == "Lint/RedundantCopDisableDirective")
+        .collect();
+    assert_eq!(redundant.len(), 1, "expected one redundant disable offense");
+    assert!(
+        redundant[0].message.contains("Style/Copyright"),
+        "expected redundant offense for disabled cop"
+    );
+    assert!(
+        !redundant[0].corrected,
+        "mixed directives should remain offense-only"
+    );
+
+    let corrected = fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        corrected,
+        "# frozen_string_literal: true\n\nx = 1 # rubocop:disable Style/Copyright, Layout/TrailingWhitespace\n"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn no_redundant_disable_department_used() {
     // Department-level disables are never flagged (conservative)
     let dir = temp_dir("redundant_disable_dept_used");
