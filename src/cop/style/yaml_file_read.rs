@@ -38,6 +38,10 @@ impl Cop for YAMLFileRead {
         &[CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -45,7 +49,7 @@ impl Cop for YAMLFileRead {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -142,7 +146,7 @@ impl Cop for YAMLFileRead {
         let name_str = String::from_utf8_lossy(name);
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
@@ -150,7 +154,61 @@ impl Cop for YAMLFileRead {
                 "Use `YAML.{}_file` instead of `YAML.{}` with `File.read`.",
                 name_str, name_str
             ),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let file_read_call = arg_list[0].as_call_node().expect("checked above");
+            let file_read_args = match file_read_call.arguments() {
+                Some(a) => a,
+                None => {
+                    diagnostics.push(diagnostic);
+                    return;
+                }
+            };
+            let file_args: Vec<_> = file_read_args.arguments().iter().collect();
+            let file_path_arg = match file_args.first() {
+                Some(a) => a,
+                None => {
+                    diagnostics.push(diagnostic);
+                    return;
+                }
+            };
+
+            let bytes = source.as_bytes();
+            let receiver_loc = receiver.location();
+            let receiver_src = String::from_utf8_lossy(
+                &bytes[receiver_loc.start_offset()..receiver_loc.end_offset()],
+            );
+
+            let mut corrected_args = Vec::with_capacity(arg_list.len());
+            let file_path_loc = file_path_arg.location();
+            corrected_args.push(
+                String::from_utf8_lossy(&bytes[file_path_loc.start_offset()..file_path_loc.end_offset()])
+                    .to_string(),
+            );
+            for arg in arg_list.iter().skip(1) {
+                let arg_loc = arg.location();
+                corrected_args.push(
+                    String::from_utf8_lossy(&bytes[arg_loc.start_offset()..arg_loc.end_offset()]).to_string(),
+                );
+            }
+
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!(
+                    "{}.{}_file({})",
+                    receiver_src,
+                    name_str,
+                    corrected_args.join(", ")
+                ),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -158,4 +216,5 @@ impl Cop for YAMLFileRead {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(YAMLFileRead, "cops/style/yaml_file_read");
+    crate::cop_autocorrect_fixture_tests!(YAMLFileRead, "cops/style/yaml_file_read");
 }

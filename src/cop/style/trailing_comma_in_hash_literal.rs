@@ -22,6 +22,52 @@ use crate::parse::source::SourceFile;
 /// bodies that sit between the last element and the closing brace.
 pub struct TrailingCommaInHashLiteral;
 
+fn push_remove_diagnostic(
+    cop: &TrailingCommaInHashLiteral,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    abs_offset: usize,
+    message: &str,
+) {
+    let (line, column) = source.offset_to_line_col(abs_offset);
+    let mut diag = cop.diagnostic(source, line, column, message.to_string());
+    if let Some(corr) = corrections.as_deref_mut() {
+        corr.push(crate::correction::Correction {
+            start: abs_offset,
+            end: abs_offset + 1,
+            replacement: String::new(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+    diagnostics.push(diag);
+}
+
+fn push_insert_diagnostic(
+    cop: &TrailingCommaInHashLiteral,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    insert_offset: usize,
+    message: &str,
+) {
+    let (line, column) = source.offset_to_line_col(insert_offset);
+    let mut diag = cop.diagnostic(source, line, column, message.to_string());
+    if let Some(corr) = corrections.as_deref_mut() {
+        corr.push(crate::correction::Correction {
+            start: insert_offset,
+            end: insert_offset,
+            replacement: ",".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+    diagnostics.push(diag);
+}
+
 impl Cop for TrailingCommaInHashLiteral {
     fn name(&self) -> &'static str {
         "Style/TrailingCommaInHashLiteral"
@@ -31,6 +77,10 @@ impl Cop for TrailingCommaInHashLiteral {
         &[HASH_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -38,7 +88,7 @@ impl Cop for TrailingCommaInHashLiteral {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Note: keyword_hash_node (keyword args like `foo(a: 1)`) intentionally not
         // handled — this cop only applies to trailing commas in hash literals.
@@ -103,27 +153,29 @@ impl Cop for TrailingCommaInHashLiteral {
             "comma" | "consistent_comma" => {
                 // Require trailing comma in multiline; no opinion on single-line
                 if is_multiline && !has_comma {
-                    let (line, column) = source.offset_to_line_col(last_end);
-                    diagnostics.push(self.diagnostic(
+                    push_insert_diagnostic(
+                        self,
                         source,
-                        line,
-                        column,
-                        "Put a comma after the last item of a multiline hash.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                        last_end,
+                        "Put a comma after the last item of a multiline hash.",
+                    );
                 }
             }
             _ => {
                 // no_comma: flag trailing commas
-                if has_comma {
-                    if let Some(abs_offset) = find_comma_offset() {
-                        let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Avoid comma after the last item of a hash.".to_string(),
-                        ));
-                    }
+                if has_comma
+                    && let Some(abs_offset) = find_comma_offset()
+                {
+                    push_remove_diagnostic(
+                        self,
+                        source,
+                        diagnostics,
+                        &mut corrections,
+                        abs_offset,
+                        "Avoid comma after the last item of a hash.",
+                    );
                 }
             }
         }
@@ -183,6 +235,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        TrailingCommaInHashLiteral,
+        "cops/style/trailing_comma_in_hash_literal"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         TrailingCommaInHashLiteral,
         "cops/style/trailing_comma_in_hash_literal"
     );

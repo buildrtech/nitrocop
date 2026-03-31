@@ -36,6 +36,10 @@ impl Cop for TrailingCommaInBlockArgs {
         &[BLOCK_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -43,7 +47,7 @@ impl Cop for TrailingCommaInBlockArgs {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let block = match node.as_block_node() {
             Some(b) => b,
@@ -103,12 +107,29 @@ impl Cop for TrailingCommaInBlockArgs {
 
         if bytes[pos] == b',' {
             let (line, column) = source.offset_to_line_col(pos);
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Useless trailing comma present in block arguments.".to_string(),
-            ));
+            );
+            if let Some(ref mut corr) = corrections {
+                let mut remove_end = pos + 1;
+                while remove_end < close_offset
+                    && (bytes[remove_end] == b' ' || bytes[remove_end] == b'\t')
+                {
+                    remove_end += 1;
+                }
+                corr.push(crate::correction::Correction {
+                    start: pos,
+                    end: remove_end,
+                    replacement: String::new(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+            diagnostics.push(diag);
         }
     }
 }
@@ -117,6 +138,10 @@ impl Cop for TrailingCommaInBlockArgs {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        TrailingCommaInBlockArgs,
+        "cops/style/trailing_comma_in_block_args"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         TrailingCommaInBlockArgs,
         "cops/style/trailing_comma_in_block_args"
     );

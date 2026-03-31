@@ -30,6 +30,10 @@ impl Cop for InfiniteLoop {
         "Style/InfiniteLoop"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -37,15 +41,19 @@ impl Cop for InfiniteLoop {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = InfiniteLoopVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -53,6 +61,7 @@ struct InfiniteLoopVisitor<'a> {
     cop: &'a InfiniteLoop,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 /// Returns true if the node is a truthy literal (true, integer, float, array, hash).
@@ -193,6 +202,55 @@ fn would_break_scoping(
 }
 
 impl InfiniteLoopVisitor<'_> {
+    fn build_replacement(
+        &self,
+        keyword_start: usize,
+        predicate_end: usize,
+        end_start: usize,
+    ) -> String {
+        let indent = " ".repeat(self.source.offset_to_line_col(keyword_start).1);
+        let bytes = self.source.as_bytes();
+        if predicate_end < end_start {
+            let mut body = String::from_utf8_lossy(&bytes[predicate_end..end_start]).to_string();
+            if body.starts_with(" do") {
+                body = body[3..].to_string();
+            }
+            if !body.starts_with('\n') {
+                body = format!("\n{}", body.trim_start_matches([' ', '\t']));
+            }
+            body = body.trim_end_matches([' ', '\t', '\n']).to_string();
+            body.push('\n');
+            format!("loop do{}{indent}end", body)
+        } else {
+            format!("loop do\n{indent}end")
+        }
+    }
+
+    fn find_end_keyword_start(&self, loc: ruby_prism::Location<'_>) -> Option<usize> {
+        let bytes = self.source.as_bytes();
+        let start = loc.start_offset();
+        let end = loc.end_offset();
+        if end <= start + 3 || end > bytes.len() {
+            return None;
+        }
+        let slice = &bytes[start..end];
+        for i in (0..=slice.len().saturating_sub(3)).rev() {
+            if &slice[i..i + 3] == b"end" {
+                let abs = start + i;
+                let prev_ok = abs == 0
+                    || bytes[abs - 1] == b'\n'
+                    || bytes[abs - 1] == b' '
+                    || bytes[abs - 1] == b'\t';
+                let next_ok = abs + 3 >= bytes.len()
+                    || matches!(bytes[abs + 3], b'\n' | b' ' | b'\t' | b';');
+                if prev_ok && next_ok {
+                    return Some(abs);
+                }
+            }
+        }
+        None
+    }
+
     fn check_statements(&mut self, stmts: &[ruby_prism::Node<'_>]) {
         for (i, stmt) in stmts.iter().enumerate() {
             if let Some(while_node) = stmt.as_while_node() {
@@ -201,26 +259,59 @@ impl InfiniteLoopVisitor<'_> {
                 {
                     let kw_loc = while_node.keyword_loc();
                     let (line, column) = self.source.offset_to_line_col(kw_loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diag = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
                         "Use `Kernel#loop` for infinite loops.".to_string(),
-                    ));
+                    );
+
+                    if let Some(end_start) = self.find_end_keyword_start(stmt.location()) {
+                        let replacement = self.build_replacement(
+                            kw_loc.start_offset(),
+                            while_node.predicate().location().end_offset(),
+                            end_start,
+                        );
+                        self.corrections.push(crate::correction::Correction {
+                            start: stmt.location().start_offset(),
+                            end: stmt.location().end_offset(),
+                            replacement,
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    self.diagnostics.push(diag);
                 }
-            } else if let Some(until_node) = stmt.as_until_node() {
-                if is_falsey_literal(&until_node.predicate())
-                    && !would_break_scoping(stmts, i, until_node.statements())
-                {
-                    let kw_loc = until_node.keyword_loc();
-                    let (line, column) = self.source.offset_to_line_col(kw_loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Use `Kernel#loop` for infinite loops.".to_string(),
-                    ));
+            } else if let Some(until_node) = stmt.as_until_node()
+                && is_falsey_literal(&until_node.predicate())
+                && !would_break_scoping(stmts, i, until_node.statements())
+            {
+                let kw_loc = until_node.keyword_loc();
+                let (line, column) = self.source.offset_to_line_col(kw_loc.start_offset());
+                let mut diag = self.cop.diagnostic(
+                    self.source,
+                    line,
+                    column,
+                    "Use `Kernel#loop` for infinite loops.".to_string(),
+                );
+
+                if let Some(end_start) = self.find_end_keyword_start(stmt.location()) {
+                    let replacement = self.build_replacement(
+                        kw_loc.start_offset(),
+                        until_node.predicate().location().end_offset(),
+                        end_start,
+                    );
+                    self.corrections.push(crate::correction::Correction {
+                        start: stmt.location().start_offset(),
+                        end: stmt.location().end_offset(),
+                        replacement,
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
                 }
+                self.diagnostics.push(diag);
             }
         }
     }
@@ -306,4 +397,5 @@ impl<'pr> Visit<'pr> for InfiniteLoopVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(InfiniteLoop, "cops/style/infinite_loop");
+    crate::cop_autocorrect_fixture_tests!(InfiniteLoop, "cops/style/infinite_loop");
 }
