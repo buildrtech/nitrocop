@@ -1,3 +1,3 @@
-- `Style/RescueModifier`: investigate conservative rescue-body rewrites where offense spans allow bounded single-expression transformations.
+- `Style/RescueStandardError`: add bounded explicit/implicit keyword-range autocorrect parity (`rescue` <-> `rescue StandardError`) while leaving multi-exception clauses untouched.
 - `Style/Semicolon`: consider expanding autocorrect beyond current conservative subset to expression-separator lines only if newline rewrites can be made robust without structural regressions.
 - Keep Layout backlog staged (spacing-first, then alignment/indentation) until remaining non-Layout low-risk cops are exhausted.
