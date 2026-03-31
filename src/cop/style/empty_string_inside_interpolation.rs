@@ -13,6 +13,10 @@ impl Cop for EmptyStringInsideInterpolation {
         "Style/EmptyStringInsideInterpolation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ELSE_NODE,
@@ -32,7 +36,7 @@ impl Cop for EmptyStringInsideInterpolation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "trailing_conditional");
 
@@ -87,15 +91,85 @@ impl Cop for EmptyStringInsideInterpolation {
                                     let loc = embedded.location();
                                     let (line, column) =
                                         source.offset_to_line_col(loc.start_offset());
-                                    diagnostics.push(
-                                        self.diagnostic(
-                                            source,
-                                            line,
-                                            column,
-                                            "Do not return empty strings in string interpolation."
-                                                .to_string(),
-                                        ),
+                                    let mut diag = self.diagnostic(
+                                        source,
+                                        line,
+                                        column,
+                                        "Do not return empty strings in string interpolation."
+                                            .to_string(),
                                     );
+
+                                    if let Some(corr) = corrections.as_mut() {
+                                        let replacement = if if_is_empty {
+                                            let else_expr = ternary
+                                                .subsequent()
+                                                .and_then(|n| n.as_else_node())
+                                                .and_then(|e| e.statements())
+                                                .and_then(|s| s.body().iter().next())
+                                                .map(|n| {
+                                                    source
+                                                        .byte_slice(
+                                                            n.location().start_offset(),
+                                                            n.location().end_offset(),
+                                                            "",
+                                                        )
+                                                        .to_string()
+                                                });
+                                            else_expr.map(|expr| {
+                                                format!(
+                                                    "{expr} unless {}",
+                                                    source.byte_slice(
+                                                        ternary
+                                                            .predicate()
+                                                            .location()
+                                                            .start_offset(),
+                                                        ternary.predicate().location().end_offset(),
+                                                        ""
+                                                    )
+                                                )
+                                            })
+                                        } else {
+                                            let if_expr = ternary
+                                                .statements()
+                                                .and_then(|s| s.body().iter().next())
+                                                .map(|n| {
+                                                    source
+                                                        .byte_slice(
+                                                            n.location().start_offset(),
+                                                            n.location().end_offset(),
+                                                            "",
+                                                        )
+                                                        .to_string()
+                                                });
+                                            if_expr.map(|expr| {
+                                                format!(
+                                                    "{expr} if {}",
+                                                    source.byte_slice(
+                                                        ternary
+                                                            .predicate()
+                                                            .location()
+                                                            .start_offset(),
+                                                        ternary.predicate().location().end_offset(),
+                                                        ""
+                                                    )
+                                                )
+                                            })
+                                        };
+
+                                        if let Some(replacement) = replacement {
+                                            let ternary_loc = ternary.location();
+                                            corr.push(crate::correction::Correction {
+                                                start: ternary_loc.start_offset(),
+                                                end: ternary_loc.end_offset(),
+                                                replacement,
+                                                cop_name: self.name(),
+                                                cop_index: 0,
+                                            });
+                                            diag.corrected = true;
+                                        }
+                                    }
+
+                                    diagnostics.push(diag);
                                 }
                             }
                         }
@@ -155,6 +229,10 @@ fn is_empty_value(_node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        EmptyStringInsideInterpolation,
+        "cops/style/empty_string_inside_interpolation"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         EmptyStringInsideInterpolation,
         "cops/style/empty_string_inside_interpolation"
     );
