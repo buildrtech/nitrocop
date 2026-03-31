@@ -1,6 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -166,6 +167,10 @@ impl Cop for DoubleNegation {
         "Style/DoubleNegation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -173,13 +178,15 @@ impl Cop for DoubleNegation {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "allowed_in_returns");
         let mut visitor = DoubleNegationVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            autocorrect_enabled: corrections.is_some(),
             enforced_style,
             def_info_stack: Vec::new(),
             conditional_last_line_stack: Vec::new(),
@@ -189,6 +196,9 @@ impl Cop for DoubleNegation {
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections.as_mut() {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -209,6 +219,8 @@ struct DoubleNegationVisitor<'a> {
     cop: &'a DoubleNegation,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
+    autocorrect_enabled: bool,
     enforced_style: &'a str,
     /// Stack of def body info (innermost at top).
     def_info_stack: Vec<DefBodyInfo>,
@@ -312,12 +324,34 @@ impl DoubleNegationVisitor<'_> {
 
         let loc = node.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diag = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Avoid the use of double negation (`!!`).".to_string(),
-        ));
+        );
+
+        if self.autocorrect_enabled {
+            if let Some(selector) = node.message_loc() {
+                self.corrections.push(Correction {
+                    start: selector.start_offset(),
+                    end: selector.end_offset(),
+                    replacement: String::new(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                self.corrections.push(Correction {
+                    start: loc.end_offset(),
+                    end: loc.end_offset(),
+                    replacement: ".nil?".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        self.diagnostics.push(diag);
     }
 
     /// RuboCop-compatible `end_of_method_definition?` check.
@@ -870,4 +904,5 @@ impl<'pr> Visit<'pr> for DoubleNegationVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DoubleNegation, "cops/style/double_negation");
+    crate::cop_autocorrect_fixture_tests!(DoubleNegation, "cops/style/double_negation");
 }
