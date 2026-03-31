@@ -9,6 +9,10 @@ impl Cop for ScriptPermission {
         "Lint/ScriptPermission"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -18,7 +22,7 @@ impl Cop for ScriptPermission {
         source: &SourceFile,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Only check files that start with a shebang
         let first_line = match source.lines().next() {
@@ -65,12 +69,27 @@ impl Cop for ScriptPermission {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(path);
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 1,
                 0,
                 format!("Script file {basename} doesn't have execute permission."),
-            ));
+            );
+
+            #[cfg(unix)]
+            if corrections.is_some() {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(path) {
+                    let mode = meta.permissions().mode();
+                    let _ = std::fs::set_permissions(
+                        path,
+                        std::fs::Permissions::from_mode(mode | 0o111),
+                    );
+                    diag.corrected = true;
+                }
+            }
+
+            diagnostics.push(diag);
         }
     }
 }
@@ -165,5 +184,28 @@ mod tests {
         let mut diags = Vec::new();
         ScriptPermission.check_lines(&source, &config, &mut diags, None);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn autocorrect_sets_execute_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = make_temp_script(
+            "autocorrect_exec_script.rb",
+            b"#!/usr/bin/env ruby\nputs 'hello'\n",
+            0o644,
+        );
+        let source = SourceFile::from_bytes(&path, std::fs::read(&path).unwrap());
+        let config = CopConfig::default();
+        let mut diags = Vec::new();
+        let mut corrections = Vec::new();
+
+        ScriptPermission.check_lines(&source, &config, &mut diags, Some(&mut corrections));
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "autocorrect should set execute bits");
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
     }
 }
