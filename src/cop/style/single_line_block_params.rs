@@ -2,6 +2,7 @@ use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Checks whether the block parameters of a single-line method accepting a block
 /// match the names specified via configuration.
@@ -74,6 +75,10 @@ impl Cop for SingleLineBlockParams {
         "Style/SingleLineBlockParams"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -89,7 +94,7 @@ impl Cop for SingleLineBlockParams {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -199,17 +204,81 @@ impl Cop for SingleLineBlockParams {
 
         let loc = block_params.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             format!("Name `{}` block params `|{}|`.", method_name_str, joined,),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("|{}|", joined),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+
+            if let Some(body) = block_node.body() {
+                let mut finder = LocalVarReadFinder {
+                    current_names: requireds
+                        .iter()
+                        .filter_map(|r| {
+                            r.as_required_parameter_node()
+                                .map(|rp| rp.name().as_slice().to_vec())
+                        })
+                        .collect(),
+                    preferred_names: preferred.iter().map(|p| p.as_bytes().to_vec()).collect(),
+                    replacements: Vec::new(),
+                };
+                finder.visit(&body);
+                for (start, end, replacement) in finder.replacements {
+                    corr.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                }
+            }
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
+}
+
+struct LocalVarReadFinder {
+    current_names: Vec<Vec<u8>>,
+    preferred_names: Vec<Vec<u8>>,
+    replacements: Vec<(usize, usize, String)>,
+}
+
+impl<'pr> Visit<'pr> for LocalVarReadFinder {
+    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        let name = node.name().as_slice();
+        if let Some(idx) = self.current_names.iter().position(|n| n.as_slice() == name) {
+            let loc = node.location();
+            self.replacements.push((
+                loc.start_offset(),
+                loc.end_offset(),
+                String::from_utf8_lossy(&self.preferred_names[idx]).to_string(),
+            ));
+        }
+    }
+
+    fn visit_block_node(&mut self, _node: &ruby_prism::BlockNode<'pr>) {}
+    fn visit_lambda_node(&mut self, _node: &ruby_prism::LambdaNode<'pr>) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SingleLineBlockParams, "cops/style/single_line_block_params");
+    crate::cop_autocorrect_fixture_tests!(
+        SingleLineBlockParams,
+        "cops/style/single_line_block_params"
+    );
 }
