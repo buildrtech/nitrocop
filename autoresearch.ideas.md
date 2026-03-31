@@ -1,3 +1,3 @@
-- `Style/ItBlockParameter`: add conservative autocorrect for `_1`-based offenses (`Use `it` block parameter.`) by replacing `_1` reads with `it` while preserving existing style gating and Ruby version checks.
+- `Style/Next`: investigate bounded autocorrect for wrapped iterator `if/unless` offenses where body shape allows deterministic `next` rewriting without changing branch semantics.
 - `Style/Semicolon`: consider expanding autocorrect beyond current conservative subset to expression-separator lines only if newline rewrites can be made robust without structural regressions.
 - Keep Layout backlog staged (spacing-first, then alignment/indentation) until remaining non-Layout low-risk cops are exhausted.

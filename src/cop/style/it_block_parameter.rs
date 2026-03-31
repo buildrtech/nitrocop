@@ -65,6 +65,10 @@ impl Cop for ItBlockParameter {
         "Style/ItBlockParameter"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, LAMBDA_NODE, SUPER_NODE, FORWARDING_SUPER_NODE]
     }
@@ -76,7 +80,7 @@ impl Cop for ItBlockParameter {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // RuboCop: minimum_target_ruby_version 3.4
         let ruby_version = config
@@ -92,7 +96,14 @@ impl Cop for ItBlockParameter {
 
         // Handle LambdaNode (-> { _1 }, -> { it }, -> { |x| x })
         if let Some(lambda) = node.as_lambda_node() {
-            self.check_lambda(source, node, &lambda, style, diagnostics);
+            self.check_lambda(
+                source,
+                node,
+                &lambda,
+                style,
+                diagnostics,
+                corrections.as_deref_mut(),
+            );
             return;
         }
 
@@ -101,7 +112,14 @@ impl Cop for ItBlockParameter {
         if let Some(call) = node.as_call_node() {
             if let Some(block) = call.block() {
                 if let Some(block_node) = block.as_block_node() {
-                    self.check_block_params(source, node, &block_node, style, diagnostics);
+                    self.check_block_params(
+                        source,
+                        node,
+                        &block_node,
+                        style,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                    );
                 }
             }
             return;
@@ -109,14 +127,28 @@ impl Cop for ItBlockParameter {
         if let Some(super_node) = node.as_super_node() {
             if let Some(block) = super_node.block() {
                 if let Some(block_node) = block.as_block_node() {
-                    self.check_block_params(source, node, &block_node, style, diagnostics);
+                    self.check_block_params(
+                        source,
+                        node,
+                        &block_node,
+                        style,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                    );
                 }
             }
             return;
         }
         if let Some(fwd_super) = node.as_forwarding_super_node() {
             if let Some(block_node) = fwd_super.block() {
-                self.check_block_params(source, node, &block_node, style, diagnostics);
+                self.check_block_params(
+                    source,
+                    node,
+                    &block_node,
+                    style,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
             }
         }
     }
@@ -131,6 +163,7 @@ impl ItBlockParameter {
         block_node: &ruby_prism::BlockNode<'_>,
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let params = match block_node.parameters() {
             Some(p) => p,
@@ -143,7 +176,14 @@ impl ItBlockParameter {
         }
 
         if let Some(numbered) = params.as_numbered_parameters_node() {
-            self.check_numblock(source, block_node, &numbered, style, diagnostics);
+            self.check_numblock(
+                source,
+                block_node,
+                &numbered,
+                style,
+                diagnostics,
+                corrections,
+            );
             return;
         }
 
@@ -223,6 +263,7 @@ impl ItBlockParameter {
         lambda: &ruby_prism::LambdaNode<'_>,
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let params = match lambda.parameters() {
             Some(p) => p,
@@ -291,14 +332,25 @@ impl ItBlockParameter {
                     locations: Vec::new(),
                 };
                 finder.visit(&body);
-                for (start_offset, _end_offset) in finder.locations {
+                for (start_offset, end_offset) in finder.locations {
                     let (line, column) = source.offset_to_line_col(start_offset);
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
                         "Use `it` block parameter.".to_string(),
-                    ));
+                    );
+                    if let Some(corr) = corrections.as_deref_mut() {
+                        corr.push(crate::correction::Correction {
+                            start: start_offset,
+                            end: end_offset,
+                            replacement: "it".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
                 }
             }
             return;
@@ -365,6 +417,7 @@ impl ItBlockParameter {
         numbered: &ruby_prism::NumberedParametersNode<'_>,
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // disallow style doesn't flag numbered params
         if style == "disallow" {
@@ -387,14 +440,26 @@ impl ItBlockParameter {
                 locations: Vec::new(),
             };
             finder.visit(&body);
-            for (start_offset, _end_offset) in finder.locations {
+            let mut corrections = corrections;
+            for (start_offset, end_offset) in finder.locations {
                 let (line, column) = source.offset_to_line_col(start_offset);
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use `it` block parameter.".to_string(),
-                ));
+                );
+                if let Some(corr) = corrections.as_deref_mut() {
+                    corr.push(crate::correction::Correction {
+                        start: start_offset,
+                        end: end_offset,
+                        replacement: "it".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
         }
     }
@@ -561,6 +626,7 @@ impl<'pr, 'a> Visit<'pr> for NamedParamFinder<'a> {
 mod tests {
     use super::*;
     use crate::cop::CopConfig;
+    use crate::testutil::assert_cop_autocorrect_with_config;
 
     fn ruby34_config() -> CopConfig {
         let mut config = CopConfig::default();
@@ -595,6 +661,16 @@ mod tests {
         crate::testutil::assert_cop_no_offenses_full(
             &ItBlockParameter,
             include_bytes!("../../../tests/fixtures/cops/style/it_block_parameter/offense.rb"),
+        );
+    }
+
+    #[test]
+    fn autocorrect_numbered_parameter_offenses() {
+        assert_cop_autocorrect_with_config(
+            &ItBlockParameter,
+            include_bytes!("../../../tests/fixtures/cops/style/it_block_parameter/offense.rb"),
+            include_bytes!("../../../tests/fixtures/cops/style/it_block_parameter/corrected.rb"),
+            ruby34_config(),
         );
     }
 }
