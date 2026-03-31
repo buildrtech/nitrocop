@@ -18,6 +18,10 @@ impl Cop for ImplicitStringConcatenation {
         &[INTERPOLATED_STRING_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for ImplicitStringConcatenation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let interp = match node.as_interpolated_string_node() {
             Some(n) => n,
@@ -74,7 +78,7 @@ impl Cop for ImplicitStringConcatenation {
                             // not at the parent dstr node. RuboCop uses the range spanning
                             // lhs to rhs; we use lhs start for line/column.
                             let (line, column) = source.offset_to_line_col(prev_loc.start_offset());
-                            diagnostics.push(self.diagnostic(
+                            let mut diagnostic = self.diagnostic(
                                 source,
                                 line,
                                 column,
@@ -82,7 +86,20 @@ impl Cop for ImplicitStringConcatenation {
                                     "Combine {} and {} into a single string literal, rather than using implicit string concatenation.",
                                     lhs_display, rhs_display
                                 ),
-                            ));
+                            );
+
+                            if let Some(corrs) = corrections.as_mut() {
+                                corrs.push(crate::correction::Correction {
+                                    start: prev_loc.end_offset(),
+                                    end: curr_loc.start_offset(),
+                                    replacement: " + ".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+
+                            diagnostics.push(diagnostic);
                             // Do NOT break — report all consecutive same-line pairs,
                             // matching RuboCop's behavior.
                         }
@@ -103,6 +120,10 @@ fn display_str(source: &SourceFile, loc: &ruby_prism::Location<'_>) -> String {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        ImplicitStringConcatenation,
+        "cops/lint/implicit_string_concatenation"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         ImplicitStringConcatenation,
         "cops/lint/implicit_string_concatenation"
     );
