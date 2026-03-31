@@ -39,6 +39,10 @@ impl Cop for CombinableDefined {
         "Style/CombinableDefined"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             AND_NODE,
@@ -56,7 +60,7 @@ impl Cop for CombinableDefined {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(and_node) = node.as_and_node() {
             check_and(
@@ -66,6 +70,7 @@ impl Cop for CombinableDefined {
                 &and_node.left(),
                 &and_node.right(),
                 diagnostics,
+                &mut corrections,
             );
             return;
         }
@@ -78,7 +83,15 @@ impl Cop for CombinableDefined {
                     if let Some(args) = call.arguments() {
                         let arg_list: Vec<_> = args.arguments().iter().collect();
                         if arg_list.len() == 1 {
-                            check_and(self, source, node, &receiver, &arg_list[0], diagnostics);
+                            check_and(
+                                self,
+                                source,
+                                node,
+                                &receiver,
+                                &arg_list[0],
+                                diagnostics,
+                                &mut corrections,
+                            );
                         }
                     }
                 }
@@ -152,6 +165,7 @@ fn check_and(
     left: &ruby_prism::Node<'_>,
     right: &ruby_prism::Node<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     // Collect subject info from all terms in the chain
     let mut subjects = Vec::new();
@@ -173,16 +187,43 @@ fn check_and(
             if subject_texts.contains(&parent_text.as_str()) {
                 let loc = whole_node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(cop.diagnostic(
+                let mut diag = cop.diagnostic(
                     source,
                     line,
                     column,
                     "Combine nested `defined?` calls.".to_string(),
-                ));
+                );
+                if let Some(corr) = corrections.as_mut() {
+                    if let Some(best) = preferred_defined_subject(&subjects) {
+                        corr.push(crate::correction::Correction {
+                            start: whole_node.location().start_offset(),
+                            end: whole_node.location().end_offset(),
+                            replacement: format!("defined?({best})"),
+                            cop_name: cop.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+                diagnostics.push(diag);
                 return;
             }
         }
     }
+}
+
+fn preferred_defined_subject(subjects: &[SubjectInfo]) -> Option<&str> {
+    subjects
+        .iter()
+        .max_by_key(|s| {
+            let depth = s
+                .text
+                .matches("::")
+                .count()
+                .max(s.text.matches('.').count());
+            (depth, s.text.len())
+        })
+        .map(|s| s.text.as_str())
 }
 
 /// Extract the direct parent/namespace of a defined? subject as source text:
@@ -214,4 +255,5 @@ fn node_source_text(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String 
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CombinableDefined, "cops/style/combinable_defined");
+    crate::cop_autocorrect_fixture_tests!(CombinableDefined, "cops/style/combinable_defined");
 }
