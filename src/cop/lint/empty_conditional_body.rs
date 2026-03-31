@@ -32,6 +32,10 @@ impl Cop for EmptyConditionalBody {
         "Lint/EmptyConditionalBody"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -47,7 +51,7 @@ impl Cop for EmptyConditionalBody {
         parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_comments = config.get_bool("AllowComments", true);
 
@@ -91,12 +95,32 @@ impl Cop for EmptyConditionalBody {
                     }
                 }
                 let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     "Avoid empty `if` conditions.".to_string(),
-                ));
+                );
+
+                if let Some(corr) = corrections.as_mut() {
+                    let insert_at = if let Some(sub) = if_node.subsequent() {
+                        sub.location().start_offset()
+                    } else if let Some(end_kw) = if_node.end_keyword_loc() {
+                        end_kw.start_offset()
+                    } else {
+                        node.location().end_offset()
+                    };
+                    corr.push(crate::correction::Correction {
+                        start: insert_at,
+                        end: insert_at,
+                        replacement: format!("{}nil\n", " ".repeat(column + 2)),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+
+                diagnostics.push(diag);
             }
         }
 
@@ -134,12 +158,32 @@ impl Cop for EmptyConditionalBody {
                 }
                 let kw_loc = unless_node.keyword_loc();
                 let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     line,
                     column,
                     "Avoid empty `unless` conditions.".to_string(),
-                ));
+                );
+
+                if let Some(corr) = corrections.as_mut() {
+                    let insert_at = if let Some(else_clause) = unless_node.else_clause() {
+                        else_clause.location().start_offset()
+                    } else if let Some(end_kw) = unless_node.end_keyword_loc() {
+                        end_kw.start_offset()
+                    } else {
+                        node.location().end_offset()
+                    };
+                    corr.push(crate::correction::Correction {
+                        start: insert_at,
+                        end: insert_at,
+                        replacement: format!("{}nil\n", " ".repeat(column + 2)),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+
+                diagnostics.push(diag);
             }
         }
     }
@@ -149,4 +193,5 @@ impl Cop for EmptyConditionalBody {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyConditionalBody, "cops/lint/empty_conditional_body");
+    crate::cop_autocorrect_fixture_tests!(EmptyConditionalBody, "cops/lint/empty_conditional_body");
 }
