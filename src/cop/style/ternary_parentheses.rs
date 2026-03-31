@@ -98,6 +98,10 @@ impl Cop for TernaryParentheses {
         "Style/TernaryParentheses"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
@@ -129,7 +133,7 @@ impl Cop for TernaryParentheses {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "require_no_parentheses");
         let allow_safe = config.get_bool("AllowSafeAssignment", true);
@@ -160,12 +164,30 @@ impl Cop for TernaryParentheses {
                 if !is_parenthesized {
                     let loc = predicate.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
                         "Use parentheses for ternary conditions.".to_string(),
-                    ));
+                    );
+                    if let Some(corr) = corrections.as_mut() {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.start_offset(),
+                            replacement: "(".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        corr.push(crate::correction::Correction {
+                            start: loc.end_offset(),
+                            end: loc.end_offset(),
+                            replacement: ")".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
                 }
             }
             "require_parentheses_when_complex" => {
@@ -173,28 +195,61 @@ impl Cop for TernaryParentheses {
                 if is_complex && !is_parenthesized {
                     let loc = predicate.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Use parentheses for ternary expressions with complex conditions."
-                                .to_string(),
-                        ),
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use parentheses for ternary expressions with complex conditions."
+                            .to_string(),
                     );
+                    if let Some(corr) = corrections.as_mut() {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.start_offset(),
+                            replacement: "(".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        corr.push(crate::correction::Correction {
+                            start: loc.end_offset(),
+                            end: loc.end_offset(),
+                            replacement: ")".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
                 } else if !is_complex && is_parenthesized {
                     let paren = predicate.as_parentheses_node().unwrap();
                     let open_loc = paren.opening_loc();
+                    let close_loc = paren.closing_loc();
                     let (line, column) = source.offset_to_line_col(open_loc.start_offset());
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Only use parentheses for ternary expressions with complex conditions."
-                                .to_string(),
-                        ),
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Only use parentheses for ternary expressions with complex conditions."
+                            .to_string(),
                     );
+                    if let Some(corr) = corrections.as_mut() {
+                        corr.push(crate::correction::Correction {
+                            start: open_loc.start_offset(),
+                            end: open_loc.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        corr.push(crate::correction::Correction {
+                            start: close_loc.start_offset(),
+                            end: close_loc.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
                 }
             }
             _ => {
@@ -202,13 +257,32 @@ impl Cop for TernaryParentheses {
                 if is_parenthesized {
                     let paren = predicate.as_parentheses_node().unwrap();
                     let open_loc = paren.opening_loc();
+                    let close_loc = paren.closing_loc();
                     let (line, column) = source.offset_to_line_col(open_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
                         "Ternary conditions should not be wrapped in parentheses.".to_string(),
-                    ));
+                    );
+                    if let Some(corr) = corrections.as_mut() {
+                        corr.push(crate::correction::Correction {
+                            start: open_loc.start_offset(),
+                            end: open_loc.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        corr.push(crate::correction::Correction {
+                            start: close_loc.start_offset(),
+                            end: close_loc.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
                 }
             }
         }
@@ -221,6 +295,7 @@ mod tests {
     use crate::testutil::{run_cop_full, run_cop_full_with_config};
 
     crate::cop_fixture_tests!(TernaryParentheses, "cops/style/ternary_parentheses");
+    crate::cop_autocorrect_fixture_tests!(TernaryParentheses, "cops/style/ternary_parentheses");
 
     #[test]
     fn require_parentheses_flags_missing() {
