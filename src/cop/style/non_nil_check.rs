@@ -10,6 +10,10 @@ impl Cop for NonNilCheck {
         "Style/NonNilCheck"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -17,7 +21,7 @@ impl Cop for NonNilCheck {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let include_semantic_changes = config.get_bool("IncludeSemanticChanges", false);
         let mut visitor = NonNilCheckVisitor {
@@ -27,6 +31,7 @@ impl Cop for NonNilCheck {
             include_semantic_changes,
             in_predicate_method: false,
             predicate_last_stmt_offset: None,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -41,6 +46,7 @@ struct NonNilCheckVisitor<'a, 'src> {
     in_predicate_method: bool,
     /// Start offset of the last statement in the current predicate method body.
     predicate_last_stmt_offset: Option<usize>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> Visit<'pr> for NonNilCheckVisitor<'_, '_> {
@@ -100,12 +106,24 @@ impl<'pr> Visit<'pr> for NonNilCheckVisitor<'_, '_> {
                                 std::str::from_utf8(node.receiver().unwrap().location().as_slice())
                                     .unwrap_or("x");
                             let current_src = std::str::from_utf8(loc.as_slice()).unwrap_or("");
-                            self.diagnostics.push(self.cop.diagnostic(
+                            let mut diag = self.cop.diagnostic(
                                 self.source,
                                 line,
                                 column,
                                 format!("Prefer `!{}.nil?` over `{}`.", receiver_src, current_src),
-                            ));
+                            );
+                            if let Some(corrections) = self.corrections.as_mut() {
+                                let replacement = format!("!{receiver_src}.nil?");
+                                corrections.push(crate::correction::Correction {
+                                    start: loc.start_offset(),
+                                    end: loc.end_offset(),
+                                    replacement,
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                            self.diagnostics.push(diag);
                         }
                     }
                 }
@@ -146,4 +164,5 @@ impl<'pr> Visit<'pr> for NonNilCheckVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NonNilCheck, "cops/style/non_nil_check");
+    crate::cop_autocorrect_fixture_tests!(NonNilCheck, "cops/style/non_nil_check");
 }
