@@ -80,6 +80,10 @@ impl Cop for TrailingMethodEndStatement {
         &[BEGIN_NODE, DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -87,7 +91,7 @@ impl Cop for TrailingMethodEndStatement {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -122,12 +126,42 @@ impl Cop for TrailingMethodEndStatement {
         let last_line = body_last_line(source, &body);
 
         if last_line == end_line {
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 end_line,
                 end_column,
                 "Place the end statement of a multi-line method on its own line.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                let bytes = source.as_bytes();
+                let end_start = end_loc.start_offset();
+                let mut replace_start = end_start;
+
+                while replace_start > 0 {
+                    let ch = bytes[replace_start - 1];
+                    if ch == b' ' || ch == b'\t' {
+                        replace_start -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                if replace_start > 0 && bytes[replace_start - 1] == b';' {
+                    replace_start -= 1;
+                }
+
+                let def_indent = source.offset_to_line_col(def_node.def_keyword_loc().start_offset()).1;
+                corr.push(crate::correction::Correction {
+                    start: replace_start,
+                    end: end_start,
+                    replacement: format!("\n{}", " ".repeat(def_indent)),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -136,6 +170,10 @@ impl Cop for TrailingMethodEndStatement {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        TrailingMethodEndStatement,
+        "cops/style/trailing_method_end_statement"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         TrailingMethodEndStatement,
         "cops/style/trailing_method_end_statement"
     );
