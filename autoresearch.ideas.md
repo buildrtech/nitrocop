@@ -1,3 +1,3 @@
-- `Lint/UselessAccessModifier`: add conservative line-removal autocorrect for offense-matched bare access modifiers (`public/private/protected/module_function` and bare `private_class_method`) where deletions are whole-line and deterministic.
+- `Lint/RedundantSplatExpansion`: investigate conservative autocorrect for offense-matched literal splats by removing only the splat operator or outer literal brackets in contexts already flagged by current detection.
 - `Style/Semicolon`: consider expanding autocorrect beyond current conservative subset to expression-separator lines only if newline rewrites can be made robust without structural regressions.
 - Keep Layout backlog staged (spacing-first, then alignment/indentation) until remaining non-Layout low-risk cops are exhausted.

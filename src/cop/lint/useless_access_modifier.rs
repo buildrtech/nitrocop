@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -56,6 +58,10 @@ impl Cop for UselessAccessModifier {
         "Lint/UselessAccessModifier"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -67,7 +73,7 @@ impl Cop for UselessAccessModifier {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let context_creating = config
             .get_string_array("ContextCreatingMethods")
@@ -84,7 +90,43 @@ impl Cop for UselessAccessModifier {
             in_def: false,
         };
         visitor.visit(&parse_result.node());
+
+        if let Some(corr) = corrections.as_mut() {
+            let mut seen_ranges = HashSet::new();
+            for diag in &mut visitor.diagnostics {
+                if let Some((start, end)) = whole_line_range(source, diag.location.line) {
+                    if seen_ranges.insert((start, end)) {
+                        corr.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: "".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                    }
+                    diag.corrected = true;
+                }
+            }
+        }
+
         diagnostics.extend(visitor.diagnostics);
+    }
+}
+
+fn whole_line_range(source: &SourceFile, line: usize) -> Option<(usize, usize)> {
+    if line == 0 {
+        return None;
+    }
+
+    let start = source.line_start_offset(line);
+    let end = source
+        .line_col_to_offset(line + 1, 0)
+        .unwrap_or(source.as_bytes().len());
+
+    if start <= end {
+        Some((start, end))
+    } else {
+        None
     }
 }
 
@@ -765,4 +807,8 @@ impl<'pr> Visit<'pr> for UselessAccessVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UselessAccessModifier, "cops/lint/useless_access_modifier");
+    crate::cop_autocorrect_fixture_tests!(
+        UselessAccessModifier,
+        "cops/lint/useless_access_modifier"
+    );
 }
