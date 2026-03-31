@@ -42,6 +42,10 @@ impl Cop for StringLiteralsInInterpolation {
         "Style/StringLiteralsInInterpolation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -49,7 +53,7 @@ impl Cop for StringLiteralsInInterpolation {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "single_quotes").to_string();
 
@@ -57,12 +61,16 @@ impl Cop for StringLiteralsInInterpolation {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             enforced_style,
             in_interpolation: false,
             in_xstr: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(c) = corrections {
+            c.extend(visitor.corrections);
+        }
     }
 }
 
@@ -70,6 +78,7 @@ struct InterpStringVisitor<'a> {
     cop: &'a StringLiteralsInInterpolation,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     enforced_style: String,
     in_interpolation: bool,
     in_xstr: bool,
@@ -129,12 +138,23 @@ impl<'pr> Visit<'pr> for InterpStringVisitor<'_> {
                     if !needs_double_quotes(content) {
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Prefer single-quoted strings inside interpolations.".to_string(),
-                        ));
+                        );
+
+                        let replacement = to_single_quoted_literal(content);
+                        self.corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -184,10 +204,44 @@ fn needs_double_quotes(content: &[u8]) -> bool {
     false
 }
 
+fn to_single_quoted_literal(content: &[u8]) -> String {
+    let mut out = String::with_capacity(content.len() + 2);
+    out.push('\'');
+
+    let mut i = 0;
+    while i < content.len() {
+        if content[i] == b'\\' && i + 1 < content.len() {
+            match content[i + 1] {
+                b'"' => {
+                    out.push('"');
+                    i += 2;
+                    continue;
+                }
+                b'\\' => {
+                    out.push('\\');
+                    out.push('\\');
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(content[i] as char);
+        i += 1;
+    }
+
+    out.push('\'');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        StringLiteralsInInterpolation,
+        "cops/style/string_literals_in_interpolation"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         StringLiteralsInInterpolation,
         "cops/style/string_literals_in_interpolation"
     );
