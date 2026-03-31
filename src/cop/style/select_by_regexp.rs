@@ -22,27 +22,39 @@ impl SelectByRegexp {
         false
     }
 
-    fn check_block_body(body: &ruby_prism::Node<'_>, block_arg_name: &[u8]) -> bool {
-        if let Some(call) = body.as_call_node() {
-            let name = call.name();
-            let name_bytes = name.as_slice();
-            if matches!(name_bytes, b"match?" | b"=~" | b"!~") {
-                if let Some(receiver) = call.receiver() {
-                    if let Some(args) = call.arguments() {
-                        let arg_list: Vec<_> = args.arguments().iter().collect();
-                        if arg_list.len() == 1 {
-                            let recv_is_var = Self::is_local_var_named(&receiver, block_arg_name);
-                            let arg_is_var = Self::is_local_var_named(&arg_list[0], block_arg_name);
-                            let recv_is_re = Self::is_regexp(&receiver);
-                            let arg_is_re = Self::is_regexp(&arg_list[0]);
-
-                            return (recv_is_var && arg_is_re) || (recv_is_re && arg_is_var);
-                        }
-                    }
-                }
-            }
+    fn regexp_match_arg(
+        body: &ruby_prism::Node<'_>,
+        block_arg_name: &[u8],
+    ) -> Option<(usize, usize, bool)> {
+        let call = body.as_call_node()?;
+        let name_bytes = call.name().as_slice();
+        if !matches!(name_bytes, b"match?" | b"=~" | b"!~") {
+            return None;
         }
-        false
+
+        let receiver = call.receiver()?;
+        let args = call.arguments()?;
+        let arg_list: Vec<_> = args.arguments().iter().collect();
+        if arg_list.len() != 1 {
+            return None;
+        }
+
+        let recv_is_var = Self::is_local_var_named(&receiver, block_arg_name);
+        let arg_is_var = Self::is_local_var_named(&arg_list[0], block_arg_name);
+        let recv_is_re = Self::is_regexp(&receiver);
+        let arg_is_re = Self::is_regexp(&arg_list[0]);
+
+        if recv_is_var && arg_is_re {
+            let loc = arg_list[0].location();
+            return Some((loc.start_offset(), loc.end_offset(), name_bytes == b"!~"));
+        }
+
+        if recv_is_re && arg_is_var {
+            let loc = receiver.location();
+            return Some((loc.start_offset(), loc.end_offset(), name_bytes == b"!~"));
+        }
+
+        None
     }
 
     fn is_hash_receiver(node: &ruby_prism::Node<'_>) -> bool {
@@ -89,6 +101,10 @@ impl Cop for SelectByRegexp {
         "Style/SelectByRegexp"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             BLOCK_NODE,
@@ -113,7 +129,7 @@ impl Cop for SelectByRegexp {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // We check the CallNode; its block() gives us the BlockNode
         let call = match node.as_call_node() {
@@ -182,22 +198,35 @@ impl Cop for SelectByRegexp {
             None => return,
         };
 
-        if let Some(stmts) = body.as_statements_node() {
+        let (regexp_start, regexp_end, negated_match) = if let Some(stmts) = body.as_statements_node() {
             let body_nodes: Vec<_> = stmts.body().into_iter().collect();
             if body_nodes.len() != 1 {
                 return;
             }
 
-            if !Self::check_block_body(&body_nodes[0], &block_arg_name) {
-                return;
+            match Self::regexp_match_arg(&body_nodes[0], &block_arg_name) {
+                Some(result) => result,
+                None => return,
             }
         } else {
             return;
-        }
+        };
 
         let replacement = match method_bytes {
-            b"select" | b"filter" | b"find_all" => "grep",
-            b"reject" => "grep_v",
+            b"select" | b"filter" | b"find_all" => {
+                if negated_match {
+                    "grep_v"
+                } else {
+                    "grep"
+                }
+            }
+            b"reject" => {
+                if negated_match {
+                    "grep"
+                } else {
+                    "grep_v"
+                }
+            }
             _ => return,
         };
 
@@ -205,7 +234,7 @@ impl Cop for SelectByRegexp {
         // Report on the whole call including block
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
@@ -213,7 +242,34 @@ impl Cop for SelectByRegexp {
                 "Prefer `{}` to `{}` with a regexp match.",
                 replacement, method_str
             ),
-        ));
+        );
+
+        if let Some(corrs) = corrections.as_mut() {
+            let regexp_source = source.byte_slice(regexp_start, regexp_end, "");
+            let replacement_source = if let Some(receiver) = call.receiver() {
+                let recv_loc = receiver.location();
+                let recv_source = source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+                let op = if let Some(op_loc) = call.call_operator_loc() {
+                    source.byte_slice(op_loc.start_offset(), op_loc.end_offset(), "")
+                } else {
+                    "."
+                };
+                format!("{recv_source}{op}{replacement}({regexp_source})")
+            } else {
+                format!("{replacement}({regexp_source})")
+            };
+
+            corrs.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: replacement_source,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -221,4 +277,5 @@ impl Cop for SelectByRegexp {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SelectByRegexp, "cops/style/select_by_regexp");
+    crate::cop_autocorrect_fixture_tests!(SelectByRegexp, "cops/style/select_by_regexp");
 }
