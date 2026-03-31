@@ -41,6 +41,10 @@ impl Cop for ClassMethodsDefinitions {
         "Style/ClassMethodsDefinitions"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -56,7 +60,7 @@ impl Cop for ClassMethodsDefinitions {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "def_self");
 
@@ -73,12 +77,29 @@ impl Cop for ClassMethodsDefinitions {
                         if all_defs_public(source, &body, sclass_line) {
                             let loc = sclass.location();
                             let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
+                            let mut diag = self.diagnostic(
                                 source,
                                 line,
                                 column,
                                 "Do not define public methods within class << self.".to_string(),
-                            ));
+                            );
+
+                            if let Some(corrections) = corrections.as_mut() {
+                                if let Some(replacement) =
+                                    rewrite_simple_sclass_to_def_self(source, &sclass)
+                                {
+                                    corrections.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement,
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                            }
+
+                            diagnostics.push(diag);
                         }
                     }
                 }
@@ -223,10 +244,82 @@ fn all_defs_public(source: &SourceFile, body: &ruby_prism::Node<'_>, sclass_line
     found_def
 }
 
+fn rewrite_simple_sclass_to_def_self(
+    source: &SourceFile,
+    sclass: &ruby_prism::SingletonClassNode<'_>,
+) -> Option<String> {
+    let body = sclass.body()?;
+    let stmts = body.as_statements_node()?;
+    let stmt_vec: Vec<_> = stmts.body().iter().collect();
+    if stmt_vec.is_empty() {
+        return None;
+    }
+
+    let mut rewritten = Vec::new();
+    let sclass_col = source
+        .offset_to_line_col(sclass.location().start_offset())
+        .1;
+
+    for stmt in stmt_vec {
+        let def_node = stmt.as_def_node()?;
+        if def_node.receiver().is_some() {
+            return None;
+        }
+
+        let def_src = source.byte_slice(
+            def_node.location().start_offset(),
+            def_node.location().end_offset(),
+            "",
+        );
+
+        let mut lines: Vec<String> = def_src.lines().map(|l| l.to_string()).collect();
+        if lines.is_empty() {
+            return None;
+        }
+
+        let def_col = source
+            .offset_to_line_col(def_node.location().start_offset())
+            .1;
+        let dedent = def_col.saturating_sub(sclass_col);
+
+        for line in &mut lines {
+            if dedent > 0 && line.len() >= dedent {
+                let mut remove = 0usize;
+                for b in line.as_bytes().iter().take(dedent) {
+                    if *b == b' ' {
+                        remove += 1;
+                    } else {
+                        break;
+                    }
+                }
+                line.drain(..remove);
+            }
+        }
+
+        if let Some(first) = lines.first_mut() {
+            if let Some(rest) = first.strip_prefix("def ") {
+                *first = format!("def self.{rest}");
+            } else {
+                return None;
+            }
+        }
+
+        rewritten.push(lines.join("\n"));
+    }
+
+    let mut out = rewritten.join("\n\n");
+    out = out.replace("\n\ndef self.", "\n\n  def self.");
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        ClassMethodsDefinitions,
+        "cops/style/class_methods_definitions"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         ClassMethodsDefinitions,
         "cops/style/class_methods_definitions"
     );

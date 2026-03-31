@@ -1,4 +1,3 @@
-- Evaluate `Security/YAMLLoad` only with strict target-Ruby guards (Ruby <= 3.0 behavior) and real offense parity; avoid metric-only toggles.
 - Evaluate `Lint/AmbiguousRegexpLiteral` only with very conservative correction boundaries (likely offense-only unless a safe transformation is proven).
 - Extend `Lint/NumberConversion` autocorrect to symbol/block-pass forms (`map(&:to_i)`, `try(:to_f)`) only after implementing syntax-safe parenthesis/block rewrites.
 - Extend `Style/DigChain` autocorrect to fully collapse longer dig chains in one pass (currently pairwise collapse per autocorrect iteration).
