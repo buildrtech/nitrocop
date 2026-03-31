@@ -82,6 +82,10 @@ impl Cop for BitwisePredicate {
         "Style/BitwisePredicate"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, INTEGER_NODE, PARENTHESES_NODE, STATEMENTS_NODE]
     }
@@ -93,7 +97,7 @@ impl Cop for BitwisePredicate {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -113,7 +117,7 @@ impl Cop for BitwisePredicate {
             };
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
@@ -121,7 +125,26 @@ impl Cop for BitwisePredicate {
                     "Replace with `{}` for comparison with bit flags.",
                     predicate
                 ),
-            ));
+            );
+            if let Some(corrections) = corrections.as_mut() {
+                if let Some(bit_operation) = parenthesized_bit_operation(call.receiver()) {
+                    if let (Some(lhs), Some(rhs)) =
+                        (bit_operation.receiver(), single_argument(&bit_operation))
+                    {
+                        let replacement =
+                            format!("{}.{}({})", node_source(&lhs), predicate, node_source(&rhs));
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+            }
+            diagnostics.push(diag);
         }
 
         // Pattern: (variable & flags) > 0 / != 0 / == 0
@@ -131,7 +154,7 @@ impl Cop for BitwisePredicate {
                     if let Some(preferred) = preferred_allbits(&call, &bit_operation) {
                         let loc = node.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diag = self.diagnostic(
                             source,
                             line,
                             column,
@@ -139,7 +162,19 @@ impl Cop for BitwisePredicate {
                                 "Replace with `{}` for comparison with bit flags.",
                                 preferred
                             ),
-                        ));
+                        );
+                        if let Some(corrections) = corrections.as_mut() {
+                            let loc = node.location();
+                            corrections.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: preferred,
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
                         return;
                     }
                 }
@@ -154,26 +189,62 @@ impl Cop for BitwisePredicate {
                         {
                             let loc = node.location();
                             let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(
-                                self.diagnostic(
-                                    source,
-                                    line,
-                                    column,
-                                    "Replace with `anybits?` for comparison with bit flags."
-                                        .to_string(),
-                                ),
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Replace with `anybits?` for comparison with bit flags."
+                                    .to_string(),
                             );
+                            if let Some(corrections) = corrections.as_mut() {
+                                if let (Some(lhs), Some(rhs)) =
+                                    (bit_operation.receiver(), single_argument(&bit_operation))
+                                {
+                                    corrections.push(crate::correction::Correction {
+                                        start: node.location().start_offset(),
+                                        end: node.location().end_offset(),
+                                        replacement: format!(
+                                            "{}.anybits?({})",
+                                            node_source(&lhs),
+                                            node_source(&rhs)
+                                        ),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                            }
+                            diagnostics.push(diag);
                         }
 
                         if method_name == "==" && is_zero {
                             let loc = node.location();
                             let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
+                            let mut diag = self.diagnostic(
                                 source,
                                 line,
                                 column,
                                 "Replace with `nobits?` for comparison with bit flags.".to_string(),
-                            ));
+                            );
+                            if let Some(corrections) = corrections.as_mut() {
+                                if let (Some(lhs), Some(rhs)) =
+                                    (bit_operation.receiver(), single_argument(&bit_operation))
+                                {
+                                    corrections.push(crate::correction::Correction {
+                                        start: node.location().start_offset(),
+                                        end: node.location().end_offset(),
+                                        replacement: format!(
+                                            "{}.nobits?({})",
+                                            node_source(&lhs),
+                                            node_source(&rhs)
+                                        ),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                            }
+                            diagnostics.push(diag);
                         }
                     }
                 }
@@ -186,4 +257,5 @@ impl Cop for BitwisePredicate {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BitwisePredicate, "cops/style/bitwise_predicate");
+    crate::cop_autocorrect_fixture_tests!(BitwisePredicate, "cops/style/bitwise_predicate");
 }
