@@ -35,6 +35,10 @@ impl Cop for MethodCallWithoutArgsParentheses {
         "Style/MethodCallWithoutArgsParentheses"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -42,7 +46,7 @@ impl Cop for MethodCallWithoutArgsParentheses {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_methods = config
             .get_string_array("AllowedMethods")
@@ -57,6 +61,7 @@ impl Cop for MethodCallWithoutArgsParentheses {
             allowed_methods,
             allowed_patterns,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             // Stack of assignment variable names (for same_name_assignment detection)
             assignment_names: Vec::new(),
             // Whether inside an OptionalParameterNode
@@ -66,6 +71,9 @@ impl Cop for MethodCallWithoutArgsParentheses {
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(c) = corrections {
+            c.extend(visitor.corrections);
+        }
     }
 }
 
@@ -75,6 +83,7 @@ struct MethodCallVisitor<'a, 'src> {
     allowed_methods: Vec<String>,
     allowed_patterns: Vec<String>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     /// Stack of sets of variable names from enclosing assignments.
     /// Each entry is a vec of names assigned at that level.
     assignment_names: Vec<Vec<String>>,
@@ -186,12 +195,32 @@ impl<'a, 'src> MethodCallVisitor<'a, 'src> {
 
         let open_loc = call.opening_loc().unwrap();
         let (line, column) = self.source.offset_to_line_col(open_loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Do not use parentheses for method calls with no arguments.".to_string(),
-        ));
+        );
+
+        self.corrections.push(crate::correction::Correction {
+            start: open_loc.start_offset(),
+            end: open_loc.end_offset(),
+            replacement: String::new(),
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        });
+        if let Some(close_loc) = call.closing_loc() {
+            self.corrections.push(crate::correction::Correction {
+                start: close_loc.start_offset(),
+                end: close_loc.end_offset(),
+                replacement: String::new(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 
     /// Check if a block node has no explicit parameters (empty and without delimiters).
@@ -337,6 +366,10 @@ impl<'a, 'src, 'pr> Visit<'pr> for MethodCallVisitor<'a, 'src> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        MethodCallWithoutArgsParentheses,
+        "cops/style/method_call_without_args_parentheses"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         MethodCallWithoutArgsParentheses,
         "cops/style/method_call_without_args_parentheses"
     );
