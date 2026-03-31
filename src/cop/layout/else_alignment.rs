@@ -3,6 +3,7 @@ use crate::cop::node_type::{
 };
 use crate::cop::util::assignment_context_base_col;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -60,6 +61,31 @@ impl ElseAlignment {
         first_nonws == offset
     }
 
+    fn push_alignment_offense(
+        &self,
+        source: &SourceFile,
+        line: usize,
+        col: usize,
+        expected_col: usize,
+        message: String,
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<Correction>>,
+    ) {
+        let mut diagnostic = self.diagnostic(source, line, col, message);
+        if let Some(corrections) = corrections.as_mut() {
+            let line_start = source.line_start_offset(line);
+            corrections.push(Correction {
+                start: line_start,
+                end: line_start + col,
+                replacement: " ".repeat(expected_col),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
+    }
+
     /// Check else alignment for begin/rescue/else constructs.
     /// `base_keyword` is the keyword name to use in the message (e.g., "begin", "def").
     fn check_begin_else(
@@ -70,6 +96,7 @@ impl ElseAlignment {
         base_line: usize,
         base_keyword: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<Correction>>,
     ) {
         let else_clause = match begin_node.else_clause() {
             Some(ec) => ec,
@@ -85,12 +112,15 @@ impl ElseAlignment {
             return;
         }
         if else_col != base_col {
-            diagnostics.push(self.diagnostic(
+            self.push_alignment_offense(
                 source,
                 else_line,
                 else_col,
+                base_col,
                 format!("Align `else` with `{base_keyword}`."),
-            ));
+                diagnostics,
+                corrections,
+            );
         }
     }
 }
@@ -98,6 +128,10 @@ impl ElseAlignment {
 impl Cop for ElseAlignment {
     fn name(&self) -> &'static str {
         "Layout/ElseAlignment"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -119,7 +153,7 @@ impl Cop for ElseAlignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         // --- case/when ---
         if let Some(case_node) = node.as_case_node() {
@@ -153,12 +187,15 @@ impl Cop for ElseAlignment {
                 return;
             }
             if else_col != expected_col {
-                diagnostics.push(self.diagnostic(
+                self.push_alignment_offense(
                     source,
                     else_line,
                     else_col,
+                    expected_col,
                     "Align `else` with `when`.".to_string(),
-                ));
+                    diagnostics,
+                    &mut corrections,
+                );
             }
             return;
         }
@@ -195,12 +232,15 @@ impl Cop for ElseAlignment {
                 return;
             }
             if else_col != expected_col {
-                diagnostics.push(self.diagnostic(
+                self.push_alignment_offense(
                     source,
                     else_line,
                     else_col,
+                    expected_col,
                     "Align `else` with `in`.".to_string(),
-                ));
+                    diagnostics,
+                    &mut corrections,
+                );
             }
             return;
         }
@@ -220,6 +260,7 @@ impl Cop for ElseAlignment {
                 begin_line,
                 "begin",
                 diagnostics,
+                &mut corrections,
             );
             return;
         }
@@ -264,7 +305,15 @@ impl Cop for ElseAlignment {
                 }
             };
 
-            self.check_begin_else(source, &begin_node, base_col, def_line, "def", diagnostics);
+            self.check_begin_else(
+                source,
+                &begin_node,
+                base_col,
+                def_line,
+                "def",
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
@@ -312,12 +361,15 @@ impl Cop for ElseAlignment {
                 return;
             }
             if else_col != expected_col {
-                diagnostics.push(self.diagnostic(
+                self.push_alignment_offense(
                     source,
                     else_line,
                     else_col,
+                    expected_col,
                     "Align `else` with `unless`.".to_string(),
-                ));
+                    diagnostics,
+                    &mut corrections,
+                );
             }
             return;
         }
@@ -381,12 +433,15 @@ impl Cop for ElseAlignment {
                     continue;
                 }
                 if else_col != expected_col {
-                    diagnostics.push(self.diagnostic(
+                    self.push_alignment_offense(
                         source,
                         else_line,
                         else_col,
+                        expected_col,
                         "Align `else` with `if`.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                    );
                 }
                 current = None;
             } else if let Some(elsif_node) = subsequent.as_if_node() {
@@ -406,12 +461,15 @@ impl Cop for ElseAlignment {
                     continue;
                 }
                 if elsif_col != expected_col {
-                    diagnostics.push(self.diagnostic(
+                    self.push_alignment_offense(
                         source,
                         elsif_line,
                         elsif_col,
+                        expected_col,
                         "Align `elsif` with `if`.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                    );
                 }
                 current = elsif_node.subsequent();
             } else {
@@ -427,6 +485,7 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(ElseAlignment, "cops/layout/else_alignment");
+    crate::cop_autocorrect_fixture_tests!(ElseAlignment, "cops/layout/else_alignment");
 
     #[test]
     fn ternary_no_offense() {
