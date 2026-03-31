@@ -1,3 +1,3 @@
-- `Style/Semicolon`: consider expanding autocorrect beyond current conservative subset to offense-matched expression-separator lines only if newline rewrites can be made robust without structural regressions.
-- `Style/TrailingBodyOnModule` and `Style/TrailingBodyOnMethodDefinition`: apply the same semicolon-to-newline indentation strategy used for `Style/TrailingBodyOnClass`.
+- `Style/Semicolon`: consider expanding autocorrect beyond the current conservative subset to offense-matched expression-separator lines only if newline rewrites are robust and fixture-proven.
+- `Style/TrailingMethodEndStatement` follow-up: verify edge cases with comments immediately before trailing `end` and ensure separator rewrite remains stable.
 - Keep Layout backlog staged (spacing-first, then alignment/indentation) until remaining non-Layout low-risk cops are exhausted.
