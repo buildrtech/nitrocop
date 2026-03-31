@@ -38,6 +38,13 @@ fn first_body_line_col(source: &SourceFile, body: &ruby_prism::Node<'_>) -> (usi
     source.offset_to_line_col(loc.start_offset())
 }
 
+fn find_body_separator(bytes: &[u8], header_start: usize, body_start: usize) -> Option<usize> {
+    if body_start > bytes.len() || header_start >= body_start {
+        return None;
+    }
+    (header_start..body_start).find(|&i| bytes[i] == b';')
+}
+
 impl Cop for TrailingBodyOnClass {
     fn name(&self) -> &'static str {
         "Style/TrailingBodyOnClass"
@@ -47,6 +54,10 @@ impl Cop for TrailingBodyOnClass {
         &[CLASS_NODE, SINGLETON_CLASS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -54,7 +65,7 @@ impl Cop for TrailingBodyOnClass {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check class ... ; body
         if let Some(class_node) = node.as_class_node() {
@@ -75,12 +86,30 @@ impl Cop for TrailingBodyOnClass {
                     return;
                 }
 
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     body_line,
                     body_column,
                     "Place the first line of class body on its own line.".to_string(),
-                ));
+                );
+                if let Some(ref mut corr) = corrections {
+                    let class_kw = class_node.class_keyword_loc();
+                    let body_start = body.location().start_offset();
+                    if let Some(semi_offset) =
+                        find_body_separator(source.as_bytes(), class_kw.end_offset(), body_start)
+                    {
+                        let indent = " ".repeat(source.offset_to_line_col(class_kw.start_offset()).1 + 2);
+                        corr.push(crate::correction::Correction {
+                            start: semi_offset,
+                            end: body_start,
+                            replacement: format!("\n{indent}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+                diagnostics.push(diag);
             }
         }
 
@@ -103,12 +132,29 @@ impl Cop for TrailingBodyOnClass {
                     return;
                 }
 
-                diagnostics.push(self.diagnostic(
+                let mut diag = self.diagnostic(
                     source,
                     body_line,
                     body_column,
                     "Place the first line of class body on its own line.".to_string(),
-                ));
+                );
+                if let Some(ref mut corr) = corrections {
+                    let body_start = body.location().start_offset();
+                    if let Some(semi_offset) =
+                        find_body_separator(source.as_bytes(), kw_loc.end_offset(), body_start)
+                    {
+                        let indent = " ".repeat(source.offset_to_line_col(kw_loc.start_offset()).1 + 2);
+                        corr.push(crate::correction::Correction {
+                            start: semi_offset,
+                            end: body_start,
+                            replacement: format!("\n{indent}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+                diagnostics.push(diag);
             }
         }
     }
@@ -118,4 +164,5 @@ impl Cop for TrailingBodyOnClass {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(TrailingBodyOnClass, "cops/style/trailing_body_on_class");
+    crate::cop_autocorrect_fixture_tests!(TrailingBodyOnClass, "cops/style/trailing_body_on_class");
 }
