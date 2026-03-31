@@ -28,6 +28,10 @@ impl Cop for OrderedMagicComments {
         "Lint/OrderedMagicComments"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -37,7 +41,7 @@ impl Cop for OrderedMagicComments {
         source: &SourceFile,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut encoding_line: Option<usize> = None;
         let mut frozen_string_line: Option<usize> = None;
@@ -92,18 +96,50 @@ impl Cop for OrderedMagicComments {
         if let (Some(enc_line), Some(fsl_line)) = (encoding_line, frozen_string_line) {
             if enc_line > fsl_line {
                 // Encoding comment appears after frozen_string_literal
-                diagnostics.push(
-                    self.diagnostic(
-                        source,
-                        enc_line,
-                        0,
-                        "The encoding magic comment should precede all other magic comments."
-                            .to_string(),
-                    ),
+                let mut diag = self.diagnostic(
+                    source,
+                    enc_line,
+                    0,
+                    "The encoding magic comment should precede all other magic comments."
+                        .to_string(),
                 );
+
+                if let Some(corr) = corrections.as_mut() {
+                    if let (Some((fsl_start, fsl_end)), Some((enc_start, enc_end))) = (
+                        line_range_without_newline(source, fsl_line),
+                        line_range_without_newline(source, enc_line),
+                    ) {
+                        let fsl_text = String::from_utf8_lossy(&source.as_bytes()[fsl_start..fsl_end]);
+                        let enc_text = String::from_utf8_lossy(&source.as_bytes()[enc_start..enc_end]);
+
+                        corr.push(crate::correction::Correction {
+                            start: fsl_start,
+                            end: fsl_end,
+                            replacement: enc_text.to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        corr.push(crate::correction::Correction {
+                            start: enc_start,
+                            end: enc_end,
+                            replacement: fsl_text.to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diag);
             }
         }
     }
+}
+
+fn line_range_without_newline(source: &SourceFile, line_num: usize) -> Option<(usize, usize)> {
+    let line = source.lines().nth(line_num.checked_sub(1)?)?;
+    let start = source.line_start_offset(line_num);
+    Some((start, start + line.len()))
 }
 
 fn is_encoding_comment(lower: &[u8]) -> bool {
@@ -233,6 +269,33 @@ mod tests {
         with_coding = "with_coding.rb",
         with_shebang = "with_shebang.rb",
     );
+
+    #[test]
+    fn autocorrect_basic_scenario() {
+        crate::testutil::assert_cop_autocorrect(
+            &OrderedMagicComments,
+            include_bytes!("../../../tests/fixtures/cops/lint/ordered_magic_comments/offense/basic.rb"),
+            b"# encoding: ascii\n# frozen_string_literal: true\np 'hello'\n",
+        );
+    }
+
+    #[test]
+    fn autocorrect_with_coding_scenario() {
+        crate::testutil::assert_cop_autocorrect(
+            &OrderedMagicComments,
+            include_bytes!("../../../tests/fixtures/cops/lint/ordered_magic_comments/offense/with_coding.rb"),
+            b"# coding: utf-8\n# frozen_string_literal: true\nx = 1\n",
+        );
+    }
+
+    #[test]
+    fn autocorrect_with_shebang_scenario() {
+        crate::testutil::assert_cop_autocorrect(
+            &OrderedMagicComments,
+            include_bytes!("../../../tests/fixtures/cops/lint/ordered_magic_comments/offense/with_shebang.rb"),
+            b"#!/usr/bin/env ruby\n# encoding: utf-8\n# frozen_string_literal: true\nputs 'hi'\n",
+        );
+    }
 
     #[test]
     fn no_offense_encoding_after_regular_comments() {
