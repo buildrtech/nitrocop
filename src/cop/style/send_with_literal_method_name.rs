@@ -84,6 +84,10 @@ impl Cop for SendWithLiteralMethodName {
         "Style/SendWithLiteralMethodName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, STRING_NODE, SYMBOL_NODE]
     }
@@ -95,7 +99,7 @@ impl Cop for SendWithLiteralMethodName {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_send = config.get_bool("AllowSend", true);
 
@@ -144,14 +148,85 @@ impl Cop for SendWithLiteralMethodName {
             return;
         }
 
+        let method_name = if let Some(sym) = arg_list[0].as_symbol_node() {
+            std::str::from_utf8(sym.unescaped())
+                .ok()
+                .map(|s| s.to_string())
+        } else if let Some(s) = arg_list[0].as_string_node() {
+            std::str::from_utf8(s.unescaped())
+                .ok()
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Use a direct method call instead of `send` with a literal method name.".to_string(),
-        ));
+        );
+
+        if let (Some(corr), Some(method_name)) = (corrections.as_mut(), method_name) {
+            // Skip block forms with an explicit block body (`do ... end` / `{ ... }`).
+            // Keep corrections local to call syntax transformations only.
+            if call.block().is_none_or(|b| b.as_block_node().is_none()) {
+                let mut replacement = String::new();
+                if let Some(receiver) = call.receiver() {
+                    let recv_loc = receiver.location();
+                    replacement.push_str(source.byte_slice(
+                        recv_loc.start_offset(),
+                        recv_loc.end_offset(),
+                        "",
+                    ));
+                    if let Some(op) = call.call_operator_loc() {
+                        replacement.push_str(std::str::from_utf8(op.as_slice()).unwrap_or("."));
+                    } else {
+                        replacement.push('.');
+                    }
+                }
+                replacement.push_str(&method_name);
+
+                let mut tail_args: Vec<String> = arg_list[1..]
+                    .iter()
+                    .map(|arg| {
+                        let arg_loc = arg.location();
+                        source
+                            .byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "")
+                            .to_string()
+                    })
+                    .collect();
+
+                if let Some(block_arg) = call.block().and_then(|b| b.as_block_argument_node()) {
+                    let b_loc = block_arg.location();
+                    tail_args.push(
+                        source
+                            .byte_slice(b_loc.start_offset(), b_loc.end_offset(), "")
+                            .to_string(),
+                    );
+                }
+
+                if !tail_args.is_empty() {
+                    replacement.push('(');
+                    replacement.push_str(&tail_args.join(", "));
+                    replacement.push(')');
+                }
+
+                let call_loc = call.location();
+                corr.push(crate::correction::Correction {
+                    start: call_loc.start_offset(),
+                    end: call_loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -159,6 +234,10 @@ impl Cop for SendWithLiteralMethodName {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        SendWithLiteralMethodName,
+        "cops/style/send_with_literal_method_name"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         SendWithLiteralMethodName,
         "cops/style/send_with_literal_method_name"
     );
