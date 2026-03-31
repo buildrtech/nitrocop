@@ -28,6 +28,10 @@ impl Cop for DateTime {
         "Style/DateTime"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -43,7 +47,7 @@ impl Cop for DateTime {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_coercion = config.get_bool("AllowCoercion", false);
 
@@ -90,12 +94,19 @@ impl Cop for DateTime {
 
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `Time` over `DateTime`.".to_string(),
-            ));
+            );
+            if let Some(corr) = corrections.as_mut() {
+                corrections_for_datetime_receiver(self, &call, corr);
+                if has_datetime_receiver(&call) {
+                    diag.corrected = true;
+                }
+            }
+            diagnostics.push(diag);
         }
     }
 }
@@ -152,8 +163,48 @@ fn is_historic_date(call: &ruby_prism::CallNode<'_>) -> bool {
     false
 }
 
+fn has_datetime_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.receiver()
+        .is_some_and(|receiver| is_datetime_const(&receiver))
+}
+
+fn corrections_for_datetime_receiver(
+    cop: &DateTime,
+    call: &ruby_prism::CallNode<'_>,
+    corrections: &mut Vec<crate::correction::Correction>,
+) {
+    let Some(receiver) = call.receiver() else {
+        return;
+    };
+    if let Some(read) = receiver.as_constant_read_node() {
+        let loc = read.location();
+        corrections.push(crate::correction::Correction {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+            replacement: "Time".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        return;
+    }
+
+    if let Some(path) = receiver.as_constant_path_node() {
+        if path.parent().is_none() {
+            let name_loc = path.name_loc();
+            corrections.push(crate::correction::Correction {
+                start: name_loc.start_offset(),
+                end: name_loc.end_offset(),
+                replacement: "Time".to_string(),
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DateTime, "cops/style/date_time");
+    crate::cop_autocorrect_fixture_tests!(DateTime, "cops/style/date_time");
 }
