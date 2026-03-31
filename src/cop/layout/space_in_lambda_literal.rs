@@ -1,5 +1,6 @@
 use crate::cop::node_type::LAMBDA_NODE;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -18,6 +19,10 @@ impl Cop for SpaceInLambdaLiteral {
         "Layout/SpaceInLambdaLiteral"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[LAMBDA_NODE]
     }
@@ -29,7 +34,7 @@ impl Cop for SpaceInLambdaLiteral {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "require_no_space");
 
@@ -111,29 +116,61 @@ impl Cop for SpaceInLambdaLiteral {
         match style {
             "require_space" => {
                 if !has_space {
-                    let (line, col) = source.offset_to_line_col(arrow_end);
-                    diagnostics.push(self.diagnostic(
+                    push_spacing_offense(
+                        self,
                         source,
-                        line,
-                        col,
-                        "Use a space between `->` and `(` in lambda literals.".to_string(),
-                    ));
+                        arrow_end,
+                        param_start,
+                        "Use a space between `->` and `(` in lambda literals.",
+                        " ",
+                        diagnostics,
+                        &mut corrections,
+                    );
                 }
             }
             _ => {
                 // "require_no_space" (default)
                 if has_space {
-                    let (line, col) = source.offset_to_line_col(arrow_end);
-                    diagnostics.push(self.diagnostic(
+                    push_spacing_offense(
+                        self,
                         source,
-                        line,
-                        col,
-                        "Do not use spaces between `->` and `(` in lambda literals.".to_string(),
-                    ));
+                        arrow_end,
+                        param_start,
+                        "Do not use spaces between `->` and `(` in lambda literals.",
+                        "",
+                        diagnostics,
+                        &mut corrections,
+                    );
                 }
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_spacing_offense(
+    cop: &dyn Cop,
+    source: &SourceFile,
+    gap_start: usize,
+    gap_end: usize,
+    message: &str,
+    replacement: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<Correction>>,
+) {
+    let (line, col) = source.offset_to_line_col(gap_start);
+    let mut diagnostic = cop.diagnostic(source, line, col, message.to_string());
+    if let Some(corrections) = corrections.as_mut() {
+        corrections.push(Correction {
+            start: gap_start,
+            end: gap_end,
+            replacement: replacement.to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+    diagnostics.push(diagnostic);
 }
 
 #[cfg(test)]
@@ -141,4 +178,27 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SpaceInLambdaLiteral, "cops/layout/space_in_lambda_literal");
+    crate::cop_autocorrect_fixture_tests!(
+        SpaceInLambdaLiteral,
+        "cops/layout/space_in_lambda_literal"
+    );
+
+    #[test]
+    fn autocorrect_require_space_inserts_gap() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("require_space".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let source = b"x = ->x { x + 1 }\n";
+        let (_diagnostics, corrections) =
+            crate::testutil::run_cop_autocorrect_with_config(&SpaceInLambdaLiteral, source, config);
+        let corrected = crate::correction::CorrectionSet::from_vec(corrections).apply(source);
+        assert_eq!(corrected, b"x = -> x { x + 1 }\n");
+    }
 }
