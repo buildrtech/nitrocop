@@ -31,6 +31,52 @@ use crate::parse::source::SourceFile;
 /// scanned for commas producing false positives. Seen in zeitwerk, rufo, thredded.
 pub struct TrailingCommaInArrayLiteral;
 
+fn push_remove_diagnostic(
+    cop: &TrailingCommaInArrayLiteral,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    abs_offset: usize,
+    message: &str,
+) {
+    let (line, column) = source.offset_to_line_col(abs_offset);
+    let mut diag = cop.diagnostic(source, line, column, message.to_string());
+    if let Some(corr) = corrections.as_deref_mut() {
+        corr.push(crate::correction::Correction {
+            start: abs_offset,
+            end: abs_offset + 1,
+            replacement: String::new(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+    diagnostics.push(diag);
+}
+
+fn push_insert_diagnostic(
+    cop: &TrailingCommaInArrayLiteral,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    insert_offset: usize,
+    message: &str,
+) {
+    let (line, column) = source.offset_to_line_col(insert_offset);
+    let mut diag = cop.diagnostic(source, line, column, message.to_string());
+    if let Some(corr) = corrections.as_deref_mut() {
+        corr.push(crate::correction::Correction {
+            start: insert_offset,
+            end: insert_offset,
+            replacement: ",".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+    diagnostics.push(diag);
+}
+
 impl Cop for TrailingCommaInArrayLiteral {
     fn name(&self) -> &'static str {
         "Style/TrailingCommaInArrayLiteral"
@@ -40,6 +86,10 @@ impl Cop for TrailingCommaInArrayLiteral {
         &[ARRAY_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -47,7 +97,7 @@ impl Cop for TrailingCommaInArrayLiteral {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let array_node = match node.as_array_node() {
             Some(a) => a,
@@ -135,43 +185,47 @@ impl Cop for TrailingCommaInArrayLiteral {
                 let should_have = is_multiline && each_on_own_line;
                 if has_comma && !should_have {
                     if let Some(abs_offset) = find_comma_offset() {
-                        let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(
+                        push_remove_diagnostic(
+                            self,
                             source,
-                            line,
-                            column,
-                            "Avoid comma after the last item of an array, unless each item is on its own line.".to_string(),
-                        ));
+                            diagnostics,
+                            &mut corrections,
+                            abs_offset,
+                            "Avoid comma after the last item of an array, unless each item is on its own line.",
+                        );
                     }
                 } else if !has_comma && should_have {
-                    let (line, column) = source.offset_to_line_col(last_end);
-                    diagnostics.push(self.diagnostic(
+                    push_insert_diagnostic(
+                        self,
                         source,
-                        line,
-                        column,
-                        "Put a comma after the last item of a multiline array.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                        last_end,
+                        "Put a comma after the last item of a multiline array.",
+                    );
                 }
             }
             "consistent_comma" => {
                 if has_comma && !is_multiline {
                     if let Some(abs_offset) = find_comma_offset() {
-                        let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(
+                        push_remove_diagnostic(
+                            self,
                             source,
-                            line,
-                            column,
-                            "Avoid comma after the last item of an array, unless items are split onto multiple lines.".to_string(),
-                        ));
+                            diagnostics,
+                            &mut corrections,
+                            abs_offset,
+                            "Avoid comma after the last item of an array, unless items are split onto multiple lines.",
+                        );
                     }
                 } else if !has_comma && is_multiline {
-                    let (line, column) = source.offset_to_line_col(last_end);
-                    diagnostics.push(self.diagnostic(
+                    push_insert_diagnostic(
+                        self,
                         source,
-                        line,
-                        column,
-                        "Put a comma after the last item of a multiline array.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                        last_end,
+                        "Put a comma after the last item of a multiline array.",
+                    );
                 }
             }
             "diff_comma" => {
@@ -179,35 +233,38 @@ impl Cop for TrailingCommaInArrayLiteral {
                     is_multiline && last_item_precedes_newline(bytes, last_end, closing_start);
                 if has_comma && !last_precedes_newline {
                     if let Some(abs_offset) = find_comma_offset() {
-                        let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(
+                        push_remove_diagnostic(
+                            self,
                             source,
-                            line,
-                            column,
-                            "Avoid comma after the last item of an array, unless that item immediately precedes a newline.".to_string(),
-                        ));
+                            diagnostics,
+                            &mut corrections,
+                            abs_offset,
+                            "Avoid comma after the last item of an array, unless that item immediately precedes a newline.",
+                        );
                     }
                 } else if !has_comma && last_precedes_newline {
-                    let (line, column) = source.offset_to_line_col(last_end);
-                    diagnostics.push(self.diagnostic(
+                    push_insert_diagnostic(
+                        self,
                         source,
-                        line,
-                        column,
-                        "Put a comma after the last item of a multiline array.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                        last_end,
+                        "Put a comma after the last item of a multiline array.",
+                    );
                 }
             }
             _ => {
-                if has_comma {
-                    if let Some(abs_offset) = find_comma_offset() {
-                        let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Avoid comma after the last item of an array.".to_string(),
-                        ));
-                    }
+                if has_comma
+                    && let Some(abs_offset) = find_comma_offset()
+                {
+                    push_remove_diagnostic(
+                        self,
+                        source,
+                        diagnostics,
+                        &mut corrections,
+                        abs_offset,
+                        "Avoid comma after the last item of an array.",
+                    );
                 }
             }
         }
@@ -344,6 +401,10 @@ mod tests {
     use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
+        TrailingCommaInArrayLiteral,
+        "cops/style/trailing_comma_in_array_literal"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         TrailingCommaInArrayLiteral,
         "cops/style/trailing_comma_in_array_literal"
     );
