@@ -45,6 +45,10 @@ impl Cop for OperatorMethodCall {
         "Style/OperatorMethodCall"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
@@ -56,7 +60,7 @@ impl Cop for OperatorMethodCall {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -211,12 +215,18 @@ impl Cop for OperatorMethodCall {
         }
 
         let (line, column) = source.offset_to_line_col(call_op.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Redundant dot detected.".to_string(),
-        ));
+        let mut diag = self.diagnostic(source, line, column, "Redundant dot detected.".to_string());
+        if let Some(corr) = corrections.as_mut() {
+            corr.push(crate::correction::Correction {
+                start: call_op.start_offset(),
+                end: call_op.end_offset(),
+                replacement: " ".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+        diagnostics.push(diag);
     }
 }
 
@@ -224,4 +234,5 @@ impl Cop for OperatorMethodCall {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(OperatorMethodCall, "cops/style/operator_method_call");
+    crate::cop_autocorrect_fixture_tests!(OperatorMethodCall, "cops/style/operator_method_call");
 }
