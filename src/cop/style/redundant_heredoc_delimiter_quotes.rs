@@ -27,6 +27,10 @@ impl Cop for RedundantHeredocDelimiterQuotes {
         &[INTERPOLATED_STRING_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -34,7 +38,7 @@ impl Cop for RedundantHeredocDelimiterQuotes {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check both StringNode (non-interpolated heredoc) and InterpolatedStringNode (heredoc with interp)
         let opening_loc = if let Some(s) = node.as_string_node() {
@@ -133,7 +137,7 @@ impl Cop for RedundantHeredocDelimiterQuotes {
         let delim_str = String::from_utf8_lossy(delim);
 
         let (line, column) = source.offset_to_line_col(opening.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
@@ -141,7 +145,20 @@ impl Cop for RedundantHeredocDelimiterQuotes {
                 "Remove the redundant heredoc delimiter quotes, use `{}{}` instead.",
                 prefix_str, delim_str
             ),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: opening.start_offset(),
+                end: opening.end_offset(),
+                replacement: format!("{}{}", prefix_str, delim_str),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -164,6 +181,10 @@ fn body_has_interpolation_or_escape(body: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        RedundantHeredocDelimiterQuotes,
+        "cops/style/redundant_heredoc_delimiter_quotes"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RedundantHeredocDelimiterQuotes,
         "cops/style/redundant_heredoc_delimiter_quotes"
     );

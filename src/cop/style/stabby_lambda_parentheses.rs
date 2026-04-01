@@ -37,6 +37,10 @@ impl Cop for StabbyLambdaParentheses {
         &[LAMBDA_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -44,7 +48,7 @@ impl Cop for StabbyLambdaParentheses {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let lambda_node = match node.as_lambda_node() {
             Some(l) => l,
@@ -108,12 +112,37 @@ impl Cop for StabbyLambdaParentheses {
             "require_parentheses" => {
                 if !has_paren {
                     let (line, column) = source.offset_to_line_col(operator_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diag = self.diagnostic(
                         source,
                         line,
                         column,
                         "Use parentheses for stabby lambda arguments.".to_string(),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        let args = between
+                            .iter()
+                            .copied()
+                            .skip_while(|b| b.is_ascii_whitespace())
+                            .collect::<Vec<_>>();
+                        let args_trimmed_end = args
+                            .iter()
+                            .rposition(|b| !b.is_ascii_whitespace())
+                            .map(|idx| idx + 1)
+                            .unwrap_or(0);
+                        let args_src = String::from_utf8_lossy(&args[..args_trimmed_end]);
+
+                        corr.push(crate::correction::Correction {
+                            start: operator_end,
+                            end: opening_start,
+                            replacement: format!("({args_src}) "),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+
+                    diagnostics.push(diag);
                 }
             }
             "require_no_parentheses" => {
@@ -138,6 +167,10 @@ mod tests {
     use crate::testutil::run_cop_full_with_config;
 
     crate::cop_fixture_tests!(
+        StabbyLambdaParentheses,
+        "cops/style/stabby_lambda_parentheses"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         StabbyLambdaParentheses,
         "cops/style/stabby_lambda_parentheses"
     );
