@@ -38,6 +38,10 @@ impl Cop for ExplicitBlockArgument {
         "Style/ExplicitBlockArgument"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -45,13 +49,15 @@ impl Cop for ExplicitBlockArgument {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ExplicitBlockArgumentVisitor {
             source,
             cop: self,
             diagnostics,
+            corrections,
             def_depth: 0,
+            def_block_params: Vec::new(),
         };
         visitor.visit(&parse_result.node());
     }
@@ -61,14 +67,21 @@ struct ExplicitBlockArgumentVisitor<'a> {
     source: &'a SourceFile,
     cop: &'a ExplicitBlockArgument,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     def_depth: u32,
+    def_block_params: Vec<Option<Vec<u8>>>,
 }
 
 impl<'a> ExplicitBlockArgumentVisitor<'a> {
     /// Check if a call node has a yielding block: `something { |args| yield args }`
     /// where the block body is a single yield statement and args match.
     /// `call_start` is the start offset of the full expression (call + block).
-    fn check_call_with_block(&mut self, block: &ruby_prism::BlockNode<'_>, call_start: usize) {
+    fn check_call_with_block(
+        &mut self,
+        block: &ruby_prism::BlockNode<'_>,
+        call_start: usize,
+        autocorrect_target: Option<(usize, usize)>,
+    ) {
         // Must be inside a method definition
         if self.def_depth == 0 {
             return;
@@ -123,12 +136,32 @@ impl<'a> ExplicitBlockArgumentVisitor<'a> {
 
         // Report the offense at the full call+block expression
         let (line, column) = self.source.offset_to_line_col(call_start);
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diag = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Consider using explicit block argument in the surrounding method's signature over `yield`.".to_string(),
-        ));
+        );
+
+        // Conservative autocorrect subset: only receiver calls with no arguments,
+        // in defs that already declare an explicit named &block parameter.
+        if let (Some((replace_start, replace_end)), Some(block_param), Some(corrections)) = (
+            autocorrect_target,
+            self.def_block_params.last().and_then(|n| n.as_ref()),
+            self.corrections.as_deref_mut(),
+        ) {
+            let replacement = format!("(&{})", String::from_utf8_lossy(block_param));
+            corrections.push(crate::correction::Correction {
+                start: replace_start,
+                end: replace_end,
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        self.diagnostics.push(diag);
     }
 
     /// Extract block parameter names as a list of byte slices.
@@ -195,7 +228,14 @@ impl<'a> ExplicitBlockArgumentVisitor<'a> {
 impl<'a, 'pr> Visit<'pr> for ExplicitBlockArgumentVisitor<'a> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         self.def_depth += 1;
+        let block_name = node
+            .parameters()
+            .and_then(|p| p.block())
+            .and_then(|b| b.name())
+            .map(|n| n.as_slice().to_vec());
+        self.def_block_params.push(block_name);
         ruby_prism::visit_def_node(self, node);
+        self.def_block_params.pop();
         self.def_depth -= 1;
     }
 
@@ -203,7 +243,18 @@ impl<'a, 'pr> Visit<'pr> for ExplicitBlockArgumentVisitor<'a> {
         // Check if this call has a block that just yields
         if let Some(block_arg) = node.block() {
             if let Some(block) = block_arg.as_block_node() {
-                self.check_call_with_block(&block, node.location().start_offset());
+                let args_len = node.arguments().map(|a| a.arguments().len()).unwrap_or(0);
+                let autocorrect_target = if args_len == 0 {
+                    let block_loc = block.location();
+                    let mut start = block_loc.start_offset();
+                    if start > 0 && self.source.as_bytes()[start - 1] == b' ' {
+                        start -= 1;
+                    }
+                    Some((start, block_loc.end_offset()))
+                } else {
+                    None
+                };
+                self.check_call_with_block(&block, node.location().start_offset(), autocorrect_target);
             }
         }
         ruby_prism::visit_call_node(self, node);
@@ -212,7 +263,7 @@ impl<'a, 'pr> Visit<'pr> for ExplicitBlockArgumentVisitor<'a> {
     fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
         // `super { yield }` (no explicit args) parses as ForwardingSuperNode
         if let Some(block) = node.block() {
-            self.check_call_with_block(&block, node.location().start_offset());
+            self.check_call_with_block(&block, node.location().start_offset(), None);
         }
         ruby_prism::visit_forwarding_super_node(self, node);
     }
@@ -221,7 +272,7 @@ impl<'a, 'pr> Visit<'pr> for ExplicitBlockArgumentVisitor<'a> {
         // `super(args) { yield }` parses as SuperNode; block() returns Node
         if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
-                self.check_call_with_block(&block_node, node.location().start_offset());
+                self.check_call_with_block(&block_node, node.location().start_offset(), None);
             }
         }
         ruby_prism::visit_super_node(self, node);
@@ -232,4 +283,8 @@ impl<'a, 'pr> Visit<'pr> for ExplicitBlockArgumentVisitor<'a> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ExplicitBlockArgument, "cops/style/explicit_block_argument");
+    crate::cop_autocorrect_fixture_tests!(
+        ExplicitBlockArgument,
+        "cops/style/explicit_block_argument_autocorrect"
+    );
 }
