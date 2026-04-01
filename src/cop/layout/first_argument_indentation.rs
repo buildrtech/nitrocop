@@ -1,6 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -73,6 +74,10 @@ impl Cop for FirstArgumentIndentation {
         "Layout/FirstArgumentIndentation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -80,7 +85,7 @@ impl Cop for FirstArgumentIndentation {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let style = config.get_str(
             "EnforcedStyle",
@@ -93,11 +98,15 @@ impl Cop for FirstArgumentIndentation {
             style,
             width,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             // Stack of parent call info: (is_parenthesized, call_start_offset)
             parent_call_stack: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corrections) = corrections.as_mut() {
+            corrections.extend(visitor.corrections);
+        }
     }
 }
 
@@ -107,6 +116,7 @@ struct FirstArgVisitor<'a> {
     style: &'a str,
     width: usize,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
     /// Stack of parent call info: (is_parenthesized, call_node_start_col)
     /// call_node_start_col is the column of the start of the entire call expression
     /// (including receiver), matching RuboCop's node.source_range.begin_pos
@@ -176,15 +186,33 @@ impl FirstArgVisitor<'_> {
             self.compute_expected_indent(call_start_offset, first_arg_loc.start_offset(), arg_line);
 
         if arg_col != expected {
-            self.diagnostics.push(
-                self.cop.diagnostic(
-                    self.source,
-                    arg_line,
-                    arg_col,
-                    "Indent the first argument one step more than the start of the previous line."
-                        .to_string(),
-                ),
+            let mut diagnostic = self.cop.diagnostic(
+                self.source,
+                arg_line,
+                arg_col,
+                "Indent the first argument one step more than the start of the previous line."
+                    .to_string(),
             );
+
+            let line_start = self.source.line_start_offset(arg_line);
+            let current_indent = &self.source.as_bytes()[line_start..first_arg_loc.start_offset()];
+            let replacement = if !current_indent.is_empty()
+                && current_indent.iter().all(|&b| b == b'\t')
+            {
+                "\t".repeat(expected)
+            } else {
+                " ".repeat(expected)
+            };
+
+            self.corrections.push(Correction {
+                start: line_start,
+                end: first_arg_loc.start_offset(),
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+            self.diagnostics.push(diagnostic);
         }
     }
 
@@ -475,6 +503,10 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
+        FirstArgumentIndentation,
+        "cops/layout/first_argument_indentation"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         FirstArgumentIndentation,
         "cops/layout/first_argument_indentation"
     );
