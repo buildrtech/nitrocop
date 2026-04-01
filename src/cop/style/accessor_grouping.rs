@@ -75,6 +75,10 @@ impl Cop for AccessorGrouping {
         "Style/AccessorGrouping"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
@@ -92,7 +96,7 @@ impl Cop for AccessorGrouping {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "grouped");
 
@@ -118,7 +122,7 @@ impl Cop for AccessorGrouping {
         };
 
         if enforced_style == "grouped" {
-            check_grouped(self, source, &stmts, diagnostics);
+            check_grouped(self, source, &stmts, diagnostics, corrections.as_deref_mut());
         }
     }
 }
@@ -144,6 +148,7 @@ fn check_grouped(
     source: &SourceFile,
     stmts: &ruby_prism::StatementsNode<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) {
     let stmt_list: Vec<_> = stmts.body().iter().collect();
     if stmt_list.is_empty() {
@@ -252,6 +257,182 @@ fn check_grouped(
                 }
             }
         }
+    }
+
+    if let Some(corrections) = corrections {
+        emit_grouped_autocorrections(cop, source, &stmt_list, &infos, corrections);
+    }
+}
+
+struct AccessorCallInfo {
+    start_offset: usize,
+    end_offset: usize,
+    start_line: usize,
+    end_line: usize,
+    args_start: usize,
+    args_end: usize,
+    args_source: String,
+}
+
+fn emit_grouped_autocorrections(
+    cop: &AccessorGrouping,
+    source: &SourceFile,
+    stmt_list: &[ruby_prism::Node<'_>],
+    infos: &[StmtInfo],
+    corrections: &mut Vec<crate::correction::Correction>,
+) {
+    let mut i = 0;
+    while i < infos.len() {
+        let Some(mut current) = accessor_call_info(source, &stmt_list[infos[i].idx]) else {
+            i += 1;
+            continue;
+        };
+
+        if !infos[i].is_accessor || !infos[i].groupable || infos[i].has_previous_line_comment {
+            i += 1;
+            continue;
+        }
+
+        let mut run = vec![current];
+        let mut j = i + 1;
+
+        while j < infos.len() {
+            if !infos[j].is_accessor
+                || infos[j].accessor_name != infos[i].accessor_name
+                || infos[j].visibility != infos[i].visibility
+                || !infos[j].groupable
+                || infos[j].has_previous_line_comment
+            {
+                break;
+            }
+
+            let Some(next_call) = accessor_call_info(source, &stmt_list[infos[j].idx]) else {
+                break;
+            };
+
+            // Keep this conservative: only merge physically adjacent accessor lines.
+            let prev_end_line = run.last().map(|r| r.end_line).unwrap_or(0);
+            if next_call.start_line != prev_end_line + 1 {
+                break;
+            }
+
+            // Skip calls with trailing comments/code so line deletion is safe.
+            if !line_contains_only_call(source, next_call.start_offset, next_call.end_offset) {
+                break;
+            }
+
+            current = next_call;
+            run.push(current);
+            j += 1;
+        }
+
+        if run.len() > 1 {
+            let merged_args = run
+                .iter()
+                .map(|r| r.args_source.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let first = &run[0];
+            corrections.push(crate::correction::Correction {
+                start: first.args_start,
+                end: first.args_end,
+                replacement: merged_args,
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+
+            for call in run.iter().skip(1) {
+                let delete_start = line_start_offset(source, call.start_offset);
+                let delete_end = extend_to_line_break(source, call.end_offset);
+                corrections.push(crate::correction::Correction {
+                    start: delete_start,
+                    end: delete_end,
+                    replacement: String::new(),
+                    cop_name: cop.name(),
+                    cop_index: 0,
+                });
+            }
+        }
+
+        i = if run.len() > 1 { j } else { i + 1 };
+    }
+}
+
+fn accessor_call_info(
+    source: &SourceFile,
+    stmt: &ruby_prism::Node<'_>,
+) -> Option<AccessorCallInfo> {
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some() || call.block().is_some() {
+        return None;
+    }
+
+    let args = call.arguments()?;
+    let args_loc = args.location();
+    let call_loc = call.location();
+
+    let args_source = std::str::from_utf8(&source.as_bytes()[args_loc.start_offset()..args_loc.end_offset()])
+        .ok()?
+        .trim()
+        .to_string();
+
+    if args_source.is_empty() {
+        return None;
+    }
+
+    let (start_line, _) = source.offset_to_line_col(call_loc.start_offset());
+    let (end_line, _) = source.offset_to_line_col(call_loc.end_offset());
+
+    Some(AccessorCallInfo {
+        start_offset: call_loc.start_offset(),
+        end_offset: call_loc.end_offset(),
+        start_line,
+        end_line,
+        args_start: args_loc.start_offset(),
+        args_end: args_loc.end_offset(),
+        args_source,
+    })
+}
+
+fn line_start_offset(source: &SourceFile, offset: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut line_start = offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    line_start
+}
+
+fn line_contains_only_call(source: &SourceFile, call_start: usize, call_end: usize) -> bool {
+    let bytes = source.as_bytes();
+    let line_start = line_start_offset(source, call_start);
+
+    let mut line_end = call_end;
+    while line_end < bytes.len() && bytes[line_end] != b'\n' {
+        line_end += 1;
+    }
+
+    bytes[line_start..call_start]
+        .iter()
+        .all(|b| b.is_ascii_whitespace())
+        && bytes[call_end..line_end]
+            .iter()
+            .all(|b| b.is_ascii_whitespace())
+}
+
+fn extend_to_line_break(source: &SourceFile, end: usize) -> usize {
+    let bytes = source.as_bytes();
+    if end >= bytes.len() {
+        return end;
+    }
+
+    if bytes[end] == b'\r' && end + 1 < bytes.len() && bytes[end + 1] == b'\n' {
+        end + 2
+    } else if bytes[end] == b'\n' {
+        end + 1
+    } else {
+        end
     }
 }
 
@@ -376,4 +557,5 @@ fn has_inline_rbs_comment(source: &SourceFile, start_offset: usize) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AccessorGrouping, "cops/style/accessor_grouping");
+    crate::cop_autocorrect_fixture_tests!(AccessorGrouping, "cops/style/accessor_grouping");
 }
