@@ -10,9 +10,80 @@ use crate::parse::source::SourceFile;
 /// and only collecting `StringNode` content for the slash check.
 pub struct RegexpLiteral;
 
+fn push_slashes_diagnostic(
+    cop: &RegexpLiteral,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    node_start: usize,
+    node_end: usize,
+    opening_len: usize,
+    message: &str,
+) {
+    let (line, column) = source.offset_to_line_col(node_start);
+    let mut diag = cop.diagnostic(source, line, column, message.to_string());
+
+    if let Some(corr) = corrections.as_mut() {
+        corr.push(crate::correction::Correction {
+            start: node_start,
+            end: node_start + opening_len,
+            replacement: "/".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        corr.push(crate::correction::Correction {
+            start: node_end.saturating_sub(1),
+            end: node_end,
+            replacement: "/".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+
+    diagnostics.push(diag);
+}
+
+fn push_percent_r_diagnostic(
+    cop: &RegexpLiteral,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    node_start: usize,
+    node_end: usize,
+    message: &str,
+) {
+    let (line, column) = source.offset_to_line_col(node_start);
+    let mut diag = cop.diagnostic(source, line, column, message.to_string());
+
+    if let Some(corr) = corrections.as_mut() {
+        corr.push(crate::correction::Correction {
+            start: node_start,
+            end: node_start + 1,
+            replacement: "%r{".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        corr.push(crate::correction::Correction {
+            start: node_end.saturating_sub(1),
+            end: node_end,
+            replacement: "}".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+
+    diagnostics.push(diag);
+}
+
 impl Cop for RegexpLiteral {
     fn name(&self) -> &'static str {
         "Style/RegexpLiteral"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -29,7 +100,7 @@ impl Cop for RegexpLiteral {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "slashes");
         let allow_inner_slashes = config.get_bool("AllowInnerSlashes", false);
@@ -49,9 +120,6 @@ impl Cop for RegexpLiteral {
                 let opening = re.opening_loc();
                 let loc = re.location();
                 let open = opening.as_slice();
-                // Only collect content from string literal parts, skipping interpolation.
-                // RuboCop's `node_body` only examines `:str` children, so slashes
-                // inside `#{}` interpolation are not counted as inner slashes.
                 let mut content = Vec::new();
                 for part in re.parts().iter() {
                     if let Some(s) = part.as_string_node() {
@@ -65,12 +133,6 @@ impl Cop for RegexpLiteral {
 
         let is_slash = open_bytes == b"/";
         let is_percent_r = open_bytes.starts_with(b"%r");
-
-        // Check if content contains forward slashes (escaped or unescaped).
-        // RuboCop counts escaped slashes (`\/`) as inner slashes too, because
-        // using `%r{}` would eliminate the need for escaping them.
-        // In slash-delimited regexps, slashes are always escaped as `\/`.
-        // In %r-delimited regexps, slashes appear as bare `/`.
         let has_slash = content_bytes.contains(&b'/');
 
         let is_multiline = {
@@ -79,11 +141,6 @@ impl Cop for RegexpLiteral {
             end_line > start_line
         };
 
-        // %r with content starting with space or = may be used to avoid syntax errors
-        // when the regexp is a method argument without parentheses:
-        //   do_something %r{ regexp}  # valid
-        //   do_something / regexp/    # syntax error
-        // Allow %r in these cases (matching RuboCop's behavior).
         let content_starts_with_space_or_eq =
             !content_bytes.is_empty() && (content_bytes[0] == b' ' || content_bytes[0] == b'=');
 
@@ -96,36 +153,43 @@ impl Cop for RegexpLiteral {
                     if content_starts_with_space_or_eq {
                         return;
                     }
-                    let (line, column) = source.offset_to_line_col(node_start);
-                    diagnostics.push(self.diagnostic(
+                    push_slashes_diagnostic(
+                        self,
                         source,
-                        line,
-                        column,
-                        "Use `//` around regular expression.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                        node_start,
+                        node_end,
+                        open_bytes.len(),
+                        "Use `//` around regular expression.",
+                    );
                 }
             }
             "percent_r" => {
                 if is_slash {
-                    let (line, column) = source.offset_to_line_col(node_start);
-                    diagnostics.push(self.diagnostic(
+                    push_percent_r_diagnostic(
+                        self,
                         source,
-                        line,
-                        column,
-                        "Use `%r` around regular expression.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                        node_start,
+                        node_end,
+                        "Use `%r` around regular expression.",
+                    );
                 }
             }
             "mixed" => {
                 if is_multiline {
                     if is_slash {
-                        let (line, column) = source.offset_to_line_col(node_start);
-                        diagnostics.push(self.diagnostic(
+                        push_percent_r_diagnostic(
+                            self,
                             source,
-                            line,
-                            column,
-                            "Use `%r` around regular expression.".to_string(),
-                        ));
+                            diagnostics,
+                            &mut corrections,
+                            node_start,
+                            node_end,
+                            "Use `%r` around regular expression.",
+                        );
                     }
                 } else if is_percent_r {
                     if has_slash && !allow_inner_slashes {
@@ -134,27 +198,31 @@ impl Cop for RegexpLiteral {
                     if content_starts_with_space_or_eq {
                         return;
                     }
-                    let (line, column) = source.offset_to_line_col(node_start);
-                    diagnostics.push(self.diagnostic(
+                    push_slashes_diagnostic(
+                        self,
                         source,
-                        line,
-                        column,
-                        "Use `//` around regular expression.".to_string(),
-                    ));
+                        diagnostics,
+                        &mut corrections,
+                        node_start,
+                        node_end,
+                        open_bytes.len(),
+                        "Use `//` around regular expression.",
+                    );
                 }
             }
             _ => {}
         }
 
-        // For slashes style: check for inner slashes
         if enforced_style == "slashes" && is_slash && has_slash && !allow_inner_slashes {
-            let (line, column) = source.offset_to_line_col(node_start);
-            diagnostics.push(self.diagnostic(
+            push_percent_r_diagnostic(
+                self,
                 source,
-                line,
-                column,
-                "Use `%r` around regular expression.".to_string(),
-            ));
+                diagnostics,
+                &mut corrections,
+                node_start,
+                node_end,
+                "Use `%r` around regular expression.",
+            );
         }
     }
 }
@@ -163,4 +231,5 @@ impl Cop for RegexpLiteral {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RegexpLiteral, "cops/style/regexp_literal");
+    crate::cop_autocorrect_fixture_tests!(RegexpLiteral, "cops/style/regexp_literal");
 }
