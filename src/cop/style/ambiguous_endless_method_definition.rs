@@ -30,6 +30,10 @@ impl Cop for AmbiguousEndlessMethodDefinition {
         &[DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -37,7 +41,7 @@ impl Cop for AmbiguousEndlessMethodDefinition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // RuboCop: minimum_target_ruby_version 3.0
         // Endless methods were introduced in Ruby 3.0
@@ -96,12 +100,48 @@ impl Cop for AmbiguousEndlessMethodDefinition {
         };
 
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Avoid using `{}` statements with endless methods.", op_name),
-        ));
+        );
+
+        if let Some(corrs) = corrections.as_mut() {
+            let mut expr_start = def_node
+                .equal_loc()
+                .map(|eq| eq.end_offset())
+                .unwrap_or(tail_start);
+            while expr_start < tail_end
+                && matches!(source_bytes[expr_start], b' ' | b'\t' | b'\r')
+            {
+                expr_start += 1;
+            }
+
+            let mut expr_end = tail_end;
+            if let Some(hash_idx) = source_bytes[tail_start..tail_end].iter().position(|&b| b == b'#')
+            {
+                expr_end = tail_start + hash_idx;
+            }
+            while expr_end > expr_start && matches!(source_bytes[expr_end - 1], b' ' | b'\t' | b'\r')
+            {
+                expr_end -= 1;
+            }
+
+            if expr_start < expr_end {
+                let expr_src = String::from_utf8_lossy(&source_bytes[expr_start..expr_end]);
+                corrs.push(crate::correction::Correction {
+                    start: expr_start,
+                    end: expr_end,
+                    replacement: format!("({})", expr_src),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -149,6 +189,20 @@ mod tests {
             include_bytes!(
                 "../../../tests/fixtures/cops/style/ambiguous_endless_method_definition/offense.rb"
             ),
+        );
+    }
+
+    #[test]
+    fn autocorrect_fixture_with_ruby30() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &AmbiguousEndlessMethodDefinition,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/ambiguous_endless_method_definition/offense.rb"
+            ),
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/ambiguous_endless_method_definition/corrected.rb"
+            ),
+            ruby30_config(),
         );
     }
 }
