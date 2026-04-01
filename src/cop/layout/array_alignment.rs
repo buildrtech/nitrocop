@@ -1,4 +1,5 @@
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
@@ -58,6 +59,10 @@ impl Cop for ArrayAlignment {
         "Layout/ArrayAlignment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -65,16 +70,21 @@ impl Cop for ArrayAlignment {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = AlignmentVisitor {
             cop: self,
             source,
             config,
             diagnostics,
+            pending_corrections: Vec::new(),
             in_multi_write: false,
         };
         visitor.visit(&parse_result.node());
+
+        if let Some(corrections) = corrections {
+            corrections.extend(visitor.pending_corrections);
+        }
     }
 }
 
@@ -83,6 +93,7 @@ struct AlignmentVisitor<'a> {
     source: &'a SourceFile,
     config: &'a CopConfig,
     diagnostics: &'a mut Vec<Diagnostic>,
+    pending_corrections: Vec<Correction>,
     in_multi_write: bool,
 }
 
@@ -123,8 +134,13 @@ impl<'pr> Visit<'pr> for AlignmentVisitor<'_> {
         // where `[x, y]` is inside the implicit RHS array) ARE checked, since
         // their parent is the implicit array, not the masgn itself.
         if !self.in_multi_write {
-            self.cop
-                .check_array(self.source, node, self.config, self.diagnostics);
+            self.cop.check_array(
+                self.source,
+                node,
+                self.config,
+                self.diagnostics,
+                &mut self.pending_corrections,
+            );
         }
         // Reset in_multi_write before visiting children — only the direct
         // array child of MultiWriteNode is skipped, not nested arrays.
@@ -135,8 +151,13 @@ impl<'pr> Visit<'pr> for AlignmentVisitor<'_> {
     }
 
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
-        self.cop
-            .check_rescue_exceptions(self.source, node, self.config, self.diagnostics);
+        self.cop.check_rescue_exceptions(
+            self.source,
+            node,
+            self.config,
+            self.diagnostics,
+            &mut self.pending_corrections,
+        );
         ruby_prism::visit_rescue_node(self, node);
     }
 }
@@ -148,6 +169,7 @@ impl ArrayAlignment {
         array_node: &ruby_prism::ArrayNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Vec<Correction>,
     ) {
         let style = config.get_str("EnforcedStyle", "with_first_element");
         let indent_width = config.get_usize("IndentationWidth", 2);
@@ -181,7 +203,14 @@ impl ArrayAlignment {
             _ => first_col, // "with_first_element" (default)
         };
 
-        self.check_element_alignment(source, &elements, first_line, expected_col, diagnostics);
+        self.check_element_alignment(
+            source,
+            &elements,
+            first_line,
+            expected_col,
+            diagnostics,
+            corrections,
+        );
     }
 
     fn check_rescue_exceptions(
@@ -190,6 +219,7 @@ impl ArrayAlignment {
         rescue_node: &ruby_prism::RescueNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Vec<Correction>,
     ) {
         let style = config.get_str("EnforcedStyle", "with_first_element");
         let indent_width = config.get_usize("IndentationWidth", 2);
@@ -213,7 +243,14 @@ impl ArrayAlignment {
             _ => first_col, // "with_first_element" (default)
         };
 
-        self.check_element_alignment(source, &exceptions, first_line, expected_col, diagnostics);
+        self.check_element_alignment(
+            source,
+            &exceptions,
+            first_line,
+            expected_col,
+            diagnostics,
+            corrections,
+        );
     }
 
     fn check_element_alignment(
@@ -223,6 +260,7 @@ impl ArrayAlignment {
         first_line: usize,
         expected_col: usize,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Vec<Correction>,
     ) {
         let mut last_checked_line = first_line;
 
@@ -241,15 +279,25 @@ impl ArrayAlignment {
                 continue;
             }
             if elem_col != expected_col {
-                diagnostics.push(
-                    self.diagnostic(
-                        source,
-                        elem_line,
-                        elem_col,
-                        "Align the elements of an array literal if they span more than one line."
-                            .to_string(),
-                    ),
+                let mut diagnostic = self.diagnostic(
+                    source,
+                    elem_line,
+                    elem_col,
+                    "Align the elements of an array literal if they span more than one line."
+                        .to_string(),
                 );
+
+                let line_start = source.line_start_offset(elem_line);
+                corrections.push(Correction {
+                    start: line_start,
+                    end: line_start + elem_col,
+                    replacement: " ".repeat(expected_col),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -261,6 +309,7 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(ArrayAlignment, "cops/layout/array_alignment");
+    crate::cop_autocorrect_fixture_tests!(ArrayAlignment, "cops/layout/array_alignment");
 
     #[test]
     fn rescue_exception_list_misaligned() {
