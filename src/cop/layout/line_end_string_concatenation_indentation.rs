@@ -55,6 +55,10 @@ impl Cop for LineEndStringConcatenationIndentation {
         "Layout/LineEndStringConcatenationIndentation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -62,7 +66,7 @@ impl Cop for LineEndStringConcatenationIndentation {
         code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "aligned");
         let indent_width = config.get_usize("IndentationWidth", 2);
@@ -77,6 +81,7 @@ impl Cop for LineEndStringConcatenationIndentation {
             nearest_parent_type: ParentType::TopLevel,
             saved_parent_types: Vec::new(),
             expected_stack_depth: 0,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -98,6 +103,7 @@ struct ConcatVisitor<'a> {
     /// `visit_else_node` call. Used to detect whether
     /// `visit_branch_node_enter` was called for that node.
     expected_stack_depth: usize,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -118,6 +124,34 @@ enum ParentType {
 }
 
 impl ConcatVisitor<'_> {
+    fn add_indent_correction(&mut self, part_offset: usize, expected_col: usize) -> bool {
+        let bytes = self.source.as_bytes();
+        let mut line_start = part_offset;
+        while line_start > 0 && bytes[line_start - 1] != b'\n' {
+            line_start -= 1;
+        }
+
+        if !bytes[line_start..part_offset]
+            .iter()
+            .all(|&b| b == b' ' || b == b'\t')
+        {
+            return false;
+        }
+
+        if let Some(ref mut corrections) = self.corrections {
+            corrections.push(crate::correction::Correction {
+                start: line_start,
+                end: part_offset,
+                replacement: " ".repeat(expected_col),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            return true;
+        }
+
+        false
+    }
+
     fn check_dstr(&mut self, node: &ruby_prism::InterpolatedStringNode<'_>) {
         let parts: Vec<_> = node.parts().iter().collect();
         if parts.len() < 2 {
@@ -210,15 +244,18 @@ impl ConcatVisitor<'_> {
             let expected_indent = first_line_indent + self.indent_width;
 
             if columns[1] != expected_indent {
-                let (line_num, _) = self
-                    .source
-                    .offset_to_line_col(parts[1].location().start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let part_offset = parts[1].location().start_offset();
+                let (line_num, _) = self.source.offset_to_line_col(part_offset);
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line_num,
                     columns[1],
                     "Indent the first part of a string concatenated with backslash.".to_string(),
-                ));
+                );
+                if self.add_indent_correction(part_offset, expected_indent) {
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
 
             // Check alignment of third+ parts with the second part
@@ -227,15 +264,18 @@ impl ConcatVisitor<'_> {
                 for (idx, &col) in columns[2..].iter().enumerate() {
                     if col != base {
                         let part_idx = idx + 2;
-                        let (line_num, _) = self
-                            .source
-                            .offset_to_line_col(parts[part_idx].location().start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let part_offset = parts[part_idx].location().start_offset();
+                        let (line_num, _) = self.source.offset_to_line_col(part_offset);
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line_num,
                             col,
                             "Align parts of a string concatenated with backslash.".to_string(),
-                        ));
+                        );
+                        if self.add_indent_correction(part_offset, base) {
+                            diagnostic.corrected = true;
+                        }
+                        self.diagnostics.push(diagnostic);
                     }
                     base = col;
                 }
@@ -245,15 +285,18 @@ impl ConcatVisitor<'_> {
             for (idx, &col) in columns[1..].iter().enumerate() {
                 if col != base {
                     let part_idx = idx + 1;
-                    let (line_num, _) = self
-                        .source
-                        .offset_to_line_col(parts[part_idx].location().start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let part_offset = parts[part_idx].location().start_offset();
+                    let (line_num, _) = self.source.offset_to_line_col(part_offset);
+                    let mut diagnostic = self.cop.diagnostic(
                         self.source,
                         line_num,
                         col,
                         "Align parts of a string concatenated with backslash.".to_string(),
-                    ));
+                    );
+                    if self.add_indent_correction(part_offset, base) {
+                        diagnostic.corrected = true;
+                    }
+                    self.diagnostics.push(diagnostic);
                 }
                 base = col;
             }
@@ -408,5 +451,9 @@ mod tests {
     crate::cop_fixture_tests!(
         LineEndStringConcatenationIndentation,
         "cops/layout/line_end_string_concatenation_indentation"
+    );
+    crate::cop_autocorrect_fixture_tests!(
+        LineEndStringConcatenationIndentation,
+        "cops/layout/line_end_string_concatenation_indentation_autocorrect"
     );
 }
