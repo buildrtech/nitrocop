@@ -153,7 +153,9 @@ impl TernaryVisitor<'_> {
         let if_branch_src = self.single_statement_source(statements)?;
         let else_branch_src = self.single_statement_source(else_stmts)?;
 
-        let (_, column) = self.source.offset_to_line_col(if_node.location().start_offset());
+        let (_, column) = self
+            .source
+            .offset_to_line_col(if_node.location().start_offset());
         let base_indent = " ".repeat(column.saturating_sub(1));
         let body_indent = format!("{base_indent}  ");
 
@@ -162,7 +164,10 @@ impl TernaryVisitor<'_> {
         ))
     }
 
-    fn single_statement_source(&self, statements: ruby_prism::StatementsNode<'_>) -> Option<String> {
+    fn single_statement_source(
+        &self,
+        statements: ruby_prism::StatementsNode<'_>,
+    ) -> Option<String> {
         let body: Vec<_> = statements.body().iter().collect();
         if body.len() != 1 {
             return None;

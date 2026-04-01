@@ -93,6 +93,24 @@ impl MutableConstant {
         false
     }
 
+    fn is_heredoc_literal(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+        if let Some(s) = node.as_string_node() {
+            if let Some(opening) = s.opening_loc() {
+                let bytes = &source.as_bytes()[opening.start_offset()..opening.end_offset()];
+                return bytes.starts_with(b"<<");
+            }
+        }
+
+        if let Some(isn) = node.as_interpolated_string_node() {
+            if let Some(opening) = isn.opening_loc() {
+                let bytes = &source.as_bytes()[opening.start_offset()..opening.end_offset()];
+                return bytes.starts_with(b"<<");
+            }
+        }
+
+        false
+    }
+
     /// Check if the value is a `.freeze` call (meaning the value is already frozen).
     fn is_frozen_value(node: &ruby_prism::Node<'_>) -> bool {
         if let Some(call) = node.as_call_node() {
@@ -364,6 +382,7 @@ impl MutableConstant {
         value: &ruby_prism::Node<'_>,
         frozen_strings: bool,
         enforced_style: &str,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) -> Vec<Diagnostic> {
         // Already frozen via .freeze call
         if Self::is_frozen_value(value) {
@@ -405,12 +424,31 @@ impl MutableConstant {
 
         // Point at the mutable value (RHS), matching RuboCop behavior
         let (line, column) = source.offset_to_line_col(value.location().start_offset());
-        vec![self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Freeze mutable objects assigned to constants.".to_string(),
-        )]
+        );
+
+        // Conservative autocorrect: append `.freeze` to the RHS value source.
+        // Skip heredocs because appending after the heredoc terminator can
+        // produce invalid output.
+        if let Some(ref mut corr) = corrections {
+            if !Self::is_heredoc_literal(source, value) {
+                let value_loc = value.location();
+                corr.push(crate::correction::Correction {
+                    start: value_loc.end_offset(),
+                    end: value_loc.end_offset(),
+                    replacement: ".freeze".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        vec![diag]
     }
 }
 
@@ -428,6 +466,10 @@ impl Cop for MutableConstant {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -435,7 +477,7 @@ impl Cop for MutableConstant {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "literals");
         let frozen_strings = Self::has_frozen_string_literal_true(source);
@@ -443,28 +485,52 @@ impl Cop for MutableConstant {
         // Check ConstantWriteNode (CONST = value)
         if let Some(cw) = node.as_constant_write_node() {
             let value = cw.value();
-            diagnostics.extend(self.check_value(source, &value, frozen_strings, enforced_style));
+            diagnostics.extend(self.check_value(
+                source,
+                &value,
+                frozen_strings,
+                enforced_style,
+                corrections.as_deref_mut(),
+            ));
             return;
         }
 
         // Check ConstantPathWriteNode (Module::CONST = value)
         if let Some(cpw) = node.as_constant_path_write_node() {
             let value = cpw.value();
-            diagnostics.extend(self.check_value(source, &value, frozen_strings, enforced_style));
+            diagnostics.extend(self.check_value(
+                source,
+                &value,
+                frozen_strings,
+                enforced_style,
+                corrections.as_deref_mut(),
+            ));
             return;
         }
 
         // Check ConstantOrWriteNode (CONST ||= value)
         if let Some(cow) = node.as_constant_or_write_node() {
             let value = cow.value();
-            diagnostics.extend(self.check_value(source, &value, frozen_strings, enforced_style));
+            diagnostics.extend(self.check_value(
+                source,
+                &value,
+                frozen_strings,
+                enforced_style,
+                corrections.as_deref_mut(),
+            ));
             return;
         }
 
         // Check ConstantPathOrWriteNode (Module::CONST ||= value)
         if let Some(cpow) = node.as_constant_path_or_write_node() {
             let value = cpow.value();
-            diagnostics.extend(self.check_value(source, &value, frozen_strings, enforced_style));
+            diagnostics.extend(self.check_value(
+                source,
+                &value,
+                frozen_strings,
+                enforced_style,
+                corrections.as_deref_mut(),
+            ));
         }
     }
 }
@@ -473,6 +539,7 @@ impl Cop for MutableConstant {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MutableConstant, "cops/style/mutable_constant");
+    crate::cop_autocorrect_fixture_tests!(MutableConstant, "cops/style/mutable_constant");
 
     /// XStringNode (backtick) should be flagged even with frozen_string_literal: true.
     /// The magic comment only freezes str/dstr, not xstr.
