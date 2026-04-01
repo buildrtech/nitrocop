@@ -1,6 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -48,20 +49,19 @@ impl Cop for EmptyCaseCondition {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let mut visitor = EmptyCaseVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
             corrections: Vec::new(),
-            emit_corrections: corrections.is_some(),
             parent_kind: ParentKind::Other,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
-        if let Some(ref mut corr) = corrections {
-            corr.extend(visitor.corrections);
+        if let Some(corrs) = corrections.as_mut() {
+            corrs.extend(visitor.corrections);
         }
     }
 }
@@ -78,8 +78,7 @@ struct EmptyCaseVisitor<'a> {
     cop: &'a EmptyCaseCondition,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
-    corrections: Vec<crate::correction::Correction>,
-    emit_corrections: bool,
+    corrections: Vec<Correction>,
     parent_kind: ParentKind,
 }
 
@@ -118,6 +117,72 @@ fn branch_contains_return(case_node: &ruby_prism::CaseNode<'_>) -> bool {
     false
 }
 
+fn build_case_autocorrect(case_node: &ruby_prism::CaseNode<'_>, source: &SourceFile) -> Option<String> {
+    let when_nodes: Vec<_> = case_node
+        .conditions()
+        .iter()
+        .filter_map(|cond| cond.as_when_node())
+        .collect();
+
+    if when_nodes.is_empty() {
+        return None;
+    }
+
+    if when_nodes
+        .iter()
+        .any(|when_node| when_node.conditions().iter().count() != 1)
+    {
+        return None;
+    }
+
+    let case_kw_loc = case_node.case_keyword_loc();
+    let first_when = when_nodes.first()?;
+    let first_when_kw_start = first_when.location().start_offset();
+    let first_when_kw_end = first_when_kw_start + 4;
+
+    // Conservative guard: only autocorrect `case` lines that contain just the keyword.
+    let bytes = source.as_bytes();
+    let mut case_line_end = case_kw_loc.end_offset();
+    while case_line_end < bytes.len() && bytes[case_line_end] != b'\n' {
+        case_line_end += 1;
+    }
+    let case_line_src = &bytes[case_kw_loc.start_offset()..case_line_end];
+    if std::str::from_utf8(case_line_src).ok()?.trim() != "case" {
+        return None;
+    }
+
+    let mut replacement = String::from_utf8_lossy(
+        &bytes[case_node.location().start_offset()..case_node.location().end_offset()],
+    )
+    .into_owned();
+
+    let base = case_node.location().start_offset();
+    let mut edits: Vec<(usize, usize, &str)> = Vec::new();
+
+    // Remove `case` header (from `case` keyword up to first `when`).
+    edits.push((
+        case_kw_loc.start_offset() - base,
+        first_when_kw_start - base,
+        "",
+    ));
+
+    // Rewrite first `when` to `if`.
+    edits.push((first_when_kw_start - base, first_when_kw_end - base, "if"));
+
+    // Rewrite subsequent `when` to `elsif`.
+    for when_node in when_nodes.iter().skip(1) {
+        let when_kw_start = when_node.location().start_offset();
+        edits.push((when_kw_start - base, when_kw_start + 4 - base, "elsif"));
+    }
+
+    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    for (start, end, text) in edits {
+        replacement.replace_range(start..end, text);
+    }
+
+    Some(replacement)
+}
+
 /// Helper macro to implement visitor methods that set parent_kind for their children.
 /// This ensures case nodes nested as direct children see the correct parent type.
 macro_rules! visit_with_parent {
@@ -140,7 +205,7 @@ impl<'pr> Visit<'pr> for EmptyCaseVisitor<'_> {
                 let case_kw_loc = node.case_keyword_loc();
                 let case_offset = case_kw_loc.start_offset();
                 let (line, column) = self.source.offset_to_line_col(case_offset);
-                let mut diag = self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
@@ -148,69 +213,18 @@ impl<'pr> Visit<'pr> for EmptyCaseVisitor<'_> {
                         .to_string(),
                 );
 
-                if self.emit_corrections {
-                    let when_nodes: Vec<_> = node
-                        .conditions()
-                        .iter()
-                        .filter_map(|cond| cond.as_when_node())
-                        .collect();
-
-                    if let Some(first_when) = when_nodes.first() {
-                        // `case` ... first `when` => `if`
-                        let first_when_start = first_when.location().start_offset();
-                        self.corrections.push(crate::correction::Correction {
-                            start: case_kw_loc.start_offset(),
-                            end: first_when_start + 4,
-                            replacement: "if".to_string(),
-                            cop_name: self.cop.name(),
-                            cop_index: 0,
-                        });
-
-                        // Remaining `when` => `elsif`
-                        for when_node in when_nodes.iter().skip(1) {
-                            let when_start = when_node.location().start_offset();
-                            self.corrections.push(crate::correction::Correction {
-                                start: when_start,
-                                end: when_start + 4,
-                                replacement: "elsif".to_string(),
-                                cop_name: self.cop.name(),
-                                cop_index: 0,
-                            });
-                        }
-
-                        // `when a, b` => `if/elsif a || b`
-                        for when_node in &when_nodes {
-                            let conditions = when_node.conditions();
-                            if conditions.len() <= 1 {
-                                continue;
-                            }
-
-                            let first = conditions.iter().next();
-                            let last = conditions.iter().last();
-                            if let (Some(first), Some(last)) = (first, last) {
-                                let replacement = conditions
-                                    .iter()
-                                    .map(|c| {
-                                        String::from_utf8_lossy(c.location().as_slice()).to_string()
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(" || ");
-
-                                self.corrections.push(crate::correction::Correction {
-                                    start: first.location().start_offset(),
-                                    end: last.location().end_offset(),
-                                    replacement,
-                                    cop_name: self.cop.name(),
-                                    cop_index: 0,
-                                });
-                            }
-                        }
-
-                        diag.corrected = true;
-                    }
+                if let Some(replacement) = build_case_autocorrect(node, self.source) {
+                    self.corrections.push(Correction {
+                        start: node.location().start_offset(),
+                        end: node.location().end_offset(),
+                        replacement,
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
                 }
 
-                self.diagnostics.push(diag);
+                self.diagnostics.push(diagnostic);
             }
         }
 
