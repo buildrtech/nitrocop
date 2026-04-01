@@ -45,7 +45,11 @@ fn single_statement_source(
     let node = &body[0];
     Some(
         source
-            .byte_slice(node.location().start_offset(), node.location().end_offset(), "")
+            .byte_slice(
+                node.location().start_offset(),
+                node.location().end_offset(),
+                "",
+            )
             .to_string(),
     )
 }
@@ -59,7 +63,10 @@ fn remove_wrapping_parentheses(expr: String) -> String {
     }
 }
 
-fn replacement_for_ternary(if_node: &ruby_prism::IfNode<'_>, source: &SourceFile) -> Option<String> {
+fn replacement_for_ternary(
+    if_node: &ruby_prism::IfNode<'_>,
+    source: &SourceFile,
+) -> Option<String> {
     let predicate = if_node.predicate();
     let if_statements = if_node.statements()?;
     let subsequent = if_node.subsequent()?;

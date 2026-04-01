@@ -111,12 +111,16 @@ impl<'a> ChildrenVisitor<'a> {
                 last.corrected = true;
             }
         }
-        if let (Some(corrections), Some(correction)) = (self.corrections.as_deref_mut(), correction) {
+        if let (Some(corrections), Some(correction)) = (self.corrections.as_deref_mut(), correction)
+        {
             corrections.push(correction);
         }
     }
 
-    fn split_constant_path_segments(&self, constant_path: &ruby_prism::Node<'_>) -> Option<Vec<String>> {
+    fn split_constant_path_segments(
+        &self,
+        constant_path: &ruby_prism::Node<'_>,
+    ) -> Option<Vec<String>> {
         let src = std::str::from_utf8(constant_path.location().as_slice()).ok()?;
         let segments: Vec<String> = src
             .split("::")

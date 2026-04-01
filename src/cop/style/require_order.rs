@@ -268,7 +268,10 @@ fn group_autocorrect_safe(group: &[RequireEntry], lines: &[&[u8]]) -> bool {
     for line_num in first..=last {
         let idx = line_num - 1;
         let line_str = std::str::from_utf8(lines[idx]).unwrap_or("");
-        let trimmed = line_str.trim().strip_prefix('\u{FEFF}').unwrap_or(line_str.trim());
+        let trimmed = line_str
+            .trim()
+            .strip_prefix('\u{FEFF}')
+            .unwrap_or(line_str.trim());
         let Some(parsed) = extract_require(trimmed) else {
             return false;
         };

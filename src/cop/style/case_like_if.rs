@@ -79,6 +79,10 @@ impl Cop for CaseLikeIf {
         "Style/CaseLikeIf"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
@@ -104,7 +108,7 @@ impl Cop for CaseLikeIf {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let min_branches = config.get_usize("MinBranchesCount", 3);
 
@@ -185,13 +189,166 @@ impl Cop for CaseLikeIf {
 
         let loc = if_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Convert `if-elsif` to `case-when`.".to_string(),
+        );
+
+        if let Some(corrs) = corrections.as_mut() {
+            if let Some(replacement) = build_conservative_case_replacement(source, &if_node) {
+                corrs.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
+    }
+}
+
+/// Conservative autocorrect builder for `if/elsif/else` => `case/when`.
+///
+/// Intentionally supports only simple equality chains where each branch
+/// predicate is `<target> == <literal-or-const>` (or swapped sides), matching
+/// the low-risk subset documented in `autoresearch.ideas.md`.
+fn build_conservative_case_replacement(
+    source: &SourceFile,
+    if_node: &ruby_prism::IfNode<'_>,
+) -> Option<String> {
+    let mut branches: Vec<(Vec<u8>, Option<ruby_prism::StatementsNode<'_>>)> = Vec::new();
+    let mut target: Option<Vec<u8>> = None;
+
+    let mut current_node = if_node.as_node();
+    let mut else_clause: Option<ruby_prism::Node<'_>> = None;
+
+    loop {
+        let current = current_node.as_if_node()?;
+
+        let (branch_target, branch_value) =
+            with_unwrapped(&current.predicate(), &|n| extract_simple_equality_branch(n))?;
+
+        if let Some(existing) = &target {
+            if existing.as_slice() != branch_target.as_slice() {
+                return None;
+            }
+        } else {
+            target = Some(branch_target);
+        }
+
+        branches.push((branch_value, current.statements()));
+
+        match current.subsequent() {
+            Some(next) => {
+                if next.as_if_node().is_some() {
+                    current_node = next;
+                } else {
+                    else_clause = Some(next);
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+
+    let target = target?;
+    let loc = if_node.location();
+    let (_, if_col) = source.offset_to_line_col(loc.start_offset());
+    let line_start = loc.start_offset().saturating_sub(if_col);
+    let indent = String::from_utf8_lossy(&source.as_bytes()[line_start..loc.start_offset()]);
+
+    let mut out = String::new();
+    out.push_str(&indent);
+    out.push_str("case ");
+    out.push_str(&String::from_utf8_lossy(&target));
+    out.push('\n');
+
+    for (value, statements) in branches {
+        out.push_str(&indent);
+        out.push_str("when ");
+        out.push_str(&String::from_utf8_lossy(&value));
+        out.push('\n');
+
+        if let Some(stmts) = statements {
+            let body_loc = stmts.location();
+            let body = &source.as_bytes()[body_loc.start_offset()..body_loc.end_offset()];
+            if !body.is_empty() {
+                append_reindented_body(&mut out, body, &format!("{indent}  "));
+            }
+        }
+    }
+
+    if let Some(else_node) = else_clause.and_then(|n| n.as_else_node()) {
+        out.push_str(&indent);
+        out.push_str("else\n");
+        if let Some(stmts) = else_node.statements() {
+            let body_loc = stmts.location();
+            let body = &source.as_bytes()[body_loc.start_offset()..body_loc.end_offset()];
+            if !body.is_empty() {
+                append_reindented_body(&mut out, body, &format!("{indent}  "));
+            }
+        }
+    }
+
+    out.push_str(&indent);
+    out.push_str("end");
+
+    Some(out)
+}
+
+/// Returns `(target, value)` for simple equality branch predicates:
+/// `<target> == <literal-or-const>` or `<literal-or-const> == <target>`.
+fn append_reindented_body(out: &mut String, body: &[u8], line_prefix: &str) {
+    let body_text = String::from_utf8_lossy(body);
+    for line in body_text.lines() {
+        out.push_str(line_prefix);
+        out.push_str(line.trim_start());
+        out.push('\n');
+    }
+}
+
+fn extract_simple_equality_branch(node: &ruby_prism::Node<'_>) -> Option<(Vec<u8>, Vec<u8>)> {
+    let call = node.as_call_node()?;
+    if is_safe_navigation(&call) {
+        return None;
+    }
+
+    let method = std::str::from_utf8(call.name().as_slice()).ok()?;
+    if method != "==" && method != "eql?" && method != "equal?" {
+        return None;
+    }
+
+    let receiver = call.receiver()?;
+    let args = call.arguments()?;
+    let arg = args.arguments().iter().next()?;
+    if args.arguments().len() != 1 {
+        return None;
+    }
+
+    let recv_lit = is_literal(&receiver) || is_const_reference(&receiver);
+    let arg_lit = is_literal(&arg) || is_const_reference(&arg);
+
+    if recv_lit && !arg_lit && !is_class_reference(&receiver) {
+        return Some((
+            arg.location().as_slice().to_vec(),
+            receiver.location().as_slice().to_vec(),
         ));
     }
+
+    if arg_lit && !recv_lit && !is_class_reference(&arg) {
+        return Some((
+            receiver.location().as_slice().to_vec(),
+            arg.location().as_slice().to_vec(),
+        ));
+    }
+
+    None
 }
 
 /// RuboCop's `regexp_with_working_captures?`: checks if a condition contains
@@ -605,4 +762,17 @@ fn is_class_reference(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CaseLikeIf, "cops/style/case_like_if");
+
+    #[test]
+    fn autocorrect_simple_equality_chain_to_case_when() {
+        crate::testutil::assert_cop_autocorrect(
+            &CaseLikeIf,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/case_like_if/offense/autocorrect_simple.rb"
+            ),
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/case_like_if/corrected/autocorrect_simple.rb"
+            ),
+        );
+    }
 }

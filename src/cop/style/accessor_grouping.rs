@@ -122,7 +122,13 @@ impl Cop for AccessorGrouping {
         };
 
         if enforced_style == "grouped" {
-            check_grouped(self, source, &stmts, diagnostics, corrections.as_deref_mut());
+            check_grouped(
+                self,
+                source,
+                &stmts,
+                diagnostics,
+                corrections.as_deref_mut(),
+            );
         }
     }
 }
@@ -372,10 +378,11 @@ fn accessor_call_info(
     let args_loc = args.location();
     let call_loc = call.location();
 
-    let args_source = std::str::from_utf8(&source.as_bytes()[args_loc.start_offset()..args_loc.end_offset()])
-        .ok()?
-        .trim()
-        .to_string();
+    let args_source =
+        std::str::from_utf8(&source.as_bytes()[args_loc.start_offset()..args_loc.end_offset()])
+            .ok()?
+            .trim()
+            .to_string();
 
     if args_source.is_empty() {
         return None;

@@ -486,7 +486,8 @@ impl Cop for IdenticalConditionalBranches {
             // if every branch has exactly one identical non-heredoc statement,
             // replace the full conditional with that statement.
             if let Some(corrections) = corrections {
-                if let Some(replacement) = identical_single_statement_replacement(source, &branches) {
+                if let Some(replacement) = identical_single_statement_replacement(source, &branches)
+                {
                     let loc = node.location();
                     corrections.push(crate::correction::Correction {
                         start: loc.start_offset(),
@@ -521,7 +522,8 @@ impl Cop for IdenticalConditionalBranches {
             );
 
             if let Some(corrections) = corrections {
-                if let Some(replacement) = identical_single_statement_replacement(source, &branches) {
+                if let Some(replacement) = identical_single_statement_replacement(source, &branches)
+                {
                     let loc = node.location();
                     corrections.push(crate::correction::Correction {
                         start: loc.start_offset(),
@@ -555,7 +557,8 @@ impl Cop for IdenticalConditionalBranches {
             );
 
             if let Some(corrections) = corrections {
-                if let Some(replacement) = identical_single_statement_replacement(source, &branches) {
+                if let Some(replacement) = identical_single_statement_replacement(source, &branches)
+                {
                     let loc = node.location();
                     corrections.push(crate::correction::Correction {
                         start: loc.start_offset(),

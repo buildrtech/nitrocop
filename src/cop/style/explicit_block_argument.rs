@@ -254,7 +254,11 @@ impl<'a, 'pr> Visit<'pr> for ExplicitBlockArgumentVisitor<'a> {
                 } else {
                     None
                 };
-                self.check_call_with_block(&block, node.location().start_offset(), autocorrect_target);
+                self.check_call_with_block(
+                    &block,
+                    node.location().start_offset(),
+                    autocorrect_target,
+                );
             }
         }
         ruby_prism::visit_call_node(self, node);
