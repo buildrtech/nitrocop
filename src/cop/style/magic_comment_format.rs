@@ -37,12 +37,16 @@ impl Cop for MagicCommentFormat {
         "Style/MagicCommentFormat"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_lines(
         &self,
         source: &SourceFile,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let lines: Vec<&str> = source
             .lines()
@@ -51,6 +55,7 @@ impl Cop for MagicCommentFormat {
         let style = config.get_str("EnforcedStyle", "snake_case");
         let _directive_cap = config.get_str("DirectiveCapitalization", "");
         let _value_cap = config.get_str("ValueCapitalization", "");
+        let mut corrections = corrections;
 
         // Only check lines before the first code statement
         for (i, line) in lines.iter().enumerate() {
@@ -83,6 +88,7 @@ impl Cop for MagicCommentFormat {
                         if Self::is_magic_comment_directive(directive) {
                             Self::check_directive_style(
                                 diagnostics,
+                                &mut corrections,
                                 source,
                                 i,
                                 line,
@@ -100,6 +106,7 @@ impl Cop for MagicCommentFormat {
                     if Self::is_magic_comment_directive(directive) {
                         Self::check_directive_style(
                             diagnostics,
+                            &mut corrections,
                             source,
                             i,
                             line,
@@ -117,6 +124,7 @@ impl Cop for MagicCommentFormat {
 impl MagicCommentFormat {
     fn check_directive_style(
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
         source: &SourceFile,
         line_idx: usize,
         line: &str,
@@ -147,7 +155,26 @@ impl MagicCommentFormat {
                     "kebab_case" => "Prefer kebab case for magic comments.".to_string(),
                     _ => return,
                 };
-                diagnostics.push(cop.diagnostic(source, line_num, pos, msg));
+                let replacement = match style {
+                    "snake_case" => directive.replace('-', "_"),
+                    "kebab_case" => directive.replace('_', "-"),
+                    _ => return,
+                };
+
+                let mut diag = cop.diagnostic(source, line_num, pos, msg);
+                if let Some(corrs) = corrections.as_deref_mut() {
+                    if let Some(start) = source.line_col_to_offset(line_num, pos) {
+                        corrs.push(crate::correction::Correction {
+                            start,
+                            end: start + directive.len(),
+                            replacement,
+                            cop_name: cop.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+                diagnostics.push(diag);
             }
         }
     }
@@ -157,4 +184,5 @@ impl MagicCommentFormat {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MagicCommentFormat, "cops/style/magic_comment_format");
+    crate::cop_autocorrect_fixture_tests!(MagicCommentFormat, "cops/style/magic_comment_format");
 }
