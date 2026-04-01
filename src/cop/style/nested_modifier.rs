@@ -32,39 +32,45 @@ impl Cop for NestedModifier {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Get the body of a modifier conditional/loop (if/unless/while/until)
-        let body_node = if let Some(if_node) = node.as_if_node() {
-            // Must be modifier form (no end keyword, has if keyword, not ternary)
+        let (outer_if_unless, body_node) = if let Some(if_node) = node.as_if_node() {
             if if_node.end_keyword_loc().is_some() {
                 return;
             }
             let kw_loc = match if_node.if_keyword_loc() {
                 Some(loc) => loc,
-                None => return, // ternary
+                None => return,
             };
             let kw_bytes = kw_loc.as_slice();
             if kw_bytes != b"if" && kw_bytes != b"unless" {
                 return;
             }
-            if_node.statements()
+            (
+                Some((
+                    String::from_utf8_lossy(kw_loc.as_slice()).to_string(),
+                    if_node.predicate(),
+                )),
+                if_node.statements(),
+            )
         } else if let Some(unless_node) = node.as_unless_node() {
             if unless_node.end_keyword_loc().is_some() {
                 return;
             }
-            unless_node.statements()
+            (
+                Some(("unless".to_string(), unless_node.predicate())),
+                unless_node.statements(),
+            )
         } else if let Some(while_node) = node.as_while_node() {
-            // Must be modifier form (no closing/end keyword)
             if while_node.closing_loc().is_some() {
                 return;
             }
-            while_node.statements()
+            (None, while_node.statements())
         } else if let Some(until_node) = node.as_until_node() {
             if until_node.closing_loc().is_some() {
                 return;
             }
-            until_node.statements()
+            (None, until_node.statements())
         } else {
             return;
         };
@@ -79,106 +85,145 @@ impl Cop for NestedModifier {
             return;
         }
 
-        let inner_keyword_offset = if let Some(inner_if) = body[0].as_if_node() {
+        if let Some(inner_if) = body[0].as_if_node() {
             if inner_if.end_keyword_loc().is_some() {
                 return;
             }
-            inner_if.if_keyword_loc().and_then(|inner_kw| {
+            if let Some(inner_kw) = inner_if.if_keyword_loc() {
                 let inner_bytes = inner_kw.as_slice();
                 if inner_bytes == b"if" || inner_bytes == b"unless" {
-                    Some(inner_kw.start_offset())
-                } else {
-                    None
+                    let (line, column) = source.offset_to_line_col(inner_kw.start_offset());
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Avoid using nested modifiers.".to_string(),
+                    );
+
+                    if let (Some(corrs), Some((outer_kw, outer_predicate))) =
+                        (corrections.as_deref_mut(), outer_if_unless.as_ref())
+                    {
+                        let (start, end, replacement) = build_if_unless_rewrite(
+                            source,
+                            outer_kw,
+                            outer_predicate,
+                            inner_kw,
+                            &inner_if.predicate(),
+                        );
+                        corrs.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
-            })
-        } else if let Some(inner_unless) = body[0].as_unless_node() {
+            }
+        }
+
+        if let Some(inner_unless) = body[0].as_unless_node() {
             if inner_unless.end_keyword_loc().is_some() {
                 return;
             }
             let inner_kw = inner_unless.keyword_loc();
             if inner_kw.as_slice() == b"unless" {
-                Some(inner_kw.start_offset())
-            } else {
-                None
-            }
-        } else if let Some(inner_while) = body[0].as_while_node() {
-            if inner_while.closing_loc().is_some() {
-                return;
-            }
-            Some(inner_while.keyword_loc().start_offset())
-        } else if let Some(inner_until) = body[0].as_until_node() {
-            if inner_until.closing_loc().is_some() {
-                return;
-            }
-            Some(inner_until.keyword_loc().start_offset())
-        } else {
-            None
-        };
+                let (line, column) = source.offset_to_line_col(inner_kw.start_offset());
+                let mut diagnostic = self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Avoid using nested modifiers.".to_string(),
+                );
 
-        let Some(inner_keyword_offset) = inner_keyword_offset else {
-            return;
-        };
+                if let (Some(corrs), Some((outer_kw, outer_predicate))) =
+                    (corrections.as_deref_mut(), outer_if_unless.as_ref())
+                {
+                    let (start, end, replacement) = build_if_unless_rewrite(
+                        source,
+                        outer_kw,
+                        outer_predicate,
+                        inner_kw,
+                        &inner_unless.predicate(),
+                    );
+                    corrs.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
 
-        let (line, column) = source.offset_to_line_col(inner_keyword_offset);
-        let mut diagnostic = self.diagnostic(
-            source,
-            line,
-            column,
-            "Avoid using nested modifiers.".to_string(),
-        );
-
-        if let Some(corrections) = corrections {
-            if let Some(replacement) = nested_modifier_replacement(source, node) {
-                corrections.push(crate::correction::Correction {
-                    start: node.location().start_offset(),
-                    end: node.location().end_offset(),
-                    replacement,
-                    cop_name: self.name(),
-                    cop_index: 0,
-                });
-                diagnostic.corrected = true;
+                diagnostics.push(diagnostic);
             }
         }
 
-        diagnostics.push(diagnostic);
+        if let Some(inner_while) = body[0].as_while_node() {
+            if inner_while.closing_loc().is_some() {
+                return;
+            }
+            let inner_kw = inner_while.keyword_loc();
+            let (line, column) = source.offset_to_line_col(inner_kw.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Avoid using nested modifiers.".to_string(),
+            ));
+        }
+
+        if let Some(inner_until) = body[0].as_until_node() {
+            if inner_until.closing_loc().is_some() {
+                return;
+            }
+            let inner_kw = inner_until.keyword_loc();
+            let (line, column) = source.offset_to_line_col(inner_kw.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Avoid using nested modifiers.".to_string(),
+            ));
+        }
     }
 }
 
-fn nested_modifier_replacement(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<String> {
-    let (keyword, predicate, statements) = if let Some(if_node) = node.as_if_node() {
-        let kw_loc = if_node.if_keyword_loc()?;
-        let kw = match kw_loc.as_slice() {
-            b"if" => "if",
-            b"unless" => "unless",
-            _ => return None,
-        };
-        (kw, if_node.predicate(), if_node.statements()?)
-    } else if let Some(unless_node) = node.as_unless_node() {
-        ("unless", unless_node.predicate(), unless_node.statements()?)
-    } else if let Some(while_node) = node.as_while_node() {
-        ("while", while_node.predicate(), while_node.statements()?)
-    } else if let Some(until_node) = node.as_until_node() {
-        ("until", until_node.predicate(), until_node.statements()?)
-    } else {
-        return None;
-    };
-
-    let body_node = statements.body().iter().next()?;
-    let body_source = String::from_utf8_lossy(
-        &source.as_bytes()[body_node.location().start_offset()..body_node.location().end_offset()],
+fn build_if_unless_rewrite(
+    source: &SourceFile,
+    outer_keyword: &str,
+    outer_predicate: &ruby_prism::Node<'_>,
+    inner_kw_loc: ruby_prism::Location<'_>,
+    inner_predicate: &ruby_prism::Node<'_>,
+) -> (usize, usize, String) {
+    let left = String::from_utf8_lossy(
+        &source.as_bytes()
+            [outer_predicate.location().start_offset()..outer_predicate.location().end_offset()],
     )
-    .into_owned();
-    let predicate_source = String::from_utf8_lossy(
-        &source.as_bytes()[predicate.location().start_offset()..predicate.location().end_offset()],
+    .to_string();
+    let mut right = String::from_utf8_lossy(
+        &source.as_bytes()
+            [inner_predicate.location().start_offset()..inner_predicate.location().end_offset()],
     )
-    .into_owned();
+    .to_string();
 
-    Some(format!(
-        "{} {}\n  {}\nend",
-        keyword,
-        predicate_source.trim(),
-        body_source.trim()
-    ))
+    let inner_kw = String::from_utf8_lossy(inner_kw_loc.as_slice()).to_string();
+    if outer_keyword != inner_kw {
+        right = format!("!{}", right);
+    }
+
+    let operator = if outer_keyword == "if" { "&&" } else { "||" };
+    let replacement = format!("{} {} {} {}", outer_keyword, left, operator, right);
+
+    (
+        inner_kw_loc.start_offset(),
+        outer_predicate.location().end_offset(),
+        replacement,
+    )
 }
 
 #[cfg(test)]

@@ -141,7 +141,8 @@ impl MultipleComparison {
                     var_src: lhs.var_src,
                     count: lhs.count + rhs.count,
                     values,
-                    has_skipped_comparison: lhs.has_skipped_comparison || rhs.has_skipped_comparison,
+                    has_skipped_comparison: lhs.has_skipped_comparison
+                        || rhs.has_skipped_comparison,
                 });
             }
 
@@ -385,9 +386,10 @@ impl<'a, 'b> Visit<'a> for MultipleComparisonVisitor<'a, 'b> {
                     );
 
                     if let Some(corrections) = self.corrections.as_mut() {
-                        if let Some(chain) =
-                            MultipleComparison::collect_autocorrect_chain(&node.as_node(), self.allow_method)
-                        {
+                        if let Some(chain) = MultipleComparison::collect_autocorrect_chain(
+                            &node.as_node(),
+                            self.allow_method,
+                        ) {
                             if chain.count >= self.threshold
                                 && !chain.has_skipped_comparison
                                 && !chain.values.is_empty()

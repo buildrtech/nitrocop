@@ -1,27 +1,13 @@
-if y
-  do_thing if x
-end
+do_thing if y && x
 
-if b
-  run if a
-end
+run if b && a
 
-unless b
-  something if a
-end
+something unless b || !a
 
-while b
-  something if a
-end
+something if a while b
 
-until b
-  something if a
-end
+something if a until b
 
-if b
-  something while a
-end
+something while a if b
 
-if b
-  something until a
-end
+something until a if b

@@ -10,7 +10,9 @@ use crate::parse::source::SourceFile;
 /// natalie corpus repos. Fixed by requiring `receiver().is_none()` for format/sprintf.
 pub struct FormatString;
 
-const AUTOCORRECTABLE_METHODS: &[&[u8]] = &[b"to_d", b"to_f", b"to_h", b"to_i", b"to_r", b"to_s", b"to_sym"];
+const AUTOCORRECTABLE_METHODS: &[&[u8]] = &[
+    b"to_d", b"to_f", b"to_h", b"to_i", b"to_r", b"to_s", b"to_sym",
+];
 const OPERATOR_METHODS: &[&[u8]] = &[
     b"+", b"-", b"*", b"/", b"%", b"**", b"==", b"!=", b"<", b">", b"<=", b">=", b"<=>", b"<<",
     b">>", b"|", b"&", b"^",
@@ -81,8 +83,8 @@ impl Cop for FormatString {
                     None => return,
                 };
 
-                let is_string_receiver =
-                    receiver.as_string_node().is_some() || receiver.as_interpolated_string_node().is_some();
+                let is_string_receiver = receiver.as_string_node().is_some()
+                    || receiver.as_interpolated_string_node().is_some();
 
                 if !is_string_receiver {
                     let has_array_or_hash_arg = call.arguments().is_some_and(|args| {
@@ -99,7 +101,11 @@ impl Cop for FormatString {
 
                 let loc = call.message_loc().unwrap_or_else(|| call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                let preferred = if style == "format" { "format" } else { "sprintf" };
+                let preferred = if style == "format" {
+                    "format"
+                } else {
+                    "sprintf"
+                };
                 let mut diag = self.diagnostic(
                     source,
                     line,
@@ -135,12 +141,8 @@ impl Cop for FormatString {
                                 node_source(rhs)
                             };
 
-                            let replacement = format!(
-                                "{}({}, {})",
-                                preferred,
-                                node_source(&receiver),
-                                rhs_src
-                            );
+                            let replacement =
+                                format!("{}({}, {})", preferred, node_source(&receiver), rhs_src);
                             let call_loc = call.location();
                             corr.push(crate::correction::Correction {
                                 start: call_loc.start_offset(),
@@ -185,7 +187,11 @@ impl Cop for FormatString {
                 } else {
                     "String#%"
                 };
-                let current = if method_bytes == b"format" { "format" } else { "sprintf" };
+                let current = if method_bytes == b"format" {
+                    "format"
+                } else {
+                    "sprintf"
+                };
                 let mut diag = self.diagnostic(
                     source,
                     line,
@@ -206,7 +212,9 @@ impl Cop for FormatString {
                             diag.corrected = true;
                         }
                     } else if style == "percent" {
-                        let args = call.arguments().map(|a| a.arguments().iter().collect::<Vec<_>>());
+                        let args = call
+                            .arguments()
+                            .map(|a| a.arguments().iter().collect::<Vec<_>>());
                         if let Some(arg_list) = args {
                             if !arg_list.is_empty() {
                                 let format_arg = node_source(&arg_list[0]);
@@ -214,7 +222,9 @@ impl Cop for FormatString {
                                 if !param_args.is_empty() {
                                     let rhs = if param_args.len() == 1 {
                                         let single = &param_args[0];
-                                        if single.as_hash_node().is_some() || single.as_keyword_hash_node().is_some() {
+                                        if single.as_hash_node().is_some()
+                                            || single.as_keyword_hash_node().is_some()
+                                        {
                                             let src = node_source(single);
                                             if src.trim_start().starts_with('{') {
                                                 src
@@ -229,7 +239,11 @@ impl Cop for FormatString {
                                     } else {
                                         format!(
                                             "[{}]",
-                                            param_args.iter().map(|n| node_source(n)).collect::<Vec<_>>().join(", ")
+                                            param_args
+                                                .iter()
+                                                .map(|n| node_source(n))
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
                                         )
                                     };
 

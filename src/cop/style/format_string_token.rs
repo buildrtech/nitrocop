@@ -472,16 +472,17 @@ impl FormatStringTokenVisitor<'_> {
                                 "Prefer annotated tokens (like `%<foo>s`) over template tokens (like `%{foo}`).".to_string(),
                             );
 
-                            if let Some(replacement) = Self::template_to_annotated(
-                                &content[tok.offset..tok.end],
-                            ) {
-                                self.pending_corrections.push(crate::correction::Correction {
-                                    start: content_start_offset + tok.offset,
-                                    end: content_start_offset + tok.end,
-                                    replacement,
-                                    cop_name: self.cop.name(),
-                                    cop_index: 0,
-                                });
+                            if let Some(replacement) =
+                                Self::template_to_annotated(&content[tok.offset..tok.end])
+                            {
+                                self.pending_corrections
+                                    .push(crate::correction::Correction {
+                                        start: content_start_offset + tok.offset,
+                                        end: content_start_offset + tok.end,
+                                        replacement,
+                                        cop_name: self.cop.name(),
+                                        cop_index: 0,
+                                    });
                                 diag.corrected = true;
                             }
 
@@ -519,16 +520,17 @@ impl FormatStringTokenVisitor<'_> {
                                 "Prefer template tokens (like `%{foo}`) over annotated tokens (like `%<foo>s`).".to_string(),
                             );
 
-                            if let Some(replacement) = Self::annotated_to_template(
-                                &content[tok.offset..tok.end],
-                            ) {
-                                self.pending_corrections.push(crate::correction::Correction {
-                                    start: content_start_offset + tok.offset,
-                                    end: content_start_offset + tok.end,
-                                    replacement,
-                                    cop_name: self.cop.name(),
-                                    cop_index: 0,
-                                });
+                            if let Some(replacement) =
+                                Self::annotated_to_template(&content[tok.offset..tok.end])
+                            {
+                                self.pending_corrections
+                                    .push(crate::correction::Correction {
+                                        start: content_start_offset + tok.offset,
+                                        end: content_start_offset + tok.end,
+                                        replacement,
+                                        cop_name: self.cop.name(),
+                                        cop_index: 0,
+                                    });
                                 diag.corrected = true;
                             }
 

@@ -113,7 +113,9 @@ impl Cop for KeywordParametersOrder {
                 None => return,
             };
 
-            let first_line = source.offset_to_line_col(first_kw.location().start_offset()).0;
+            let first_line = source
+                .offset_to_line_col(first_kw.location().start_offset())
+                .0;
             let last_line = source.offset_to_line_col(last_kw.location().end_offset()).0;
             if first_line != last_line {
                 return;
@@ -123,7 +125,9 @@ impl Cop for KeywordParametersOrder {
             let mut optional_src: Vec<&str> = Vec::new();
             for kw in &keywords {
                 let loc = kw.location();
-                let kw_src = match std::str::from_utf8(&source.as_bytes()[loc.start_offset()..loc.end_offset()]) {
+                let kw_src = match std::str::from_utf8(
+                    &source.as_bytes()[loc.start_offset()..loc.end_offset()],
+                ) {
                     Ok(s) => s.trim(),
                     Err(_) => return,
                 };
