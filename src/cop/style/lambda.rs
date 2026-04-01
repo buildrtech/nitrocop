@@ -25,6 +25,10 @@ impl Cop for Lambda {
         "Style/Lambda"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[BLOCK_NODE, CALL_NODE, LAMBDA_NODE]
     }
@@ -36,7 +40,7 @@ impl Cop for Lambda {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "line_count_dependent");
 
@@ -67,7 +71,13 @@ impl Cop for Lambda {
             return;
         }
 
-        self.check_lambda_method(source, &call, style, diagnostics);
+        self.check_lambda_method(
+            source,
+            &call,
+            style,
+            diagnostics,
+            corrections.as_deref_mut(),
+        );
     }
 }
 
@@ -126,18 +136,25 @@ impl Lambda {
         call: &ruby_prism::CallNode<'_>,
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         match style {
             "literal" => {
                 // Always flag `lambda` — use `->` instead
                 let loc = call.message_loc().unwrap_or_else(|| call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use the `-> {}` lambda literal syntax for all lambdas.".to_string(),
-                ));
+                );
+                if let Some(corr) = corrections.as_deref_mut() {
+                    if apply_lambda_method_autocorrect(call, corr) {
+                        diagnostic.corrected = true;
+                    }
+                }
+                diagnostics.push(diagnostic);
             }
             "lambda" => {
                 // Never flag `lambda` — it's preferred
@@ -166,19 +183,52 @@ impl Lambda {
                 if start_line == end_line {
                     let loc = call.message_loc().unwrap_or_else(|| call.location());
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Use the `-> {}` lambda literal syntax for single-line lambdas."
-                                .to_string(),
-                        ),
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use the `-> {}` lambda literal syntax for single-line lambdas."
+                            .to_string(),
                     );
+                    if let Some(corr) = corrections.as_deref_mut() {
+                        if apply_lambda_method_autocorrect(call, corr) {
+                            diagnostic.corrected = true;
+                        }
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
     }
+}
+
+fn apply_lambda_method_autocorrect(
+    call: &ruby_prism::CallNode<'_>,
+    corrections: &mut Vec<crate::correction::Correction>,
+) -> bool {
+    let block = match call.block().and_then(|b| b.as_block_node()) {
+        Some(block) => block,
+        None => return false,
+    };
+
+    if block.opening_loc().as_slice() != b"{" {
+        return false;
+    }
+
+    let message = match call.message_loc() {
+        Some(message) => message,
+        None => return false,
+    };
+
+    corrections.push(crate::correction::Correction {
+        start: message.start_offset(),
+        end: message.end_offset(),
+        replacement: "->".to_string(),
+        cop_name: "Style/Lambda",
+        cop_index: 0,
+    });
+
+    true
 }
 
 #[cfg(test)]
@@ -187,6 +237,7 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(Lambda, "cops/style/lambda");
+    crate::cop_autocorrect_fixture_tests!(Lambda, "cops/style/lambda_autocorrect");
 
     #[test]
     fn lambda_with_receiver_is_ignored() {

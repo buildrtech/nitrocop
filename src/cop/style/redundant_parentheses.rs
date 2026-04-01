@@ -105,6 +105,10 @@ impl Cop for RedundantParentheses {
         "Style/RedundantParentheses"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -112,12 +116,13 @@ impl Cop for RedundantParentheses {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = RedundantParensVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             parent_stack: Vec::new(),
         };
         visitor.visit(&parse_result.node());
@@ -172,6 +177,7 @@ struct RedundantParensVisitor<'a> {
     cop: &'a RedundantParentheses,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     parent_stack: Vec<ParentInfo>,
 }
 
@@ -323,7 +329,7 @@ impl RedundantParensVisitor<'_> {
             };
             // But not inside if/while/unless/until conditions
             if should_flag && !self.has_conditional_ancestor() {
-                self.add_offense(node, "an assignment");
+                self.add_offense(node, inner, "an assignment");
             }
             return;
         }
@@ -334,7 +340,7 @@ impl RedundantParensVisitor<'_> {
         if inner.as_range_node().is_some() {
             // Check if this is an argument of a parenthesized method call first
             if let Some(msg) = self.check_argument_of_parenthesized_call(node, inner, parent) {
-                self.add_offense(node, msg);
+                self.add_offense(node, inner, msg);
                 return;
             }
             return;
@@ -357,39 +363,39 @@ impl RedundantParensVisitor<'_> {
         // in certain contexts (ternary, conditional, array, hash, method arg)
         if inner.as_rescue_modifier_node().is_some() {
             if let Some(msg) = self.check_one_line_rescue(node, parent) {
-                self.add_offense(node, msg);
+                self.add_offense(node, inner, msg);
             }
             return;
         }
 
         // Keyword detection: defined?, yield, super, return, next, break
         if let Some(msg) = self.check_keyword_with_redundant_parens(inner) {
-            self.add_offense(node, msg);
+            self.add_offense(node, inner, msg);
             return;
         }
 
         // Lambda/proc with braces — (-> { x }), (lambda { x }), (proc { x })
         if is_lambda_or_proc_with_braces(inner) {
-            self.add_offense(node, "an expression");
+            self.add_offense(node, inner, "an expression");
             return;
         }
 
         // One-line pattern matching: (expr in pattern), (expr => pattern)
         if let Some(msg) = self.check_pattern_matching(inner, parent) {
-            self.add_offense(node, msg);
+            self.add_offense(node, inner, msg);
             return;
         }
 
         // Interpolation: "#{(foo)}" — parens inside string interpolation are redundant
         if self.is_interpolation(parent) {
-            self.add_offense(node, "an interpolated expression");
+            self.add_offense(node, inner, "an interpolated expression");
             return;
         }
 
         // Check if this is an argument of a parenthesized method call
         // e.g., x.y((z)), x.y((z + w)), x.y(a, (b))
         if let Some(msg) = self.check_argument_of_parenthesized_call(node, inner, parent) {
-            self.add_offense(node, msg);
+            self.add_offense(node, inner, msg);
             return;
         }
 
@@ -413,7 +419,7 @@ impl RedundantParensVisitor<'_> {
             {
                 return;
             }
-            self.add_offense(node, msg);
+            self.add_offense(node, inner, msg);
             return;
         }
 
@@ -426,7 +432,7 @@ impl RedundantParensVisitor<'_> {
         if inner.as_and_node().is_some() || inner.as_or_node().is_some() {
             if let Some(msg) = check_logical(&self.source.content, node, inner, parent, is_receiver)
             {
-                self.add_offense(node, msg);
+                self.add_offense(node, inner, msg);
                 return;
             }
         }
@@ -439,7 +445,7 @@ impl RedundantParensVisitor<'_> {
             && self.parent_stack.len() <= 3
             && parent.is_none_or(|p| matches!(p.kind, ParentKind::Other))
         {
-            self.add_offense(node, "a comparison expression");
+            self.add_offense(node, inner, "a comparison expression");
             return;
         }
 
@@ -448,20 +454,42 @@ impl RedundantParensVisitor<'_> {
             if let Some(msg) =
                 check_method_call(&self.source.content, node, inner, parent, is_receiver)
             {
-                self.add_offense(node, msg);
+                self.add_offense(node, inner, msg);
             }
         }
     }
 
-    fn add_offense(&mut self, node: &ruby_prism::ParenthesesNode<'_>, msg: &str) {
+    fn add_offense(
+        &mut self,
+        node: &ruby_prism::ParenthesesNode<'_>,
+        inner: &ruby_prism::Node<'_>,
+        msg: &str,
+    ) {
         let loc = node.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             format!("Don't use parentheses around {}.", msg),
-        ));
+        );
+
+        if let Some(corrections) = self.corrections.as_mut() {
+            let inner_loc = inner.location();
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: self
+                    .source
+                    .byte_slice(inner_loc.start_offset(), inner_loc.end_offset(), "")
+                    .to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 
     /// Check if a nearby ancestor is a ternary, looking through intermediate
@@ -1621,4 +1649,8 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantParentheses, "cops/style/redundant_parentheses");
+    crate::cop_autocorrect_fixture_tests!(
+        RedundantParentheses,
+        "cops/style/redundant_parentheses_autocorrect"
+    );
 }
