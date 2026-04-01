@@ -1,6 +1,7 @@
 use crate::cop::node_type::{CASE_NODE, IF_NODE, UNLESS_NODE, UNTIL_NODE, WHILE_NODE};
 use crate::cop::util::is_blank_or_whitespace_line;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
@@ -144,6 +145,10 @@ impl Cop for EmptyLineAfterMultilineCondition {
         "Layout/EmptyLineAfterMultilineCondition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -179,7 +184,7 @@ impl Cop for EmptyLineAfterMultilineCondition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check if/unless nodes
         if let Some(if_node) = node.as_if_node() {
@@ -217,11 +222,19 @@ impl Cop for EmptyLineAfterMultilineCondition {
                     pred_end_line,
                     predicate.location().end_offset(),
                 ) {
-                    diagnostics.extend(self.check_multiline_condition(source, &predicate));
+                    self.push_condition_results(
+                        self.check_multiline_condition(source, &predicate),
+                        diagnostics,
+                        &mut corrections,
+                    );
                 }
             } else {
                 let predicate = if_node.predicate();
-                diagnostics.extend(self.check_multiline_condition(source, &predicate));
+                self.push_condition_results(
+                    self.check_multiline_condition(source, &predicate),
+                    diagnostics,
+                    &mut corrections,
+                );
             }
             return;
         }
@@ -245,10 +258,18 @@ impl Cop for EmptyLineAfterMultilineCondition {
                     pred_end_line,
                     predicate.location().end_offset(),
                 ) {
-                    diagnostics.extend(self.check_multiline_condition(source, &predicate));
+                    self.push_condition_results(
+                        self.check_multiline_condition(source, &predicate),
+                        diagnostics,
+                        &mut corrections,
+                    );
                 }
             } else {
-                diagnostics.extend(self.check_multiline_condition(source, &predicate));
+                self.push_condition_results(
+                    self.check_multiline_condition(source, &predicate),
+                    diagnostics,
+                    &mut corrections,
+                );
             }
             return;
         }
@@ -276,10 +297,18 @@ impl Cop for EmptyLineAfterMultilineCondition {
                     pred_end_line,
                     predicate.location().end_offset(),
                 ) {
-                    diagnostics.extend(self.check_multiline_condition(source, &predicate));
+                    self.push_condition_results(
+                        self.check_multiline_condition(source, &predicate),
+                        diagnostics,
+                        &mut corrections,
+                    );
                 }
             } else {
-                diagnostics.extend(self.check_multiline_condition(source, &predicate));
+                self.push_condition_results(
+                    self.check_multiline_condition(source, &predicate),
+                    diagnostics,
+                    &mut corrections,
+                );
             }
             return;
         }
@@ -305,10 +334,18 @@ impl Cop for EmptyLineAfterMultilineCondition {
                     pred_end_line,
                     predicate.location().end_offset(),
                 ) {
-                    diagnostics.extend(self.check_multiline_condition(source, &predicate));
+                    self.push_condition_results(
+                        self.check_multiline_condition(source, &predicate),
+                        diagnostics,
+                        &mut corrections,
+                    );
                 }
             } else {
-                diagnostics.extend(self.check_multiline_condition(source, &predicate));
+                self.push_condition_results(
+                    self.check_multiline_condition(source, &predicate),
+                    diagnostics,
+                    &mut corrections,
+                );
             }
             return;
         }
@@ -640,11 +677,33 @@ impl<'pr> Visit<'pr> for RescueVisitor<'_> {
 }
 
 impl EmptyLineAfterMultilineCondition {
+    fn push_condition_results(
+        &self,
+        results: Vec<(Diagnostic, Option<usize>)>,
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        for (diagnostic, insert_offset) in results {
+            diagnostics.push(diagnostic);
+            if let Some(offset) = insert_offset {
+                if let Some(corrections) = corrections.as_mut() {
+                    corrections.push(Correction {
+                        start: offset,
+                        end: offset,
+                        replacement: "\n".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                }
+            }
+        }
+    }
+
     fn check_multiline_condition(
         &self,
         source: &SourceFile,
         predicate: &ruby_prism::Node<'_>,
-    ) -> Vec<Diagnostic> {
+    ) -> Vec<(Diagnostic, Option<usize>)> {
         // Skip when the predicate is a CaseNode — case expressions are inherently
         // multiline (they contain when branches) and shouldn't be treated as
         // multiline boolean conditions. This matches RuboCop's behavior for
@@ -694,7 +753,7 @@ impl EmptyLineAfterMultilineCondition {
                     if rest[0] != b'#' && !is_then_keyword(rest) {
                         let (line, col) =
                             source.offset_to_line_col(predicate.location().start_offset());
-                        return vec![self.diagnostic(source, line, col, MSG.to_string())];
+                        return vec![(self.diagnostic(source, line, col, MSG.to_string()), None)];
                     }
                 }
             }
@@ -713,7 +772,11 @@ impl EmptyLineAfterMultilineCondition {
             // Report offense at the condition (predicate) start, matching RuboCop's
             // `add_offense(condition)` which places the offense on the condition node.
             let (line, col) = source.offset_to_line_col(predicate.location().start_offset());
-            return vec![self.diagnostic(source, line, col, MSG.to_string())];
+            let insert_offset = source.line_col_to_offset(next_line_num, 0);
+            return vec![(
+                self.diagnostic(source, line, col, MSG.to_string()),
+                insert_offset,
+            )];
         }
 
         Vec::new()
@@ -760,6 +823,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        EmptyLineAfterMultilineCondition,
+        "cops/layout/empty_line_after_multiline_condition"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         EmptyLineAfterMultilineCondition,
         "cops/layout/empty_line_after_multiline_condition"
     );
