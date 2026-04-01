@@ -3,6 +3,7 @@ use crate::cop::node_type::{
     MODULE_NODE, STATEMENTS_NODE, UNLESS_NODE, UNTIL_NODE, WHEN_NODE, WHILE_NODE,
 };
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -12,6 +13,13 @@ use crate::parse::source::SourceFile;
 /// the same column. The `indented_internal_methods` style only applies to
 /// class/module/block bodies, not to if/while/etc.
 pub struct IndentationConsistency;
+
+struct IndentationOffense {
+    line: usize,
+    column: usize,
+    start_offset: usize,
+    expected_column: usize,
+}
 
 /// Check if a node is a bare access modifier call (private, protected, public with no args).
 fn is_bare_access_modifier(node: &ruby_prism::Node<'_>) -> bool {
@@ -36,7 +44,7 @@ impl IndentationConsistency {
         keyword_offset: usize,
         body: Option<ruby_prism::Node<'_>>,
         indented_internal_methods: bool,
-    ) -> Vec<Diagnostic> {
+    ) -> Vec<IndentationOffense> {
         let body = match body {
             Some(b) => b,
             None => return Vec::new(),
@@ -75,7 +83,7 @@ impl IndentationConsistency {
         source: &SourceFile,
         keyword_offset: usize,
         stmts: Option<ruby_prism::StatementsNode<'_>>,
-    ) -> Vec<Diagnostic> {
+    ) -> Vec<IndentationOffense> {
         let stmts = match stmts {
             Some(s) => s,
             None => return Vec::new(),
@@ -104,7 +112,7 @@ impl IndentationConsistency {
         source: &SourceFile,
         children: &[ruby_prism::Node<'_>],
         kw_line: usize,
-    ) -> Vec<Diagnostic> {
+    ) -> Vec<IndentationOffense> {
         let first_loc = children[0].location();
         let (first_line, first_col) = source.offset_to_line_col(first_loc.start_offset());
 
@@ -123,12 +131,12 @@ impl IndentationConsistency {
             prev_line = child_line;
 
             if child_col != first_col {
-                diagnostics.push(self.diagnostic(
-                    source,
-                    child_line,
-                    child_col,
-                    "Inconsistent indentation detected.".to_string(),
-                ));
+                diagnostics.push(IndentationOffense {
+                    line: child_line,
+                    column: child_col,
+                    start_offset: loc.start_offset(),
+                    expected_column: first_col,
+                });
             }
         }
 
@@ -141,7 +149,7 @@ impl IndentationConsistency {
         &self,
         source: &SourceFile,
         children: &[ruby_prism::Node<'_>],
-    ) -> Vec<Diagnostic> {
+    ) -> Vec<IndentationOffense> {
         // Split children into sections separated by bare access modifiers.
         // Each section's children must have consistent indentation within the section,
         // but different sections can have different indentation levels.
@@ -179,23 +187,58 @@ impl IndentationConsistency {
                 prev_line = child_line;
 
                 if child_col != first_col {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        child_line,
-                        child_col,
-                        "Inconsistent indentation detected.".to_string(),
-                    ));
+                    diagnostics.push(IndentationOffense {
+                        line: child_line,
+                        column: child_col,
+                        start_offset: loc.start_offset(),
+                        expected_column: first_col,
+                    });
                 }
             }
         }
 
         diagnostics
     }
+
+    fn emit_offenses(
+        &self,
+        source: &SourceFile,
+        offenses: Vec<IndentationOffense>,
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<Correction>>,
+    ) {
+        for offense in offenses {
+            let mut diagnostic = self.diagnostic(
+                source,
+                offense.line,
+                offense.column,
+                "Inconsistent indentation detected.".to_string(),
+            );
+
+            if let Some(corrections) = corrections.as_mut() {
+                let line_start = source.line_start_offset(offense.line);
+                corrections.push(Correction {
+                    start: line_start,
+                    end: offense.start_offset,
+                    replacement: " ".repeat(offense.expected_column),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
+        }
+    }
 }
 
 impl Cop for IndentationConsistency {
     fn name(&self) -> &'static str {
         "Layout/IndentationConsistency"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -225,141 +268,198 @@ impl Cop for IndentationConsistency {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "normal");
         let indented = style == "indented_internal_methods";
 
         if let Some(class_node) = node.as_class_node() {
-            diagnostics.extend(self.check_body_consistency(
+            self.emit_offenses(
                 source,
-                class_node.class_keyword_loc().start_offset(),
-                class_node.body(),
-                indented,
-            ));
+                self.check_body_consistency(
+                    source,
+                    class_node.class_keyword_loc().start_offset(),
+                    class_node.body(),
+                    indented,
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         if let Some(module_node) = node.as_module_node() {
-            diagnostics.extend(self.check_body_consistency(
+            self.emit_offenses(
                 source,
-                module_node.module_keyword_loc().start_offset(),
-                module_node.body(),
-                indented,
-            ));
+                self.check_body_consistency(
+                    source,
+                    module_node.module_keyword_loc().start_offset(),
+                    module_node.body(),
+                    indented,
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         if let Some(def_node) = node.as_def_node() {
-            diagnostics.extend(self.check_body_consistency(
+            self.emit_offenses(
                 source,
-                def_node.def_keyword_loc().start_offset(),
-                def_node.body(),
-                false, // indented_internal_methods only applies to class/module bodies
-            ));
+                self.check_body_consistency(
+                    source,
+                    def_node.def_keyword_loc().start_offset(),
+                    def_node.body(),
+                    false, // indented_internal_methods only applies to class/module bodies
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         if let Some(block_node) = node.as_block_node() {
-            diagnostics.extend(self.check_body_consistency(
+            self.emit_offenses(
                 source,
-                block_node.opening_loc().start_offset(),
-                block_node.body(),
-                indented, // indented_internal_methods applies to block bodies too (class_methods do, etc.)
-            ));
+                self.check_body_consistency(
+                    source,
+                    block_node.opening_loc().start_offset(),
+                    block_node.body(),
+                    indented, // indented_internal_methods applies to block bodies too (class_methods do, etc.)
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         // if/elsif bodies (ternary has no if_keyword_loc, skip those)
         if let Some(if_node) = node.as_if_node() {
             if let Some(kw_loc) = if_node.if_keyword_loc() {
-                diagnostics.extend(self.check_statements_consistency(
+                self.emit_offenses(
                     source,
-                    kw_loc.start_offset(),
-                    if_node.statements(),
-                ));
+                    self.check_statements_consistency(source, kw_loc.start_offset(), if_node.statements()),
+                    diagnostics,
+                    &mut corrections,
+                );
             }
             return;
         }
 
         // unless bodies
         if let Some(unless_node) = node.as_unless_node() {
-            diagnostics.extend(self.check_statements_consistency(
+            self.emit_offenses(
                 source,
-                unless_node.keyword_loc().start_offset(),
-                unless_node.statements(),
-            ));
+                self.check_statements_consistency(
+                    source,
+                    unless_node.keyword_loc().start_offset(),
+                    unless_node.statements(),
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         // else bodies (from if/elsif/case/etc.)
         if let Some(else_node) = node.as_else_node() {
-            diagnostics.extend(self.check_statements_consistency(
+            self.emit_offenses(
                 source,
-                else_node.else_keyword_loc().start_offset(),
-                else_node.statements(),
-            ));
+                self.check_statements_consistency(
+                    source,
+                    else_node.else_keyword_loc().start_offset(),
+                    else_node.statements(),
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         // case/when bodies
         if let Some(when_node) = node.as_when_node() {
-            diagnostics.extend(self.check_statements_consistency(
+            self.emit_offenses(
                 source,
-                when_node.keyword_loc().start_offset(),
-                when_node.statements(),
-            ));
+                self.check_statements_consistency(
+                    source,
+                    when_node.keyword_loc().start_offset(),
+                    when_node.statements(),
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         // case/in bodies (pattern matching)
         if let Some(in_node) = node.as_in_node() {
-            diagnostics.extend(self.check_statements_consistency(
+            self.emit_offenses(
                 source,
-                in_node.in_loc().start_offset(),
-                in_node.statements(),
-            ));
+                self.check_statements_consistency(
+                    source,
+                    in_node.in_loc().start_offset(),
+                    in_node.statements(),
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         // while bodies
         if let Some(while_node) = node.as_while_node() {
-            diagnostics.extend(self.check_statements_consistency(
+            self.emit_offenses(
                 source,
-                while_node.keyword_loc().start_offset(),
-                while_node.statements(),
-            ));
+                self.check_statements_consistency(
+                    source,
+                    while_node.keyword_loc().start_offset(),
+                    while_node.statements(),
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         // until bodies
         if let Some(until_node) = node.as_until_node() {
-            diagnostics.extend(self.check_statements_consistency(
+            self.emit_offenses(
                 source,
-                until_node.keyword_loc().start_offset(),
-                until_node.statements(),
-            ));
+                self.check_statements_consistency(
+                    source,
+                    until_node.keyword_loc().start_offset(),
+                    until_node.statements(),
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         // for bodies
         if let Some(for_node) = node.as_for_node() {
-            diagnostics.extend(self.check_statements_consistency(
+            self.emit_offenses(
                 source,
-                for_node.for_keyword_loc().start_offset(),
-                for_node.statements(),
-            ));
+                self.check_statements_consistency(
+                    source,
+                    for_node.for_keyword_loc().start_offset(),
+                    for_node.statements(),
+                ),
+                diagnostics,
+                &mut corrections,
+            );
             return;
         }
 
         // begin bodies (only explicit begin blocks with begin keyword)
         if let Some(begin_node) = node.as_begin_node() {
             if let Some(kw_loc) = begin_node.begin_keyword_loc() {
-                diagnostics.extend(self.check_statements_consistency(
+                self.emit_offenses(
                     source,
-                    kw_loc.start_offset(),
-                    begin_node.statements(),
-                ));
+                    self.check_statements_consistency(source, kw_loc.start_offset(), begin_node.statements()),
+                    diagnostics,
+                    &mut corrections,
+                );
             }
         }
     }
@@ -371,6 +471,10 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
+        IndentationConsistency,
+        "cops/layout/indentation_consistency"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         IndentationConsistency,
         "cops/layout/indentation_consistency"
     );
