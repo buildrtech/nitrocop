@@ -10,6 +10,10 @@ impl Cop for SingleLineMethods {
         "Style/SingleLineMethods"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[DEF_NODE, STATEMENTS_NODE]
     }
@@ -21,7 +25,7 @@ impl Cop for SingleLineMethods {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_empty = config.get_bool("AllowIfMethodIsEmpty", true);
         let def_node = match node.as_def_node() {
@@ -64,6 +68,62 @@ impl Cop for SingleLineMethods {
                 column,
                 "Avoid single-line method definitions.".to_string(),
             ));
+
+            if let Some(corrections) = corrections {
+                let indent_width = config.get_usize("IndentationWidth", 2);
+                let base_indent = " ".repeat(column);
+                let body_indent = format!("{base_indent}{}", " ".repeat(indent_width));
+
+                let start = def_node.location().start_offset();
+                let end = def_node.location().end_offset();
+
+                if has_body {
+                    let Some(body_node) = def_node.body() else {
+                        return;
+                    };
+                    let body_loc = body_node.location();
+                    let mut header = source
+                        .byte_slice(def_loc.start_offset(), body_loc.start_offset(), "")
+                        .to_string();
+                    while header.ends_with(';') || header.ends_with(' ') {
+                        header.pop();
+                    }
+
+                    let mut body = source
+                        .byte_slice(body_loc.start_offset(), body_loc.end_offset(), "")
+                        .trim()
+                        .to_string();
+                    while body.ends_with(';') {
+                        body.pop();
+                        body = body.trim_end().to_string();
+                    }
+
+                    if body.is_empty() || body.contains(';') || body.contains('\n') {
+                        return;
+                    }
+
+                    let replacement = format!("{header}\n{body_indent}{body}\n{base_indent}end");
+                    corrections.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                } else {
+                    let header = source
+                        .byte_slice(def_loc.start_offset(), end_kw_loc.start_offset(), "")
+                        .trim_end();
+                    let replacement = format!("{header}\n{base_indent}end");
+                    corrections.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                }
+            }
         }
     }
 }
@@ -74,6 +134,7 @@ mod tests {
     use crate::testutil::{run_cop_full, run_cop_full_with_config};
 
     crate::cop_fixture_tests!(SingleLineMethods, "cops/style/single_line_methods");
+    crate::cop_autocorrect_fixture_tests!(SingleLineMethods, "cops/style/single_line_methods");
 
     #[test]
     fn empty_single_line_method_is_ok() {
