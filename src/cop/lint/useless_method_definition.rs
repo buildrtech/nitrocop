@@ -54,21 +54,17 @@ impl Cop for UselessMethodDefinition {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = UselessMethodVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
-            corrections: Vec::new(),
-            emit_corrections: corrections.is_some(),
+            corrections,
             inside_non_access_modifier_call: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
-        if let Some(ref mut corr) = corrections {
-            corr.extend(visitor.corrections);
-        }
     }
 }
 
@@ -76,8 +72,7 @@ struct UselessMethodVisitor<'a, 'src> {
     cop: &'a UselessMethodDefinition,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
-    corrections: Vec<crate::correction::Correction>,
-    emit_corrections: bool,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// True when we are inside a CallNode that is NOT an access modifier
     /// (e.g., `memoize def foo; super; end`). DefNodes in this context should
     /// not be flagged.
@@ -188,12 +183,12 @@ impl UselessMethodVisitor<'_, '_> {
             "Useless method definition detected. The method just delegates to `super`.".to_string(),
         );
 
-        if self.emit_corrections {
-            let (start, end) = removal_range_for_def(self.source, def_node);
-            self.corrections.push(crate::correction::Correction {
-                start,
-                end,
-                replacement: String::new(),
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            let loc = def_node.location();
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "".to_string(),
                 cop_name: self.cop.name(),
                 cop_index: 0,
             });
@@ -202,46 +197,6 @@ impl UselessMethodVisitor<'_, '_> {
 
         self.diagnostics.push(diag);
     }
-}
-
-fn removal_range_for_def(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> (usize, usize) {
-    let bytes = source.as_bytes();
-    let def_loc = def_node.location();
-    let def_start = def_loc.start_offset();
-    let mut start = def_start;
-
-    // Mirror RuboCop's behavior for `private/protected/public/module_function def ...`
-    // by removing the wrapping send-node span rather than only the def span.
-    let (line, _) = source.offset_to_line_col(def_start);
-    let line_start = source.line_start_offset(line);
-    let prefix = &bytes[line_start..def_start];
-    if let Ok(prefix_text) = std::str::from_utf8(prefix) {
-        let trimmed = prefix_text.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("private") {
-            if rest.starts_with(char::is_whitespace) {
-                start = line_start + (prefix_text.len() - trimmed.len());
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("protected") {
-            if rest.starts_with(char::is_whitespace) {
-                start = line_start + (prefix_text.len() - trimmed.len());
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("public") {
-            if rest.starts_with(char::is_whitespace) {
-                start = line_start + (prefix_text.len() - trimmed.len());
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("module_function") {
-            if rest.starts_with(char::is_whitespace) {
-                start = line_start + (prefix_text.len() - trimmed.len());
-            }
-        }
-    }
-
-    let mut end = def_loc.end_offset();
-    if end < bytes.len() && bytes[end] == b'\n' {
-        end += 1;
-    }
-
-    (start, end)
 }
 
 /// Check if a CallNode has any DefNode arguments.

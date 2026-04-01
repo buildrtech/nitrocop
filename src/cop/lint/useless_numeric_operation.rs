@@ -28,16 +28,16 @@ impl Cop for UselessNumericOperation {
         "Lint/UselessNumericOperation"
     }
 
-    fn supports_autocorrect(&self) -> bool {
-        true
-    }
-
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, INTEGER_NODE, LOCAL_VARIABLE_OPERATOR_WRITE_NODE]
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn check_node(
@@ -99,11 +99,12 @@ impl Cop for UselessNumericOperation {
                 let loc = call.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 let mut diag = self.diagnostic(source, line, column, MSG.to_string());
-                if let Some(corrections) = corrections.as_mut() {
-                    let replacement = source
-                        .byte_slice(recv.location().start_offset(), recv.location().end_offset(), "x")
+
+                if let Some(ref mut corr) = corrections {
+                    let replacement = std::str::from_utf8(recv.location().as_slice())
+                        .unwrap_or_default()
                         .to_string();
-                    corrections.push(crate::correction::Correction {
+                    corr.push(crate::correction::Correction {
                         start: loc.start_offset(),
                         end: loc.end_offset(),
                         replacement,
@@ -112,6 +113,7 @@ impl Cop for UselessNumericOperation {
                     });
                     diag.corrected = true;
                 }
+
                 diagnostics.push(diag);
             }
         }
@@ -131,17 +133,21 @@ impl Cop for UselessNumericOperation {
                 let loc = op_assign.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 let mut diag = self.diagnostic(source, line, column, MSG.to_string());
-                if let Some(corrections) = corrections.as_mut() {
-                    let lhs = std::str::from_utf8(op_assign.name().as_slice()).unwrap_or("x");
-                    corrections.push(crate::correction::Correction {
+
+                if let Some(ref mut corr) = corrections {
+                    let variable = std::str::from_utf8(op_assign.name().as_slice())
+                        .unwrap_or_default()
+                        .to_string();
+                    corr.push(crate::correction::Correction {
                         start: loc.start_offset(),
                         end: loc.end_offset(),
-                        replacement: format!("{lhs} = {lhs}"),
+                        replacement: format!("{variable} = {variable}"),
                         cop_name: self.name(),
                         cop_index: 0,
                     });
                     diag.corrected = true;
                 }
+
                 diagnostics.push(diag);
             }
         }

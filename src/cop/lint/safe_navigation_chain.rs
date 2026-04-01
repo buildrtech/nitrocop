@@ -112,12 +112,12 @@ impl Cop for SafeNavigationChain {
         Severity::Warning
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, CALL_NODE]
-    }
-
     fn supports_autocorrect(&self) -> bool {
         true
+    }
+
+    fn interested_node_types(&self) -> &'static [u8] {
+        &[BLOCK_NODE, CALL_NODE]
     }
 
     fn check_node(
@@ -207,18 +207,17 @@ impl Cop for SafeNavigationChain {
             "Do not chain ordinary method call after safe navigation operator.".to_string(),
         );
 
-        if let Some(corrs) = corrections.as_mut()
-            && let Some(op_loc) = call.call_operator_loc()
-            && op_loc.as_slice() == b"."
-        {
-            corrs.push(crate::correction::Correction {
-                start: op_loc.start_offset(),
-                end: op_loc.end_offset(),
-                replacement: "&.".to_string(),
-                cop_name: self.name(),
-                cop_index: 0,
-            });
-            diagnostic.corrected = true;
+        if let (Some(corrections), Some(op_loc)) = (corrections.as_mut(), call.call_operator_loc()) {
+            if op_loc.as_slice() == b"." {
+                corrections.push(crate::correction::Correction {
+                    start: op_loc.start_offset(),
+                    end: op_loc.end_offset(),
+                    replacement: "&.".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
         }
 
         diagnostics.push(diagnostic);

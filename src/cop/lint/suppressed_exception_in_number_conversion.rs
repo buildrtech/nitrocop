@@ -47,13 +47,31 @@ impl Cop for SuppressedExceptionInNumberConversion {
             cop: self,
             source,
             diagnostics: Vec::new(),
-            corrections: Vec::new(),
-            emit_corrections: corrections.is_some(),
+            correction_data: Vec::new(),
         };
         visitor.visit(&parse_result.node());
-        diagnostics.extend(visitor.diagnostics);
+
         if let Some(ref mut corr) = corrections {
-            corr.extend(visitor.corrections);
+            for (diag, correction_data) in visitor
+                .diagnostics
+                .iter()
+                .zip(visitor.correction_data.iter())
+            {
+                let mut diag = diag.clone();
+                if let Some((start, end, replacement)) = correction_data {
+                    corr.push(crate::correction::Correction {
+                        start: *start,
+                        end: *end,
+                        replacement: replacement.clone(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
+            }
+        } else {
+            diagnostics.extend(visitor.diagnostics);
         }
     }
 }
@@ -62,8 +80,7 @@ struct NumConvVisitor<'a, 'src> {
     cop: &'a SuppressedExceptionInNumberConversion,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
-    corrections: Vec<crate::correction::Correction>,
-    emit_corrections: bool,
+    correction_data: Vec<Option<(usize, usize, String)>>,
 }
 
 impl<'pr> Visit<'pr> for NumConvVisitor<'_, '_> {
@@ -79,25 +96,14 @@ impl<'pr> Visit<'pr> for NumConvVisitor<'_, '_> {
                 let prefer = build_preferred(&call, self.source);
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                let mut diag = self.cop.diagnostic(
+                self.diagnostics.push(self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     format!("Use `{}` instead.", prefer),
-                );
-
-                if self.emit_corrections {
-                    self.corrections.push(crate::correction::Correction {
-                        start: loc.start_offset(),
-                        end: loc.end_offset(),
-                        replacement: prefer,
-                        cop_name: self.cop.name(),
-                        cop_index: 0,
-                    });
-                    diag.corrected = true;
-                }
-
-                self.diagnostics.push(diag);
+                ));
+                self.correction_data
+                    .push(Some((loc.start_offset(), loc.end_offset(), prefer)));
             }
         }
 
@@ -124,25 +130,14 @@ impl<'pr> Visit<'pr> for NumConvVisitor<'_, '_> {
                             let prefer = build_preferred(&call, self.source);
                             let loc = node.location();
                             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                            let mut diag = self.cop.diagnostic(
+                            self.diagnostics.push(self.cop.diagnostic(
                                 self.source,
                                 line,
                                 column,
                                 format!("Use `{}` instead.", prefer),
-                            );
-
-                            if self.emit_corrections {
-                                self.corrections.push(crate::correction::Correction {
-                                    start: loc.start_offset(),
-                                    end: loc.end_offset(),
-                                    replacement: prefer,
-                                    cop_name: self.cop.name(),
-                                    cop_index: 0,
-                                });
-                                diag.corrected = true;
-                            }
-
-                            self.diagnostics.push(diag);
+                            ));
+                            self.correction_data
+                                .push(Some((loc.start_offset(), loc.end_offset(), prefer)));
                         }
                     }
                 }
@@ -201,21 +196,7 @@ fn build_preferred(call: &ruby_prism::CallNode<'_>, source: &SourceFile) -> Stri
     }
     args_parts.push("exception: false".to_string());
 
-    let preferred = format!("{}({})", method_name, args_parts.join(", "));
-    if let Some(receiver) = call.receiver() {
-        let receiver_src = &source.as_bytes()
-            [receiver.location().start_offset()..receiver.location().end_offset()];
-        let receiver_src = std::str::from_utf8(receiver_src).unwrap_or("Kernel");
-        let operator = if let Some(op_loc) = call.call_operator_loc() {
-            let op_src = &source.as_bytes()[op_loc.start_offset()..op_loc.end_offset()];
-            std::str::from_utf8(op_src).unwrap_or(".")
-        } else {
-            "."
-        };
-        return format!("{}{}{}", receiver_src, operator, preferred);
-    }
-
-    preferred
+    format!("{}({})", method_name, args_parts.join(", "))
 }
 
 fn is_rescue_nil_or_empty(rescue_node: &ruby_prism::RescueNode<'_>) -> bool {

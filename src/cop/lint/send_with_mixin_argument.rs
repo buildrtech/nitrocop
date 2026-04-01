@@ -32,10 +32,6 @@ impl Cop for SendWithMixinArgument {
         "Lint/SendWithMixinArgument"
     }
 
-    fn supports_autocorrect(&self) -> bool {
-        true
-    }
-
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -48,6 +44,10 @@ impl Cop for SendWithMixinArgument {
             STRING_NODE,
             SYMBOL_NODE,
         ]
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn check_node(
@@ -126,20 +126,22 @@ impl Cop for SendWithMixinArgument {
             call.location().end_offset(),
             "send(...)",
         );
-        let replacement = format!("{mixin_str} {}", module_names.join(", "));
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
         let mut diag = self.diagnostic(
             source,
             line,
             column,
-            format!("Use `{replacement}` instead of `{bad_method}`."),
+            format!(
+                "Use `{mixin_str} {}` instead of `{bad_method}`.",
+                module_names.join(", ")
+            ),
         );
 
-        if let Some(corr) = corrections.as_mut() {
+        if let Some(ref mut corr) = corrections {
             corr.push(crate::correction::Correction {
                 start: msg_loc.start_offset(),
                 end: call.location().end_offset(),
-                replacement,
+                replacement: format!("{mixin_str} {}", module_names.join(", ")),
                 cop_name: self.name(),
                 cop_index: 0,
             });

@@ -52,16 +52,16 @@ impl Cop for UnusedMethodArgument {
         "Lint/UnusedMethodArgument"
     }
 
-    fn supports_autocorrect(&self) -> bool {
-        true
-    }
-
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
         &[DEF_NODE]
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn check_node(
@@ -260,16 +260,19 @@ impl Cop for UnusedMethodArgument {
                     column,
                     format!("Unused method argument - `{display_name}`."),
                 );
-                if let Some(corrections) = corrections.as_mut() {
+
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let name_str = String::from_utf8_lossy(name);
                     corrections.push(crate::correction::Correction {
                         start: *offset,
-                        end: *offset + name.len(),
-                        replacement: format!("_{}", String::from_utf8_lossy(name)),
+                        end: *offset + name_str.len(),
+                        replacement: format!("_{name_str}"),
                         cop_name: self.name(),
                         cop_index: 0,
                     });
                     diag.corrected = true;
                 }
+
                 diagnostics.push(diag);
             }
         }
@@ -504,10 +507,7 @@ impl<'pr> Visit<'pr> for VarReadFinder {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UnusedMethodArgument, "cops/lint/unused_method_argument");
-    crate::cop_autocorrect_fixture_tests!(
-        UnusedMethodArgument,
-        "cops/lint/unused_method_argument"
-    );
+    crate::cop_autocorrect_fixture_tests!(UnusedMethodArgument, "cops/lint/unused_method_argument");
 
     #[test]
     fn test_block_param_unused() {
