@@ -34,6 +34,51 @@ fn has_semicolon_then(source: &SourceFile, if_node: &ruby_prism::IfNode<'_>) -> 
     false
 }
 
+fn build_elsif_replacement(
+    source: &SourceFile,
+    else_node: &ruby_prism::ElseNode<'_>,
+    inner_if: &ruby_prism::IfNode<'_>,
+) -> Option<String> {
+    let inner_if_kw = inner_if.if_keyword_loc()?;
+    let inner_end_kw = inner_if.end_keyword_loc()?;
+
+    let start = inner_if_kw.start_offset();
+    let end = inner_end_kw.start_offset();
+    let raw = std::str::from_utf8(&source.as_bytes()[start..end]).ok()?;
+
+    let mut lines: Vec<String> = raw.lines().map(|line| line.to_string()).collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    if !lines[0].starts_with("if") {
+        return None;
+    }
+    lines[0].replace_range(0..2, "elsif");
+
+    let (_, else_col) = source.offset_to_line_col(else_node.else_keyword_loc().start_offset());
+    let (_, inner_col) = source.offset_to_line_col(inner_if_kw.start_offset());
+    let dedent = inner_col.saturating_sub(else_col);
+
+    if dedent > 0 {
+        for line in lines.iter_mut().skip(1) {
+            let remove = line
+                .as_bytes()
+                .iter()
+                .take_while(|&&b| b == b' ')
+                .count()
+                .min(dedent);
+            line.replace_range(0..remove, "");
+        }
+    }
+
+    let mut replacement = lines.join("\n");
+    while replacement.ends_with(' ') {
+        replacement.pop();
+    }
+    Some(replacement)
+}
+
 /// Style/IfInsideElse
 ///
 /// ## Corpus investigation (2026-03-08)
@@ -64,6 +109,10 @@ impl Cop for IfInsideElse {
         "Style/IfInsideElse"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[ELSE_NODE, IF_NODE]
     }
@@ -75,7 +124,7 @@ impl Cop for IfInsideElse {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let if_node = match node.as_if_node() {
             Some(n) => n,
@@ -142,12 +191,36 @@ impl Cop for IfInsideElse {
         };
         let (line, column) = source.offset_to_line_col(loc.start_offset());
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Convert `if` nested inside `else` to `elsif`.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = corrections.as_mut() {
+            if let (Some(replacement), Some(inner_end_kw)) = (
+                build_elsif_replacement(source, &else_node, &inner_if),
+                inner_if.end_keyword_loc(),
+            ) {
+                let else_kw_loc = else_node.else_keyword_loc();
+                let mut correction_end = inner_end_kw.end_offset();
+                if source.as_bytes().get(correction_end) == Some(&b'\n') {
+                    correction_end += 1;
+                }
+
+                corrections.push(crate::correction::Correction {
+                    start: else_kw_loc.start_offset(),
+                    end: correction_end,
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -155,4 +228,5 @@ impl Cop for IfInsideElse {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(IfInsideElse, "cops/style/if_inside_else");
+    crate::cop_autocorrect_fixture_tests!(IfInsideElse, "cops/style/if_inside_else");
 }
