@@ -1,5 +1,6 @@
 use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -140,49 +141,41 @@ impl RaiseArgs {
 
         let loc = call.message_loc().unwrap_or_else(|| call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diag = self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Provide an exception class and message as arguments to `{method_name}`."),
         );
 
-        if let Some(corrs) = corrections.as_deref_mut() {
-            let receiver_loc = receiver.location();
-            if let Some(receiver_src) = source.try_byte_slice(
-                receiver_loc.start_offset(),
-                receiver_loc.end_offset(),
-            ) {
-                let replacement = if let Some(new_args) = arg_call.arguments() {
-                    let new_arg_list: Vec<_> = new_args.arguments().iter().collect();
-                    if let Some(first_arg) = new_arg_list.first() {
-                        let arg_loc = first_arg.location();
-                        if let Some(arg_src) =
-                            source.try_byte_slice(arg_loc.start_offset(), arg_loc.end_offset())
-                        {
-                            format!("{method_name} {receiver_src}, {arg_src}")
-                        } else {
-                            format!("{method_name} {receiver_src}")
-                        }
-                    } else {
-                        format!("{method_name} {receiver_src}")
-                    }
-                } else {
-                    format!("{method_name} {receiver_src}")
-                };
+        if let Some(corrections) = corrections.as_mut() {
+            let receiver_source = receiver.location().as_slice();
+            let receiver_source = std::str::from_utf8(receiver_source).unwrap_or("");
 
-                corrs.push(crate::correction::Correction {
-                    start: call.location().start_offset(),
-                    end: call.location().end_offset(),
-                    replacement,
-                    cop_name: self.name(),
-                    cop_index: 0,
-                });
-                diag.corrected = true;
-            }
+            let replacement = if let Some(new_args) = arg_call.arguments() {
+                let new_arg_list: Vec<_> = new_args.arguments().iter().collect();
+                if let Some(first_arg) = new_arg_list.first() {
+                    let arg_source =
+                        std::str::from_utf8(first_arg.location().as_slice()).unwrap_or("");
+                    format!("{method_name} {receiver_source}, {arg_source}")
+                } else {
+                    format!("{method_name} {receiver_source}")
+                }
+            } else {
+                format!("{method_name} {receiver_source}")
+            };
+
+            corrections.push(Correction {
+                start: call.location().start_offset(),
+                end: call.location().end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
         }
 
-        diagnostics.push(diag);
+        diagnostics.push(diagnostic);
     }
 
     fn check_compact(
