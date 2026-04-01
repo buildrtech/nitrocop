@@ -88,98 +88,46 @@ impl Cop for MultilineMethodSignature {
         }
 
         let (line, column) = source.offset_to_line_col(def_loc.start_offset());
-        let mut diag = self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Avoid multi-line method signatures.".to_string(),
         );
 
-        if let (Some(ref mut corr), Some(params), Some(lparen)) = (
-            corrections.as_mut(),
-            def_node.parameters(),
-            def_node.lparen_loc(),
-        ) {
-            let mut param_slices: Vec<(usize, String)> = Vec::new();
-
-            for p in params.requireds().iter() {
-                param_slices.push((
-                    p.location().start_offset(),
-                    std::str::from_utf8(p.location().as_slice())
-                        .unwrap_or("")
-                        .to_string(),
-                ));
-            }
-            for p in params.optionals().iter() {
-                param_slices.push((
-                    p.location().start_offset(),
-                    std::str::from_utf8(p.location().as_slice())
-                        .unwrap_or("")
-                        .to_string(),
-                ));
-            }
-            if let Some(rest) = params.rest() {
-                param_slices.push((
-                    rest.location().start_offset(),
-                    std::str::from_utf8(rest.location().as_slice())
-                        .unwrap_or("")
-                        .to_string(),
-                ));
-            }
-            for p in params.posts().iter() {
-                param_slices.push((
-                    p.location().start_offset(),
-                    std::str::from_utf8(p.location().as_slice())
-                        .unwrap_or("")
-                        .to_string(),
-                ));
-            }
-            for p in params.keywords().iter() {
-                param_slices.push((
-                    p.location().start_offset(),
-                    std::str::from_utf8(p.location().as_slice())
-                        .unwrap_or("")
-                        .to_string(),
-                ));
-            }
-            if let Some(keyword_rest) = params.keyword_rest() {
-                param_slices.push((
-                    keyword_rest.location().start_offset(),
-                    std::str::from_utf8(keyword_rest.location().as_slice())
-                        .unwrap_or("")
-                        .to_string(),
-                ));
-            }
-            if let Some(block) = params.block() {
-                param_slices.push((
-                    block.location().start_offset(),
-                    std::str::from_utf8(block.location().as_slice())
-                        .unwrap_or("")
-                        .to_string(),
-                ));
-            }
-
-            if !param_slices.is_empty() {
-                param_slices.sort_by_key(|(start, _)| *start);
-                let joined = param_slices
-                    .into_iter()
-                    .map(|(_, text)| text)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                corr.push(crate::correction::Correction {
-                    start: lparen.end_offset(),
-                    end: rparen.start_offset(),
-                    replacement: joined,
+        if let Some(ref mut corrs) = corrections {
+            if let Some(replacement) = collapsed_signature(source, &def_node) {
+                corrs.push(crate::correction::Correction {
+                    start: def_node.lparen_loc().unwrap().start_offset(),
+                    end: rparen.end_offset(),
+                    replacement,
                     cop_name: self.name(),
                     cop_index: 0,
                 });
-                diag.corrected = true;
+                diagnostic.corrected = true;
             }
         }
 
-        diagnostics.push(diag);
+        diagnostics.push(diagnostic);
     }
+}
+
+fn collapsed_signature(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> Option<String> {
+    let lparen = def_node.lparen_loc()?;
+    let rparen = def_node.rparen_loc()?;
+    let inner = &source.as_bytes()[lparen.end_offset()..rparen.start_offset()];
+
+    // Keep autocorrection conservative when parameters contain comments.
+    if inner.contains(&b'#') {
+        return None;
+    }
+
+    let flattened = String::from_utf8_lossy(inner)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    Some(format!("({flattened})"))
 }
 
 fn line_indentation_width(source: &SourceFile, line: usize) -> usize {

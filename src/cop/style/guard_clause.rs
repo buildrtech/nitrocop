@@ -363,7 +363,9 @@ impl GuardClauseVisitor<'_, '_> {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Some(format!("return {guard_keyword} {condition_src}\n{indented_body}"))
+        Some(format!(
+            "return {guard_keyword} {condition_src}\n{indented_body}"
+        ))
     }
 }
 
