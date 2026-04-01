@@ -32,6 +32,10 @@ impl Cop for SendWithMixinArgument {
         "Lint/SendWithMixinArgument"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -53,7 +57,7 @@ impl Cop for SendWithMixinArgument {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -122,16 +126,27 @@ impl Cop for SendWithMixinArgument {
             call.location().end_offset(),
             "send(...)",
         );
+        let replacement = format!("{mixin_str} {}", module_names.join(", "));
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
-            format!(
-                "Use `{mixin_str} {}` instead of `{bad_method}`.",
-                module_names.join(", ")
-            ),
-        ));
+            format!("Use `{replacement}` instead of `{bad_method}`."),
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            corr.push(crate::correction::Correction {
+                start: msg_loc.start_offset(),
+                end: call.location().end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -139,4 +154,8 @@ impl Cop for SendWithMixinArgument {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SendWithMixinArgument, "cops/lint/send_with_mixin_argument");
+    crate::cop_autocorrect_fixture_tests!(
+        SendWithMixinArgument,
+        "cops/lint/send_with_mixin_argument"
+    );
 }

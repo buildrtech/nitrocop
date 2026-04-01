@@ -243,8 +243,5 @@ fn receiver_uses_safe_nav(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SafeNavigationChain, "cops/lint/safe_navigation_chain");
-    crate::cop_autocorrect_fixture_tests!(
-        SafeNavigationChain,
-        "cops/lint/safe_navigation_chain"
-    );
+    crate::cop_autocorrect_fixture_tests!(SafeNavigationChain, "cops/lint/safe_navigation_chain");
 }

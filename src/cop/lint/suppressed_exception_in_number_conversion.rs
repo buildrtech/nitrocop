@@ -26,6 +26,10 @@ impl Cop for SuppressedExceptionInNumberConversion {
         "Lint/SuppressedExceptionInNumberConversion"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -37,15 +41,20 @@ impl Cop for SuppressedExceptionInNumberConversion {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = NumConvVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            emit_corrections: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -53,6 +62,8 @@ struct NumConvVisitor<'a, 'src> {
     cop: &'a SuppressedExceptionInNumberConversion,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    emit_corrections: bool,
 }
 
 impl<'pr> Visit<'pr> for NumConvVisitor<'_, '_> {
@@ -68,12 +79,25 @@ impl<'pr> Visit<'pr> for NumConvVisitor<'_, '_> {
                 let prefer = build_preferred(&call, self.source);
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diag = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     format!("Use `{}` instead.", prefer),
-                ));
+                );
+
+                if self.emit_corrections {
+                    self.corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: prefer,
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+
+                self.diagnostics.push(diag);
             }
         }
 
@@ -100,12 +124,25 @@ impl<'pr> Visit<'pr> for NumConvVisitor<'_, '_> {
                             let prefer = build_preferred(&call, self.source);
                             let loc = node.location();
                             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                            self.diagnostics.push(self.cop.diagnostic(
+                            let mut diag = self.cop.diagnostic(
                                 self.source,
                                 line,
                                 column,
                                 format!("Use `{}` instead.", prefer),
-                            ));
+                            );
+
+                            if self.emit_corrections {
+                                self.corrections.push(crate::correction::Correction {
+                                    start: loc.start_offset(),
+                                    end: loc.end_offset(),
+                                    replacement: prefer,
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+
+                            self.diagnostics.push(diag);
                         }
                     }
                 }
@@ -164,7 +201,21 @@ fn build_preferred(call: &ruby_prism::CallNode<'_>, source: &SourceFile) -> Stri
     }
     args_parts.push("exception: false".to_string());
 
-    format!("{}({})", method_name, args_parts.join(", "))
+    let preferred = format!("{}({})", method_name, args_parts.join(", "));
+    if let Some(receiver) = call.receiver() {
+        let receiver_src = &source.as_bytes()
+            [receiver.location().start_offset()..receiver.location().end_offset()];
+        let receiver_src = std::str::from_utf8(receiver_src).unwrap_or("Kernel");
+        let operator = if let Some(op_loc) = call.call_operator_loc() {
+            let op_src = &source.as_bytes()[op_loc.start_offset()..op_loc.end_offset()];
+            std::str::from_utf8(op_src).unwrap_or(".")
+        } else {
+            "."
+        };
+        return format!("{}{}{}", receiver_src, operator, preferred);
+    }
+
+    preferred
 }
 
 fn is_rescue_nil_or_empty(rescue_node: &ruby_prism::RescueNode<'_>) -> bool {
@@ -221,6 +272,10 @@ fn is_expected_exception_class(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        SuppressedExceptionInNumberConversion,
+        "cops/lint/suppressed_exception_in_number_conversion"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         SuppressedExceptionInNumberConversion,
         "cops/lint/suppressed_exception_in_number_conversion"
     );
