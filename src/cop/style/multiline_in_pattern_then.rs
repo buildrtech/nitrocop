@@ -22,48 +22,27 @@ impl Cop for MultilineInPatternThen {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = MultilineInPatternThenVisitor {
+            cop: self,
             source,
-            offenses: Vec::new(),
+            diagnostics: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
-
-        let src = source.as_bytes();
-        for (then_start, then_end) in visitor.offenses {
-            let (line, column) = source.offset_to_line_col(then_start);
-            let mut diag = self.diagnostic(
-                source,
-                line,
-                column,
-                "Do not use `then` for multi-line `in` statement.".to_string(),
-            );
-
-            if let Some(ref mut corr) = corrections {
-                let mut start = then_start;
-                if start > 0 && src[start - 1] == b' ' {
-                    start -= 1;
-                }
-
-                corr.push(crate::correction::Correction {
-                    start,
-                    end: then_end,
-                    replacement: String::new(),
-                    cop_name: self.name(),
-                    cop_index: 0,
-                });
-                diag.corrected = true;
-            }
-
-            diagnostics.push(diag);
+        diagnostics.extend(visitor.diagnostics);
+        if let Some(corrections) = corrections {
+            corrections.extend(visitor.corrections);
         }
     }
 }
 
 struct MultilineInPatternThenVisitor<'a> {
+    cop: &'a MultilineInPatternThen,
     source: &'a SourceFile,
-    offenses: Vec<(usize, usize)>,
+    diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 impl<'pr> Visit<'pr> for MultilineInPatternThenVisitor<'_> {
@@ -80,8 +59,35 @@ impl<'pr> Visit<'pr> for MultilineInPatternThenVisitor<'_> {
                     let (body_line, _) = self.source.offset_to_line_col(body_loc.start_offset());
 
                     if body_line > pattern_line {
-                        self.offenses
-                            .push((then_loc.start_offset(), then_loc.end_offset()));
+                        let (line, column) =
+                            self.source.offset_to_line_col(then_loc.start_offset());
+                        let mut diag = self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            "Do not use `then` for multi-line `in` statement.".to_string(),
+                        );
+
+                        let mut start = then_loc.start_offset();
+                        if start > 0 {
+                            let bytes = self.source.as_bytes();
+                            if bytes[start - 1].is_ascii_whitespace()
+                                && bytes[start - 1] != b'\n'
+                                && bytes[start - 1] != b'\r'
+                            {
+                                start -= 1;
+                            }
+                        }
+
+                        self.corrections.push(crate::correction::Correction {
+                            start,
+                            end: then_loc.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                        self.diagnostics.push(diag);
                     }
                 }
             }

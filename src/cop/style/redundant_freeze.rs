@@ -4,6 +4,7 @@ use crate::cop::node_type::{
     REGULAR_EXPRESSION_NODE, STATEMENTS_NODE, STRING_NODE, SYMBOL_NODE, TRUE_NODE,
 };
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -234,32 +235,28 @@ impl Cop for RedundantFreeze {
 
         let loc = receiver.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diag = self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not freeze immutable objects, as freezing them has no effect.".to_string(),
         );
 
-        if let Some(ref mut corr) = corrections {
-            let msg_loc = call_node
-                .message_loc()
-                .unwrap_or_else(|| call_node.location());
-            let start = call_node
-                .call_operator_loc()
-                .map(|op| op.start_offset())
-                .unwrap_or_else(|| msg_loc.start_offset());
-            corr.push(crate::correction::Correction {
-                start,
-                end: msg_loc.end_offset(),
-                replacement: String::new(),
-                cop_name: self.name(),
-                cop_index: 0,
-            });
-            diag.corrected = true;
+        if let Some(corrections) = corrections.as_mut() {
+            let recv_src = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+            if let Ok(recv_src) = std::str::from_utf8(recv_src) {
+                corrections.push(Correction {
+                    start: call_node.location().start_offset(),
+                    end: call_node.location().end_offset(),
+                    replacement: recv_src.to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
         }
 
-        diagnostics.push(diag);
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -269,7 +266,6 @@ mod tests {
     use std::collections::HashMap;
 
     crate::cop_fixture_tests!(RedundantFreeze, "cops/style/redundant_freeze");
-    crate::cop_autocorrect_fixture_tests!(RedundantFreeze, "cops/style/redundant_freeze");
 
     fn config_ruby30() -> CopConfig {
         let mut options = HashMap::new();

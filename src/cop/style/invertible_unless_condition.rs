@@ -312,7 +312,7 @@ impl Cop for InvertibleUnlessCondition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let unless_node = match node.as_unless_node() {
             Some(u) => u,
@@ -355,37 +355,37 @@ impl Cop for InvertibleUnlessCondition {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         let mut diagnostic = self.diagnostic(source, line, column, message);
 
-        if let Some(corrs) = corrections.as_mut() {
-            // Conservative subset: only autocorrect without else/elsif branches and
-            // with exactly one body statement.
-            if unless_node.else_clause().is_none() {
-                if let Some(stmts) = unless_node.statements() {
-                    let body: Vec<_> = stmts.body().iter().collect();
-                    if body.len() == 1 {
-                        let body_src = String::from_utf8_lossy(body[0].location().as_slice());
-                        let replacement = if unless_node.end_keyword_loc().is_none() {
-                            format!("{} if {}", body_src.trim(), preferred)
-                        } else {
-                            let (_, base_col) =
-                                source.offset_to_line_col(node.location().start_offset());
-                            let indent = " ".repeat(base_col.saturating_sub(1));
-                            format!(
-                                "{indent}if {}\n{indent}  {}\n{indent}end",
-                                preferred,
-                                body_src.trim()
-                            )
-                        };
+        if let Some(corrections) = corrections {
+            let kw_loc = unless_node.keyword_loc();
+            let pred_loc = predicate.location();
 
-                        corrs.push(crate::correction::Correction {
-                            start: node.location().start_offset(),
-                            end: node.location().end_offset(),
-                            replacement,
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diagnostic.corrected = true;
-                    }
-                }
+            if kw_loc.start_offset() > node.location().start_offset() {
+                // Modifier form: `body unless cond` -> `body if <inverted-cond>`
+                corrections.push(crate::correction::Correction {
+                    start: kw_loc.start_offset(),
+                    end: pred_loc.end_offset(),
+                    replacement: format!("if {}", preferred),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            } else {
+                // Block form: `unless cond ... end` -> `if <inverted-cond> ... end`
+                corrections.push(crate::correction::Correction {
+                    start: kw_loc.start_offset(),
+                    end: kw_loc.end_offset(),
+                    replacement: "if".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                corrections.push(crate::correction::Correction {
+                    start: pred_loc.start_offset(),
+                    end: pred_loc.end_offset(),
+                    replacement: preferred,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
             }
         }
 

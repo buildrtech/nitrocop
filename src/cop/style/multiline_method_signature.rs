@@ -27,6 +27,10 @@ impl Cop for MultilineMethodSignature {
         &[DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -34,7 +38,7 @@ impl Cop for MultilineMethodSignature {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -84,12 +88,97 @@ impl Cop for MultilineMethodSignature {
         }
 
         let (line, column) = source.offset_to_line_col(def_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Avoid multi-line method signatures.".to_string(),
-        ));
+        );
+
+        if let (Some(ref mut corr), Some(params), Some(lparen)) = (
+            corrections.as_mut(),
+            def_node.parameters(),
+            def_node.lparen_loc(),
+        ) {
+            let mut param_slices: Vec<(usize, String)> = Vec::new();
+
+            for p in params.requireds().iter() {
+                param_slices.push((
+                    p.location().start_offset(),
+                    std::str::from_utf8(p.location().as_slice())
+                        .unwrap_or("")
+                        .to_string(),
+                ));
+            }
+            for p in params.optionals().iter() {
+                param_slices.push((
+                    p.location().start_offset(),
+                    std::str::from_utf8(p.location().as_slice())
+                        .unwrap_or("")
+                        .to_string(),
+                ));
+            }
+            if let Some(rest) = params.rest() {
+                param_slices.push((
+                    rest.location().start_offset(),
+                    std::str::from_utf8(rest.location().as_slice())
+                        .unwrap_or("")
+                        .to_string(),
+                ));
+            }
+            for p in params.posts().iter() {
+                param_slices.push((
+                    p.location().start_offset(),
+                    std::str::from_utf8(p.location().as_slice())
+                        .unwrap_or("")
+                        .to_string(),
+                ));
+            }
+            for p in params.keywords().iter() {
+                param_slices.push((
+                    p.location().start_offset(),
+                    std::str::from_utf8(p.location().as_slice())
+                        .unwrap_or("")
+                        .to_string(),
+                ));
+            }
+            if let Some(keyword_rest) = params.keyword_rest() {
+                param_slices.push((
+                    keyword_rest.location().start_offset(),
+                    std::str::from_utf8(keyword_rest.location().as_slice())
+                        .unwrap_or("")
+                        .to_string(),
+                ));
+            }
+            if let Some(block) = params.block() {
+                param_slices.push((
+                    block.location().start_offset(),
+                    std::str::from_utf8(block.location().as_slice())
+                        .unwrap_or("")
+                        .to_string(),
+                ));
+            }
+
+            if !param_slices.is_empty() {
+                param_slices.sort_by_key(|(start, _)| *start);
+                let joined = param_slices
+                    .into_iter()
+                    .map(|(_, text)| text)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                corr.push(crate::correction::Correction {
+                    start: lparen.end_offset(),
+                    end: rparen.start_offset(),
+                    replacement: joined,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -113,6 +202,10 @@ fn line_indentation_width(source: &SourceFile, line: usize) -> usize {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        MultilineMethodSignature,
+        "cops/style/multiline_method_signature"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         MultilineMethodSignature,
         "cops/style/multiline_method_signature"
     );

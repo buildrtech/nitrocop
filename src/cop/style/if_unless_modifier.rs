@@ -193,12 +193,12 @@ impl Cop for IfUnlessModifier {
         "Style/IfUnlessModifier"
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[IF_NODE, UNLESS_NODE]
-    }
-
     fn supports_autocorrect(&self) -> bool {
         true
+    }
+
+    fn interested_node_types(&self) -> &'static [u8] {
+        &[IF_NODE, UNLESS_NODE]
     }
 
     fn check_node(
@@ -208,7 +208,7 @@ impl Cop for IfUnlessModifier {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Extract keyword location, predicate, statements, has_else, and keyword name
         // from either IfNode or UnlessNode
@@ -527,26 +527,35 @@ impl Cop for IfUnlessModifier {
                 format!("Favor modifier `{keyword}` usage when having a single-line body."),
             );
 
-            if let Some(corrs) = corrections.as_mut() {
-                let kw_line_start = kw_loc.start_offset() - kw_col;
-                let indent_src = &source.as_bytes()[kw_line_start..kw_loc.start_offset()];
-                let indent = String::from_utf8_lossy(indent_src);
-                let body_trimmed = String::from_utf8_lossy(body_text).trim().to_string();
-                let cond_trimmed = String::from_utf8_lossy(cond_text).trim().to_string();
+            if let Some(corrections) = corrections {
+                // Conservative whole-node replacement subset:
+                // - keep only single-line predicates to avoid multiline whitespace normalization
+                // - skip assignment-parenthesized contexts (would require wrapping in parens)
+                let (pred_start_line, _) =
+                    source.offset_to_line_col(predicate.location().start_offset());
+                let pred_end_off = predicate
+                    .location()
+                    .end_offset()
+                    .saturating_sub(1)
+                    .max(predicate.location().start_offset());
+                let (pred_end_line, _) = source.offset_to_line_col(pred_end_off);
 
-                let mut replacement = format!("{indent}{body_trimmed} {keyword} {cond_trimmed}");
-                if parens_overhead == 2 {
-                    replacement = format!("({replacement})");
+                if pred_start_line == pred_end_line && parens_overhead == 0 {
+                    let replacement = format!(
+                        "{} {} {}",
+                        String::from_utf8_lossy(body_text).trim(),
+                        keyword,
+                        String::from_utf8_lossy(cond_text).trim()
+                    );
+                    corrections.push(crate::correction::Correction {
+                        start: node.location().start_offset(),
+                        end: node.location().end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
                 }
-
-                corrs.push(crate::correction::Correction {
-                    start: node.location().start_offset(),
-                    end: node.location().end_offset(),
-                    replacement,
-                    cop_name: self.name(),
-                    cop_index: 0,
-                });
-                diagnostic.corrected = true;
             }
 
             diagnostics.push(diagnostic);
