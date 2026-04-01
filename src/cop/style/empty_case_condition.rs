@@ -117,7 +117,10 @@ fn branch_contains_return(case_node: &ruby_prism::CaseNode<'_>) -> bool {
     false
 }
 
-fn build_case_autocorrect(case_node: &ruby_prism::CaseNode<'_>, source: &SourceFile) -> Option<String> {
+fn build_case_autocorrect(
+    case_node: &ruby_prism::CaseNode<'_>,
+    source: &SourceFile,
+) -> Option<String> {
     let when_nodes: Vec<_> = case_node
         .conditions()
         .iter()

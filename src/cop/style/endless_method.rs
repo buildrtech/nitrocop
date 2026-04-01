@@ -1,5 +1,6 @@
 use crate::cop::node_type::DEF_NODE;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -82,7 +83,7 @@ impl Cop for EndlessMethod {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // RuboCop: minimum_target_ruby_version 3.0
         let ruby_version = config
@@ -136,7 +137,18 @@ impl Cop for EndlessMethod {
                         column,
                         "Avoid endless method definitions.".to_string(),
                     ));
-                    self.push_autocorrect(source, &def_node, config, corrections);
+                    if let (Some(corrections), Some(replacement)) = (
+                        corrections.as_deref_mut(),
+                        endless_to_regular(source, &def_node),
+                    ) {
+                        corrections.push(Correction {
+                            start: def_node.location().start_offset(),
+                            end: def_node.location().end_offset(),
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                    }
                 }
             }
             "allow_single_line" => {
@@ -152,7 +164,18 @@ impl Cop for EndlessMethod {
                             column,
                             "Avoid endless method definitions with multiple lines.".to_string(),
                         ));
-                        self.push_autocorrect(source, &def_node, config, corrections);
+                        if let (Some(corrections), Some(replacement)) = (
+                            corrections.as_deref_mut(),
+                            endless_to_regular(source, &def_node),
+                        ) {
+                            corrections.push(Correction {
+                                start: def_node.location().start_offset(),
+                                end: def_node.location().end_offset(),
+                                replacement,
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                        }
                     }
                 }
             }
@@ -175,7 +198,18 @@ impl Cop for EndlessMethod {
                             column,
                             "Avoid endless method definitions with multiple lines.".to_string(),
                         ));
-                        self.push_autocorrect(source, &def_node, config, corrections);
+                        if let (Some(corrections), Some(replacement)) = (
+                            corrections.as_deref_mut(),
+                            endless_to_regular(source, &def_node),
+                        ) {
+                            corrections.push(Correction {
+                                start: def_node.location().start_offset(),
+                                end: def_node.location().end_offset(),
+                                replacement,
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                        }
                     }
                 }
             }
@@ -184,52 +218,42 @@ impl Cop for EndlessMethod {
     }
 }
 
-impl EndlessMethod {
-    fn push_autocorrect(
-        &self,
-        source: &SourceFile,
-        def_node: &ruby_prism::DefNode<'_>,
-        config: &CopConfig,
-        corrections: Option<&mut Vec<crate::correction::Correction>>,
-    ) {
-        let Some(corrections) = corrections else {
-            return;
-        };
-        let Some(equal_loc) = def_node.equal_loc() else {
-            return;
-        };
+fn endless_to_regular(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> Option<String> {
+    let equal_loc = def_node.equal_loc()?;
+    let def_loc = def_node.location();
+    let bytes = source.as_bytes();
 
-        let loc = def_node.location();
-        let def_start = loc.start_offset();
-        let def_end = loc.end_offset();
-        let eq_start = equal_loc.start_offset();
-        let body_start = equal_loc.end_offset();
+    let header = String::from_utf8_lossy(&bytes[def_loc.start_offset()..equal_loc.start_offset()])
+        .trim_end()
+        .to_string();
+    let body = String::from_utf8_lossy(&bytes[equal_loc.end_offset()..def_loc.end_offset()])
+        .trim()
+        .to_string();
 
-        let (_, column) = source.offset_to_line_col(def_start);
-        let base_indent = " ".repeat(column);
-        let body_indent = format!(
-            "{base_indent}{}",
-            " ".repeat(config.get_usize("IndentationWidth", 2))
-        );
-
-        let header = source
-            .byte_slice(def_start, eq_start, "")
-            .trim_end()
-            .to_string();
-        let body = source.byte_slice(body_start, def_end, "").trim();
-        if body.is_empty() {
-            return;
-        }
-
-        let replacement = format!("{header}\n{body_indent}{body}\n{base_indent}end");
-        corrections.push(crate::correction::Correction {
-            start: def_start,
-            end: def_end,
-            replacement,
-            cop_name: self.name(),
-            cop_index: 0,
-        });
+    if header.is_empty() || body.is_empty() {
+        return None;
     }
+
+    let indent = leading_indent(source, def_loc.start_offset());
+    let body_indent = format!("{indent}  ");
+    let body = body.replace('\n', &format!("\n{body_indent}"));
+
+    Some(format!("{header}\n{body_indent}{body}\n{indent}end"))
+}
+
+fn leading_indent(source: &SourceFile, offset: usize) -> String {
+    let bytes = source.as_bytes();
+    let mut line_start = offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+
+    let mut i = line_start;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&bytes[line_start..i]).to_string()
 }
 
 #[cfg(test)]
@@ -265,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn autocorrect_offense_with_ruby30() {
+    fn autocorrect_fixture_with_ruby30() {
         crate::testutil::assert_cop_autocorrect_with_config(
             &EndlessMethod,
             include_bytes!("../../../tests/fixtures/cops/style/endless_method/offense.rb"),
