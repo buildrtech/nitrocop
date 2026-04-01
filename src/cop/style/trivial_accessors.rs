@@ -82,6 +82,10 @@ impl Cop for TrivialAccessors {
         "Style/TrivialAccessors"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -89,7 +93,7 @@ impl Cop for TrivialAccessors {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let exact_name_match = config.get_bool("ExactNameMatch", true);
         let allow_predicates = config.get_bool("AllowPredicates", true);
@@ -118,9 +122,14 @@ impl Cop for TrivialAccessors {
             scope_stack: vec![ScopeKind::TopLevel],
             sole_root_def_start,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+
+        if let Some(corrections_out) = corrections {
+            corrections_out.extend(visitor.corrections);
+        }
     }
 }
 
@@ -135,6 +144,7 @@ struct TrivialAccessorsVisitor<'a> {
     scope_stack: Vec<ScopeKind>,
     sole_root_def_start: Option<usize>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 impl<'a> TrivialAccessorsVisitor<'a> {
@@ -170,6 +180,85 @@ impl<'a> TrivialAccessorsVisitor<'a> {
         } else {
             Some(body)
         }
+    }
+
+    fn in_class_context(&self) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            match scope {
+                ScopeKind::Class => return true,
+                ScopeKind::Module | ScopeKind::InstanceEval => return false,
+                ScopeKind::Block | ScopeKind::TopLevel => {}
+            }
+        }
+        false
+    }
+
+    fn line_start_offset(&self, offset: usize) -> usize {
+        let bytes = self.source.as_bytes();
+        let mut line_start = offset;
+        while line_start > 0 && bytes[line_start - 1] != b'\n' {
+            line_start -= 1;
+        }
+        line_start
+    }
+
+    fn line_indent_prefix(&self, offset: usize) -> Option<String> {
+        let bytes = self.source.as_bytes();
+        let line_start = self.line_start_offset(offset);
+        let mut i = line_start;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b' ' || b == b'\t' {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        std::str::from_utf8(&bytes[line_start..i])
+            .ok()
+            .map(|s| s.to_string())
+    }
+
+    fn extend_to_line_break(&self, end: usize) -> usize {
+        let bytes = self.source.as_bytes();
+        if end >= bytes.len() {
+            return end;
+        }
+        if bytes[end] == b'\r' && end + 1 < bytes.len() && bytes[end + 1] == b'\n' {
+            end + 2
+        } else if bytes[end] == b'\n' {
+            end + 1
+        } else {
+            end
+        }
+    }
+
+    fn add_autocorrect(&mut self, def_node: &ruby_prism::DefNode<'_>, attr_kind: &str, attr_name: &str) {
+        // Conservative subset: only instance methods inside class/sclass contexts.
+        if def_node.receiver().is_some() || !self.in_class_context() {
+            return;
+        }
+
+        // Endless defs frequently carry trailing comments in fixtures; skip for now.
+        if def_node.end_keyword_loc().is_none() {
+            return;
+        }
+
+        let def_loc = def_node.location();
+        let start = def_loc.start_offset();
+        let end = def_loc.end_offset();
+
+        let Some(_indent) = self.line_indent_prefix(start) else {
+            return;
+        };
+
+        self.corrections.push(crate::correction::Correction {
+            start,
+            end: self.extend_to_line_break(end),
+            replacement: format!("{attr_kind} :{attr_name}\n"),
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        });
     }
 
     fn check_def(&mut self, def_node: &ruby_prism::DefNode<'_>) {
@@ -243,6 +332,9 @@ impl<'a> TrivialAccessorsVisitor<'a> {
                 column,
                 "Use `attr_reader` to define trivial reader methods.".to_string(),
             ));
+            if let Ok(attr_name) = std::str::from_utf8(ivar_without_at) {
+                self.add_autocorrect(def_node, "attr_reader", attr_name);
+            }
             return;
         }
 
@@ -290,6 +382,9 @@ impl<'a> TrivialAccessorsVisitor<'a> {
                 self.cop
                     .diagnostic(self.source, line, column, msg.to_string()),
             );
+            if let Ok(attr_name) = std::str::from_utf8(ivar_without_at) {
+                self.add_autocorrect(def_node, "attr_writer", attr_name);
+            }
         }
     }
 }
@@ -354,4 +449,5 @@ impl<'pr> Visit<'pr> for TrivialAccessorsVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(TrivialAccessors, "cops/style/trivial_accessors");
+    crate::cop_autocorrect_fixture_tests!(TrivialAccessors, "cops/style/trivial_accessors");
 }
