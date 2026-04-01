@@ -116,6 +116,10 @@ impl Cop for SafeNavigationChain {
         &[BLOCK_NODE, CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -123,7 +127,7 @@ impl Cop for SafeNavigationChain {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -196,12 +200,28 @@ impl Cop for SafeNavigationChain {
             source.offset_to_line_col(recv_end)
         };
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not chain ordinary method call after safe navigation operator.".to_string(),
-        ));
+        );
+
+        if let Some(corrs) = corrections.as_mut()
+            && let Some(op_loc) = call.call_operator_loc()
+            && op_loc.as_slice() == b"."
+        {
+            corrs.push(crate::correction::Correction {
+                start: op_loc.start_offset(),
+                end: op_loc.end_offset(),
+                replacement: "&.".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -223,4 +243,8 @@ fn receiver_uses_safe_nav(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SafeNavigationChain, "cops/lint/safe_navigation_chain");
+    crate::cop_autocorrect_fixture_tests!(
+        SafeNavigationChain,
+        "cops/lint/safe_navigation_chain"
+    );
 }
