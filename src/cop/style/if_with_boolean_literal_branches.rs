@@ -203,8 +203,9 @@ impl Cop for IfWithBooleanLiteralBranches {
                         return;
                     }
 
-                    let condition_src = std::str::from_utf8(if_node.predicate().location().as_slice())
-                        .unwrap_or("condition");
+                    let condition_src =
+                        std::str::from_utf8(if_node.predicate().location().as_slice())
+                            .unwrap_or("condition");
                     let replacement = if if_val {
                         condition_src.to_string()
                     } else {
@@ -293,8 +294,9 @@ impl Cop for IfWithBooleanLiteralBranches {
                         return;
                     }
 
-                    let condition_src = std::str::from_utf8(unless_node.predicate().location().as_slice())
-                        .unwrap_or("condition");
+                    let condition_src =
+                        std::str::from_utf8(unless_node.predicate().location().as_slice())
+                            .unwrap_or("condition");
                     let replacement = if else_val {
                         condition_src.to_string()
                     } else {

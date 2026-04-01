@@ -104,6 +104,70 @@ fn is_negated(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
+fn invert_negated_condition_source(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+) -> Option<String> {
+    let bytes = source.as_bytes();
+    let call = node.as_call_node()?;
+    let name = call.name().as_slice();
+
+    if name == b"!" {
+        let recv = call.receiver()?;
+        let loc = recv.location();
+        return Some(
+            String::from_utf8_lossy(&bytes[loc.start_offset()..loc.end_offset()]).to_string(),
+        );
+    }
+
+    if let Some(msg_loc) = call.message_loc() {
+        if msg_loc.as_slice() == b"not" {
+            let recv = call.receiver()?;
+            let loc = recv.location();
+            return Some(
+                String::from_utf8_lossy(&bytes[loc.start_offset()..loc.end_offset()]).to_string(),
+            );
+        }
+    }
+
+    let args = call.arguments()?;
+    if args.arguments().len() != 1 {
+        return None;
+    }
+    let recv = call.receiver()?;
+    let arg = args.arguments().iter().next()?;
+    let recv_loc = recv.location();
+    let arg_loc = arg.location();
+    let recv_src = String::from_utf8_lossy(&bytes[recv_loc.start_offset()..recv_loc.end_offset()]);
+    let arg_src = String::from_utf8_lossy(&bytes[arg_loc.start_offset()..arg_loc.end_offset()]);
+
+    if name == b"!=" {
+        return Some(format!("{recv_src} == {arg_src}"));
+    }
+    if name == b"!~" {
+        return Some(format!("{recv_src} =~ {arg_src}"));
+    }
+
+    None
+}
+
+fn single_stmt_source(
+    source: &SourceFile,
+    stmts: Option<ruby_prism::StatementsNode<'_>>,
+) -> Option<String> {
+    let stmts = stmts?;
+    let mut it = stmts.body().iter();
+    let stmt = it.next()?;
+    if it.next().is_some() {
+        return None;
+    }
+    let loc = stmt.location();
+    Some(
+        String::from_utf8_lossy(&source.as_bytes()[loc.start_offset()..loc.end_offset()])
+            .to_string(),
+    )
+}
+
 impl Cop for NegatedIfElseCondition {
     fn name(&self) -> &'static str {
         "Style/NegatedIfElseCondition"
@@ -113,6 +177,10 @@ impl Cop for NegatedIfElseCondition {
         &[IF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -120,7 +188,7 @@ impl Cop for NegatedIfElseCondition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let Some(if_node) = node.as_if_node() else {
             return;
@@ -181,7 +249,28 @@ impl Cop for NegatedIfElseCondition {
             } else {
                 "Invert the negated condition and swap the if-else branches."
             };
-            diagnostics.push(self.diagnostic(source, line, column, msg.to_string()));
+            let mut diagnostic = self.diagnostic(source, line, column, msg.to_string());
+
+            if let Some(ref mut corr) = corrections {
+                if is_ternary {
+                    if let (Some(inverted_cond), Some(if_src), Some(else_src)) = (
+                        invert_negated_condition_source(source, &unwrapped),
+                        single_stmt_source(source, if_node.statements()),
+                        single_stmt_source(source, else_node.statements()),
+                    ) {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: format!("{inverted_cond} ? {else_src} : {if_src}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                }
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -190,6 +279,10 @@ impl Cop for NegatedIfElseCondition {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        NegatedIfElseCondition,
+        "cops/style/negated_if_else_condition"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         NegatedIfElseCondition,
         "cops/style/negated_if_else_condition"
     );

@@ -286,11 +286,106 @@ impl SafeNavigation {
     fn is_nil(node: &ruby_prism::Node<'_>) -> bool {
         node.as_nil_node().is_some()
     }
+
+    fn collect_safe_nav_operator_ranges(
+        node: &ruby_prism::Node<'_>,
+        checked_src: &[u8],
+        bytes: &[u8],
+        ranges: &mut Vec<(usize, usize)>,
+    ) -> bool {
+        let call = match node.as_call_node() {
+            Some(c) => c,
+            None => return false,
+        };
+        let recv = match call.receiver() {
+            Some(r) => r,
+            None => return false,
+        };
+
+        let recv_src = &bytes[recv.location().start_offset()..recv.location().end_offset()];
+        let matched = if recv_src == checked_src {
+            true
+        } else {
+            Self::collect_safe_nav_operator_ranges(&recv, checked_src, bytes, ranges)
+        };
+
+        if !matched {
+            return false;
+        }
+
+        let op = match call.call_operator_loc() {
+            Some(op) if op.as_slice() == b"." => op,
+            _ => return false,
+        };
+        ranges.push((op.start_offset(), op.end_offset()));
+        true
+    }
+
+    fn build_safe_navigation_replacement(
+        source: &SourceFile,
+        checked_src: &[u8],
+        body: &ruby_prism::Node<'_>,
+    ) -> Option<String> {
+        let bytes = source.as_bytes();
+        let body_loc = body.location();
+        let mut ranges = Vec::new();
+        if !Self::collect_safe_nav_operator_ranges(body, checked_src, bytes, &mut ranges) {
+            return None;
+        }
+
+        let mut out = bytes[body_loc.start_offset()..body_loc.end_offset()].to_vec();
+        ranges.sort_by_key(|(s, _)| *s);
+        for (start, end) in ranges.into_iter().rev() {
+            let rel_start = start - body_loc.start_offset();
+            let rel_end = end - body_loc.start_offset();
+            out.splice(rel_start..rel_end, b"&.".iter().copied());
+        }
+
+        String::from_utf8(out).ok()
+    }
+
+    fn maybe_add_safe_nav_correction(
+        &self,
+        source: &SourceFile,
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Vec<crate::correction::Correction>,
+        offense_loc: &ruby_prism::Location<'_>,
+        body: &ruby_prism::Node<'_>,
+        checked_src: &[u8],
+    ) {
+        let (line, column) = source.offset_to_line_col(offense_loc.start_offset());
+        let mut diag = self.diagnostic(
+            source,
+            line,
+            column,
+            "Use safe navigation (`&.`) instead of checking if an object exists before calling the method."
+                .to_string(),
+        );
+
+        if let Some(replacement) =
+            Self::build_safe_navigation_replacement(source, checked_src, body)
+        {
+            corrections.push(crate::correction::Correction {
+                start: offense_loc.start_offset(),
+                end: offense_loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
+    }
 }
 
 impl Cop for SafeNavigation {
     fn name(&self) -> &'static str {
         "Style/SafeNavigation"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn check_source(
@@ -300,7 +395,7 @@ impl Cop for SafeNavigation {
         _code_map: &crate::cop::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let max_chain_length = config.get_usize("MaxChainLength", 2);
         let _convert_nil = config.get_bool("ConvertCodeThatCanStartToReturnNil", false);
@@ -312,12 +407,16 @@ impl Cop for SafeNavigation {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             max_chain_length,
             allowed_methods,
             in_unsafe_parent: 0,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(c) = corrections {
+            c.extend(visitor.corrections);
+        }
     }
 }
 
@@ -329,6 +428,7 @@ struct SafeNavVisitor<'a> {
     cop: &'a SafeNavigation,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     max_chain_length: usize,
     allowed_methods: Option<Vec<String>>,
     in_unsafe_parent: usize,
@@ -451,14 +551,16 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
-        let loc = node.location();
-        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let checked_src =
+            &self.source.as_bytes()[lhs.location().start_offset()..lhs.location().end_offset()];
+        self.cop.maybe_add_safe_nav_correction(
             self.source,
-            line,
-            column,
-            "Use safe navigation (`&.`) instead of checking if an object exists before calling the method.".to_string(),
-        ));
+            &mut self.diagnostics,
+            &mut self.corrections,
+            &node.location(),
+            &rhs,
+            checked_src,
+        );
 
         // Don't visit children — we already processed this and_node
     }
@@ -617,13 +719,14 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
-        let (line, column) = self.source.offset_to_line_col(node_loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        self.cop.maybe_add_safe_nav_correction(
             self.source,
-            line,
-            column,
-            "Use safe navigation (`&.`) instead of checking if an object exists before calling the method.".to_string(),
-        ));
+            &mut self.diagnostics,
+            &mut self.corrections,
+            &node_loc,
+            &body,
+            checked_src,
+        );
 
         ruby_prism::visit_unless_node(self, node);
     }
@@ -1014,4 +1117,5 @@ impl SafeNavigation {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SafeNavigation, "cops/style/safe_navigation");
+    crate::cop_autocorrect_fixture_tests!(SafeNavigation, "cops/style/safe_navigation");
 }
