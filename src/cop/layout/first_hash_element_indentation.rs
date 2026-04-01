@@ -1,6 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -58,6 +59,10 @@ impl Cop for FirstHashElementIndentation {
         "Layout/FirstHashElementIndentation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -65,7 +70,7 @@ impl Cop for FirstHashElementIndentation {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "special_inside_parentheses");
         let width = config.get_usize("IndentationWidth", 2);
@@ -75,11 +80,15 @@ impl Cop for FirstHashElementIndentation {
             style,
             width,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             handled_hashes: Vec::new(),
             parent_pair_col: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corrections) = corrections.as_mut() {
+            corrections.extend(visitor.corrections);
+        }
     }
 }
 
@@ -89,6 +98,7 @@ struct HashIndentVisitor<'a> {
     style: &'a str,
     width: usize,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
     /// Start offsets of hash nodes already checked via a parent call with parentheses.
     handled_hashes: Vec<usize>,
     /// When visiting a hash that is a value in a pair (AssocNode), this stores
@@ -232,12 +242,30 @@ impl HashIndentVisitor<'_> {
 
         let (expected_col, base_kind) = self.indent_base(hash_node.opening_loc(), left_paren_col);
         if brace_col != expected_col {
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 brace_line,
                 brace_col,
                 self.right_brace_message(base_kind).to_string(),
-            ));
+            );
+            let line_start = self.source.line_start_offset(brace_line);
+            let current_indent = &self.source.as_bytes()[line_start..brace_start];
+            let replacement = if !current_indent.is_empty()
+                && current_indent.iter().all(|&b| b == b'\t')
+            {
+                "\t".repeat(expected_col)
+            } else {
+                " ".repeat(expected_col)
+            };
+            self.corrections.push(Correction {
+                start: line_start,
+                end: brace_start,
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+            self.diagnostics.push(diagnostic);
         }
     }
 
@@ -266,7 +294,7 @@ impl HashIndentVisitor<'_> {
             let expected = base_indent + self.width;
 
             if elem_col != expected {
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     elem_line,
                     elem_col,
@@ -275,7 +303,26 @@ impl HashIndentVisitor<'_> {
                         self.width,
                         elem_col.saturating_sub(base_indent)
                     ),
-                ));
+                );
+                let line_start = self.source.line_start_offset(elem_line);
+                let elem_start = first_loc.start_offset();
+                let current_indent = &self.source.as_bytes()[line_start..elem_start];
+                let replacement = if !current_indent.is_empty()
+                    && current_indent.iter().all(|&b| b == b'\t')
+                {
+                    "\t".repeat(expected)
+                } else {
+                    " ".repeat(expected)
+                };
+                self.corrections.push(Correction {
+                    start: line_start,
+                    end: elem_start,
+                    replacement,
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+                self.diagnostics.push(diagnostic);
             }
         }
 
@@ -488,6 +535,10 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
+        FirstHashElementIndentation,
+        "cops/layout/first_hash_element_indentation"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         FirstHashElementIndentation,
         "cops/layout/first_hash_element_indentation"
     );
