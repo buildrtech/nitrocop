@@ -24,19 +24,19 @@ impl Cop for ClosingHeredocIndentation {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = HeredocVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
-            corrections: Vec::new(),
+            pending_corrections: Vec::new(),
             argument_indent: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
-        if let Some(corrections) = corrections.as_mut() {
-            corrections.extend(visitor.corrections);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.pending_corrections);
         }
     }
 }
@@ -45,7 +45,7 @@ struct HeredocVisitor<'a> {
     cop: &'a ClosingHeredocIndentation,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
-    corrections: Vec<Correction>,
+    pending_corrections: Vec<Correction>,
     /// When a heredoc is a direct argument to a method call (or chained call),
     /// this holds the indentation of the outermost call in the chain.
     /// Mirrors RuboCop's `argument_indentation_correct?` + `find_node_used_heredoc_argument`.
@@ -122,28 +122,20 @@ impl HeredocVisitor<'_> {
             )
         };
 
-        let mut diagnostic = self
-            .cop
-            .diagnostic(self.source, close_line, close_col, message);
+        self.diagnostics.push(
+            self.cop
+                .diagnostic(self.source, close_line, close_col, message),
+        );
 
-        // RuboCop aligns the closing delimiter to the opening heredoc indentation.
-        let closing_indent = closing_line_indent;
-        let replacement = if closing_line_text.len() >= closing_indent {
-            let rest = &closing_line_text[closing_indent..];
-            format!("{}{}", " ".repeat(opening_line_indent), String::from_utf8_lossy(rest))
-        } else {
-            format!("{}{}", " ".repeat(opening_line_indent), closing_trimmed)
-        };
-
-        self.corrections.push(Correction {
-            start: closing_loc.start_offset(),
-            end: closing_loc.end_offset(),
-            replacement,
+        let expected_indent = self.argument_indent.unwrap_or(opening_line_indent);
+        let line_start = self.source.line_start_offset(close_line);
+        self.pending_corrections.push(Correction {
+            start: line_start,
+            end: close_content_offset,
+            replacement: " ".repeat(expected_indent),
             cop_name: self.cop.name(),
             cop_index: 0,
         });
-        diagnostic.corrected = true;
-        self.diagnostics.push(diagnostic);
     }
 }
 

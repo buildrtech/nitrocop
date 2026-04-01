@@ -31,4 +31,4 @@ end
 include_examples :offense,
                  <<-HEREDOC
   bar
-                 HEREDOC
+HEREDOC
