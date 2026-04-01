@@ -94,6 +94,10 @@ impl Cop for BlockDelimiters {
         "Style/BlockDelimiters"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -101,7 +105,7 @@ impl Cop for BlockDelimiters {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "line_count_based");
         let _procedural_methods = config.get_string_array("ProceduralMethods");
@@ -125,6 +129,7 @@ impl Cop for BlockDelimiters {
             source,
             cop: self,
             diagnostics: Vec::new(),
+            corrections,
             ignored_blocks: HashSet::new(),
             suppressed_ranges: Vec::new(),
             allowed_methods: allowed,
@@ -140,6 +145,7 @@ struct BlockDelimitersVisitor<'a> {
     source: &'a SourceFile,
     cop: &'a BlockDelimiters,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     ignored_blocks: HashSet<usize>,
     /// Byte ranges of blocks that suppress nested block checks.
     /// Includes: (1) blocks in non-parenthesized arg positions (binding change),
@@ -197,7 +203,7 @@ impl<'a> BlockDelimitersVisitor<'a> {
         if self.braces_required_methods.iter().any(|m| m == method_str) {
             if opening == b"do" {
                 let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
@@ -205,7 +211,25 @@ impl<'a> BlockDelimitersVisitor<'a> {
                         "Brace delimiters `{{...}}` required for '{}' method.",
                         method_str
                     ),
-                ));
+                );
+                if let Some(ref mut corrections) = self.corrections {
+                    corrections.push(crate::correction::Correction {
+                        start: opening_loc.start_offset(),
+                        end: opening_loc.end_offset(),
+                        replacement: "{".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    corrections.push(crate::correction::Correction {
+                        start: closing_loc.start_offset(),
+                        end: closing_loc.end_offset(),
+                        replacement: "}".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
                 return true;
             }
             return false;
@@ -220,21 +244,57 @@ impl<'a> BlockDelimitersVisitor<'a> {
         // line_count_based style
         if is_single_line && opening == b"do" {
             let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Prefer `{...}` over `do...end` for single-line blocks.".to_string(),
-            ));
+            );
+            if let Some(ref mut corrections) = self.corrections {
+                corrections.push(crate::correction::Correction {
+                    start: opening_loc.start_offset(),
+                    end: opening_loc.end_offset(),
+                    replacement: "{".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                corrections.push(crate::correction::Correction {
+                    start: closing_loc.start_offset(),
+                    end: closing_loc.end_offset(),
+                    replacement: "}".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
             return true;
         } else if !is_single_line && opening == b"{" {
             let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Prefer `do...end` over `{...}` for multi-line blocks.".to_string(),
-            ));
+            );
+            if let Some(ref mut corrections) = self.corrections {
+                corrections.push(crate::correction::Correction {
+                    start: opening_loc.start_offset(),
+                    end: opening_loc.end_offset(),
+                    replacement: "do".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                corrections.push(crate::correction::Correction {
+                    start: closing_loc.start_offset(),
+                    end: closing_loc.end_offset(),
+                    replacement: "end".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
             return true;
         }
         false
@@ -553,6 +613,7 @@ fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut H
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BlockDelimiters, "cops/style/block_delimiters");
+    crate::cop_autocorrect_fixture_tests!(BlockDelimiters, "cops/style/block_delimiters");
 
     #[test]
     fn no_offense_proc_in_keyword_arg() {
