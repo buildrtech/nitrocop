@@ -1,5 +1,6 @@
 use crate::cop::node_type::BEGIN_NODE;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
@@ -12,6 +13,10 @@ pub struct BeginEndAlignment;
 impl Cop for BeginEndAlignment {
     fn name(&self) -> &'static str {
         "Layout/BeginEndAlignment"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_severity(&self) -> Severity {
@@ -29,7 +34,7 @@ impl Cop for BeginEndAlignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let style = config.get_str("EnforcedStyleAlignWith", "start_of_line");
 
@@ -76,12 +81,24 @@ impl Cop for BeginEndAlignment {
         };
 
         if end_col != expected_col {
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 end_line,
                 end_col,
                 "`end` at 0, 0 is not aligned with `begin` at 0, 0.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections.as_mut() {
+                let line_start = source.line_start_offset(end_line);
+                corrections.push(Correction {
+                    start: line_start,
+                    end: line_start + end_col,
+                    replacement: " ".repeat(expected_col),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -91,4 +108,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(BeginEndAlignment, "cops/layout/begin_end_alignment");
+    crate::cop_autocorrect_fixture_tests!(BeginEndAlignment, "cops/layout/begin_end_alignment");
 }
