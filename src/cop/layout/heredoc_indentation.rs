@@ -1,5 +1,6 @@
 use crate::cop::node_type::{INTERPOLATED_STRING_NODE, STRING_NODE};
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -21,6 +22,10 @@ impl Cop for HeredocIndentation {
         "Layout/HeredocIndentation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[INTERPOLATED_STRING_NODE, STRING_NODE]
     }
@@ -32,7 +37,7 @@ impl Cop for HeredocIndentation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check StringNode and InterpolatedStringNode for heredoc openings.
         let (opening_loc, closing_loc, raw_content_start) = if let Some(s) = node.as_string_node() {
@@ -163,15 +168,20 @@ impl Cop for HeredocIndentation {
             }
 
             let (line, col) = source.offset_to_line_col(content_start);
-            diagnostics.push(self.diagnostic(
+            push_heredoc_indent_diagnostic(
+                self,
                 source,
+                opening_loc.start_offset(),
+                opening,
                 line,
                 col,
                 format!(
                     "Use {} spaces for indentation in a heredoc.",
                     indentation_width,
                 ),
-            ));
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // For <<- and bare << heredocs:
@@ -183,15 +193,20 @@ impl Cop for HeredocIndentation {
 
         if body_indent == 0 {
             let (line, col) = source.offset_to_line_col(content_start);
-            diagnostics.push(self.diagnostic(
+            push_heredoc_indent_diagnostic(
+                self,
                 source,
+                opening_loc.start_offset(),
+                opening,
                 line,
                 col,
                 format!(
                     "Use {} spaces for indentation in a heredoc by using `<<~` instead of `{}`.",
                     indentation_width, indent_type_str,
                 ),
-            ));
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // Check if the heredoc has .squish/.squish! called on it.
@@ -208,18 +223,62 @@ impl Cop for HeredocIndentation {
             let expected = base_indent + indentation_width;
             if !line_too_long_after_adjust(body, expected, body_indent, config) {
                 let (line, col) = source.offset_to_line_col(content_start);
-                diagnostics.push(self.diagnostic(
+                push_heredoc_indent_diagnostic(
+                    self,
                     source,
+                    opening_loc.start_offset(),
+                    opening,
                     line,
                     col,
                     format!(
                         "Use {} spaces for indentation in a heredoc by using `<<~` instead of `{}`.",
                         indentation_width, indent_type_str,
                     ),
-                ));
+                    diagnostics,
+                    &mut corrections,
+                );
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_heredoc_indent_diagnostic(
+    cop: &HeredocIndentation,
+    source: &SourceFile,
+    opening_start: usize,
+    opening: &[u8],
+    line: usize,
+    col: usize,
+    message: String,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<Correction>>,
+) {
+    let mut diagnostic = cop.diagnostic(source, line, col, message);
+
+    if let Some(corrections) = corrections.as_mut() {
+        if opening.starts_with(b"<<-") {
+            corrections.push(Correction {
+                start: opening_start,
+                end: opening_start + 3,
+                replacement: "<<~".to_string(),
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        } else if opening.starts_with(b"<<") && !opening.starts_with(b"<<~") {
+            corrections.push(Correction {
+                start: opening_start,
+                end: opening_start + 2,
+                replacement: "<<~".to_string(),
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+    }
+
+    diagnostics.push(diagnostic);
 }
 
 /// Check if the bytes after the heredoc opening contain `.squish` or `.squish!`.
@@ -320,6 +379,7 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(HeredocIndentation, "cops/layout/heredoc_indentation");
+    crate::cop_autocorrect_fixture_tests!(HeredocIndentation, "cops/layout/heredoc_indentation");
 
     #[test]
     fn bare_heredoc_body_at_zero_is_offense() {

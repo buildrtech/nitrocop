@@ -1,4 +1,5 @@
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
@@ -76,6 +77,10 @@ impl Cop for HeredocArgumentClosingParenthesis {
         false
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -83,7 +88,7 @@ impl Cop for HeredocArgumentClosingParenthesis {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = HeredocParenVisitor {
             source,
@@ -91,6 +96,7 @@ impl Cop for HeredocArgumentClosingParenthesis {
             end_depth: 0,
             end_stack: Vec::new(),
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -104,6 +110,7 @@ struct HeredocParenVisitor<'a> {
     /// Stack of booleans: true if the corresponding branch node had an `end` keyword.
     end_stack: Vec<bool>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<Correction>>,
 }
 
 impl HeredocParenVisitor<'_> {
@@ -281,12 +288,43 @@ impl HeredocParenVisitor<'_> {
             }
         }
 
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             close_line,
             close_col,
             "Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = self.corrections.as_mut() {
+            let opener_line_start = self.source.line_start_offset(last_heredoc_opener_line);
+            let opener_line_end = opener_line_start
+                + crate::cop::util::line_at(self.source, last_heredoc_opener_line)
+                    .map(|l| l.len())
+                    .unwrap_or(0);
+            corrections.push(Correction {
+                start: opener_line_end,
+                end: opener_line_end,
+                replacement: ")".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+
+            let close_line_start = self.source.line_start_offset(close_line);
+            let close_line_end = self
+                .source
+                .line_col_to_offset(close_line + 1, 0)
+                .unwrap_or_else(|| self.source.as_bytes().len());
+            corrections.push(Correction {
+                start: close_line_start,
+                end: close_line_end,
+                replacement: String::new(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -448,6 +486,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        HeredocArgumentClosingParenthesis,
+        "cops/layout/heredoc_argument_closing_parenthesis"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         HeredocArgumentClosingParenthesis,
         "cops/layout/heredoc_argument_closing_parenthesis"
     );
