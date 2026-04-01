@@ -55,7 +55,7 @@ impl Cop for EvalWithLocation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -144,32 +144,34 @@ impl Cop for EvalWithLocation {
             } else {
                 format!("Pass `__FILE__` and `__LINE__` to `{}`.", method_str)
             };
+
             let mut diag = self.diagnostic(source, line, column, msg);
 
-            if let Some(ref mut corr) = corrections {
-                let missing_args = if needs_binding {
-                    match arg_list.len() {
-                        1 => ", binding, __FILE__, __LINE__",
-                        2 => ", __FILE__, __LINE__",
-                        3 => ", __LINE__",
-                        _ => "",
+            if let Some(corrections) = corrections {
+                let missing = expected_count - arg_list.len();
+                let replacement = if needs_binding {
+                    match missing {
+                        3 => Some(", binding, __FILE__, __LINE__".to_string()),
+                        2 => Some(", __FILE__, __LINE__".to_string()),
+                        1 => Some(", __LINE__".to_string()),
+                        _ => None,
                     }
                 } else {
-                    match arg_list.len() {
-                        1 => ", __FILE__, __LINE__",
-                        2 => ", __LINE__",
-                        _ => "",
+                    match missing {
+                        2 => Some(", __FILE__, __LINE__".to_string()),
+                        1 => Some(", __LINE__".to_string()),
+                        _ => None,
                     }
                 };
 
-                if !missing_args.is_empty() {
-                    let insert_at = arg_list
-                        .last()
-                        .map_or(loc.end_offset(), |arg| arg.location().end_offset());
-                    corr.push(crate::correction::Correction {
+                if let Some(replacement) = replacement {
+                    let insert_at = call
+                        .closing_loc()
+                        .map_or(loc.end_offset(), |close| close.start_offset());
+                    corrections.push(crate::correction::Correction {
                         start: insert_at,
                         end: insert_at,
-                        replacement: missing_args.to_string(),
+                        replacement,
                         cop_name: self.name(),
                         cop_index: 0,
                     });
