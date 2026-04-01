@@ -181,6 +181,10 @@ impl Cop for RedundantFreeze {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -188,7 +192,7 @@ impl Cop for RedundantFreeze {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call_node = match node.as_call_node() {
             Some(c) => c,
@@ -230,12 +234,32 @@ impl Cop for RedundantFreeze {
 
         let loc = receiver.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Do not freeze immutable objects, as freezing them has no effect.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let msg_loc = call_node
+                .message_loc()
+                .unwrap_or_else(|| call_node.location());
+            let start = call_node
+                .call_operator_loc()
+                .map(|op| op.start_offset())
+                .unwrap_or_else(|| msg_loc.start_offset());
+            corr.push(crate::correction::Correction {
+                start,
+                end: msg_loc.end_offset(),
+                replacement: String::new(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -245,6 +269,7 @@ mod tests {
     use std::collections::HashMap;
 
     crate::cop_fixture_tests!(RedundantFreeze, "cops/style/redundant_freeze");
+    crate::cop_autocorrect_fixture_tests!(RedundantFreeze, "cops/style/redundant_freeze");
 
     fn config_ruby30() -> CopConfig {
         let mut options = HashMap::new();
