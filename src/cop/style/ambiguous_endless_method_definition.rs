@@ -66,26 +66,18 @@ impl Cop for AmbiguousEndlessMethodDefinition {
         }
 
         let loc = def_node.location();
-        let equal_loc = match def_node.equal_loc() {
-            Some(loc) => loc,
-            None => return,
-        };
         let source_bytes = source.as_bytes();
         let tail_start = loc.end_offset();
-        let rhs_start = equal_loc.end_offset();
-        let mut line_end = rhs_start;
-        while line_end < source_bytes.len() && source_bytes[line_end] != b'\n' {
-            line_end += 1;
+        let mut tail_end = tail_start;
+        while tail_end < source_bytes.len() && source_bytes[tail_end] != b'\n' {
+            tail_end += 1;
         }
 
-        let raw_tail = match std::str::from_utf8(&source_bytes[tail_start..line_end]) {
+        let tail = match std::str::from_utf8(&source_bytes[tail_start..tail_end]) {
             Ok(tail) => tail,
             Err(_) => return,
         };
-
-        // Ignore trailing inline comment text for detection/autocorrect boundaries.
-        let tail_before_comment = raw_tail.split('#').next().unwrap_or("");
-        let tail = tail_before_comment.trim_end();
+        let tail = tail.split('#').next().unwrap_or("").trim_end();
         if tail.trim_start().starts_with(')') {
             return;
         }
@@ -108,38 +100,50 @@ impl Cop for AmbiguousEndlessMethodDefinition {
         };
 
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diag = self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Avoid using `{}` statements with endless methods.", op_name),
         );
 
-        if let Some(ref mut corr) = corrections {
-            let raw_rhs = match std::str::from_utf8(&source_bytes[rhs_start..line_end]) {
-                Ok(rhs) => rhs,
-                Err(_) => return,
-            };
-            let rhs_before_comment = raw_rhs.split('#').next().unwrap_or("");
-            let rhs_trimmed_end = rhs_before_comment.trim_end();
-            let leading_ws_len = rhs_trimmed_end
-                .len()
-                .saturating_sub(rhs_trimmed_end.trim_start().len());
-            let expr = rhs_trimmed_end[leading_ws_len..].trim();
+        if let Some(corrs) = corrections.as_mut() {
+            let mut expr_start = def_node
+                .equal_loc()
+                .map(|eq| eq.end_offset())
+                .unwrap_or(tail_start);
+            while expr_start < tail_end && matches!(source_bytes[expr_start], b' ' | b'\t' | b'\r')
+            {
+                expr_start += 1;
+            }
 
-            if !expr.is_empty() {
-                corr.push(crate::correction::Correction {
-                    start: rhs_start + leading_ws_len,
-                    end: rhs_start + rhs_trimmed_end.len(),
-                    replacement: format!("({expr})"),
+            let mut expr_end = tail_end;
+            if let Some(hash_idx) = source_bytes[tail_start..tail_end]
+                .iter()
+                .position(|&b| b == b'#')
+            {
+                expr_end = tail_start + hash_idx;
+            }
+            while expr_end > expr_start
+                && matches!(source_bytes[expr_end - 1], b' ' | b'\t' | b'\r')
+            {
+                expr_end -= 1;
+            }
+
+            if expr_start < expr_end {
+                let expr_src = String::from_utf8_lossy(&source_bytes[expr_start..expr_end]);
+                corrs.push(crate::correction::Correction {
+                    start: expr_start,
+                    end: expr_end,
+                    replacement: format!("({})", expr_src),
                     cop_name: self.name(),
                     cop_index: 0,
                 });
-                diag.corrected = true;
+                diagnostic.corrected = true;
             }
         }
 
-        diagnostics.push(diag);
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -147,7 +151,6 @@ impl Cop for AmbiguousEndlessMethodDefinition {
 mod tests {
     use super::*;
     use crate::cop::CopConfig;
-    use crate::testutil::assert_cop_autocorrect_with_config;
 
     fn ruby30_config() -> CopConfig {
         let mut config = CopConfig::default();
@@ -192,8 +195,8 @@ mod tests {
     }
 
     #[test]
-    fn autocorrect_with_ruby30() {
-        assert_cop_autocorrect_with_config(
+    fn autocorrect_fixture_with_ruby30() {
+        crate::testutil::assert_cop_autocorrect_with_config(
             &AmbiguousEndlessMethodDefinition,
             include_bytes!(
                 "../../../tests/fixtures/cops/style/ambiguous_endless_method_definition/offense.rb"

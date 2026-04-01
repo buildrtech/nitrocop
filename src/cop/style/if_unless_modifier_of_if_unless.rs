@@ -10,12 +10,12 @@ impl Cop for IfUnlessModifierOfIfUnless {
         "Style/IfUnlessModifierOfIfUnless"
     }
 
-    fn supports_autocorrect(&self) -> bool {
-        true
-    }
-
     fn interested_node_types(&self) -> &'static [u8] {
         &[IF_NODE, UNLESS_NODE]
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn check_node(
@@ -25,7 +25,7 @@ impl Cop for IfUnlessModifierOfIfUnless {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check modifier `if`
         if let Some(if_node) = node.as_if_node() {
@@ -57,21 +57,27 @@ impl Cop for IfUnlessModifierOfIfUnless {
                         format!("Avoid modifier `{}` after another conditional.", keyword),
                     );
 
-                    if let Some(corrections) = corrections {
+                    if let Some(corrs) = corrections.as_mut() {
+                        let cond_src = String::from_utf8_lossy(
+                            &source.as_bytes()[if_node.predicate().location().start_offset()
+                                ..if_node.predicate().location().end_offset()],
+                        );
                         let body_src = String::from_utf8_lossy(
                             &source.as_bytes()[body[0].location().start_offset()
                                 ..body[0].location().end_offset()],
                         );
-                        let predicate = if_node.predicate();
-                        let predicate_src = String::from_utf8_lossy(
-                            &source.as_bytes()[predicate.location().start_offset()
-                                ..predicate.location().end_offset()],
+                        let (_, base_col) =
+                            source.offset_to_line_col(if_node.location().start_offset());
+                        let indent = " ".repeat(base_col.saturating_sub(1));
+                        let replacement = format!(
+                            "{indent}if {}\n{indent}  {}\n{indent}end",
+                            cond_src.trim(),
+                            body_src.trim()
                         );
-                        let replacement =
-                            format!("if {}\n{}\nend", predicate_src.trim(), body_src.trim());
-                        corrections.push(crate::correction::Correction {
-                            start: node.location().start_offset(),
-                            end: node.location().end_offset(),
+
+                        corrs.push(crate::correction::Correction {
+                            start: if_node.location().start_offset(),
+                            end: if_node.location().end_offset(),
                             replacement,
                             cop_name: self.name(),
                             cop_index: 0,
@@ -83,8 +89,9 @@ impl Cop for IfUnlessModifierOfIfUnless {
                 }
             }
         }
+
         // Check modifier `unless`
-        else if let Some(unless_node) = node.as_unless_node() {
+        if let Some(unless_node) = node.as_unless_node() {
             // Must be modifier form (no end keyword)
             if unless_node.end_keyword_loc().is_some() {
                 return;
@@ -107,21 +114,27 @@ impl Cop for IfUnlessModifierOfIfUnless {
                         "Avoid modifier `unless` after another conditional.".to_string(),
                     );
 
-                    if let Some(corrections) = corrections {
+                    if let Some(corrs) = corrections.as_mut() {
+                        let cond_src = String::from_utf8_lossy(
+                            &source.as_bytes()[unless_node.predicate().location().start_offset()
+                                ..unless_node.predicate().location().end_offset()],
+                        );
                         let body_src = String::from_utf8_lossy(
                             &source.as_bytes()[body[0].location().start_offset()
                                 ..body[0].location().end_offset()],
                         );
-                        let predicate = unless_node.predicate();
-                        let predicate_src = String::from_utf8_lossy(
-                            &source.as_bytes()[predicate.location().start_offset()
-                                ..predicate.location().end_offset()],
+                        let (_, base_col) =
+                            source.offset_to_line_col(unless_node.location().start_offset());
+                        let indent = " ".repeat(base_col.saturating_sub(1));
+                        let replacement = format!(
+                            "{indent}unless {}\n{indent}  {}\n{indent}end",
+                            cond_src.trim(),
+                            body_src.trim()
                         );
-                        let replacement =
-                            format!("unless {}\n{}\nend", predicate_src.trim(), body_src.trim());
-                        corrections.push(crate::correction::Correction {
-                            start: node.location().start_offset(),
-                            end: node.location().end_offset(),
+
+                        corrs.push(crate::correction::Correction {
+                            start: unless_node.location().start_offset(),
+                            end: unless_node.location().end_offset(),
                             replacement,
                             cop_name: self.name(),
                             cop_index: 0,

@@ -43,12 +43,12 @@ impl Cop for SlicingWithRange {
         "Style/SlicingWithRange"
     }
 
-    fn supports_autocorrect(&self) -> bool {
-        true
-    }
-
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, INTEGER_NODE, RANGE_NODE]
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn check_node(
@@ -69,9 +69,10 @@ impl Cop for SlicingWithRange {
         if call.name().as_slice() != b"[]" {
             return;
         }
-        if call.receiver().is_none() {
-            return;
-        }
+        let receiver = match call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
 
         let args = match call.arguments() {
             Some(a) => a,
@@ -95,6 +96,8 @@ impl Cop for SlicingWithRange {
             let is_inclusive = op.as_slice() == b"..";
             let is_exclusive = op.as_slice() == b"...";
             let op_str = if is_inclusive { ".." } else { "..." };
+            let src = std::str::from_utf8(node.location().as_slice()).unwrap_or("");
+            let recv_src = std::str::from_utf8(receiver.location().as_slice()).unwrap_or("ary");
 
             if let Some(left) = irange.left() {
                 let left_is_zero = Self::int_value(&left) == Some(0);
@@ -105,29 +108,23 @@ impl Cop for SlicingWithRange {
                         if let Some(right) = irange.right() {
                             if Self::int_value(&right) == Some(-1) {
                                 let (line, column) = source.offset_to_line_col(bracket_offset);
-                                let src =
-                                    std::str::from_utf8(node.location().as_slice()).unwrap_or("");
-                                let recv = std::str::from_utf8(
-                                    call.receiver().unwrap().location().as_slice(),
-                                )
-                                .unwrap_or("ary");
-                                let mut diagnostic = self.diagnostic(
+                                let mut diag = self.diagnostic(
                                     source,
                                     line,
                                     column,
-                                    format!("Prefer `{recv}` over `{src}`."),
+                                    format!("Prefer `{recv_src}` over `{src}`."),
                                 );
-                                if let Some(corrections) = corrections.as_mut() {
-                                    corrections.push(crate::correction::Correction {
+                                if let Some(ref mut corr) = corrections {
+                                    corr.push(crate::correction::Correction {
                                         start: node.location().start_offset(),
                                         end: node.location().end_offset(),
-                                        replacement: recv.to_string(),
+                                        replacement: recv_src.to_string(),
                                         cop_name: self.name(),
                                         cop_index: 0,
                                     });
-                                    diagnostic.corrected = true;
+                                    diag.corrected = true;
                                 }
-                                diagnostics.push(diagnostic);
+                                diagnostics.push(diag);
                                 return;
                             }
                         }
@@ -138,27 +135,23 @@ impl Cop for SlicingWithRange {
                     // NodePattern `nil` matches NilNode, not absent children.
                     if (is_inclusive || is_exclusive) && Self::right_is_explicit_nil(&irange) {
                         let (line, column) = source.offset_to_line_col(bracket_offset);
-                        let src = std::str::from_utf8(node.location().as_slice()).unwrap_or("");
-                        let recv =
-                            std::str::from_utf8(call.receiver().unwrap().location().as_slice())
-                                .unwrap_or("ary");
-                        let mut diagnostic = self.diagnostic(
+                        let mut diag = self.diagnostic(
                             source,
                             line,
                             column,
-                            format!("Prefer `{recv}` over `{src}`."),
+                            format!("Prefer `{recv_src}` over `{src}`."),
                         );
-                        if let Some(corrections) = corrections.as_mut() {
-                            corrections.push(crate::correction::Correction {
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
                                 start: node.location().start_offset(),
                                 end: node.location().end_offset(),
-                                replacement: recv.to_string(),
+                                replacement: recv_src.to_string(),
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diagnostic.corrected = true;
+                            diag.corrected = true;
                         }
-                        diagnostics.push(diagnostic);
+                        diagnostics.push(diag);
                         return;
                     }
                 }
@@ -170,27 +163,23 @@ impl Cop for SlicingWithRange {
                             let left_src =
                                 std::str::from_utf8(left.location().as_slice()).unwrap_or("1");
                             let (line, column) = source.offset_to_line_col(bracket_offset);
-                            let mut diagnostic = self.diagnostic(
+                            let mut diag = self.diagnostic(
                                 source,
                                 line,
                                 column,
                                 format!("Prefer `[{left_src}..]` over `[{left_src}..-1]`."),
                             );
-                            if let Some(corrections) = corrections.as_mut() {
-                                let recv = std::str::from_utf8(
-                                    call.receiver().unwrap().location().as_slice(),
-                                )
-                                .unwrap_or("ary");
-                                corrections.push(crate::correction::Correction {
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
                                     start: node.location().start_offset(),
                                     end: node.location().end_offset(),
-                                    replacement: format!("{recv}[{left_src}..]"),
+                                    replacement: format!("{recv_src}[{left_src}..]"),
                                     cop_name: self.name(),
                                     cop_index: 0,
                                 });
-                                diagnostic.corrected = true;
+                                diag.corrected = true;
                             }
-                            diagnostics.push(diagnostic);
+                            diagnostics.push(diag);
                             return;
                         }
                     }
@@ -203,7 +192,7 @@ impl Cop for SlicingWithRange {
                             let left_src =
                                 std::str::from_utf8(left.location().as_slice()).unwrap_or("1");
                             let (line, column) = source.offset_to_line_col(bracket_offset);
-                            let mut diagnostic = self.diagnostic(
+                            let mut diag = self.diagnostic(
                                 source,
                                 line,
                                 column,
@@ -211,21 +200,17 @@ impl Cop for SlicingWithRange {
                                     "Prefer `[{left_src}{op_str}]` over `[{left_src}{op_str}nil]`."
                                 ),
                             );
-                            if let Some(corrections) = corrections.as_mut() {
-                                let recv = std::str::from_utf8(
-                                    call.receiver().unwrap().location().as_slice(),
-                                )
-                                .unwrap_or("ary");
-                                corrections.push(crate::correction::Correction {
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
                                     start: node.location().start_offset(),
                                     end: node.location().end_offset(),
-                                    replacement: format!("{recv}[{left_src}{op_str}]"),
+                                    replacement: format!("{recv_src}[{left_src}{op_str}]"),
                                     cop_name: self.name(),
                                     cop_index: 0,
                                 });
-                                diagnostic.corrected = true;
+                                diag.corrected = true;
                             }
-                            diagnostics.push(diagnostic);
+                            diagnostics.push(diag);
                         }
                     }
                 }
