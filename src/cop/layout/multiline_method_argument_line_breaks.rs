@@ -196,9 +196,10 @@ impl Cop for MultilineMethodArgumentLineBreaks {
                 );
 
                 if let Some(corrections) = corrections.as_deref_mut() {
-                    let replace_start = whitespace_prefix_start(source, start, arg_start_line)
-                        .unwrap_or(start);
-                    let indent = preferred_indent(source, arg_start_line, arg_start_col, call_end_line);
+                    let replace_start =
+                        whitespace_prefix_start(source, start, arg_start_line).unwrap_or(start);
+                    let indent =
+                        preferred_indent(source, arg_start_line, arg_start_col, call_end_line);
                     corrections.push(Correction {
                         start: replace_start,
                         end: start,
@@ -217,7 +218,11 @@ impl Cop for MultilineMethodArgumentLineBreaks {
     }
 }
 
-fn whitespace_prefix_start(source: &SourceFile, arg_start: usize, arg_start_line: usize) -> Option<usize> {
+fn whitespace_prefix_start(
+    source: &SourceFile,
+    arg_start: usize,
+    arg_start_line: usize,
+) -> Option<usize> {
     let line_start = source.line_col_to_offset(arg_start_line, 0)?;
     let bytes = source.as_bytes();
     let mut start = arg_start;
@@ -235,14 +240,15 @@ fn whitespace_prefix_start(source: &SourceFile, arg_start: usize, arg_start_line
 fn line_indent(source: &SourceFile, line: usize) -> Option<usize> {
     let lines: Vec<&[u8]> = source.lines().collect();
     let raw = *lines.get(line.checked_sub(1)?)?;
-    Some(
-        raw.iter()
-            .take_while(|&&b| b == b' ' || b == b'\t')
-            .count(),
-    )
+    Some(raw.iter().take_while(|&&b| b == b' ' || b == b'\t').count())
 }
 
-fn preferred_indent(source: &SourceFile, arg_line: usize, arg_col: usize, call_end_line: usize) -> usize {
+fn preferred_indent(
+    source: &SourceFile,
+    arg_line: usize,
+    arg_col: usize,
+    call_end_line: usize,
+) -> usize {
     let current_indent = line_indent(source, arg_line).unwrap_or(0);
     if current_indent > 0 {
         return current_indent;

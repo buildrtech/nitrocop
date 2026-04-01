@@ -123,7 +123,8 @@ impl Cop for MultilineMethodCallBraceLayout {
             .count();
 
         let mut emit = |message: &str, want_same_line: bool| {
-            let mut diagnostic = self.diagnostic(source, close_line, close_col, message.to_string());
+            let mut diagnostic =
+                self.diagnostic(source, close_line, close_col, message.to_string());
 
             if let Some(corrections) = corrections.as_mut() {
                 if want_same_line {

@@ -253,11 +253,7 @@ impl Cop for MultilineAssignmentLayout {
 fn leading_indent(source: &SourceFile, line: usize) -> Option<usize> {
     let lines: Vec<&[u8]> = source.lines().collect();
     let raw = *lines.get(line.checked_sub(1)?)?;
-    Some(
-        raw.iter()
-            .take_while(|&&b| b == b' ' || b == b'\t')
-            .count(),
-    )
+    Some(raw.iter().take_while(|&&b| b == b' ' || b == b'\t').count())
 }
 
 #[cfg(test)]

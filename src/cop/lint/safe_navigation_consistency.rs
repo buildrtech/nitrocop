@@ -169,12 +169,8 @@ impl Cop for SafeNavigationConsistency {
                         .iter()
                         .any(|d| d.location.line == line && d.location.column == column);
                     if !already_reported {
-                        let mut diagnostic = self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            message.to_string(),
-                        );
+                        let mut diagnostic =
+                            self.diagnostic(source, line, column, message.to_string());
 
                         if let Some(corrections) = corrections.as_mut() {
                             let has_call_operator = op.call_operator_len > 0;

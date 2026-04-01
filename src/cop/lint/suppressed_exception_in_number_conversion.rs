@@ -136,8 +136,11 @@ impl<'pr> Visit<'pr> for NumConvVisitor<'_, '_> {
                                 column,
                                 format!("Use `{}` instead.", prefer),
                             ));
-                            self.correction_data
-                                .push(Some((loc.start_offset(), loc.end_offset(), prefer)));
+                            self.correction_data.push(Some((
+                                loc.start_offset(),
+                                loc.end_offset(),
+                                prefer,
+                            )));
                         }
                     }
                 }

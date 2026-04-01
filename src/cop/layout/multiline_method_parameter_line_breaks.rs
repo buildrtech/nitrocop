@@ -80,7 +80,8 @@ impl Cop for MultilineMethodParameterLineBreaks {
                 );
 
                 if let Some(corrections) = corrections.as_deref_mut() {
-                    let replace_start = whitespace_prefix_start(source, start, curr_line).unwrap_or(start);
+                    let replace_start =
+                        whitespace_prefix_start(source, start, curr_line).unwrap_or(start);
                     let indent = preferred_indent(source, curr_line, curr_col, &param_locs);
                     corrections.push(Correction {
                         start: replace_start,
@@ -160,7 +161,11 @@ fn all_on_same_line(
     first_line == last_line
 }
 
-fn whitespace_prefix_start(source: &SourceFile, param_start: usize, param_line: usize) -> Option<usize> {
+fn whitespace_prefix_start(
+    source: &SourceFile,
+    param_start: usize,
+    param_line: usize,
+) -> Option<usize> {
     let line_start = source.line_col_to_offset(param_line, 0)?;
     let bytes = source.as_bytes();
     let mut start = param_start;
@@ -178,11 +183,7 @@ fn whitespace_prefix_start(source: &SourceFile, param_start: usize, param_line: 
 fn line_indent(source: &SourceFile, line: usize) -> Option<usize> {
     let lines: Vec<&[u8]> = source.lines().collect();
     let raw = *lines.get(line.checked_sub(1)?)?;
-    Some(
-        raw.iter()
-            .take_while(|&&b| b == b' ' || b == b'\t')
-            .count(),
-    )
+    Some(raw.iter().take_while(|&&b| b == b' ' || b == b'\t').count())
 }
 
 fn preferred_indent(

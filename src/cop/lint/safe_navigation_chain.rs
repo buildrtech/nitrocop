@@ -207,7 +207,8 @@ impl Cop for SafeNavigationChain {
             "Do not chain ordinary method call after safe navigation operator.".to_string(),
         );
 
-        if let (Some(corrections), Some(op_loc)) = (corrections.as_mut(), call.call_operator_loc()) {
+        if let (Some(corrections), Some(op_loc)) = (corrections.as_mut(), call.call_operator_loc())
+        {
             if op_loc.as_slice() == b"." {
                 corrections.push(crate::correction::Correction {
                     start: op_loc.start_offset(),

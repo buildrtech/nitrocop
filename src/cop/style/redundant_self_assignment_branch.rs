@@ -124,7 +124,8 @@ impl RedundantSelfAssignmentBranch {
                         column,
                         "Remove the self-assignment branch.".to_string(),
                     );
-                    if let Some(replacement) = build_replacement(source, if_node, &else_stmts, "unless")
+                    if let Some(replacement) =
+                        build_replacement(source, if_node, &else_stmts, "unless")
                     {
                         if let Some(corrections) = corrections.as_mut() {
                             let if_loc = if_node.location();
