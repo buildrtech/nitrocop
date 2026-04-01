@@ -1,6 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -11,6 +12,10 @@ impl Cop for ClassAndModuleChildren {
         "Style/ClassAndModuleChildren"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -18,7 +23,7 @@ impl Cop for ClassAndModuleChildren {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "nested").to_string();
         let enforced_for_classes = config.get_str("EnforcedStyleForClasses", "").to_string();
@@ -31,6 +36,7 @@ impl Cop for ClassAndModuleChildren {
             enforced_for_modules,
             inside_class_or_module: false,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -61,6 +67,7 @@ struct ChildrenVisitor<'a> {
     enforced_for_modules: String,
     inside_class_or_module: bool,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<Correction>>,
 }
 
 impl<'a> ChildrenVisitor<'a> {
@@ -92,6 +99,130 @@ impl<'a> ChildrenVisitor<'a> {
         });
     }
 
+    fn push_diagnostic_with_correction(
+        &mut self,
+        offset: usize,
+        message: String,
+        correction: Option<Correction>,
+    ) {
+        self.add_diagnostic(offset, message);
+        if let Some(last) = self.diagnostics.last_mut() {
+            if correction.is_some() {
+                last.corrected = true;
+            }
+        }
+        if let (Some(corrections), Some(correction)) = (self.corrections.as_deref_mut(), correction) {
+            corrections.push(correction);
+        }
+    }
+
+    fn split_constant_path_segments(&self, constant_path: &ruby_prism::Node<'_>) -> Option<Vec<String>> {
+        let src = std::str::from_utf8(constant_path.location().as_slice()).ok()?;
+        let segments: Vec<String> = src
+            .split("::")
+            .filter(|part| !part.is_empty())
+            .map(std::string::ToString::to_string)
+            .collect();
+        if segments.len() < 2 {
+            return None;
+        }
+        Some(segments)
+    }
+
+    fn indent_block(source: &str, spaces: usize) -> String {
+        let pad = " ".repeat(spaces);
+        let mut lines: Vec<&str> = source.split_inclusive('\n').collect();
+        if lines.is_empty() && !source.is_empty() {
+            lines.push(source);
+        }
+
+        let trim_following = lines
+            .iter()
+            .skip(1)
+            .filter_map(|line| {
+                if line.trim().is_empty() {
+                    None
+                } else {
+                    Some(line.as_bytes().iter().take_while(|&&b| b == b' ').count())
+                }
+            })
+            .min()
+            .unwrap_or(0);
+
+        let mut out = String::new();
+        for (idx, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                out.push_str(line);
+                continue;
+            }
+            out.push_str(&pad);
+            if idx == 0 || trim_following == 0 {
+                out.push_str(line);
+            } else {
+                let mut dropped = 0usize;
+                let bytes = line.as_bytes();
+                while dropped < trim_following && dropped < bytes.len() && bytes[dropped] == b' ' {
+                    dropped += 1;
+                }
+                out.push_str(&line[dropped..]);
+            }
+        }
+        out
+    }
+
+    fn build_nested_replacement(
+        &self,
+        constant_path: &ruby_prism::Node<'_>,
+        body: Option<ruby_prism::Node<'_>>,
+        keyword: &str,
+        superclass: Option<ruby_prism::Node<'_>>,
+    ) -> Option<String> {
+        let segments = self.split_constant_path_segments(constant_path)?;
+        let mut replacement = String::new();
+
+        for (idx, segment) in segments.iter().take(segments.len() - 1).enumerate() {
+            replacement.push_str(&" ".repeat(idx * 2));
+            replacement.push_str(keyword);
+            replacement.push(' ');
+            replacement.push_str(segment);
+            replacement.push('\n');
+        }
+
+        let final_indent = (segments.len() - 1) * 2;
+        replacement.push_str(&" ".repeat(final_indent));
+        replacement.push_str(keyword);
+        replacement.push(' ');
+        replacement.push_str(segments.last()?);
+
+        if let Some(superclass) = superclass {
+            replacement.push_str(" < ");
+            replacement.push_str(std::str::from_utf8(superclass.location().as_slice()).ok()?);
+        }
+        replacement.push('\n');
+
+        if let Some(body_node) = body {
+            let body_src = std::str::from_utf8(body_node.location().as_slice()).ok()?;
+            replacement.push_str(&Self::indent_block(body_src, segments.len() * 2));
+            if !body_src.ends_with('\n') {
+                replacement.push('\n');
+            }
+        }
+
+        replacement.push_str(&" ".repeat(final_indent));
+        replacement.push_str("end\n");
+
+        for idx in (0..segments.len() - 1).rev() {
+            replacement.push_str(&" ".repeat(idx * 2));
+            replacement.push_str("end\n");
+        }
+
+        if replacement.ends_with('\n') {
+            replacement.pop();
+        }
+
+        Some(replacement)
+    }
+
     /// Check if the body of a class/module is a single class or module definition
     /// that could be compacted. In Prism, the body is either a StatementsNode
     /// containing a single child, or None.
@@ -111,7 +242,12 @@ impl<'a> ChildrenVisitor<'a> {
         body_node.as_class_node().is_some() || body_node.as_module_node().is_some()
     }
 
-    fn check_nested_style(&mut self, is_compact: bool, name_offset: usize) {
+    fn check_nested_style(
+        &mut self,
+        is_compact: bool,
+        name_offset: usize,
+        correction: Option<Correction>,
+    ) {
         // For nested style: flag compact-style definitions (with ::) at top level
         if !is_compact {
             return;
@@ -120,9 +256,10 @@ impl<'a> ChildrenVisitor<'a> {
         if self.inside_class_or_module {
             return;
         }
-        self.add_diagnostic(
+        self.push_diagnostic_with_correction(
             name_offset,
             "Use nested module/class definitions instead of compact style.".to_string(),
+            correction,
         );
     }
 
@@ -135,9 +272,10 @@ impl<'a> ChildrenVisitor<'a> {
         if !self.body_is_single_class_or_module(body) {
             return;
         }
-        self.add_diagnostic(
+        self.push_diagnostic_with_correction(
             name_offset,
             "Use compact module/class definition instead of nested style.".to_string(),
+            None,
         );
     }
 }
@@ -195,7 +333,24 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         }
 
         if style == "nested" {
-            self.check_nested_style(is_compact, name_offset);
+            let correction = if is_compact {
+                self.build_nested_replacement(
+                    &constant_path,
+                    node.body(),
+                    "class",
+                    node.superclass(),
+                )
+                .map(|replacement| Correction {
+                    start: node.location().start_offset(),
+                    end: node.location().end_offset(),
+                    replacement,
+                    cop_name: "Style/ClassAndModuleChildren",
+                    cop_index: 0,
+                })
+            } else {
+                None
+            };
+            self.check_nested_style(is_compact, name_offset, correction);
         } else if style == "compact" {
             let body = node.body();
             self.check_compact_style(&body, name_offset);
@@ -224,7 +379,19 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         }
 
         if style == "nested" {
-            self.check_nested_style(is_compact, name_offset);
+            let correction = if is_compact {
+                self.build_nested_replacement(&constant_path, node.body(), "module", None)
+                    .map(|replacement| Correction {
+                        start: node.location().start_offset(),
+                        end: node.location().end_offset(),
+                        replacement,
+                        cop_name: "Style/ClassAndModuleChildren",
+                        cop_index: 0,
+                    })
+            } else {
+                None
+            };
+            self.check_nested_style(is_compact, name_offset, correction);
         } else if style == "compact" {
             let body = node.body();
             self.check_compact_style(&body, name_offset);
@@ -243,6 +410,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        ClassAndModuleChildren,
+        "cops/style/class_and_module_children"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         ClassAndModuleChildren,
         "cops/style/class_and_module_children"
     );
