@@ -72,6 +72,7 @@ use crate::cop::node_type::{
     MULTI_WRITE_NODE,
 };
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -232,17 +233,18 @@ impl AssignmentIndentation {
         operator_offset: usize,
         value: &ruby_prism::Node<'_>,
         width: usize,
-    ) -> Vec<Diagnostic> {
+    ) -> Option<(Diagnostic, Correction)> {
         let (_name_line, name_col) = source.offset_to_line_col(name_offset);
         let (operator_line, _operator_col) = source.offset_to_line_col(operator_offset);
         let value_loc = value.location();
-        let (value_line, value_col) = source.offset_to_line_col(value_loc.start_offset());
+        let value_start = value_loc.start_offset();
+        let (value_line, value_col) = source.offset_to_line_col(value_start);
 
         // Only check when RHS is on a different line than the operator (=).
         // For `headers[\n"key"\n] = "value"`, the operator and value are on the
         // same line, so this is not a multi-line RHS — skip it.
         if value_line == operator_line {
-            return Vec::new();
+            return None;
         }
 
         // For chained assignments like `a = b = \n value`, use the column of the
@@ -252,25 +254,58 @@ impl AssignmentIndentation {
         let base_col = Self::find_chained_assignment_base(source, name_offset).unwrap_or(name_col);
         let expected = base_col + width;
 
-        if value_col != expected {
-            return vec![
-                self.diagnostic(
-                    source,
-                    value_line,
-                    value_col,
-                    "Indent the first line of the right-hand-side of a multi-line assignment."
-                        .to_string(),
-                ),
-            ];
+        if value_col == expected {
+            return None;
         }
 
-        Vec::new()
+        let diagnostic = self.diagnostic(
+            source,
+            value_line,
+            value_col,
+            "Indent the first line of the right-hand-side of a multi-line assignment.".to_string(),
+        );
+
+        let line_start = source.line_start_offset(value_line);
+        let correction = Correction {
+            start: line_start,
+            end: value_start,
+            replacement: " ".repeat(expected),
+            cop_name: self.name(),
+            cop_index: 0,
+        };
+
+        Some((diagnostic, correction))
+    }
+
+    fn push_check(
+        &self,
+        source: &SourceFile,
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<Correction>>,
+        name_offset: usize,
+        operator_offset: usize,
+        value: &ruby_prism::Node<'_>,
+        width: usize,
+    ) {
+        if let Some((mut diagnostic, correction)) =
+            self.check_write(source, name_offset, operator_offset, value, width)
+        {
+            if let Some(corrections) = corrections.as_mut() {
+                corrections.push(correction);
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
+        }
     }
 }
 
 impl Cop for AssignmentIndentation {
     fn name(&self) -> &'static str {
         "Layout/AssignmentIndentation"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -325,265 +360,315 @@ impl Cop for AssignmentIndentation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let width = config.get_usize("IndentationWidth", 2);
 
         // Simple writes
         if let Some(n) = node.as_local_variable_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_instance_variable_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_class_variable_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_global_variable_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_constant_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         // Operator writes (+=, -=, *=, etc.)
         if let Some(n) = node.as_local_variable_operator_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_instance_variable_operator_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_class_variable_operator_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_global_variable_operator_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_constant_operator_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         // Or writes (||=)
         if let Some(n) = node.as_local_variable_or_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_instance_variable_or_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_class_variable_or_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_global_variable_or_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_constant_or_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         // And writes (&&=)
         if let Some(n) = node.as_local_variable_and_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_instance_variable_and_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_class_variable_and_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_global_variable_and_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_constant_and_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.name_loc().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         // Multi-write (a, b = ...)
         if let Some(n) = node.as_multi_write_node() {
             // Use the start of the whole multi-write node (first target) as the base
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.location().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         // Constant path writes (Module::CONST = ...)
         if let Some(n) = node.as_constant_path_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.target().location().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_constant_path_operator_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.target().location().start_offset(),
                 n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_constant_path_or_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.target().location().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_constant_path_and_write_node() {
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 n.target().location().start_offset(),
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         // Setter calls (obj.x = val, hash[key] = val)
@@ -615,13 +700,15 @@ impl Cop for AssignmentIndentation {
                             .or(n.message_loc())
                             .map(|l| l.start_offset())
                             .unwrap_or(base_offset);
-                        diagnostics.extend(self.check_write(
+                        self.push_check(
                             source,
+                            diagnostics,
+                            &mut corrections,
                             base_offset,
                             op_offset,
                             last_arg,
                             width,
-                        ));
+                        );
                     }
                 }
             }
@@ -634,13 +721,15 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 base_offset,
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_call_and_write_node() {
@@ -649,13 +738,15 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 base_offset,
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_call_operator_write_node() {
@@ -664,13 +755,15 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 base_offset,
                 n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         // Index compound writes (hash[key] ||= val, hash[key] &&= val, hash[key] += val)
@@ -680,13 +773,15 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 base_offset,
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_index_and_write_node() {
@@ -695,13 +790,15 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 base_offset,
                 n.operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
 
         if let Some(n) = node.as_index_operator_write_node() {
@@ -710,13 +807,15 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(
+            self.push_check(
                 source,
+                diagnostics,
+                &mut corrections,
                 base_offset,
                 n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
-            ));
+            );
         }
     }
 }
@@ -727,6 +826,10 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(AssignmentIndentation, "cops/layout/assignment_indentation");
+    crate::cop_autocorrect_fixture_tests!(
+        AssignmentIndentation,
+        "cops/layout/assignment_indentation"
+    );
 
     #[test]
     fn single_line_assignment_ignored() {

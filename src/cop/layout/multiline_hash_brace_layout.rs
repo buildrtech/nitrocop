@@ -1,5 +1,6 @@
 use crate::cop::node_type::{HASH_NODE, KEYWORD_HASH_NODE};
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -26,6 +27,10 @@ impl Cop for MultilineHashBraceLayout {
         "Layout/MultilineHashBraceLayout"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[HASH_NODE, KEYWORD_HASH_NODE]
     }
@@ -37,7 +42,7 @@ impl Cop for MultilineHashBraceLayout {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "symmetrical");
 
@@ -89,48 +94,70 @@ impl Cop for MultilineHashBraceLayout {
         let open_same_as_first = open_line == first_elem_line;
         let close_same_as_last = close_line == last_elem_line;
 
+        let last_elem_end = last_elem.location().end_offset();
+        let closing_start = closing.start_offset();
+        let closing_end = closing.end_offset();
+        let opening_line_start = source.line_start_offset(open_line);
+        let opening_indent = source.as_bytes()[opening_line_start..]
+            .iter()
+            .take_while(|&&b| b == b' ' || b == b'\t')
+            .count();
+
+        let mut emit = |message: &str, want_same_line: bool| {
+            let mut diagnostic =
+                self.diagnostic(source, close_line, close_col, message.to_string());
+            if let Some(corrections) = corrections.as_mut() {
+                let correction = if want_same_line {
+                    Correction {
+                        start: last_elem_end,
+                        end: closing_end,
+                        replacement: "}".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    }
+                } else {
+                    Correction {
+                        start: last_elem_end,
+                        end: closing_start,
+                        replacement: format!("\n{}", " ".repeat(opening_indent)),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    }
+                };
+                corrections.push(correction);
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
+        };
+
         match enforced_style {
             "symmetrical" => {
                 if open_same_as_first && !close_same_as_last {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        close_line,
-                        close_col,
-                        "Closing hash brace must be on the same line as the last hash element when opening brace is on the same line as the first hash element.".to_string(),
-                    ));
+                    emit(
+                        "Closing hash brace must be on the same line as the last hash element when opening brace is on the same line as the first hash element.",
+                        true,
+                    );
                 }
                 if !open_same_as_first && close_same_as_last {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        close_line,
-                        close_col,
-                        "Closing hash brace must be on the line after the last hash element when opening brace is on a separate line from the first hash element.".to_string(),
-                    ));
+                    emit(
+                        "Closing hash brace must be on the line after the last hash element when opening brace is on a separate line from the first hash element.",
+                        false,
+                    );
                 }
             }
             "new_line" => {
                 if close_same_as_last {
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            close_line,
-                            close_col,
-                            "Closing hash brace must be on the line after the last hash element."
-                                .to_string(),
-                        ),
+                    emit(
+                        "Closing hash brace must be on the line after the last hash element.",
+                        false,
                     );
                 }
             }
             "same_line" => {
                 if !close_same_as_last {
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            close_line,
-                            close_col,
-                            "Closing hash brace must be on the same line as the last hash element."
-                                .to_string(),
-                        ),
+                    emit(
+                        "Closing hash brace must be on the same line as the last hash element.",
+                        true,
                     );
                 }
             }
@@ -178,6 +205,10 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
+        MultilineHashBraceLayout,
+        "cops/layout/multiline_hash_brace_layout"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         MultilineHashBraceLayout,
         "cops/layout/multiline_hash_brace_layout"
     );
