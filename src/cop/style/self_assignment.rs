@@ -4,6 +4,7 @@ use crate::cop::node_type::{
     LOCAL_VARIABLE_WRITE_NODE,
 };
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -54,6 +55,21 @@ impl SelfAssignment {
         None
     }
 
+    fn write_name_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<String> {
+        let bytes = source.as_bytes();
+        let loc = if let Some(lv) = node.as_local_variable_write_node() {
+            lv.name_loc()
+        } else if let Some(iv) = node.as_instance_variable_write_node() {
+            iv.name_loc()
+        } else if let Some(cv) = node.as_class_variable_write_node() {
+            cv.name_loc()
+        } else {
+            return None;
+        };
+
+        String::from_utf8(bytes[loc.start_offset()..loc.end_offset()].to_vec()).ok()
+    }
+
     fn check_boolean_assignment(
         &self,
         source: &SourceFile,
@@ -61,6 +77,7 @@ impl SelfAssignment {
         value: &ruby_prism::Node<'_>,
         write_name: &[u8],
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<Correction>>,
     ) {
         let (left, op_loc) = if let Some(and_node) = value.as_and_node() {
             (and_node.left(), and_node.operator_loc())
@@ -75,12 +92,39 @@ impl SelfAssignment {
                 let op = std::str::from_utf8(op_loc.as_slice()).unwrap_or("&&");
                 let loc = node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Use self-assignment shorthand `{}=`.", op),
-                ));
+                );
+
+                if let (Some(corrections), Some(write_src)) =
+                    (corrections.as_mut(), Self::write_name_source(source, node))
+                {
+                    let right = if let Some(and_node) = value.as_and_node() {
+                        and_node.right()
+                    } else if let Some(or_node) = value.as_or_node() {
+                        or_node.right()
+                    } else {
+                        diagnostics.push(diagnostic);
+                        return;
+                    };
+                    let right_loc = right.location();
+                    let right_src = &source.as_bytes()[right_loc.start_offset()..right_loc.end_offset()];
+                    if let Ok(right_src) = std::str::from_utf8(right_src) {
+                        corrections.push(Correction {
+                            start: node.location().start_offset(),
+                            end: node.location().end_offset(),
+                            replacement: format!("{} {}= {}", write_src, op, right_src),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -104,6 +148,10 @@ impl Cop for SelfAssignment {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -111,7 +159,7 @@ impl Cop for SelfAssignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let write_name = match Self::get_write_name(node) {
             Some(n) => n,
@@ -155,19 +203,51 @@ impl Cop for SelfAssignment {
                         let op = std::str::from_utf8(method_bytes).unwrap_or("+");
                         let loc = node.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             format!("Use self-assignment shorthand `{}=`.", op),
-                        ));
+                        );
+
+                        if let (Some(corrections), Some(write_src), Some(args)) = (
+                            corrections.as_mut(),
+                            Self::write_name_source(source, node),
+                            call.arguments(),
+                        ) {
+                            let arg_list: Vec<_> = args.arguments().iter().collect();
+                            if arg_list.len() == 1 {
+                                let arg_loc = arg_list[0].location();
+                                let arg_src =
+                                    &source.as_bytes()[arg_loc.start_offset()..arg_loc.end_offset()];
+                                if let Ok(arg_src) = std::str::from_utf8(arg_src) {
+                                    corrections.push(Correction {
+                                        start: node.location().start_offset(),
+                                        end: node.location().end_offset(),
+                                        replacement: format!("{} {}= {}", write_src, op, arg_src),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                            }
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
         }
 
         // Check for boolean operators: `x = x && y` and `x = x || y`
-        self.check_boolean_assignment(source, node, &value, &write_name, diagnostics);
+        self.check_boolean_assignment(
+            source,
+            node,
+            &value,
+            &write_name,
+            diagnostics,
+            &mut corrections,
+        );
     }
 }
 
@@ -175,4 +255,5 @@ impl Cop for SelfAssignment {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SelfAssignment, "cops/style/self_assignment");
+    crate::cop_autocorrect_fixture_tests!(SelfAssignment, "cops/style/self_assignment");
 }
