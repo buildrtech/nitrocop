@@ -32,12 +32,16 @@ impl Cop for LineLength {
         "Layout/LineLength"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_lines(
         &self,
         source: &SourceFile,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let max = config.get_usize("Max", 120);
         let allow_heredoc = config.get_bool("AllowHeredoc", true);
@@ -71,6 +75,7 @@ impl Cop for LineLength {
         let mut heredoc_terminators: Vec<Vec<u8>> = Vec::new();
 
         for (i, line) in lines.iter().enumerate() {
+            let line_start = source.line_start_offset(i + 1);
             // Track heredoc regions — check if the current line closes the
             // active (first) heredoc.
             if let Some(terminator) = heredoc_terminators.first() {
@@ -210,8 +215,83 @@ impl Cop for LineLength {
                 max,
                 format!("Line is too long. [{}/{}]", char_len, max),
             ));
+
+            if let Some(corrections) = &mut corrections {
+                maybe_autocorrect_simple_string_assignment(
+                    self,
+                    line,
+                    max,
+                    line_start,
+                    corrections,
+                );
+            }
         }
     }
+}
+
+fn maybe_autocorrect_simple_string_assignment(
+    cop: &LineLength,
+    line: &[u8],
+    max: usize,
+    line_start: usize,
+    corrections: &mut Vec<crate::correction::Correction>,
+) {
+    let line_str = match std::str::from_utf8(line) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // Conservative subset: `<lhs> = "..."` on a single line with no escapes/interpolation.
+    let quote_start = match line_str.find('"') {
+        Some(idx) => idx,
+        None => return,
+    };
+    if !line_str[..quote_start].contains('=') {
+        return;
+    }
+    let quote_end = match line_str.rfind('"') {
+        Some(idx) if idx > quote_start => idx,
+        _ => return,
+    };
+    if !line_str[quote_end + 1..].trim().is_empty() {
+        return;
+    }
+
+    let content = &line_str[quote_start + 1..quote_end];
+    if content.is_empty() || content.contains('\\') || content.contains("#{") {
+        return;
+    }
+
+    let prefix = &line_str[..quote_start + 1];
+    let prefix_chars = prefix.chars().count();
+    let first_content_chars = max.saturating_sub(prefix_chars + 3); // closing quote + space + backslash
+    if first_content_chars == 0 || content.chars().count() <= first_content_chars {
+        return;
+    }
+
+    let split_byte = content
+        .char_indices()
+        .nth(first_content_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(content.len());
+    if split_byte == 0 || split_byte >= content.len() {
+        return;
+    }
+
+    let (first, second) = content.split_at(split_byte);
+    let indent = line_str
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect::<String>();
+    let replacement = format!("{prefix}{first}\" \\\n{indent}\"{second}\"");
+
+    corrections.push(crate::correction::Correction {
+        start: line_start,
+        end: line_start + line.len(),
+        replacement,
+        cop_name: cop.name(),
+        cop_index: 0,
+    });
 }
 
 /// Check if the last qualified name match in the line extends to the end of the line
@@ -407,6 +487,7 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(LineLength, "cops/layout/line_length");
+    crate::cop_autocorrect_fixture_tests!(LineLength, "cops/layout/line_length");
 
     #[test]
     fn custom_max() {
