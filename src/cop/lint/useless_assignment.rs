@@ -77,6 +77,10 @@ impl Cop for UselessAssignment {
         "Lint/UselessAssignment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -88,26 +92,30 @@ impl Cop for UselessAssignment {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = UselessAssignVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
             inside_def: false,
+            corrections,
+            correction_ranges: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct UselessAssignVisitor<'a, 'src> {
+struct UselessAssignVisitor<'a, 'src, 'corr> {
     cop: &'a UselessAssignment,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     /// True when inside a def node. Blocks inside defs are analyzed as closures
     /// by the def's ScopeAnalyzer, so they don't need separate analysis.
     inside_def: bool,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
+    correction_ranges: Vec<(usize, usize)>,
 }
 
 // ── Liveness tracking ───────────────────────────────────────────────────────
@@ -197,6 +205,9 @@ struct UselessWrite {
 struct ScopeAnalyzer {
     /// Useless writes found during analysis.
     useless: Vec<UselessWrite>,
+    /// Assignment node spans keyed by write offset, used for conservative
+    /// autocorrect (whole-line deletion of standalone local variable writes).
+    write_spans: HashMap<usize, (usize, usize)>,
     /// Whether a `binding` call was found (suppresses all reports).
     has_binding: bool,
     /// Whether a bare `super` (forwarding) was found.
@@ -231,6 +242,7 @@ impl ScopeAnalyzer {
     fn new() -> Self {
         Self {
             useless: Vec::new(),
+            write_spans: HashMap::new(),
             has_binding: false,
             has_forwarding_super: false,
             closure_reads: HashSet::new(),
@@ -268,7 +280,16 @@ impl ScopeAnalyzer {
     }
 
     /// Record a write and mark the previous write as useless if appropriate.
-    fn record_write_and_check(&mut self, state: &mut LiveState, name: &str, offset: usize) {
+    fn record_write_and_check(
+        &mut self,
+        state: &mut LiveState,
+        name: &str,
+        offset: usize,
+        span: Option<(usize, usize)>,
+    ) {
+        if let Some((start, end)) = span {
+            self.write_spans.insert(offset, (start, end));
+        }
         if let Some(prev_offset) = state.record_write(name, offset) {
             if !name.starts_with('_') && !self.protected_offsets.contains(&prev_offset) {
                 self.useless.push(UselessWrite {
@@ -294,7 +315,12 @@ impl ScopeAnalyzer {
             self.analyze_node(&write_node.value(), state);
             let name = node_name(write_node.name().as_slice());
             let offset = write_node.name_loc().start_offset();
-            self.record_write_and_check(state, &name, offset);
+            self.record_write_and_check(
+                state,
+                &name,
+                offset,
+                Some((write_node.location().start_offset(), write_node.location().end_offset())),
+            );
             return;
         }
 
@@ -839,7 +865,7 @@ impl ScopeAnalyzer {
         if let Some(target) = node.as_local_variable_target_node() {
             let name = node_name(target.name().as_slice());
             let offset = target.location().start_offset();
-            self.record_write_and_check(state, &name, offset);
+            self.record_write_and_check(state, &name, offset, None);
             return;
         }
 
@@ -857,7 +883,7 @@ impl ScopeAnalyzer {
         if let Some(target_node) = target.as_local_variable_target_node() {
             let name = node_name(target_node.name().as_slice());
             let offset = target_node.location().start_offset();
-            self.record_write_and_check(state, &name, offset);
+            self.record_write_and_check(state, &name, offset, None);
         }
         // Other targets (instance vars, etc.) — ignore for local var analysis
     }
@@ -1151,7 +1177,7 @@ impl ScopeAnalyzer {
         if let Some(target) = index.as_local_variable_target_node() {
             let name = node_name(target.name().as_slice());
             let offset = target.location().start_offset();
-            self.record_write_and_check(state, &name, offset);
+            self.record_write_and_check(state, &name, offset, None);
         } else if let Some(multi) = index.as_multi_target_node() {
             for target in multi.lefts().iter() {
                 self.analyze_for_index(&target, state);
@@ -1360,6 +1386,51 @@ fn contains_local_variable_write(node: &ruby_prism::Node<'_>) -> bool {
 /// Helper to convert name bytes to String.
 fn node_name(bytes: &[u8]) -> String {
     std::str::from_utf8(bytes).unwrap_or("").to_string()
+}
+
+fn standalone_line_range_from_span(
+    source: &SourceFile,
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    if start >= end {
+        return None;
+    }
+
+    let bytes = source.as_bytes();
+    if bytes.get(start..end)?.contains(&b'\n') {
+        return None;
+    }
+
+    let mut line_start = start;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+
+    let mut line_end = end;
+    while line_end < bytes.len() && bytes[line_end] != b'\n' {
+        line_end += 1;
+    }
+
+    if bytes[line_start..start]
+        .iter()
+        .any(|b| !matches!(*b, b' ' | b'\t'))
+    {
+        return None;
+    }
+    if bytes[end..line_end]
+        .iter()
+        .any(|b| !matches!(*b, b' ' | b'\t'))
+    {
+        return None;
+    }
+
+    let delete_end = if line_end < bytes.len() {
+        line_end + 1
+    } else {
+        line_end
+    };
+    Some((line_start, delete_end))
 }
 
 /// Simple visitor that collects all local variable reads in a subtree.
@@ -1593,7 +1664,62 @@ fn collect_block_param_names(params: &ruby_prism::Node<'_>, reads: &mut HashSet<
 
 // ── Top-level visitor ───────────────────────────────────────────────────────
 
-impl UselessAssignVisitor<'_, '_> {
+impl UselessAssignVisitor<'_, '_, '_> {
+    fn add_line_delete_correction_for_offset(
+        &mut self,
+        analyzer: &ScopeAnalyzer,
+        offset: usize,
+    ) -> bool {
+        let Some(corrections) = self.corrections.as_deref_mut() else {
+            return false;
+        };
+        let Some((start, end)) = analyzer.write_spans.get(&offset).copied() else {
+            return false;
+        };
+        let Some((delete_start, delete_end)) = standalone_line_range_from_span(self.source, start, end)
+        else {
+            return false;
+        };
+        if self
+            .correction_ranges
+            .iter()
+            .any(|(existing_start, existing_end)| {
+                *existing_start == delete_start && *existing_end == delete_end
+            })
+        {
+            return false;
+        }
+
+        corrections.push(crate::correction::Correction {
+            start: delete_start,
+            end: delete_end,
+            replacement: String::new(),
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        });
+        self.correction_ranges.push((delete_start, delete_end));
+        true
+    }
+
+    fn push_useless_assignment_diagnostic(
+        &mut self,
+        analyzer: &ScopeAnalyzer,
+        name: &str,
+        offset: usize,
+    ) {
+        let (line, column) = self.source.offset_to_line_col(offset);
+        let mut diagnostic = self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            format!("Useless assignment to variable - `{}`.", name),
+        );
+        if self.add_line_delete_correction_for_offset(analyzer, offset) {
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
+    }
+
     fn report_useless(
         &mut self,
         analyzer: &ScopeAnalyzer,
@@ -1612,13 +1738,7 @@ impl UselessAssignVisitor<'_, '_> {
             if analyzer.closure_reads.contains(&w.name) {
                 continue;
             }
-            let (line, column) = self.source.offset_to_line_col(w.offset);
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                format!("Useless assignment to variable - `{}`.", w.name),
-            ));
+            self.push_useless_assignment_diagnostic(analyzer, &w.name, w.offset);
         }
         // Report writes that are still live at end of scope (never read)
         for (name, offset) in state.unread_writes() {
@@ -1636,13 +1756,7 @@ impl UselessAssignVisitor<'_, '_> {
             if analyzer.ever_read_offsets.contains(&offset) {
                 continue;
             }
-            let (line, column) = self.source.offset_to_line_col(offset);
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                format!("Useless assignment to variable - `{}`.", name),
-            ));
+            self.push_useless_assignment_diagnostic(analyzer, name, offset);
         }
         // Report extra writes from branch merges that were never read.
         // These occur when both branches of an if/unless write the same
@@ -1657,13 +1771,7 @@ impl UselessAssignVisitor<'_, '_> {
             if analyzer.ever_read_offsets.contains(offset) {
                 continue;
             }
-            let (line, column) = self.source.offset_to_line_col(*offset);
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                format!("Useless assignment to variable - `{}`.", name),
-            ));
+            self.push_useless_assignment_diagnostic(analyzer, name, *offset);
         }
     }
 
@@ -1710,7 +1818,7 @@ impl UselessAssignVisitor<'_, '_> {
     }
 }
 
-impl<'pr> Visit<'pr> for UselessAssignVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for UselessAssignVisitor<'_, '_, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         self.analyze_def(node);
         // Mark that we're inside a def so blocks don't get separate analysis
@@ -1810,4 +1918,18 @@ impl<'pr> Visit<'pr> for UselessAssignVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UselessAssignment, "cops/lint/useless_assignment");
+
+    #[test]
+    fn autocorrect_removes_standalone_useless_assignment_line() {
+        let source = b"def demo\n  x = 1\n  y = 2\n  puts x\nend\n";
+        let expected = b"def demo\n  x = 1\n  puts x\nend\n";
+        crate::testutil::assert_cop_autocorrect(&UselessAssignment, source, expected);
+    }
+
+    #[test]
+    fn autocorrect_only_removes_standalone_assignment() {
+        let source = b"def demo\n  x = 1\n  x = 1; y = 2\n  puts y\nend\n";
+        let expected = b"def demo\n  x = 1; y = 2\n  puts y\nend\n";
+        crate::testutil::assert_cop_autocorrect(&UselessAssignment, source, expected);
+    }
 }
