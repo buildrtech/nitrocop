@@ -1,3 +1,4 @@
-- `Style/SafeNavigation`: conservative subset candidate — start with simple `foo && foo.bar` / `foo ? foo.bar : nil` rewrites where receiver/source equality is exact and existing side-effect guards already pass.
-- `Lint/HeredocMethodCallPosition`: defer for now; naive location-based suffix move corrupted heredoc structure. Revisit with robust opener/body/terminator line reconstruction before retrying.
-- `Layout/FirstArrayElementIndentation`: likely bounded indentation-only autocorrect by replacing line-leading whitespace before flagged first array elements (and potentially closing bracket lines).
+- `Layout/AssignmentIndentation`: bounded first-RHS-line indentation autocorrect by replacing only line-leading whitespace at offense sites (`value_line_start..value_col`) to expected base+width.
+- `Layout/ClosingParenthesisIndentation`: bounded line-leading whitespace autocorrect for hanging `)` offenses when expected column is deterministic from existing style logic.
+- `Style/SafeNavigation`: conservative subset candidate — start with simple `foo && foo.bar` / `foo ? foo.bar : nil` rewrites where receiver/source equality is exact and side-effect guards already pass.
+- `Lint/HeredocMethodCallPosition`: defer; needs robust opener/body/terminator reconstruction before safe autocorrect.

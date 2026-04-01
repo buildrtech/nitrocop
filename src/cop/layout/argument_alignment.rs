@@ -1,5 +1,6 @@
 use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -59,6 +60,10 @@ impl Cop for ArgumentAlignment {
         "Layout/ArgumentAlignment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
@@ -70,7 +75,7 @@ impl Cop for ArgumentAlignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "with_first_argument");
         let indent_width = config.get_usize("IndentationWidth", 2);
@@ -212,15 +217,27 @@ impl Cop for ArgumentAlignment {
                     continue;
                 }
                 if arg_col != expected_col {
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            arg_line,
-                            arg_col,
-                            "Align the arguments of a method call if they span more than one line."
-                                .to_string(),
-                        ),
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        arg_line,
+                        arg_col,
+                        "Align the arguments of a method call if they span more than one line."
+                            .to_string(),
                     );
+
+                    if let Some(corrections) = corrections.as_mut() {
+                        let line_start = source.line_start_offset(arg_line);
+                        corrections.push(Correction {
+                            start: line_start,
+                            end: line_start + arg_col,
+                            replacement: " ".repeat(expected_col),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -233,6 +250,7 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(ArgumentAlignment, "cops/layout/argument_alignment");
+    crate::cop_autocorrect_fixture_tests!(ArgumentAlignment, "cops/layout/argument_alignment");
 
     #[test]
     fn single_line_call_no_offense() {

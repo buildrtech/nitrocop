@@ -1,6 +1,7 @@
 use crate::cop::node_type::DEF_NODE;
 use crate::cop::util;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -19,6 +20,10 @@ impl Cop for ParameterAlignment {
         "Layout/ParameterAlignment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[DEF_NODE]
     }
@@ -30,7 +35,7 @@ impl Cop for ParameterAlignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "with_first_parameter");
         let _indent_width = config.get_usize("IndentationWidth", 2);
@@ -104,7 +109,21 @@ impl Cop for ParameterAlignment {
                 } else {
                     "Align the parameters of a method definition if they span more than one line."
                 };
-                diagnostics.push(self.diagnostic(source, param_line, param_col, msg.to_string()));
+
+                let mut diagnostic = self.diagnostic(source, param_line, param_col, msg.to_string());
+                if let Some(corrections) = corrections.as_mut() {
+                    let line_start = source.line_start_offset(param_line);
+                    corrections.push(Correction {
+                        start: line_start,
+                        end: line_start + param_col,
+                        replacement: " ".repeat(base_col),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -115,4 +134,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(ParameterAlignment, "cops/layout/parameter_alignment");
+    crate::cop_autocorrect_fixture_tests!(ParameterAlignment, "cops/layout/parameter_alignment");
 }

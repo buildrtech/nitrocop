@@ -1,6 +1,7 @@
 use crate::cop::node_type::{CALL_NODE, DEF_NODE, HASH_NODE, KEYWORD_HASH_NODE, PARENTHESES_NODE};
 use crate::cop::util;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -12,6 +13,30 @@ fn leading_whitespace_columns(line: &[u8]) -> usize {
     line.iter()
         .take_while(|&&b| b == b' ' || b == b'\t')
         .count()
+}
+
+fn corrected_close_paren_diagnostic(
+    source: &SourceFile,
+    cop: &ClosingParenthesisIndentation,
+    close_line: usize,
+    close_col: usize,
+    expected_col: usize,
+    message: String,
+    corrections: &mut Option<&mut Vec<Correction>>,
+) -> Diagnostic {
+    let mut diagnostic = cop.diagnostic(source, close_line, close_col, message);
+    if let Some(corrections) = corrections.as_mut() {
+        let line_start = source.line_start_offset(close_line);
+        corrections.push(Correction {
+            start: line_start,
+            end: line_start + close_col,
+            replacement: " ".repeat(expected_col),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+    diagnostic
 }
 
 /// Corpus investigation (2026-03-16)
@@ -35,6 +60,10 @@ impl Cop for ClosingParenthesisIndentation {
         "Layout/ClosingParenthesisIndentation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
@@ -52,7 +81,7 @@ impl Cop for ClosingParenthesisIndentation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle method calls with parentheses
         if let Some(call) = node.as_call_node() {
@@ -67,6 +96,7 @@ impl Cop for ClosingParenthesisIndentation {
                         call.arguments(),
                         node_col,
                         config,
+                        corrections.as_mut().map(|c| &mut **c),
                     ));
                     return;
                 }
@@ -87,6 +117,7 @@ impl Cop for ClosingParenthesisIndentation {
                     close_loc,
                     parens.body(),
                     config,
+                    corrections.as_mut().map(|c| &mut **c),
                 ));
             }
             return;
@@ -104,6 +135,7 @@ impl Cop for ClosingParenthesisIndentation {
                     close_loc,
                     def_node.parameters(),
                     config,
+                    corrections.as_mut().map(|c| &mut **c),
                 ));
             }
         }
@@ -118,39 +150,30 @@ fn check_parens(
     arguments: Option<ruby_prism::ArgumentsNode<'_>>,
     node_col: usize,
     config: &CopConfig,
+    mut corrections: Option<&mut Vec<Correction>>,
 ) -> Vec<Diagnostic> {
     let (open_line, open_col) = source.offset_to_line_col(open_loc.start_offset());
     let (close_line, close_col) = source.offset_to_line_col(close_loc.start_offset());
 
-    // Closing paren must be on its own line (hanging)
-    if !util::begins_its_line(source, close_loc.start_offset()) {
-        return Vec::new();
-    }
-
-    // Must be multiline
-    if close_line == open_line {
+    if !util::begins_its_line(source, close_loc.start_offset()) || close_line == open_line {
         return Vec::new();
     }
 
     let args = match arguments {
         Some(a) => a,
         None => {
-            // No arguments: check_for_no_elements logic.
-            // Acceptable columns: line indentation of open paren line, open paren column,
-            // and the node column (for sends, same as open_line_indent typically).
-            let open_line_indent = match util::line_at(source, open_line) {
-                Some(line) => leading_whitespace_columns(line),
-                None => 0,
-            };
+            let open_line_indent = util::line_at(source, open_line)
+                .map(leading_whitespace_columns)
+                .unwrap_or(0);
             if close_col != open_line_indent && close_col != open_col && close_col != node_col {
-                return vec![cop.diagnostic(
+                return vec![corrected_close_paren_diagnostic(
                     source,
+                    cop,
                     close_line,
                     close_col,
-                    format!(
-                        "Indent `)` to column {} (not {}).",
-                        open_line_indent, close_col
-                    ),
+                    open_line_indent,
+                    format!("Indent `)` to column {} (not {}).", open_line_indent, close_col),
+                    &mut corrections,
                 )];
             }
             return Vec::new();
@@ -161,94 +184,81 @@ fn check_parens(
         Some(a) => a,
         None => return Vec::new(),
     };
-
-    let (first_arg_line, _first_arg_col) =
-        source.offset_to_line_col(first_arg.location().start_offset());
-
+    let (first_arg_line, _) = source.offset_to_line_col(first_arg.location().start_offset());
     let indent_width = config.get_usize("IndentationWidth", 2);
 
-    // Scenario 1: First param is on its own line (after the opening paren)
     if first_arg_line > open_line {
-        let first_arg_line_indent = match util::line_at(source, first_arg_line) {
-            Some(line) => leading_whitespace_columns(line),
-            None => 0,
-        };
+        let first_arg_line_indent = util::line_at(source, first_arg_line)
+            .map(leading_whitespace_columns)
+            .unwrap_or(0);
         let expected = first_arg_line_indent.saturating_sub(indent_width);
         if close_col != expected {
-            return vec![cop.diagnostic(
+            return vec![corrected_close_paren_diagnostic(
                 source,
+                cop,
                 close_line,
                 close_col,
+                expected,
                 format!("Indent `)` to column {} (not {}).", expected, close_col),
+                &mut corrections,
             )];
         }
-    } else {
-        // Scenario 2: First param is on same line as opening paren
-        // When first element is a hash, check alignment of its children (pairs)
-        let first_arg = args.arguments().iter().next().unwrap();
-        let element_columns: Vec<usize> =
-            if first_arg.as_keyword_hash_node().is_some() || first_arg.as_hash_node().is_some() {
-                // Expand hash/keyword_hash into its pair columns
-                let pairs: Vec<ruby_prism::Node<'_>> =
-                    if let Some(kh) = first_arg.as_keyword_hash_node() {
-                        kh.elements().iter().collect()
-                    } else if let Some(h) = first_arg.as_hash_node() {
-                        h.elements().iter().collect()
-                    } else {
-                        vec![]
-                    };
-                pairs
-                    .iter()
-                    .map(|p| {
-                        let (_, col) = source.offset_to_line_col(p.location().start_offset());
-                        col
-                    })
-                    .collect()
+        return Vec::new();
+    }
+
+    let first_arg = args.arguments().iter().next().unwrap();
+    let element_columns: Vec<usize> =
+        if first_arg.as_keyword_hash_node().is_some() || first_arg.as_hash_node().is_some() {
+            let pairs: Vec<ruby_prism::Node<'_>> = if let Some(kh) = first_arg.as_keyword_hash_node() {
+                kh.elements().iter().collect()
+            } else if let Some(h) = first_arg.as_hash_node() {
+                h.elements().iter().collect()
             } else {
-                args.arguments()
-                    .iter()
-                    .map(|a| {
-                        let (_, col) = source.offset_to_line_col(a.location().start_offset());
-                        col
-                    })
-                    .collect()
+                vec![]
             };
-
-        let all_aligned =
-            !element_columns.is_empty() && element_columns.iter().all(|&c| c == element_columns[0]);
-
-        if all_aligned {
-            // All args at same column: `)` aligns with `(`
-            if close_col != open_col {
-                return vec![cop.diagnostic(
-                    source,
-                    close_line,
-                    close_col,
-                    "Align `)` with `(`.".to_string(),
-                )];
-            }
+            pairs
+                .iter()
+                .map(|p| source.offset_to_line_col(p.location().start_offset()).1)
+                .collect()
         } else {
-            // Args not aligned: accept first arg line indent or open line indent
-            let open_line_indent = match util::line_at(source, open_line) {
-                Some(line) => leading_whitespace_columns(line),
-                None => 0,
-            };
-            let first_arg_line_indent = match util::line_at(source, first_arg_line) {
-                Some(line) => leading_whitespace_columns(line),
-                None => 0,
-            };
-            if close_col != first_arg_line_indent && close_col != open_line_indent {
-                return vec![cop.diagnostic(
-                    source,
-                    close_line,
-                    close_col,
-                    format!(
-                        "Indent `)` to column {} (not {}).",
-                        open_line_indent, close_col
-                    ),
-                )];
-            }
+            args.arguments()
+                .iter()
+                .map(|a| source.offset_to_line_col(a.location().start_offset()).1)
+                .collect()
+        };
+
+    let all_aligned = !element_columns.is_empty() && element_columns.iter().all(|&c| c == element_columns[0]);
+    if all_aligned {
+        if close_col != open_col {
+            return vec![corrected_close_paren_diagnostic(
+                source,
+                cop,
+                close_line,
+                close_col,
+                open_col,
+                "Align `)` with `(`.".to_string(),
+                &mut corrections,
+            )];
         }
+        return Vec::new();
+    }
+
+    let open_line_indent = util::line_at(source, open_line)
+        .map(leading_whitespace_columns)
+        .unwrap_or(0);
+    let first_arg_line_indent = util::line_at(source, first_arg_line)
+        .map(leading_whitespace_columns)
+        .unwrap_or(0);
+    if close_col != first_arg_line_indent && close_col != open_line_indent {
+        return vec![corrected_close_paren_diagnostic(
+            source,
+            cop,
+            close_line,
+            close_col,
+            open_line_indent,
+            format!("Indent `)` to column {} (not {}).", open_line_indent, close_col),
+            &mut corrections,
+        )];
     }
 
     Vec::new()
@@ -261,46 +271,36 @@ fn check_def_parens(
     close_loc: ruby_prism::Location<'_>,
     params: Option<ruby_prism::ParametersNode<'_>>,
     config: &CopConfig,
+    mut corrections: Option<&mut Vec<Correction>>,
 ) -> Vec<Diagnostic> {
     let (open_line, open_col) = source.offset_to_line_col(open_loc.start_offset());
     let (close_line, close_col) = source.offset_to_line_col(close_loc.start_offset());
 
-    if !util::begins_its_line(source, close_loc.start_offset()) {
-        return Vec::new();
-    }
-
-    if close_line == open_line {
+    if !util::begins_its_line(source, close_loc.start_offset()) || close_line == open_line {
         return Vec::new();
     }
 
     let params = match params {
         Some(p) => p,
         None => {
-            // No parameters: check_for_no_elements logic.
-            // In RuboCop, on_def calls check(node.arguments, node.arguments).
-            // For no-elements, candidates are [line_indentation, left_paren.column, node.loc.column].
-            // For def params, node is the arguments node (the paren range), so
-            // node.loc.column == open_col. Candidates collapse to [line_indent, open_col].
-            let open_line_indent = match util::line_at(source, open_line) {
-                Some(line) => leading_whitespace_columns(line),
-                None => 0,
-            };
+            let open_line_indent = util::line_at(source, open_line)
+                .map(leading_whitespace_columns)
+                .unwrap_or(0);
             if close_col != open_line_indent && close_col != open_col {
-                return vec![cop.diagnostic(
+                return vec![corrected_close_paren_diagnostic(
                     source,
+                    cop,
                     close_line,
                     close_col,
-                    format!(
-                        "Indent `)` to column {} (not {}).",
-                        open_line_indent, close_col
-                    ),
+                    open_line_indent,
+                    format!("Indent `)` to column {} (not {}).", open_line_indent, close_col),
+                    &mut corrections,
                 )];
             }
             return Vec::new();
         }
     };
 
-    // Get first parameter - check all parameter types
     let first_param = params
         .requireds()
         .iter()
@@ -309,91 +309,76 @@ fn check_def_parens(
         .or_else(|| params.posts().iter().next())
         .or_else(|| params.keywords().iter().next());
 
-    // Also check rest, keyword_rest, and block params via their locations
     let first_param_offset = first_param.as_ref().map(|p| p.location().start_offset());
-
-    // Check rest param
     let rest_offset = params.rest().map(|r| r.location().start_offset());
     let keyword_rest_offset = params.keyword_rest().map(|kr| kr.location().start_offset());
     let block_offset = params.block().map(|b| b.location().start_offset());
 
-    // Find the earliest parameter offset
-    let earliest_offset = [
-        first_param_offset,
-        rest_offset,
-        keyword_rest_offset,
-        block_offset,
-    ]
-    .into_iter()
-    .flatten()
-    .min();
-
+    let earliest_offset = [first_param_offset, rest_offset, keyword_rest_offset, block_offset]
+        .into_iter()
+        .flatten()
+        .min();
     let earliest_offset = match earliest_offset {
         Some(o) => o,
         None => return Vec::new(),
     };
 
     let (first_param_line, _) = source.offset_to_line_col(earliest_offset);
-
     let indent_width = config.get_usize("IndentationWidth", 2);
 
     if first_param_line > open_line {
-        // Scenario 1: First param on its own line after `(`
-        let first_param_line_indent = match util::line_at(source, first_param_line) {
-            Some(line) => leading_whitespace_columns(line),
-            None => 0,
-        };
+        let first_param_line_indent = util::line_at(source, first_param_line)
+            .map(leading_whitespace_columns)
+            .unwrap_or(0);
         let expected = first_param_line_indent.saturating_sub(indent_width);
         if close_col != expected {
-            return vec![cop.diagnostic(
+            return vec![corrected_close_paren_diagnostic(
                 source,
+                cop,
                 close_line,
                 close_col,
+                expected,
                 format!("Indent `)` to column {} (not {}).", expected, close_col),
+                &mut corrections,
             )];
         }
-    } else {
-        // Scenario 2: First param on same line as `(`
-        // RuboCop uses expected_column which checks all_elements_aligned? and then
-        // either aligns with `(` or uses line indentation.
-        // For def params, the elements are the parameters themselves.
-        let param_columns: Vec<usize> = collect_def_param_columns(source, &params);
+        return Vec::new();
+    }
 
-        let all_aligned =
-            !param_columns.is_empty() && param_columns.iter().all(|&c| c == param_columns[0]);
+    let param_columns: Vec<usize> = collect_def_param_columns(source, &params);
+    let all_aligned = !param_columns.is_empty() && param_columns.iter().all(|&c| c == param_columns[0]);
 
-        if all_aligned {
-            // All params at same column: `)` aligns with `(`
-            if close_col != open_col {
-                return vec![cop.diagnostic(
-                    source,
-                    close_line,
-                    close_col,
-                    "Align `)` with `(`.".to_string(),
-                )];
-            }
-        } else {
-            // Params not aligned: use line indentation of first param line
-            let open_line_indent = match util::line_at(source, open_line) {
-                Some(line) => leading_whitespace_columns(line),
-                None => 0,
-            };
-            let first_param_line_indent = match util::line_at(source, first_param_line) {
-                Some(line) => leading_whitespace_columns(line),
-                None => 0,
-            };
-            if close_col != first_param_line_indent && close_col != open_line_indent {
-                return vec![cop.diagnostic(
-                    source,
-                    close_line,
-                    close_col,
-                    format!(
-                        "Indent `)` to column {} (not {}).",
-                        open_line_indent, close_col
-                    ),
-                )];
-            }
+    if all_aligned {
+        if close_col != open_col {
+            return vec![corrected_close_paren_diagnostic(
+                source,
+                cop,
+                close_line,
+                close_col,
+                open_col,
+                "Align `)` with `(`.".to_string(),
+                &mut corrections,
+            )];
         }
+        return Vec::new();
+    }
+
+    let open_line_indent = util::line_at(source, open_line)
+        .map(leading_whitespace_columns)
+        .unwrap_or(0);
+    let first_param_line_indent = util::line_at(source, first_param_line)
+        .map(leading_whitespace_columns)
+        .unwrap_or(0);
+    if close_col != first_param_line_indent && close_col != open_line_indent {
+        return vec![corrected_close_paren_diagnostic(
+            source,
+            cop,
+            close_line,
+            close_col,
+            open_line_indent,
+            format!("Indent `)` to column {} (not {}).", open_line_indent, close_col),
+            &mut corrections,
+        )];
     }
 
     Vec::new()
@@ -447,46 +432,36 @@ fn check_grouped_parens(
     close_loc: ruby_prism::Location<'_>,
     body: Option<ruby_prism::Node<'_>>,
     config: &CopConfig,
+    mut corrections: Option<&mut Vec<Correction>>,
 ) -> Vec<Diagnostic> {
     let (open_line, open_col) = source.offset_to_line_col(open_loc.start_offset());
     let (close_line, close_col) = source.offset_to_line_col(close_loc.start_offset());
 
-    // Closing paren must be on its own line (hanging)
-    if !util::begins_its_line(source, close_loc.start_offset()) {
-        return Vec::new();
-    }
-
-    // Must be multiline
-    if close_line == open_line {
+    if !util::begins_its_line(source, close_loc.start_offset()) || close_line == open_line {
         return Vec::new();
     }
 
     let body = match body {
         Some(b) => b,
         None => {
-            // Empty parens: check no-elements case
-            // Accept `)` at open_col, open_line_indent, or node column
-            let open_line_indent = match util::line_at(source, open_line) {
-                Some(line) => leading_whitespace_columns(line),
-                None => 0,
-            };
+            let open_line_indent = util::line_at(source, open_line)
+                .map(leading_whitespace_columns)
+                .unwrap_or(0);
             if close_col != open_col && close_col != open_line_indent {
-                return vec![cop.diagnostic(
+                return vec![corrected_close_paren_diagnostic(
                     source,
+                    cop,
                     close_line,
                     close_col,
-                    format!(
-                        "Indent `)` to column {} (not {}).",
-                        open_line_indent, close_col
-                    ),
+                    open_line_indent,
+                    format!("Indent `)` to column {} (not {}).", open_line_indent, close_col),
+                    &mut corrections,
                 )];
             }
             return Vec::new();
         }
     };
 
-    // Get the first child element for indentation calculation.
-    // If body is StatementsNode, use its first child; otherwise use body directly.
     let first_element = if let Some(stmts) = body.as_statements_node() {
         match stmts.body().iter().next() {
             Some(n) => n,
@@ -497,43 +472,40 @@ fn check_grouped_parens(
     };
 
     let (first_elem_line, _) = source.offset_to_line_col(first_element.location().start_offset());
-
     let indent_width = config.get_usize("IndentationWidth", 2);
 
     if first_elem_line > open_line {
-        // Scenario 1: First element on its own line after `(`
-        let first_elem_line_indent = match util::line_at(source, first_elem_line) {
-            Some(line) => leading_whitespace_columns(line),
-            None => 0,
-        };
+        let first_elem_line_indent = util::line_at(source, first_elem_line)
+            .map(leading_whitespace_columns)
+            .unwrap_or(0);
         let expected = first_elem_line_indent.saturating_sub(indent_width);
         if close_col != expected {
-            return vec![cop.diagnostic(
+            return vec![corrected_close_paren_diagnostic(
                 source,
+                cop,
                 close_line,
                 close_col,
+                expected,
                 format!("Indent `)` to column {} (not {}).", expected, close_col),
+                &mut corrections,
             )];
         }
-    } else {
-        // Scenario 2: First element on same line as `(`
-        // For grouped expressions, all children at same column → align with `(`
-        // Otherwise use line indentation
-        let open_line_indent = match util::line_at(source, open_line) {
-            Some(line) => leading_whitespace_columns(line),
-            None => 0,
-        };
-        if close_col != open_col && close_col != open_line_indent {
-            return vec![cop.diagnostic(
-                source,
-                close_line,
-                close_col,
-                format!(
-                    "Indent `)` to column {} (not {}).",
-                    open_line_indent, close_col
-                ),
-            )];
-        }
+        return Vec::new();
+    }
+
+    let open_line_indent = util::line_at(source, open_line)
+        .map(leading_whitespace_columns)
+        .unwrap_or(0);
+    if close_col != open_col && close_col != open_line_indent {
+        return vec![corrected_close_paren_diagnostic(
+            source,
+            cop,
+            close_line,
+            close_col,
+            open_line_indent,
+            format!("Indent `)` to column {} (not {}).", open_line_indent, close_col),
+            &mut corrections,
+        )];
     }
 
     Vec::new()
@@ -544,6 +516,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        ClosingParenthesisIndentation,
+        "cops/layout/closing_parenthesis_indentation"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         ClosingParenthesisIndentation,
         "cops/layout/closing_parenthesis_indentation"
     );
