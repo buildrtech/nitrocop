@@ -2,6 +2,7 @@ use crate::cop::node_type::{
     BEGIN_NODE, BLOCK_NODE, CALL_NODE, CLASS_NODE, DEF_NODE, MODULE_NODE, SINGLETON_CLASS_NODE,
 };
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -111,6 +112,31 @@ impl RescueEnsureAlignment {
         false
     }
 
+    fn push_alignment_offense(
+        &self,
+        source: &SourceFile,
+        line: usize,
+        col: usize,
+        align_col: usize,
+        message: String,
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<Correction>>,
+    ) {
+        let mut diagnostic = self.diagnostic(source, line, col, message);
+        if let Some(corrections) = corrections.as_mut() {
+            let line_start = source.line_start_offset(line);
+            corrections.push(Correction {
+                start: line_start,
+                end: line_start + col,
+                replacement: " ".repeat(align_col),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
+    }
+
     /// Check rescue/ensure alignment in an implicit BeginNode body.
     /// `align_col` is the column the rescue/ensure should align to.
     /// `align_line` is the line of the enclosing keyword (for same-line checks).
@@ -123,6 +149,7 @@ impl RescueEnsureAlignment {
         align_line: usize,
         keyword: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<Correction>>,
     ) {
         // Walk the rescue chain
         let mut rescue_opt = begin_node.rescue_clause();
@@ -130,12 +157,15 @@ impl RescueEnsureAlignment {
             let rescue_kw_loc = rescue_node.keyword_loc();
             let (rescue_line, rescue_col) = source.offset_to_line_col(rescue_kw_loc.start_offset());
             if rescue_line != align_line && rescue_col != align_col {
-                diagnostics.push(self.diagnostic(
+                self.push_alignment_offense(
                     source,
                     rescue_line,
                     rescue_col,
+                    align_col,
                     format!("Align `rescue` with `{keyword}`."),
-                ));
+                    diagnostics,
+                    corrections,
+                );
             }
             rescue_opt = rescue_node.subsequent();
         }
@@ -144,12 +174,15 @@ impl RescueEnsureAlignment {
             let ensure_kw_loc = ensure_node.ensure_keyword_loc();
             let (ensure_line, ensure_col) = source.offset_to_line_col(ensure_kw_loc.start_offset());
             if ensure_line != align_line && ensure_col != align_col {
-                diagnostics.push(self.diagnostic(
+                self.push_alignment_offense(
                     source,
                     ensure_line,
                     ensure_col,
+                    align_col,
                     format!("Align `ensure` with `{keyword}`."),
-                ));
+                    diagnostics,
+                    corrections,
+                );
             }
         }
     }
@@ -158,6 +191,10 @@ impl RescueEnsureAlignment {
 impl Cop for RescueEnsureAlignment {
     fn name(&self) -> &'static str {
         "Layout/RescueEnsureAlignment"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -179,7 +216,7 @@ impl Cop for RescueEnsureAlignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         if let Some(begin_node) = node.as_begin_node() {
             // Only handle explicit begin (with begin keyword).
@@ -224,6 +261,7 @@ impl Cop for RescueEnsureAlignment {
                 begin_line,
                 "begin",
                 diagnostics,
+                &mut corrections,
             );
         } else if let Some(def_node) = node.as_def_node() {
             let def_kw_loc = def_node.def_keyword_loc();
@@ -259,6 +297,7 @@ impl Cop for RescueEnsureAlignment {
                             def_line,
                             "def",
                             diagnostics,
+                            &mut corrections,
                         );
                     }
                 } else if let Some(rescue_node) = body.as_rescue_node() {
@@ -267,12 +306,15 @@ impl Cop for RescueEnsureAlignment {
                     let (rescue_line, rescue_col) =
                         source.offset_to_line_col(rescue_kw_loc.start_offset());
                     if rescue_line != def_line && rescue_col != align_col {
-                        diagnostics.push(self.diagnostic(
+                        self.push_alignment_offense(
                             source,
                             rescue_line,
                             rescue_col,
+                            align_col,
                             "Align `rescue` with `def`.".to_string(),
-                        ));
+                            diagnostics,
+                            &mut corrections,
+                        );
                     }
                     // Walk the chain
                     let mut rescue_opt = rescue_node.subsequent();
@@ -280,12 +322,15 @@ impl Cop for RescueEnsureAlignment {
                         let kw_loc = sub.keyword_loc();
                         let (line, col) = source.offset_to_line_col(kw_loc.start_offset());
                         if line != def_line && col != align_col {
-                            diagnostics.push(self.diagnostic(
+                            self.push_alignment_offense(
                                 source,
                                 line,
                                 col,
+                                align_col,
                                 "Align `rescue` with `def`.".to_string(),
-                            ));
+                                diagnostics,
+                                &mut corrections,
+                            );
                         }
                         rescue_opt = sub.subsequent();
                     }
@@ -305,6 +350,7 @@ impl Cop for RescueEnsureAlignment {
                             kw_line,
                             "class",
                             diagnostics,
+                            &mut corrections,
                         );
                     }
                 }
@@ -323,6 +369,7 @@ impl Cop for RescueEnsureAlignment {
                             kw_line,
                             "module",
                             diagnostics,
+                            &mut corrections,
                         );
                     }
                 }
@@ -341,6 +388,7 @@ impl Cop for RescueEnsureAlignment {
                             kw_line,
                             "class",
                             diagnostics,
+                            &mut corrections,
                         );
                     }
                 }
@@ -410,6 +458,7 @@ impl Cop for RescueEnsureAlignment {
                             do_line,
                             "do",
                             diagnostics,
+                            &mut corrections,
                         );
                     }
                 }
@@ -428,12 +477,25 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(RescueEnsureAlignment, "cops/layout/rescue_ensure_alignment");
+    crate::cop_autocorrect_fixture_tests!(
+        RescueEnsureAlignment,
+        "cops/layout/rescue_ensure_alignment"
+    );
 
     #[test]
     fn no_rescue_no_offense() {
         let source = b"begin\n  foo\nend\n";
         let diags = run_cop_full(&RescueEnsureAlignment, source);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn autocorrect_begin_rescue_alignment() {
+        let source = b"begin\n  foo\n    rescue\n  bar\nend\n";
+        let (_diagnostics, corrections) =
+            crate::testutil::run_cop_autocorrect(&RescueEnsureAlignment, source);
+        let corrected = crate::correction::CorrectionSet::from_vec(corrections).apply(source);
+        assert_eq!(corrected, b"begin\n  foo\nrescue\n  bar\nend\n");
     }
 
     #[test]
