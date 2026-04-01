@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
@@ -62,6 +63,10 @@ impl Cop for RedundantLineBreak {
         false
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -69,7 +74,7 @@ impl Cop for RedundantLineBreak {
         code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<Correction>>,
     ) {
         let inspect_blocks = config.get_bool("InspectBlocks", false);
         let max_line_length = config.get_usize("MaxLineLength", 120);
@@ -116,6 +121,7 @@ impl Cop for RedundantLineBreak {
             block_ranges: &block_ranges,
             single_line_block_ranges: &single_line_block_ranges,
             ast_diagnostics: Vec::new(),
+            ast_corrections: Vec::new(),
             reported_starts: HashSet::new(),
             reported_ranges: Vec::new(),
             checked_chain_ranges: Vec::new(),
@@ -125,6 +131,8 @@ impl Cop for RedundantLineBreak {
         let reported_starts = visitor.reported_starts;
         diagnostics.extend(visitor.ast_diagnostics);
 
+        let all_corrections = visitor.ast_corrections;
+
         // Phase 2: Backslash continuation detection (existing text-based approach)
         check_backslash_continuations(
             self,
@@ -133,10 +141,15 @@ impl Cop for RedundantLineBreak {
             max_line_length,
             inspect_blocks,
             diagnostics,
+            None,
             &reported_starts,
             &unsafe_ranges,
             &block_ranges,
         );
+
+        if let Some(corrections) = corrections {
+            corrections.extend(all_corrections);
+        }
     }
 }
 
@@ -325,6 +338,7 @@ struct RedundantLineBreakVisitor<'a> {
     block_ranges: &'a [(usize, usize, bool)],
     single_line_block_ranges: &'a [(usize, usize)],
     ast_diagnostics: Vec<Diagnostic>,
+    ast_corrections: Vec<Correction>,
     reported_starts: HashSet<usize>,
     /// Byte ranges of nodes already reported, to skip descendant checks.
     reported_ranges: Vec<(usize, usize)>,
@@ -456,13 +470,22 @@ impl RedundantLineBreakVisitor<'_> {
         self.reported_starts.insert(line);
         self.reported_ranges.push((start_offset, end_offset));
 
+        let replacement = collapse_multiline_span(self.source, start_offset, end_offset);
+        self.ast_corrections.push(Correction {
+            start: start_offset,
+            end: end_offset,
+            replacement,
+            cop_name: self.cop_name,
+            cop_index: 0,
+        });
+
         self.ast_diagnostics.push(Diagnostic {
             path: self.source.path_str().to_string(),
             location: crate::diagnostic::Location { line, column: col },
             severity: crate::diagnostic::Severity::Convention,
             cop_name: self.cop_name.to_string(),
             message: "Redundant line break detected.".to_string(),
-            corrected: false,
+            corrected: true,
         });
     }
 }
@@ -740,6 +763,7 @@ fn check_backslash_continuations(
     max_line_length: usize,
     inspect_blocks: bool,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<Correction>>,
     already_reported: &HashSet<usize>,
     unsafe_ranges: &[(usize, usize)],
     block_ranges: &[(usize, usize, bool)],
@@ -756,6 +780,8 @@ fn check_backslash_continuations(
             offset += 1;
         }
     }
+
+    let mut corrections = corrections;
 
     let mut i = 0;
     while i < lines.len() {
@@ -886,15 +912,60 @@ fn check_backslash_continuations(
             continue;
         }
 
-        diagnostics.push(cop.diagnostic(
+        let mut diagnostic = cop.diagnostic(
             source,
             report_line,
             0,
             "Redundant line break detected.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = corrections.as_mut() {
+            let correction_start = line_starts[group_start];
+            let correction_end = line_starts[final_line_idx] + lines[final_line_idx].len();
+            corrections.push(Correction {
+                start: correction_start,
+                end: correction_end,
+                replacement: String::from_utf8_lossy(&combined).into_owned(),
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
 
         i = final_line_idx + 1;
     }
+}
+
+fn collapse_multiline_span(source: &SourceFile, start_offset: usize, end_offset: usize) -> String {
+    let span = &source.as_bytes()[start_offset..end_offset];
+    let lines: Vec<&[u8]> = span.split(|&b| b == b'\n').collect();
+
+    let mut combined = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let mut part = trim_trailing_whitespace(line);
+        if idx > 0 {
+            part = trim_leading_whitespace(part);
+        }
+        if part.is_empty() {
+            continue;
+        }
+
+        if combined.is_empty() {
+            combined.extend_from_slice(part);
+            continue;
+        }
+
+        if starts_with_method_chain_dot(part) {
+            combined.extend_from_slice(part);
+        } else {
+            combined.push(b' ');
+            combined.extend_from_slice(part);
+        }
+    }
+
+    String::from_utf8_lossy(&combined).into_owned()
 }
 
 fn trim_trailing_whitespace(line: &[u8]) -> &[u8] {
@@ -987,4 +1058,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(RedundantLineBreak, "cops/layout/redundant_line_break");
+    crate::cop_autocorrect_fixture_tests!(RedundantLineBreak, "cops/layout/redundant_line_break");
 }
