@@ -1,6 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -46,6 +47,10 @@ impl Cop for StaticClass {
         false
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -53,12 +58,13 @@ impl Cop for StaticClass {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<Correction>>,
     ) {
         let mut visitor = StaticClassVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -69,6 +75,7 @@ struct StaticClassVisitor<'a> {
     cop: &'a StaticClass,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<Correction>>,
 }
 
 impl<'pr> Visit<'pr> for StaticClassVisitor<'_> {
@@ -83,12 +90,26 @@ impl<'pr> Visit<'pr> for StaticClassVisitor<'_> {
             let (line, column) = self
                 .source
                 .offset_to_line_col(node.location().start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Prefer modules to classes with only class methods.".to_string(),
-            ));
+            );
+
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let class_kw = node.class_keyword_loc();
+                corrections.push(Correction {
+                    start: class_kw.start_offset(),
+                    end: class_kw.end_offset(),
+                    replacement: "module".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            self.diagnostics.push(diagnostic);
         }
 
         ruby_prism::visit_class_node(self, node);
@@ -184,4 +205,5 @@ fn is_extend_call(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(StaticClass, "cops/style/static_class");
+    crate::cop_autocorrect_fixture_tests!(StaticClass, "cops/style/static_class");
 }
