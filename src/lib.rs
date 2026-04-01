@@ -453,7 +453,7 @@ pub fn run(args: Args) -> Result<i32> {
         };
     }
 
-    let discovered = if let Some(handle) = discovery_handle {
+    let mut discovered = if let Some(handle) = discovery_handle {
         handle
             .join()
             .map_err(|_| anyhow::anyhow!("file discovery thread panicked"))??
@@ -482,6 +482,30 @@ pub fn run(args: Args) -> Result<i32> {
             println!("{}", file.display());
         }
         return Ok(0);
+    }
+
+    // Filter globally-excluded files from the discovered set so the file count
+    // reported by formatters matches RuboCop's "files inspected" semantics.
+    // (Explicitly-passed files bypass AllCops.Exclude unless --force-exclusion.)
+    {
+        let cop_filters = config.build_cop_filters(&registry, &tier_map, args.preview);
+        discovered.files.retain(|file| {
+            if cop_filters.is_globally_excluded(file) {
+                if args.force_exclusion {
+                    return false;
+                }
+                if discovered.explicit.is_empty() {
+                    return false;
+                }
+                let is_explicit = discovered.explicit.contains(file)
+                    || file
+                        .canonicalize()
+                        .ok()
+                        .is_some_and(|c| discovered.explicit.contains(&c));
+                return is_explicit;
+            }
+            true
+        });
     }
 
     if args.debug {
