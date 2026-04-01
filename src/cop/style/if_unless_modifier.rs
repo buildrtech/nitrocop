@@ -531,7 +531,8 @@ impl Cop for IfUnlessModifier {
                 // Conservative whole-node replacement subset:
                 // - keep only single-line predicates to avoid multiline whitespace normalization
                 // - skip assignment-parenthesized contexts (would require wrapping in parens)
-                let (pred_start_line, _) = source.offset_to_line_col(predicate.location().start_offset());
+                let (pred_start_line, _) =
+                    source.offset_to_line_col(predicate.location().start_offset());
                 let pred_end_off = predicate
                     .location()
                     .end_offset()

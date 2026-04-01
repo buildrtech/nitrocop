@@ -58,13 +58,15 @@ impl Cop for IfUnlessModifierOfIfUnless {
                     );
 
                     if let Some(corrections) = corrections {
-                        let body_src = String::from_utf8_lossy(&source.as_bytes()[
-                            body[0].location().start_offset()..body[0].location().end_offset()
-                        ]);
+                        let body_src = String::from_utf8_lossy(
+                            &source.as_bytes()[body[0].location().start_offset()
+                                ..body[0].location().end_offset()],
+                        );
                         let predicate = if_node.predicate();
-                        let predicate_src = String::from_utf8_lossy(&source.as_bytes()[
-                            predicate.location().start_offset()..predicate.location().end_offset()
-                        ]);
+                        let predicate_src = String::from_utf8_lossy(
+                            &source.as_bytes()[predicate.location().start_offset()
+                                ..predicate.location().end_offset()],
+                        );
                         let replacement =
                             format!("if {}\n{}\nend", predicate_src.trim(), body_src.trim());
                         corrections.push(crate::correction::Correction {
@@ -81,7 +83,6 @@ impl Cop for IfUnlessModifierOfIfUnless {
                 }
             }
         }
-
         // Check modifier `unless`
         else if let Some(unless_node) = node.as_unless_node() {
             // Must be modifier form (no end keyword)
@@ -107,18 +108,17 @@ impl Cop for IfUnlessModifierOfIfUnless {
                     );
 
                     if let Some(corrections) = corrections {
-                        let body_src = String::from_utf8_lossy(&source.as_bytes()[
-                            body[0].location().start_offset()..body[0].location().end_offset()
-                        ]);
-                        let predicate = unless_node.predicate();
-                        let predicate_src = String::from_utf8_lossy(&source.as_bytes()[
-                            predicate.location().start_offset()..predicate.location().end_offset()
-                        ]);
-                        let replacement = format!(
-                            "unless {}\n{}\nend",
-                            predicate_src.trim(),
-                            body_src.trim()
+                        let body_src = String::from_utf8_lossy(
+                            &source.as_bytes()[body[0].location().start_offset()
+                                ..body[0].location().end_offset()],
                         );
+                        let predicate = unless_node.predicate();
+                        let predicate_src = String::from_utf8_lossy(
+                            &source.as_bytes()[predicate.location().start_offset()
+                                ..predicate.location().end_offset()],
+                        );
+                        let replacement =
+                            format!("unless {}\n{}\nend", predicate_src.trim(), body_src.trim());
                         corrections.push(crate::correction::Correction {
                             start: node.location().start_offset(),
                             end: node.location().end_offset(),

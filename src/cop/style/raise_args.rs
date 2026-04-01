@@ -155,7 +155,8 @@ impl RaiseArgs {
             let replacement = if let Some(new_args) = arg_call.arguments() {
                 let new_arg_list: Vec<_> = new_args.arguments().iter().collect();
                 if let Some(first_arg) = new_arg_list.first() {
-                    let arg_source = std::str::from_utf8(first_arg.location().as_slice()).unwrap_or("");
+                    let arg_source =
+                        std::str::from_utf8(first_arg.location().as_slice()).unwrap_or("");
                     format!("{method_name} {receiver_source}, {arg_source}")
                 } else {
                     format!("{method_name} {receiver_source}")

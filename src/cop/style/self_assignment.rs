@@ -111,7 +111,8 @@ impl SelfAssignment {
                         return;
                     };
                     let right_loc = right.location();
-                    let right_src = &source.as_bytes()[right_loc.start_offset()..right_loc.end_offset()];
+                    let right_src =
+                        &source.as_bytes()[right_loc.start_offset()..right_loc.end_offset()];
                     if let Ok(right_src) = std::str::from_utf8(right_src) {
                         corrections.push(Correction {
                             start: node.location().start_offset(),
@@ -218,8 +219,8 @@ impl Cop for SelfAssignment {
                             let arg_list: Vec<_> = args.arguments().iter().collect();
                             if arg_list.len() == 1 {
                                 let arg_loc = arg_list[0].location();
-                                let arg_src =
-                                    &source.as_bytes()[arg_loc.start_offset()..arg_loc.end_offset()];
+                                let arg_src = &source.as_bytes()
+                                    [arg_loc.start_offset()..arg_loc.end_offset()];
                                 if let Ok(arg_src) = std::str::from_utf8(arg_src) {
                                     corrections.push(Correction {
                                         start: node.location().start_offset(),
