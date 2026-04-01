@@ -40,6 +40,10 @@ impl Cop for RedundantRegexpCharacterClass {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -47,13 +51,14 @@ impl Cop for RedundantRegexpCharacterClass {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(regexp) = node.as_regular_expression_node() {
             let Ok(content) = std::str::from_utf8(regexp.content_loc().as_slice()) else {
                 return;
             };
             let (chars, offsets) = chars_with_offsets(content, regexp.content_loc().start_offset());
+            let mut local_corrections = Vec::new();
             check_regexp_fragment(
                 self,
                 source,
@@ -62,7 +67,14 @@ impl Cop for RedundantRegexpCharacterClass {
                 regexp.is_extended(),
                 regexp.is_extended(),
                 diagnostics,
+                &mut local_corrections,
+                self.name(),
+                corrections.is_some(),
             );
+
+            if let Some(ref mut corrs) = corrections {
+                corrs.extend(local_corrections);
+            }
             return;
         }
 
@@ -89,6 +101,7 @@ impl Cop for RedundantRegexpCharacterClass {
             }
 
             let extended = is_extended_regex(regexp.closing_loc().as_slice());
+            let mut local_corrections = Vec::new();
             check_regexp_fragment(
                 self,
                 source,
@@ -97,7 +110,14 @@ impl Cop for RedundantRegexpCharacterClass {
                 extended,
                 extended,
                 diagnostics,
+                &mut local_corrections,
+                self.name(),
+                corrections.is_some(),
             );
+
+            if let Some(ref mut corrs) = corrections {
+                corrs.extend(local_corrections);
+            }
         }
     }
 }
@@ -135,6 +155,9 @@ fn check_regexp_fragment(
     extended_mode: bool,
     skip_comments: bool,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Vec<crate::correction::Correction>,
+    cop_name: &'static str,
+    autocorrect: bool,
 ) {
     let mut i = 0;
     while i < chars.len() {
@@ -160,6 +183,9 @@ fn check_regexp_fragment(
                     i..end,
                     extended_mode,
                     diagnostics,
+                    corrections,
+                    cop_name,
+                    autocorrect,
                 );
                 i = end + 1;
                 continue;
@@ -182,6 +208,9 @@ fn check_character_class(
     class_range: std::ops::Range<usize>,
     extended_mode: bool,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Vec<crate::correction::Correction>,
+    cop_name: &'static str,
+    autocorrect: bool,
 ) {
     let open = class_range.start;
     let close = class_range.end;
@@ -194,6 +223,9 @@ fn check_character_class(
             extended_mode,
             false,
             diagnostics,
+            corrections,
+            cop_name,
+            autocorrect,
         );
     }
 
@@ -208,14 +240,32 @@ fn check_character_class(
         return;
     };
     let (line, column) = source.offset_to_line_col(byte_pos);
-    diagnostics.push(cop.diagnostic(
+    let mut diag = cop.diagnostic(
         source,
         line,
         column,
         format!(
             "Redundant single-element character class, `{char_class}` can be replaced with `{replacement}`."
         ),
-    ));
+    );
+
+    if autocorrect {
+        let Some(end_pos) = offsets.get(close).copied().flatten() else {
+            diagnostics.push(diag);
+            return;
+        };
+
+        corrections.push(crate::correction::Correction {
+            start: byte_pos,
+            end: end_pos + 1,
+            replacement,
+            cop_name,
+            cop_index: 0,
+        });
+        diag.corrected = true;
+    }
+
+    diagnostics.push(diag);
 }
 
 fn redundant_single_element_character_class(
@@ -459,6 +509,10 @@ fn escape_sequence_len(chars: &[char], start: usize) -> usize {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        RedundantRegexpCharacterClass,
+        "cops/style/redundant_regexp_character_class"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RedundantRegexpCharacterClass,
         "cops/style/redundant_regexp_character_class"
     );
