@@ -1,3 +1,5 @@
 - `Style/SafeNavigation`: conservative subset candidate — start with simple `foo && foo.bar` / `foo ? foo.bar : nil` rewrites where receiver/source equality is exact and existing side-effect guards already pass.
 - `Lint/HeredocMethodCallPosition`: defer for now; naive location-based suffix move corrupted heredoc structure. Revisit with robust opener/body/terminator line reconstruction before retrying.
-- `Layout/FirstArrayElementIndentation`: likely bounded indentation-only autocorrect by replacing line-leading whitespace before flagged first array elements (and potentially closing bracket lines).
+- `Layout/FirstHashElementIndentation`: done; avoid retrying this path.
+- `Layout/FirstArrayElementIndentation`: done; avoid retrying this path.
+- `Layout/ParameterAlignment`: potential bounded indentation-only autocorrect candidate (line-leading whitespace normalization on flagged parameter lines).
