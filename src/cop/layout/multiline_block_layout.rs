@@ -1,5 +1,6 @@
 use crate::cop::node_type::{BEGIN_NODE, BLOCK_NODE, LAMBDA_NODE};
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -24,6 +25,10 @@ impl Cop for MultilineBlockLayout {
         "Layout/MultilineBlockLayout"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[BEGIN_NODE, BLOCK_NODE, LAMBDA_NODE]
     }
@@ -35,7 +40,7 @@ impl Cop for MultilineBlockLayout {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Extract the common fields from either BlockNode or LambdaNode
         if let Some(block_node) = node.as_block_node() {
@@ -47,6 +52,7 @@ impl Cop for MultilineBlockLayout {
                 block_node.body(),
                 config,
                 diagnostics,
+                corrections,
             );
         } else if let Some(lambda_node) = node.as_lambda_node() {
             self.check_block(
@@ -57,6 +63,7 @@ impl Cop for MultilineBlockLayout {
                 lambda_node.body(),
                 config,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -73,6 +80,7 @@ impl MultilineBlockLayout {
         body: Option<ruby_prism::Node<'_>>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let (open_line, _) = source.offset_to_line_col(opening_loc.start_offset());
         let (close_line, _) = source.offset_to_line_col(closing_loc.start_offset());
@@ -85,7 +93,7 @@ impl MultilineBlockLayout {
         // Check 1: Block arguments should be on the same line as block start
         // Skip implicit parameter nodes (ItParametersNode for `it`,
         // NumberedParametersNode for `_1`) — they have no visible source.
-        if let Some(params) = parameters {
+        if let Some(ref params) = parameters {
             if params.as_it_parameters_node().is_some()
                 || params.as_numbered_parameters_node().is_some()
             {
@@ -157,12 +165,36 @@ impl MultilineBlockLayout {
             if let Some(offset) = first_expr_offset {
                 let (body_line, body_col) = source.offset_to_line_col(offset);
                 if body_line == open_line {
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         body_line,
                         body_col,
                         "Block body expression is on the same line as the block start.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let line_indent = line_leading_indent(source, open_line);
+                        let params_end = parameters
+                            .and_then(|p| {
+                                if p.as_it_parameters_node().is_some()
+                                    || p.as_numbered_parameters_node().is_some()
+                                {
+                                    None
+                                } else {
+                                    Some(p.location().end_offset())
+                                }
+                            })
+                            .unwrap_or(0);
+                        let separator_start = opening_loc.end_offset().max(params_end);
+                        corrections.push(Correction {
+                            start: separator_start,
+                            end: offset,
+                            replacement: format!("\n{}", " ".repeat(line_indent + 2)),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -182,6 +214,17 @@ fn get_max_line_length(config: &CopConfig) -> Option<usize> {
 
 /// Flatten multiline params to a single line by replacing newlines and
 /// collapsing whitespace sequences.
+fn line_leading_indent(source: &SourceFile, line: usize) -> usize {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    if line == 0 || line > lines.len() {
+        return 0;
+    }
+    lines[line - 1]
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count()
+}
+
 fn flatten_to_single_line(source: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(source.len());
     let mut prev_was_whitespace = false;
@@ -208,4 +251,8 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(MultilineBlockLayout, "cops/layout/multiline_block_layout");
+    crate::cop_autocorrect_fixture_tests!(
+        MultilineBlockLayout,
+        "cops/layout/multiline_block_layout"
+    );
 }

@@ -1,5 +1,6 @@
 use crate::cop::node_type::{HASH_NODE, KEYWORD_HASH_NODE};
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -37,6 +38,10 @@ impl Cop for MultilineHashKeyLineBreaks {
         "Layout/MultilineHashKeyLineBreaks"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -52,7 +57,7 @@ impl Cop for MultilineHashKeyLineBreaks {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_multiline_final = config.get_bool("AllowMultilineFinalElement", false);
 
@@ -117,15 +122,41 @@ impl Cop for MultilineHashKeyLineBreaks {
         // multiline value's closing brace but on a different line from the last
         // non-offending element.
         let mut last_seen_line: isize = -1;
-        for elem in &elements {
+        for (index, elem) in elements.iter().enumerate() {
             let (start_line, start_col) = source.offset_to_line_col(elem.location().start_offset());
             if last_seen_line >= start_line as isize {
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     start_line,
                     start_col,
                     "Each item in a multi-line hash must start on a separate line.".to_string(),
-                ));
+                );
+
+                if let Some(corrections) = corrections.as_deref_mut()
+                    && index > 0
+                {
+                    let prev = &elements[index - 1];
+                    let prev_end = prev.location().end_offset();
+                    let elem_start = elem.location().start_offset();
+                    let (prev_line, prev_col) =
+                        source.offset_to_line_col(prev.location().start_offset());
+
+                    if prev_line == start_line
+                        && prev_end <= elem_start
+                        && source.as_bytes()[prev_end..elem_start].contains(&b',')
+                    {
+                        corrections.push(Correction {
+                            start: prev_end,
+                            end: elem_start,
+                            replacement: format!(",\n{}", " ".repeat(prev_col)),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diagnostic);
             } else {
                 let end_line = source
                     .offset_to_line_col(elem.location().end_offset().saturating_sub(1))
@@ -141,6 +172,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        MultilineHashKeyLineBreaks,
+        "cops/layout/multiline_hash_key_line_breaks"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         MultilineHashKeyLineBreaks,
         "cops/layout/multiline_hash_key_line_breaks"
     );

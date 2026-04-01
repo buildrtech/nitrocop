@@ -1,5 +1,6 @@
 use crate::cop::node_type::ARRAY_NODE;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
@@ -70,6 +71,7 @@ impl MultilineArrayLineBreaks {
         elements: &[ruby_prism::Node<'_>],
         allow_multiline_final: bool,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         if elements.len() < 2 {
             return;
@@ -99,15 +101,41 @@ impl MultilineArrayLineBreaks {
         // last_seen_line algorithm). When an element is flagged, last_seen_line is NOT
         // updated, so subsequent elements are compared against the last "good" element.
         let mut last_seen_line: isize = -1;
-        for elem in elements {
+        for (index, elem) in elements.iter().enumerate() {
             let (start_line, start_col) = source.offset_to_line_col(elem.location().start_offset());
             if last_seen_line >= start_line as isize {
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     start_line,
                     start_col,
                     "Each item in a multi-line array must start on a separate line.".to_string(),
-                ));
+                );
+
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    if index > 0 {
+                        let prev = &elements[index - 1];
+                        let prev_end = prev.location().end_offset();
+                        let elem_start = elem.location().start_offset();
+                        let (prev_line, prev_col) =
+                            source.offset_to_line_col(prev.location().start_offset());
+
+                        if prev_line == start_line
+                            && prev_end <= elem_start
+                            && source.as_bytes()[prev_end..elem_start].contains(&b',')
+                        {
+                            corrections.push(Correction {
+                                start: prev_end,
+                                end: elem_start,
+                                replacement: format!(",\n{}", " ".repeat(prev_col)),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                    }
+                }
+
+                diagnostics.push(diagnostic);
             } else {
                 let end_line = source
                     .offset_to_line_col(elem.location().end_offset().saturating_sub(1))
@@ -126,6 +154,7 @@ struct RescueVisitor<'a> {
     source: &'a SourceFile,
     allow_multiline_final: bool,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<Correction>>,
 }
 
 impl<'pr> Visit<'pr> for RescueVisitor<'_> {
@@ -136,6 +165,7 @@ impl<'pr> Visit<'pr> for RescueVisitor<'_> {
             &exceptions,
             self.allow_multiline_final,
             self.diagnostics,
+            self.corrections.as_deref_mut(),
         );
         ruby_prism::visit_rescue_node(self, node);
     }
@@ -144,6 +174,10 @@ impl<'pr> Visit<'pr> for RescueVisitor<'_> {
 impl Cop for MultilineArrayLineBreaks {
     fn name(&self) -> &'static str {
         "Layout/MultilineArrayLineBreaks"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_enabled(&self) -> bool {
@@ -161,7 +195,7 @@ impl Cop for MultilineArrayLineBreaks {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_multiline_final = config.get_bool("AllowMultilineFinalElement", false);
 
@@ -171,7 +205,13 @@ impl Cop for MultilineArrayLineBreaks {
         };
 
         let elements: Vec<ruby_prism::Node<'_>> = array.elements().iter().collect();
-        self.check_elements(source, &elements, allow_multiline_final, diagnostics);
+        self.check_elements(
+            source,
+            &elements,
+            allow_multiline_final,
+            diagnostics,
+            corrections,
+        );
     }
 
     fn check_source(
@@ -181,7 +221,7 @@ impl Cop for MultilineArrayLineBreaks {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_multiline_final = config.get_bool("AllowMultilineFinalElement", false);
 
@@ -193,6 +233,7 @@ impl Cop for MultilineArrayLineBreaks {
             source,
             allow_multiline_final,
             diagnostics,
+            corrections,
         };
         visitor.visit(&parse_result.node());
     }
@@ -205,6 +246,10 @@ mod tests {
     use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
+        MultilineArrayLineBreaks,
+        "cops/layout/multiline_array_line_breaks"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         MultilineArrayLineBreaks,
         "cops/layout/multiline_array_line_breaks"
     );
