@@ -1,6 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -31,6 +32,10 @@ impl Cop for RedundantAssignment {
         "Style/RedundantAssignment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -38,15 +43,19 @@ impl Cop for RedundantAssignment {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = RedundantAssignmentVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corrections) = corrections {
+            corrections.extend(visitor.corrections);
+        }
     }
 }
 
@@ -54,6 +63,7 @@ struct RedundantAssignmentVisitor<'a> {
     cop: &'a RedundantAssignment,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
 }
 
 impl RedundantAssignmentVisitor<'_> {
@@ -70,12 +80,26 @@ impl RedundantAssignmentVisitor<'_> {
                     if write.name().as_slice() == lvar.name().as_slice() {
                         let loc = second_last.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Redundant assignment before returning detected.".to_string(),
-                        ));
+                        );
+
+                        let value_loc = write.value().location();
+                        if let Ok(value_source) = std::str::from_utf8(value_loc.as_slice()) {
+                            self.corrections.push(Correction {
+                                start: write.location().start_offset(),
+                                end: lvar.location().end_offset(),
+                                replacement: value_source.to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        self.diagnostics.push(diagnostic);
                         return;
                     }
                 }
@@ -247,4 +271,5 @@ impl<'pr> Visit<'pr> for RedundantAssignmentVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantAssignment, "cops/style/redundant_assignment");
+    crate::cop_autocorrect_fixture_tests!(RedundantAssignment, "cops/style/redundant_assignment");
 }
