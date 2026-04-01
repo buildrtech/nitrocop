@@ -233,7 +233,12 @@ impl<'a> TrivialAccessorsVisitor<'a> {
         }
     }
 
-    fn add_autocorrect(&mut self, def_node: &ruby_prism::DefNode<'_>, attr_kind: &str, attr_name: &str) {
+    fn add_autocorrect(
+        &mut self,
+        def_node: &ruby_prism::DefNode<'_>,
+        attr_kind: &str,
+        attr_name: &str,
+    ) {
         // Conservative subset: only instance methods inside class/sclass contexts.
         if def_node.receiver().is_some() || !self.in_class_context() {
             return;

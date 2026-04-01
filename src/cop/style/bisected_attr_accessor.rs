@@ -309,5 +309,8 @@ fn extend_to_line_break(source: &SourceFile, end: usize) -> usize {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BisectedAttrAccessor, "cops/style/bisected_attr_accessor");
-    crate::cop_autocorrect_fixture_tests!(BisectedAttrAccessor, "cops/style/bisected_attr_accessor");
+    crate::cop_autocorrect_fixture_tests!(
+        BisectedAttrAccessor,
+        "cops/style/bisected_attr_accessor"
+    );
 }

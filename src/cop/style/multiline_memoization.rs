@@ -4,6 +4,7 @@ use crate::cop::node_type::{
     LOCAL_VARIABLE_OR_WRITE_NODE, PARENTHESES_NODE,
 };
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -55,7 +56,7 @@ impl Cop for MultilineMemoization {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "keyword");
 
@@ -106,34 +107,25 @@ impl Cop for MultilineMemoization {
                     "Wrap multiline memoization blocks in `begin` and `end`.".to_string(),
                 );
 
-                if let Some(corrections) = corrections {
-                    let open_line = source
-                        .offset_to_line_col(paren.opening_loc().start_offset())
-                        .0;
-                    let close_line = source
-                        .offset_to_line_col(paren.closing_loc().start_offset())
-                        .0;
-                    let body_line_range = paren.body().map(|body| {
-                        (
-                            source.offset_to_line_col(body.location().start_offset()).0,
-                            source
-                                .offset_to_line_col(body.location().end_offset().saturating_sub(1))
-                                .0,
-                        )
-                    });
-
-                    if let Some((body_start_line, body_end_line)) = body_line_range {
-                        if open_line < body_start_line && close_line > body_end_line {
-                            corrections.push(crate::correction::Correction {
-                                start: paren.opening_loc().start_offset(),
-                                end: paren.opening_loc().end_offset(),
+                // Conservative autocorrect: swap delimiters only when the
+                // parenthesized RHS already starts on a new line.
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let full = value_loc.as_slice();
+                    if full.len() >= 2 {
+                        let inner = &full[1..full.len() - 1];
+                        if inner.first() == Some(&b'\n') {
+                            let open = paren.opening_loc();
+                            let close = paren.closing_loc();
+                            corrections.push(Correction {
+                                start: open.start_offset(),
+                                end: open.end_offset(),
                                 replacement: "begin".to_string(),
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            corrections.push(crate::correction::Correction {
-                                start: paren.closing_loc().start_offset(),
-                                end: paren.closing_loc().end_offset(),
+                            corrections.push(Correction {
+                                start: close.start_offset(),
+                                end: close.end_offset(),
                                 replacement: "end".to_string(),
                                 cop_name: self.name(),
                                 cop_index: 0,
@@ -147,38 +139,14 @@ impl Cop for MultilineMemoization {
             }
         } else if enforced_style == "braces" {
             // braces style: should use parentheses, not begin..end
-            if let Some(begin) = value.as_begin_node() {
+            if value.as_begin_node().is_some() {
                 let (line, column) = source.offset_to_line_col(assign_loc.start_offset());
-                let mut diagnostic = self.diagnostic(
+                diagnostics.push(self.diagnostic(
                     source,
                     line,
                     column,
                     "Wrap multiline memoization blocks in `(` and `)`.".to_string(),
-                );
-
-                if let Some(corrections) = corrections {
-                    if let (Some(begin_kw), Some(end_kw)) =
-                        (begin.begin_keyword_loc(), begin.end_keyword_loc())
-                    {
-                        corrections.push(crate::correction::Correction {
-                            start: begin_kw.start_offset(),
-                            end: begin_kw.end_offset(),
-                            replacement: "(".to_string(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        corrections.push(crate::correction::Correction {
-                            start: end_kw.start_offset(),
-                            end: end_kw.end_offset(),
-                            replacement: ")".to_string(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diagnostic.corrected = true;
-                    }
-                }
-
-                diagnostics.push(diagnostic);
+                ));
             }
         }
     }

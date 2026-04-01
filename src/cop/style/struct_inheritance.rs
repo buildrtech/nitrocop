@@ -90,7 +90,11 @@ fn apply_struct_inheritance_autocorrect(
 
     let replacement = if let Some(body) = class_node.body() {
         let body_source = source
-            .byte_slice(body.location().start_offset(), body.location().end_offset(), "")
+            .byte_slice(
+                body.location().start_offset(),
+                body.location().end_offset(),
+                "",
+            )
             .to_string();
         if body_source.trim().is_empty() {
             format!("{class_name} = {superclass_source}")
