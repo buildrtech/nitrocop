@@ -59,12 +59,12 @@ impl Cop for WhileUntilModifier {
         "Style/WhileUntilModifier"
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[UNTIL_NODE, WHILE_NODE]
-    }
-
     fn supports_autocorrect(&self) -> bool {
         true
+    }
+
+    fn interested_node_types(&self) -> &'static [u8] {
+        &[UNTIL_NODE, WHILE_NODE]
     }
 
     fn check_node(
@@ -74,7 +74,7 @@ impl Cop for WhileUntilModifier {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let (kw_loc, statements, keyword) = if let Some(while_node) = node.as_while_node() {
             (while_node.keyword_loc(), while_node.statements(), "while")
@@ -295,37 +295,19 @@ impl Cop for WhileUntilModifier {
             ),
         );
 
-        if let Some(corrs) = corrections.as_mut() {
-            let indent_src = &src_bytes[line_start..kw_offset];
-            let indent = String::from_utf8_lossy(indent_src);
-            let pred_trimmed = pred_str.trim();
-            let mut replacement = format!("{}{} {} {}", indent, body_trimmed, keyword, pred_trimmed);
-
-            if has_first_line_comment {
-                for comment in _parse_result.comments() {
-                    let (comment_line, _) = source.offset_to_line_col(comment.location().start_offset());
-                    if comment_line == kw_line {
-                        replacement.push(' ');
-                        replacement.push_str(&String::from_utf8_lossy(comment.location().as_slice()));
-                        break;
-                    }
-                }
+        if let Some(corrections) = corrections {
+            // Conservative subset: avoid comments/trailing code to keep rewrite bounded.
+            if !has_first_line_comment && !has_code_after {
+                let replacement = format!("{} {} {}", body_trimmed, keyword, pred_str.trim());
+                corrections.push(crate::correction::Correction {
+                    start: node.location().start_offset(),
+                    end: node.location().end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
             }
-
-            let mut replace_end = node.location().end_offset();
-            if has_code_after {
-                replacement.push_str(&String::from_utf8_lossy(code_after));
-                replace_end = closing_line_end;
-            }
-
-            corrs.push(crate::correction::Correction {
-                start: node.location().start_offset(),
-                end: replace_end,
-                replacement,
-                cop_name: self.name(),
-                cop_index: 0,
-            });
-            diagnostic.corrected = true;
         }
 
         diagnostics.push(diagnostic);

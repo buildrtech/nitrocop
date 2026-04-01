@@ -99,49 +99,51 @@ impl Cop for ParallelAssignment {
 
             let loc = multi_write.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            let mut diagnostic = self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 line,
                 column,
                 "Do not use parallel assignment.".to_string(),
             );
 
-            if let Some(corrs) = corrections.as_mut() {
-                let line_start = source.as_bytes()[..loc.start_offset()]
+            if let Some(ref mut corr) = corrections {
+                let line_start = source.line_start_offset(line);
+                let indent = source
+                    .try_byte_slice(line_start, loc.start_offset())
+                    .unwrap_or("");
+
+                let assignments: Option<Vec<String>> = targets
                     .iter()
-                    .rposition(|&b| b == b'\n')
-                    .map(|p| p + 1)
-                    .unwrap_or(0);
-                let indent = String::from_utf8_lossy(&source.as_bytes()[line_start..loc.start_offset()]);
+                    .zip(elements.iter())
+                    .map(|(target, value)| {
+                        let lhs = source.try_byte_slice(
+                            target.location().start_offset(),
+                            target.location().end_offset(),
+                        )?;
+                        let rhs = source.try_byte_slice(
+                            value.location().start_offset(),
+                            value.location().end_offset(),
+                        )?;
+                        if lhs.contains('\n') || rhs.contains('\n') {
+                            return None;
+                        }
+                        Some(format!("{lhs} = {rhs}"))
+                    })
+                    .collect();
 
-                let mut assignments = Vec::with_capacity(targets.len());
-                for (target, element) in targets.iter().zip(elements.iter()) {
-                    let target_loc = target.location();
-                    let element_loc = element.location();
-                    let Some(target_src) = source
-                        .try_byte_slice(target_loc.start_offset(), target_loc.end_offset())
-                    else {
-                        return;
-                    };
-                    let Some(elem_src) = source
-                        .try_byte_slice(element_loc.start_offset(), element_loc.end_offset())
-                    else {
-                        return;
-                    };
-                    assignments.push(format!("{}{} = {}", indent, target_src, elem_src));
+                if let Some(assignments) = assignments {
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: assignments.join(&format!("\n{indent}")),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
                 }
-
-                corrs.push(crate::correction::Correction {
-                    start: loc.start_offset(),
-                    end: loc.end_offset(),
-                    replacement: assignments.join("\n"),
-                    cop_name: self.name(),
-                    cop_index: 0,
-                });
-                diagnostic.corrected = true;
             }
 
-            diagnostics.push(diagnostic);
+            diagnostics.push(diag);
         }
     }
 }
@@ -197,6 +199,7 @@ fn is_swap_assignment(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ParallelAssignment, "cops/style/parallel_assignment");
+    crate::cop_autocorrect_fixture_tests!(ParallelAssignment, "cops/style/parallel_assignment");
 
     #[test]
     fn trailing_comma_lhs() {
