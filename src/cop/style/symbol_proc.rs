@@ -67,6 +67,10 @@ impl Cop for SymbolProc {
         "Style/SymbolProc"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             BLOCK_NODE,
@@ -87,7 +91,7 @@ impl Cop for SymbolProc {
         parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_methods_with_arguments = config.get_bool("AllowMethodsWithArguments", false);
         let allowed_methods = config.get_string_array("AllowedMethods");
@@ -107,6 +111,7 @@ impl Cop for SymbolProc {
                 &allowed_patterns,
                 allow_comments,
                 diagnostics,
+                corrections,
             );
         } else if let Some(super_node) = node.as_super_node() {
             self.check_super_block(
@@ -116,6 +121,7 @@ impl Cop for SymbolProc {
                 allow_methods_with_arguments,
                 allow_comments,
                 diagnostics,
+                corrections,
             );
         } else if let Some(fwd_super) = node.as_forwarding_super_node() {
             self.check_forwarding_super_block(
@@ -124,6 +130,7 @@ impl Cop for SymbolProc {
                 parse_result,
                 allow_comments,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -142,6 +149,7 @@ impl SymbolProc {
         allowed_patterns: &Option<Vec<String>>,
         allow_comments: bool,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let block = match call_with_block.block() {
             Some(b) => match b.as_block_node() {
@@ -221,6 +229,9 @@ impl SymbolProc {
             "the method",
             allow_comments,
             diagnostics,
+            // Conservative autocorrect: only no-arg outer calls (`foo.map { ... }`).
+            call_with_block.arguments().is_none(),
+            corrections,
         );
     }
 
@@ -233,6 +244,7 @@ impl SymbolProc {
         allow_methods_with_arguments: bool,
         allow_comments: bool,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let block = match super_node.block() {
             Some(b) => match b.as_block_node() {
@@ -255,6 +267,9 @@ impl SymbolProc {
             "`super`",
             allow_comments,
             diagnostics,
+            // Conservative autocorrect: only bare `super { ... }` (no explicit args).
+            super_node.arguments().is_none(),
+            corrections,
         );
     }
 
@@ -266,6 +281,7 @@ impl SymbolProc {
         parse_result: &ruby_prism::ParseResult<'_>,
         allow_comments: bool,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let block = match fwd_super.block() {
             Some(bn) => bn,
@@ -280,6 +296,8 @@ impl SymbolProc {
             "`super`",
             allow_comments,
             diagnostics,
+            true,
+            corrections,
         );
     }
 
@@ -292,6 +310,8 @@ impl SymbolProc {
         method_desc: &str,
         allow_comments: bool,
         diagnostics: &mut Vec<Diagnostic>,
+        can_autocorrect: bool,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Extract the single method call from the block body
         let body = match block.body() {
@@ -414,7 +434,7 @@ impl SymbolProc {
 
         let loc = block.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
@@ -423,7 +443,26 @@ impl SymbolProc {
                 String::from_utf8_lossy(method_name),
                 method_desc,
             ),
-        ));
+        );
+
+        if can_autocorrect {
+            if let Some(ref mut corr) = corrections {
+                let mut start = loc.start_offset();
+                if start > 0 && source.as_bytes()[start - 1] == b' ' {
+                    start -= 1;
+                }
+                corr.push(crate::correction::Correction {
+                    start,
+                    end: loc.end_offset(),
+                    replacement: format!("(&:{})", String::from_utf8_lossy(method_name)),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
+        }
+
+        diagnostics.push(diag);
     }
 }
 
@@ -479,6 +518,7 @@ mod tests {
     use crate::testutil::{assert_cop_no_offenses_full_with_config, run_cop_full_with_config};
 
     crate::cop_fixture_tests!(SymbolProc, "cops/style/symbol_proc");
+    crate::cop_autocorrect_fixture_tests!(SymbolProc, "cops/style/symbol_proc");
 
     fn config_with_allowed(methods: &[&str]) -> CopConfig {
         let mut config = CopConfig::default();

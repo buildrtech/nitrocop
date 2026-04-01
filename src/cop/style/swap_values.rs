@@ -1,7 +1,6 @@
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
-use crate::correction::Correction;
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -23,7 +22,7 @@ impl Cop for SwapValues {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        mut corrections: Option<&mut Vec<Correction>>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = SwapVisitor {
             cop: self,
@@ -32,15 +31,10 @@ impl Cop for SwapValues {
             corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
-
-        if let Some(corrections_out) = corrections.as_mut() {
-            corrections_out.extend(visitor.corrections);
-            for diag in &mut visitor.diagnostics {
-                diag.corrected = true;
-            }
-        }
-
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corrections) = _corrections {
+            corrections.extend(visitor.corrections);
+        }
     }
 }
 
@@ -48,82 +42,91 @@ struct SwapVisitor<'a> {
     cop: &'a SwapValues,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
-    corrections: Vec<Correction>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 impl<'pr> Visit<'pr> for SwapVisitor<'_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         let stmts: Vec<_> = node.body().iter().collect();
 
-        for window in stmts.windows(3) {
+        let mut i = 0;
+        while i + 2 < stmts.len() {
             // Pattern: tmp = a; a = b; b = tmp
-            if let (Some(w1), Some(w2), Some(w3)) = (
-                window[0].as_local_variable_write_node(),
-                window[1].as_local_variable_write_node(),
-                window[2].as_local_variable_write_node(),
-            ) {
-                let tmp_name = w1.name().as_slice();
-                let val1 = w1.value();
-                let a_value = get_lvar_name(&val1);
-                let b_name = w2.name().as_slice();
-                let val2 = w2.value();
-                let b_value = get_lvar_name(&val2);
-                let c_name = w3.name().as_slice();
-                let val3 = w3.value();
-                let c_value = get_lvar_name(&val3);
+            let Some(w1) = stmts[i].as_local_variable_write_node() else {
+                i += 1;
+                continue;
+            };
+            let Some(w2) = stmts[i + 1].as_local_variable_write_node() else {
+                i += 1;
+                continue;
+            };
+            let Some(w3) = stmts[i + 2].as_local_variable_write_node() else {
+                i += 1;
+                continue;
+            };
 
-                if let (Some(a_val), Some(b_val), Some(c_val)) = (a_value, b_value, c_value) {
-                    // Pattern: tmp = a; a = b; b = tmp
-                    // w1: tmp_name = a_val  (save a into tmp)
-                    // w2: b_name = b_val    (assign b's value to a)
-                    // w3: c_name = c_val    (restore tmp into b)
-                    // Conditions:
-                    //   b_name == a_val (second writes to the saved variable)
-                    //   c_name == b_val (third writes to the source variable)
-                    //   c_val == tmp_name (third reads from temp)
-                    //   b_val != tmp_name (second doesn't read temp)
-                    if b_name == a_val && c_name == b_val && c_val == tmp_name && b_val != tmp_name
-                    {
-                        let loc = window[0].location();
-                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
-                            self.source,
-                            line,
-                            column,
-                            format!(
-                                "Replace this swap with `{}, {} = {}, {}`.",
-                                String::from_utf8_lossy(b_name),
-                                String::from_utf8_lossy(c_name),
-                                String::from_utf8_lossy(c_name),
-                                String::from_utf8_lossy(b_name),
-                            ),
-                        ));
+            let tmp_name = w1.name().as_slice();
+            let w1_value = w1.value();
+            let a_value = get_lvar_name(&w1_value);
+            let b_name = w2.name().as_slice();
+            let w2_value = w2.value();
+            let b_value = get_lvar_name(&w2_value);
+            let c_name = w3.name().as_slice();
+            let w3_value = w3.value();
+            let c_value = get_lvar_name(&w3_value);
 
-                        let first = window[0].location();
-                        let third = window[2].location();
-                        let line_start = self.source.line_start_offset(line);
-                        let indent = self
-                            .source
-                            .try_byte_slice(line_start, first.start_offset())
-                            .unwrap_or("");
+            let (Some(a_val), Some(b_val), Some(c_val)) = (a_value, b_value, c_value) else {
+                i += 1;
+                continue;
+            };
 
-                        self.corrections.push(Correction {
-                            start: first.start_offset(),
-                            end: third.end_offset(),
-                            replacement: format!(
-                                "{}{}, {} = {}, {}",
-                                indent,
-                                String::from_utf8_lossy(b_name),
-                                String::from_utf8_lossy(c_name),
-                                String::from_utf8_lossy(c_name),
-                                String::from_utf8_lossy(b_name),
-                            ),
-                            cop_name: self.cop.name(),
-                            cop_index: 0,
-                        });
-                    }
-                }
+            // Pattern: tmp = a; a = b; b = tmp
+            // w1: tmp_name = a_val  (save a into tmp)
+            // w2: b_name = b_val    (assign b's value to a)
+            // w3: c_name = c_val    (restore tmp into b)
+            // Conditions:
+            //   b_name == a_val (second writes to the saved variable)
+            //   c_name == b_val (third writes to the source variable)
+            //   c_val == tmp_name (third reads from temp)
+            //   b_val != tmp_name (second doesn't read temp)
+            if b_name == a_val && c_name == b_val && c_val == tmp_name && b_val != tmp_name {
+                let loc = stmts[i].location();
+                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                let mut diagnostic = self.cop.diagnostic(
+                    self.source,
+                    line,
+                    column,
+                    format!(
+                        "Replace this swap with `{}, {} = {}, {}`.",
+                        String::from_utf8_lossy(b_name),
+                        String::from_utf8_lossy(c_name),
+                        String::from_utf8_lossy(c_name),
+                        String::from_utf8_lossy(b_name),
+                    ),
+                );
+
+                let replacement = format!(
+                    "{}, {} = {}, {}",
+                    String::from_utf8_lossy(b_name),
+                    String::from_utf8_lossy(c_name),
+                    String::from_utf8_lossy(c_name),
+                    String::from_utf8_lossy(b_name),
+                );
+                self.corrections.push(crate::correction::Correction {
+                    start: w1.location().start_offset(),
+                    end: w3.location().end_offset(),
+                    replacement,
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+                self.diagnostics.push(diagnostic);
+
+                i += 3;
+                continue;
             }
+
+            i += 1;
         }
 
         ruby_prism::visit_statements_node(self, node);

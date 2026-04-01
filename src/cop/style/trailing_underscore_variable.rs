@@ -204,7 +204,9 @@ fn check_multi_assignment(
         "Trailing underscore variable(s) in parallel assignment are unnecessary.".to_string(),
     );
 
-    if let (Some((lhs_start, rhs_start)), Some(corr)) = (assignment_offsets, corrections.as_deref_mut()) {
+    if let (Some((lhs_start, rhs_start)), Some(corr)) =
+        (assignment_offsets, corrections.as_deref_mut())
+    {
         if let Some((start, end)) = correction_range(
             source,
             lefts,
