@@ -10,6 +10,10 @@ impl Cop for GuardClause {
         "Style/GuardClause"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -17,7 +21,7 @@ impl Cop for GuardClause {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let min_body_length = config.get_usize("MinBodyLength", 1);
         let _allow_consecutive = config.get_bool("AllowConsecutiveConditionals", false);
@@ -26,10 +30,17 @@ impl Cop for GuardClause {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            autocorrect_enabled: corrections.is_some(),
             min_body_length,
             max_line_length,
         };
         visitor.visit(&parse_result.node());
+
+        if let Some(corr) = corrections.as_mut() {
+            corr.extend(visitor.corrections);
+        }
+
         diagnostics.extend(visitor.diagnostics);
     }
 }
@@ -38,6 +49,8 @@ struct GuardClauseVisitor<'a, 'src> {
     cop: &'a GuardClause,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    autocorrect_enabled: bool,
     min_body_length: usize,
     max_line_length: usize,
 }
@@ -124,7 +137,7 @@ impl GuardClauseVisitor<'_, '_> {
             return;
         }
 
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
@@ -132,7 +145,16 @@ impl GuardClauseVisitor<'_, '_> {
                 "Use a guard clause (`{}`) instead of wrapping the code inside a conditional expression.",
                 example
             ),
-        ));
+        );
+
+        if self.autocorrect_enabled {
+            if let Some(correction) = self.build_guard_clause_correction_for_if(node, &condition_src) {
+                self.corrections.push(correction);
+                diagnostic.corrected = true;
+            }
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 
     fn check_ending_unless_node(&mut self, node: &ruby_prism::UnlessNode<'_>) {
@@ -187,7 +209,7 @@ impl GuardClauseVisitor<'_, '_> {
             return;
         }
 
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
@@ -195,7 +217,92 @@ impl GuardClauseVisitor<'_, '_> {
                 "Use a guard clause (`{}`) instead of wrapping the code inside a conditional expression.",
                 example
             ),
-        ));
+        );
+
+        if self.autocorrect_enabled {
+            if let Some(correction) =
+                self.build_guard_clause_correction_for_unless(node, &condition_src)
+            {
+                self.corrections.push(correction);
+                diagnostic.corrected = true;
+            }
+        }
+
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn build_guard_clause_correction_for_if(
+        &self,
+        node: &ruby_prism::IfNode<'_>,
+        condition_src: &str,
+    ) -> Option<crate::correction::Correction> {
+        let if_keyword_loc = node.if_keyword_loc()?;
+        let end_keyword_loc = node.end_keyword_loc()?;
+        let statements = node.statements()?;
+
+        let statements_loc = statements.location();
+        let body_src = &self.source.as_bytes()[statements_loc.start_offset()..statements_loc.end_offset()];
+        let body_src = String::from_utf8_lossy(body_src);
+
+        let (_, column) = self.source.offset_to_line_col(if_keyword_loc.start_offset());
+        let indent = " ".repeat(column);
+        let normalized_body = body_src
+            .lines()
+            .map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{indent}{line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let replacement = format!("return unless {condition_src}\n{normalized_body}");
+
+        Some(crate::correction::Correction {
+            start: if_keyword_loc.start_offset(),
+            end: end_keyword_loc.end_offset(),
+            replacement,
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        })
+    }
+
+    fn build_guard_clause_correction_for_unless(
+        &self,
+        node: &ruby_prism::UnlessNode<'_>,
+        condition_src: &str,
+    ) -> Option<crate::correction::Correction> {
+        let keyword_loc = node.keyword_loc();
+        let end_keyword_loc = node.end_keyword_loc()?;
+        let statements = node.statements()?;
+
+        let statements_loc = statements.location();
+        let body_src = &self.source.as_bytes()[statements_loc.start_offset()..statements_loc.end_offset()];
+        let body_src = String::from_utf8_lossy(body_src);
+
+        let (_, column) = self.source.offset_to_line_col(keyword_loc.start_offset());
+        let indent = " ".repeat(column);
+        let normalized_body = body_src
+            .lines()
+            .map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{indent}{line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let replacement = format!("return if {condition_src}\n{normalized_body}");
+
+        Some(crate::correction::Correction {
+            start: keyword_loc.start_offset(),
+            end: end_keyword_loc.end_offset(),
+            replacement,
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        })
     }
 
     /// Check if a node spans multiple lines.
@@ -335,4 +442,5 @@ impl<'pr> Visit<'pr> for GuardClauseVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(GuardClause, "cops/style/guard_clause");
+    crate::cop_autocorrect_fixture_tests!(GuardClause, "cops/style/guard_clause");
 }
