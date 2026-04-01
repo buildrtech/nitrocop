@@ -91,6 +91,10 @@ impl Cop for SafeNavigationConsistency {
         &[AND_NODE, OR_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -98,7 +102,7 @@ impl Cop for SafeNavigationConsistency {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_methods = config
             .get_string_array("AllowedMethods")
@@ -165,12 +169,38 @@ impl Cop for SafeNavigationConsistency {
                         .iter()
                         .any(|d| d.location.line == line && d.location.column == column);
                     if !already_reported {
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             message.to_string(),
-                        ));
+                        );
+
+                        if let Some(corrs) = corrections.as_mut()
+                            && !op.is_operator_method
+                            && op.call_operator_end > op.call_operator_offset
+                        {
+                            let replacement = if expected_op == "." && op.is_safe_nav {
+                                Some(".")
+                            } else if expected_op == "&." && !op.is_safe_nav {
+                                Some("&.")
+                            } else {
+                                None
+                            };
+
+                            if let Some(replacement) = replacement {
+                                corrs.push(crate::correction::Correction {
+                                    start: op.call_operator_offset,
+                                    end: op.call_operator_end,
+                                    replacement: replacement.to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -187,6 +217,7 @@ struct OperandInfo {
     and_group_key: Option<(usize, usize)>,
     is_operator_method: bool,
     call_operator_offset: usize,
+    call_operator_end: usize,
     receiver_offset: usize,
 }
 
@@ -253,6 +284,7 @@ fn extract_operand_info(
     let is_operator_method = is_ruby_operator_method(&method_name);
 
     let call_operator_offset = call_op.as_ref().map(|loc| loc.start_offset()).unwrap_or(0);
+    let call_operator_end = call_op.as_ref().map(|loc| loc.end_offset()).unwrap_or(0);
     let receiver_offset = recv.location().start_offset();
 
     Some(OperandInfo {
@@ -263,6 +295,7 @@ fn extract_operand_info(
         and_group_key,
         is_operator_method,
         call_operator_offset,
+        call_operator_end,
         receiver_offset,
     })
 }
