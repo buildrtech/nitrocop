@@ -1728,14 +1728,14 @@ impl UselessAssignVisitor<'_, '_, '_> {
         &mut self,
         analyzer: &ScopeAnalyzer,
         state: &LiveState,
-        param_names: &HashSet<String>,
+        skip_names: &HashSet<String>,
     ) {
         if analyzer.has_binding {
             return;
         }
         // Report writes that were detected as useless during sequential analysis
         for w in &analyzer.useless {
-            if w.name.starts_with('_') || param_names.contains(&w.name) {
+            if w.name.starts_with('_') || skip_names.contains(&w.name) {
                 continue;
             }
             // If the variable is read in any closure, don't flag it
@@ -1746,7 +1746,7 @@ impl UselessAssignVisitor<'_, '_, '_> {
         }
         // Report writes that are still live at end of scope (never read)
         for (name, offset) in state.unread_writes() {
-            if name.starts_with('_') || param_names.contains(name) {
+            if name.starts_with('_') || skip_names.contains(name) {
                 continue;
             }
             // If the variable is read in any closure, don't flag it
@@ -1766,7 +1766,7 @@ impl UselessAssignVisitor<'_, '_, '_> {
         // These occur when both branches of an if/unless write the same
         // variable and the merge can only keep one offset.
         for (name, offset) in &analyzer.branch_extra_writes {
-            if name.starts_with('_') || param_names.contains(name) {
+            if name.starts_with('_') || skip_names.contains(name) {
                 continue;
             }
             if analyzer.closure_reads.contains(name) {
@@ -1794,7 +1794,11 @@ impl UselessAssignVisitor<'_, '_, '_> {
                 }
             }
 
-            self.report_useless(&analyzer, &state, &param_names);
+            // Don't skip param names — only the initial binding is protected
+            // (via record_read above), subsequent reassignments should be flagged
+            // if useless. Pass empty set for skip_names.
+            let empty = HashSet::new();
+            self.report_useless(&analyzer, &state, &empty);
         }
     }
 
@@ -1813,12 +1817,12 @@ impl UselessAssignVisitor<'_, '_, '_> {
         }
 
         // Outer scope variables (depth > 0) are excluded from reporting:
-        // merge them into params so they're treated as "known" and skipped.
-        let mut skip_names = params.clone();
-        skip_names.extend(outer_vars.iter().cloned());
+        // writes to them may be read in the outer scope.
+        // Param names are NOT skipped — their initial binding is protected
+        // by record_read above, but subsequent reassignments should be flagged.
 
         analyzer.analyze_node(body, &mut state);
-        self.report_useless(&analyzer, &state, &skip_names);
+        self.report_useless(&analyzer, &state, outer_vars);
     }
 }
 

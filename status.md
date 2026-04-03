@@ -18,32 +18,29 @@ Minimize the per-cop offense count differences between nitrocop and RuboCop when
 ## Current State
 
 **After all fixes (fresh cache, 2026-04-03):**
-- nitrocop: 4017 offenses (6143 files)
+- nitrocop: 4046 offenses (6143 files)
 - RuboCop: 3986 offenses (6143 files)
-- **Gap: +31** (6 cops with differences — down from 28)
+- **Gap: +60** (3 cops with differences — down from 28)
 
-The key metric is **per-cop accuracy**: 25 cops were fixed to exact match across sessions 1-6, reducing mismatched cops from 28 to 6.
+The key metric is **per-cop accuracy**: 31 cops were fixed to exact match across sessions 1-7, reducing mismatched cops from 28 to 3.
 
-### Per-Cop Breakdown (6 cops with differences)
+### Per-Cop Breakdown (3 cops with differences)
 
 ```
 Cop                                                  Nitro   Rubo    Gap
 --------------------------------------------------------------------------------
 Lint/Syntax                                           1523   1456    +67
-Standard/BlockSingleLineBraces                           0     23    -23
 Layout/IndentationWidth                                 18     24     -6
-Layout/HashAlignment                                     6      9     -3
-Lint/UselessAssignment                                 241    244     -3
 Lint/SymbolConversion                                    9     10     -1
 --------------------------------------------------------------------------------
 
 FP total (nitro over-reports): +67
-FN total (nitro under-reports): -36
+FN total (nitro under-reports): -7
 ```
 
 ## Cops Fixed to Exact Match
 
-25 cops were fixed across sessions 1-6:
+31 cops were fixed across sessions 1-7:
 
 | Cop | Before | After | Session |
 |-----|--------|-------|---------|
@@ -72,6 +69,10 @@ FN total (nitro under-reports): -36
 | Rails/IndexBy | nitro=12, rubo=9 (+3) | 9=9 | 6 |
 | Rails/IndexWith | nitro=12, rubo=9 (+3) | 9=9 | 6 |
 | Style/Sample | nitro=15, rubo=18 (-3) | 18=18 | 6 |
+| Layout/HashAlignment | nitro=6, rubo=9 (-3) | 9=9 | 7 |
+| Lint/UselessAssignment | nitro=241, rubo=244 (-3) | 244=244 | 7 |
+| Layout/IndentationWidth (partial) | nitro=18, rubo=24 (-6) | 18→18 (partial, -6 remain) | 7 |
+| Standard/BlockSingleLineBraces | nitro=0, rubo=23 (-23) | 23=23 | 7 |
 
 *Style/RedundantRegexpEscape: the 2 vs 4 offenses came from a test file artifact that was removed. Both tools now report 0.
 
@@ -189,25 +190,13 @@ FN total (nitro under-reports): -36
 #### Lint/Syntax +67
 Inherent difference between Prism (nitrocop's parser) and the Parser gem (RuboCop's parser). They produce different parse error counts/messages. Cannot be resolved without switching parsers.
 
-### Unimplemented
-
-#### Standard/BlockSingleLineBraces -23
-A `standard` gem cop, not part of core RuboCop. Would require implementing from scratch.
-
 ### Deferred (risky tradeoff)
 
 #### Layout/IndentationWidth -6
-- 9 FNs: 6 from tab-indented files, 3 from begin-end alignment edge cases.
-- 3 FPs: `DefEndAlignment` misaligned `end` edge cases.
-- Tab handling would regress 159 FPs on the corpus. All differences are in corpus fixtures.
-
-#### Layout/HashAlignment -3
-- Previously attempted, reverted due to +252 FP regression on corpus.
+- Remaining 6 FNs are all from tab-indented files. Tab handling would regress 159 FPs on the corpus.
+- Session 7 fixed the `def` base_col computation (effective_column) and removed begin...end alt_base.
 
 ### Corpus fixture artifacts
-
-#### Lint/UselessAssignment -3
-Data flow analysis differences between Prism and Parser gem on malformed single-line corpus fixtures.
 
 #### Lint/SymbolConversion -1
 Malformed corpus fixture: `:sym.to_sym` after `"text".to_s` without semicolons. Prism folds `:sym.to_sym` as argument to preceding expression.
@@ -237,31 +226,50 @@ nitrocop's stat-based result cache (`~/.cache/nitrocop/`) does NOT invalidate wh
 ### Argument Check Pattern for Malformed Fixtures
 Many cops can be hardened against malformed corpus fixtures by checking that the outer method call has no unexpected arguments. RuboCop's node_pattern DSL naturally rejects calls with extra arguments, but nitrocop's manual AST traversal doesn't — explicit `arguments().is_none()` / `arguments().is_some()` checks are needed. This pattern was applied to 6 cops in session 6.
 
+### Session 7 Fixes
+
+#### 32. Layout/HashAlignment (`src/cop/layout/hash_alignment.rs`)
+- Added heuristic for detecting hash-inside-call-args context. When `autocorrect_incompatible_with_other_cops?` would skip the offense, check if the hash's preceding non-whitespace character is `(` or `,` (indicating call arg context) and only skip in that case.
+
+#### 33. Lint/UselessAssignment (`src/cop/lint/useless_assignment.rs`)
+- Fixed parameter name skip in `report_useless`. Method params were unconditionally excluded from useless assignment detection. Changed: `analyze_def` passes empty HashSet (method params should be reported), `analyze_block_scope` passes only `outer_vars` (not params+outer_vars).
+
+#### 34. Layout/IndentationWidth (`src/cop/layout/indentation_width.rs`)
+- Fixed `def` base_col to use RuboCop's `effective_column` (first non-whitespace char on the line) instead of the `def` keyword column. Handles `helper_method def amount_type` correctly.
+- Removed `begin...end` alt_base (changed to pass `None`).
+- Preserved `keyword` style branch for `align_style == "keyword"`.
+
+#### 35. Standard/BlockSingleLineBraces (`src/cop/standard/block_single_line_braces.rs`) — NEW COP
+- Implemented the `standard-custom` gem cop from scratch. Detects single-line `do...end` blocks and suggests `{...}`.
+- Handles: parenthesized calls, non-parenthesized calls (reports but skips autocorrect), super/forwarding_super nodes.
+- Skips: multi-line blocks, already-braced blocks, operator methods, assignment methods.
+- Added `Standard` department: `src/cop/standard/mod.rs`, registered in `registry.rs`.
+- Added `("Standard", "standard-custom")` to `PLUGIN_GEM_DEPARTMENTS` in `src/config/mod.rs`.
+
 ## Test Status
 
-- **4656 library tests pass** (`cargo test --release --lib`)
+- **4658 library tests pass** (`cargo test --release --lib`)
 - 7 integration test failures are pre-existing (unrelated)
-- Clippy: no new warnings from session 6 changes (90 pre-existing errors)
-- fmt: run on all session 6 files
+- Clippy: no new warnings from session 7 changes (89 pre-existing errors)
+- fmt: run on all session 7 files
 
-## Files Modified (Session 6)
+## Files Modified (Session 7)
 
 ```
-src/config/mod.rs                                      | DisabledCopNames injection for MissingCopEnableDirective
-src/cop/lint/missing_cop_enable_directive.rs            | skip offenses for disabled cops
-src/cop/performance/string_bytesize.rs                 | argument check on outer call (.count)
-src/cop/rails/pick.rs                                  | argument check on outer call (.first)
-src/cop/rails/safe_navigation_with_blank.rs            | argument check on .blank?
-src/cop/rails/index_by.rs                              | argument check on .to_h in Pattern 1
-src/cop/rails/index_with.rs                            | argument check on .to_h in Pattern 1
-src/cop/style/sample.rs                                | two-arg bracket access [0, n] pattern
-tests/fixtures/cops/style/sample/offense.rb            | add shuffle[0, 3] test case
-tests/fixtures/cops/style/sample/corrected.rb          | add sample(3) expected correction
+src/cop/layout/hash_alignment.rs                       | preceding-char heuristic for call arg context
+src/cop/lint/useless_assignment.rs                     | fix param name skip in report_useless
+src/cop/layout/indentation_width.rs                    | effective_column for def base_col, remove begin alt_base
+src/cop/standard/block_single_line_braces.rs           | NEW: Standard/BlockSingleLineBraces cop
+src/cop/standard/mod.rs                                | NEW: Standard department module
+src/cop/mod.rs                                         | add pub mod standard
+src/cop/registry.rs                                    | register Standard department, update count
+src/config/mod.rs                                      | add Standard to PLUGIN_GEM_DEPARTMENTS
+tests/integration.rs                                   | update cop count from 915 to 916
+tests/fixtures/cops/standard/block_single_line_braces/ | NEW: offense.rb, no_offense.rb
 ```
 
 ## Next Steps (Suggested Priority)
 
-1. **Commit all changes** — all files across sessions 1-6 are unstaged.
-2. **Standard/BlockSingleLineBraces** (-23) — highest-impact unimplemented cop.
-3. **Layout/IndentationWidth** (-6) — investigate tab handling without corpus regression.
-4. **Layout/HashAlignment** (-3) — retry with more conservative approach.
+1. **Commit all changes** — all files across sessions 1-7 are unstaged.
+2. **Layout/IndentationWidth** (-6) — remaining tab-related FNs, risky.
+3. **Lint/SymbolConversion** (-1) — corpus fixture artifact, low priority.

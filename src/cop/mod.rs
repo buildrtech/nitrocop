@@ -14,6 +14,7 @@ pub mod registry;
 pub mod rspec;
 pub mod rspec_rails;
 pub mod security;
+pub mod standard;
 pub mod style;
 pub mod tiers;
 pub mod util;

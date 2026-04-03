@@ -664,7 +664,23 @@ impl Cop for HashAlignment {
             } else {
                 let hash_begins_line = crate::cop::util::begins_its_line(source, hash_node_start);
                 if !hash_begins_line && !first.begins_line {
-                    return;
+                    // Only skip if the hash is inside a call's arguments
+                    // (matching RuboCop's `node.parent&.call_type?` check).
+                    // Heuristic: check if the preceding non-whitespace char is
+                    // `(` or `,` which indicates call argument context.
+                    let bytes = source.as_bytes();
+                    let mut i = hash_node_start;
+                    while i > 0 {
+                        i -= 1;
+                        let b = bytes[i];
+                        if b == b' ' || b == b'\t' {
+                            continue;
+                        }
+                        if b == b'(' || b == b',' {
+                            return; // hash is inside call args — skip
+                        }
+                        break; // preceded by `=`, `[`, etc. — don't skip
+                    }
                 }
             }
         }

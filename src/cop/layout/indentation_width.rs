@@ -728,16 +728,13 @@ impl Cop for IndentationWidth {
                 } else {
                     kw_col
                 };
-                let alt_base = if base_col != kw_col {
-                    Some(kw_col)
-                } else {
-                    None
-                };
+                // RuboCop checks body indentation relative to `end` only,
+                // not `begin`. No alt_base needed.
                 diagnostics.extend(self.check_statements_indentation(
                     source,
                     kw_offset,
                     base_col,
-                    alt_base,
+                    None,
                     begin_node.statements(),
                     width,
                     corrections.as_deref_mut(),
@@ -813,16 +810,24 @@ impl Cop for IndentationWidth {
         if let Some(def_node) = node.as_def_node() {
             let kw_offset = def_node.def_keyword_loc().start_offset();
             let base_col = if align_style == "keyword" {
-                // EnforcedStyleAlignWith: keyword — indent relative to `def` keyword column
+                // keyword style: indent relative to `def` keyword column
                 source.offset_to_line_col(kw_offset).1
             } else {
-                // EnforcedStyleAlignWith: start_of_line (default) — indent relative to the
-                // start of the line, using `end` keyword column as proxy for line-start indent.
-                if let Some(end_loc) = def_node.end_keyword_loc() {
-                    source.offset_to_line_col(end_loc.start_offset()).1
-                } else {
-                    source.offset_to_line_col(kw_offset).1
+                // start_of_line (default): RuboCop uses `effective_column` which is
+                // the column of the first non-whitespace char on the `def` keyword's
+                // line. This handles `helper_method def foo` where `def` is mid-line.
+                let bytes = source.as_bytes();
+                let mut line_start = kw_offset;
+                while line_start > 0 && bytes[line_start - 1] != b'\n' {
+                    line_start -= 1;
                 }
+                let mut col = 0;
+                let mut i = line_start;
+                while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                    col += 1;
+                    i += 1;
+                }
+                col
             };
             diagnostics.extend(self.check_body_indentation(
                 source,

@@ -3542,6 +3542,7 @@ const PLUGIN_GEM_DEPARTMENTS: &[(&str, &str)] = &[
     ("Capybara", "rubocop-capybara"),
     ("Performance", "rubocop-performance"),
     // standard-family wrapper gems
+    ("Standard", "standard-custom"),
     ("Rails", "standard-rails"),
     ("Migration", "standard-rails"),
     ("Performance", "standard-performance"),
