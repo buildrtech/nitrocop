@@ -1022,32 +1022,35 @@ fn emit_syntax_diagnostics(
     suppress_secondary_syntax_diagnostics(diagnostics)
 }
 
-fn is_recovery_ignoring_message(message: &str) -> bool {
-    // "unexpected label, ignoring it" is often RuboCop's primary syntax
-    // offense equivalent (reported as unexpected token `foo:`), so keep it.
-    message.ends_with(", ignoring it") && message != "unexpected label, ignoring it"
+/// Check if a message is a Prism-only recovery notice that RuboCop never emits.
+/// Non-label "..., ignoring it" messages are always suppressed — RuboCop/Parser
+/// never produces them. "unexpected label, ignoring it" is kept because it maps
+/// to RuboCop's "unexpected token foo:" format.
+fn is_prism_only_recovery_message(message: &str) -> bool {
+    if message.ends_with(", ignoring it") && message != "unexpected label, ignoring it" {
+        return true;
+    }
+    // Prism emits "expected a '}' to close the hash literal" and similar
+    // "expected a closing delimiter for ..." hints that RuboCop never reports.
+    if message.starts_with("expected a '") && message.contains("' to close") {
+        return true;
+    }
+    if message.starts_with("expected a closing delimiter") {
+        return true;
+    }
+    false
 }
 
-/// Prism can emit multiple diagnostics at the same location during error recovery,
-/// including secondary "..., ignoring it" notices and exact-duplicate cascading errors.
-/// RuboCop/Parser keeps distinct error messages at the same location but does not
-/// emit true duplicates. First suppress recovery notices when a primary diagnostic
-/// exists at the same location, then deduplicate exact (line, column, message) triples.
+/// Suppress Prism-only recovery diagnostics and deduplicate exact
+/// (line, column, message) triples. RuboCop/Parser does not emit recovery
+/// "ignoring it" notices or "expected to close" hints, so we filter them
+/// unconditionally. Deduplication handles cascading errors.
 fn suppress_secondary_syntax_diagnostics(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    let mut loc_has_primary: HashSet<(usize, usize)> = HashSet::new();
-    for diag in &diagnostics {
-        if !is_recovery_ignoring_message(&diag.message) {
-            loc_has_primary.insert((diag.location.line, diag.location.column));
-        }
-    }
-
     let mut seen = HashSet::new();
     diagnostics
         .into_iter()
         .filter(|diag| {
-            if is_recovery_ignoring_message(&diag.message)
-                && loc_has_primary.contains(&(diag.location.line, diag.location.column))
-            {
+            if is_prism_only_recovery_message(&diag.message) {
                 return false;
             }
             seen.insert((
@@ -1625,7 +1628,8 @@ renamed:
     }
 
     #[test]
-    fn suppress_secondary_syntax_keeps_ignoring_when_no_primary_at_location() {
+    fn suppress_secondary_syntax_filters_ignoring_unconditionally() {
+        // Non-label "ignoring it" messages are always suppressed — RuboCop never emits them.
         let diagnostics = vec![Diagnostic {
             path: "test.rb".to_string(),
             location: Location {
@@ -1639,7 +1643,37 @@ renamed:
         }];
 
         let filtered = suppress_secondary_syntax_diagnostics(diagnostics);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn suppress_secondary_syntax_filters_expected_to_close() {
+        let diagnostics = vec![Diagnostic {
+            path: "test.rb".to_string(),
+            location: Location { line: 1, column: 5 },
+            severity: Severity::Fatal,
+            cop_name: "Lint/Syntax".to_string(),
+            message: "expected a '}' to close the hash literal".to_string(),
+            corrected: false,
+        }];
+
+        let filtered = suppress_secondary_syntax_diagnostics(diagnostics);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn suppress_secondary_syntax_keeps_label_ignoring() {
+        // "unexpected label, ignoring it" maps to RuboCop's "unexpected token foo:" — keep it.
+        let diagnostics = vec![Diagnostic {
+            path: "test.rb".to_string(),
+            location: Location { line: 1, column: 5 },
+            severity: Severity::Fatal,
+            cop_name: "Lint/Syntax".to_string(),
+            message: "unexpected label, ignoring it".to_string(),
+            corrected: false,
+        }];
+
+        let filtered = suppress_secondary_syntax_diagnostics(diagnostics);
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].message, "unexpected ',', ignoring it");
     }
 }

@@ -18,25 +18,25 @@ Minimize the per-cop offense count differences between nitrocop and RuboCop when
 ## Current State
 
 **After all fixes (fresh cache, 2026-04-03):**
-- nitrocop: 4053 offenses (6143 files)
+- nitrocop: 3992 offenses (6143 files)
 - RuboCop: 3986 offenses (6143 files)
-- **Gap: +67** (1 cop with differences — down from 28)
+- **Gap: +6** (1 cop with differences — down from 28)
 
-The key metric is **per-cop accuracy**: 33 cops were fixed to exact match across sessions 1-8, reducing mismatched cops from 28 to 1.
+The key metric is **per-cop accuracy**: 34 cops were fixed across sessions 1-8, reducing mismatched cops from 28 to 1.
 
 ### Per-Cop Breakdown (1 cop with differences)
 
 ```
 Cop                                                  Nitro   Rubo    Gap
 --------------------------------------------------------------------------------
-Lint/Syntax                                           1523   1456    +67
+Lint/Syntax                                           1462   1456    +6
 --------------------------------------------------------------------------------
 
-FP total (nitro over-reports): +67
+FP total (nitro over-reports): +6
 FN total (nitro under-reports): 0
 ```
 
-The only remaining difference is Lint/Syntax (+67), an unfixable parser difference between Prism and the Parser gem. Every other cop matches RuboCop exactly.
+The remaining +6 is entirely within `benchmark/rubocop_corpus/fixtures/` — synthetic broken Ruby files. **Every real project file matches RuboCop exactly.** The difference is inherent to Prism vs. the Parser gem producing different error diagnostics on intentionally malformed code.
 
 ## Cops Fixed to Exact Match
 
@@ -74,6 +74,7 @@ The only remaining difference is Lint/Syntax (+67), an unfixable parser differen
 | Standard/BlockSingleLineBraces | nitro=0, rubo=23 (-23) | 23=23 | 7 |
 | Layout/IndentationWidth | nitro=18, rubo=24 (-6) | 24=24 | 8 |
 | Lint/SymbolConversion | nitro=9, rubo=10 (-1) | 10=10 | 8 |
+| Lint/Syntax | nitro=1523, rubo=1456 (+67) | 1462≈1456 (+6) | 8 |
 
 *Style/RedundantRegexpEscape: the 2 vs 4 offenses came from a test file artifact that was removed. Both tools now report 0.
 
@@ -186,12 +187,8 @@ The only remaining difference is Lint/Syntax (+67), an unfixable parser differen
 
 ## Remaining Gap Analysis
 
-### Unfixable
-
-#### Lint/Syntax +67
-Inherent difference between Prism (nitrocop's parser) and the Parser gem (RuboCop's parser). They produce different parse error counts/messages. Cannot be resolved without switching parsers.
-
-Both Layout/IndentationWidth and Lint/SymbolConversion were fixed in session 8. All false negatives are now resolved.
+### Lint/Syntax +6 (residual parser difference)
+After filtering Prism-only recovery messages (", ignoring it" and "expected to close" patterns), the gap dropped from +67 to +6. The remaining 6 are inherent differences between Prism and the Parser gem on intentionally broken fixture files in `benchmark/rubocop_corpus/fixtures/`. **All real project files match exactly.**
 
 ## Important Lessons Learned
 
@@ -249,9 +246,14 @@ Many cops can be hardened against malformed corpus fixtures by checking that the
 #### 37. Lint/SymbolConversion (`src/cop/lint/symbol_conversion.rs`)
 - Removed `call.arguments().is_some()` guard from `check_call_node`. RuboCop flags `.to_sym`/`.intern` on symbol/string/dstr receivers regardless of arguments. The guard was preventing detection of `:sym.to_sym` in malformed multi-expression fixtures where Prism folds trailing expressions as arguments.
 
+#### 38. Lint/Syntax (`src/linter.rs`)
+- Unconditionally suppress non-label ", ignoring it" recovery messages — RuboCop/Parser never emits them. Previously only suppressed when a primary diagnostic existed at the same (line, column).
+- Filter "expected a '...' to close" and "expected a closing delimiter" Prism-specific hint messages — RuboCop/Parser never emits these either.
+- Gap reduced from +67 to +6. The remaining 6 are inherent parser differences on synthetic broken fixture files.
+
 ## Test Status
 
-- **4659 library tests pass** (`cargo test --release --lib`)
+- **4661 library tests pass** (`cargo test --release --lib`)
 - 7 integration test failures are pre-existing (unrelated)
 - fmt: run on all session 8 files
 
@@ -261,6 +263,7 @@ Many cops can be hardened against malformed corpus fixtures by checking that the
 src/cop/layout/indentation_width.rs                    | conditional tab skip based on IndentationStyle
 src/config/mod.rs                                      | IndentationStyleEnforcedStyle injection
 src/cop/lint/symbol_conversion.rs                      | remove argument guard on check_call_node
+src/linter.rs                                          | suppress Prism-only recovery/hint messages
 tests/fixtures/cops/layout/indentation_width/no_offense.rb | remove tab-indented cases
 tests/fixtures/cops/lint/symbol_conversion/no_offense.rb   | remove "foo".to_sym(1) case
 ```
@@ -268,4 +271,4 @@ tests/fixtures/cops/lint/symbol_conversion/no_offense.rb   | remove "foo".to_sym
 ## Next Steps
 
 1. **Commit all changes** — all files across sessions 1-8 are unstaged.
-2. All false negatives are resolved. The only remaining gap is Lint/Syntax (+67), an unfixable parser difference.
+2. All false negatives are resolved. Lint/Syntax +6 is residual parser noise on synthetic fixtures only.
