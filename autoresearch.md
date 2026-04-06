@@ -2,12 +2,13 @@
 
 ## Objective
 Make `nitrocop ~/Dev/wt-gph-rspec-rip-out` faster while preserving behavior: offense count must stay exactly **3992**.
+Benchmark uses the exact user command shape (default formatter, no `--format json`).
 
 ## Metrics
 - **Primary**: `total_ms` (ms, lower is better)
 - **Secondary**:
   - `offense_count` (must remain 3992)
-  - `json_bytes` (output size sanity signal)
+  - `output_bytes` (output size sanity signal)
 
 ## How to Run
 `./autoresearch.sh`
@@ -15,7 +16,7 @@ Make `nitrocop ~/Dev/wt-gph-rspec-rip-out` faster while preserving behavior: off
 The script prints structured metrics:
 - `METRIC total_ms=<number>`
 - `METRIC offense_count=<number>`
-- `METRIC json_bytes=<number>`
+- `METRIC output_bytes=<number>`
 
 ## Files in Scope
 - `src/**/*.rs` — nitrocop implementation and performance changes
