@@ -6,9 +6,6 @@ EXPECTED_OFFENSES=3992
 BIN="./target/release/nitrocop"
 OUT_TXT="/tmp/nitrocop-autoresearch-output.txt"
 
-# Ensure benchmark uses the latest source changes. Build cost is excluded from metric.
-cargo build --release -q
-
 # Ensure benchmark uses the latest source changes without perturbing run-time
 # caches when no rebuild is needed.
 needs_build=0
