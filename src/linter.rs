@@ -1211,7 +1211,9 @@ fn lint_source_once(
                 None,
             );
         }
-        ast_cop_indices.push(i);
+        if cop.uses_node_check() {
+            ast_cop_indices.push(i);
+        }
     }
 
     // Pass 2: Pattern cops
@@ -1261,7 +1263,9 @@ fn lint_source_once(
                 None,
             );
         }
-        ast_cop_indices.push(i);
+        if cop.uses_node_check() {
+            ast_cop_indices.push(i);
+        }
     }
 
     if let Some(t) = timers {

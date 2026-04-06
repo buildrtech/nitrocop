@@ -349,9 +349,18 @@ pub trait Cop: Send + Sync {
 
     /// Node types this cop handles in `check_node`.
     /// Return a non-empty slice to opt into selective dispatch (only called for
-    /// matching node types). Return `&[]` to be called for every node (default).
+    /// matching node types). Return `&[]` for universal node dispatch.
     fn interested_node_types(&self) -> &'static [u8] {
         &[]
+    }
+
+    /// Whether this cop participates in AST node traversal (`check_node`).
+    ///
+    /// Most cops either declare `interested_node_types()` or implement line/source
+    /// checks only. Defaulting to `false` avoids dispatching no-op `check_node`
+    /// calls for every AST node.
+    fn uses_node_check(&self) -> bool {
+        !self.interested_node_types().is_empty()
     }
 
     /// Node-based check — called for every AST node during traversal.

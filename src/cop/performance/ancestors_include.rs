@@ -10,6 +10,10 @@ impl Cop for AncestorsInclude {
         "Performance/AncestorsInclude"
     }
 
+    fn uses_node_check(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }

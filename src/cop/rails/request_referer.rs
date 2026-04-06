@@ -22,6 +22,10 @@ impl Cop for RequestReferer {
         "Rails/RequestReferer"
     }
 
+    fn uses_node_check(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }

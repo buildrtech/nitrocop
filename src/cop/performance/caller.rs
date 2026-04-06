@@ -21,6 +21,10 @@ impl Cop for Caller {
         "Performance/Caller"
     }
 
+    fn uses_node_check(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }

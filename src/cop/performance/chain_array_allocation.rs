@@ -142,6 +142,10 @@ impl Cop for ChainArrayAllocation {
         "Performance/ChainArrayAllocation"
     }
 
+    fn uses_node_check(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
