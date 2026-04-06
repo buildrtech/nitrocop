@@ -1,3 +1,4 @@
 {"type":"config","name":"nitrocop wt-gph-rspec-rip-out runtime optimization (offense count fixed at 3992)","metricName":"total_ms","metricUnit":"ms","bestDirection":"lower"}
 {"run":1,"commit":"5f798dc","metric":759.4,"metrics":{},"status":"keep","description":"Baseline run on wt-gph-rspec-rip-out with offense-count guardrail (3992).","timestamp":1775515209557,"segment":0,"confidence":null,"iterationTokens":120}
 {"type":"config","name":"nitrocop default-output runtime optimization on wt-gph-rspec-rip-out (offense count fixed at 3992)","metricName":"total_ms","metricUnit":"ms","bestDirection":"lower"}
+{"run":2,"commit":"0935aac","metric":651.07,"metrics":{},"status":"keep","description":"Baseline for exact user command (default formatter) with offense-count guardrail.","timestamp":1775515297317,"segment":1,"confidence":null,"iterationTokens":123}

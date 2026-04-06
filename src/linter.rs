@@ -34,12 +34,12 @@ where
         }
 
         // Warm/cache-hit workloads are metadata-bound and can regress with very
-        // large worker pools. Cap to 8 threads by default while preserving full
-        // parallelism on smaller machines.
+        // large worker pools. Keep a conservative cap, but allow more parallelism
+        // than before so medium/large repos are not artificially bottlenecked.
         let available = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        let capped = available.min(8);
+        let capped = available.min(12);
         if capped == available {
             return None;
         }
