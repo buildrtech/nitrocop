@@ -1215,6 +1215,7 @@ fn lint_source_once(
     }
 
     // Pass 2: Pattern cops
+    let path_ctx = active_filters.path_match_context(&source.path);
     for &i in active_filters.pattern_cop_indices() {
         let cop = &cops[i];
         let name = registry.cop_name(i);
@@ -1228,7 +1229,7 @@ fn lint_source_once(
             continue;
         }
 
-        if !active_filters.is_cop_match(i, &source.path) {
+        if !active_filters.is_cop_match_with_context(i, &path_ctx) {
             continue;
         }
 

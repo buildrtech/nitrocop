@@ -169,6 +169,13 @@ pub struct CopFilterSet {
     migrated_schema_version: Option<String>,
 }
 
+pub struct CopPathMatchContext<'a> {
+    path: &'a Path,
+    rel_path: Option<&'a Path>,
+    rel_to_base: Option<&'a Path>,
+    stripped: Option<&'a Path>,
+}
+
 impl CopFilterSet {
     fn matches_global_exclude_glob(&self, path: &Path) -> bool {
         // Fast reject: when all global exclude globs are anchored by a literal
@@ -325,55 +332,63 @@ impl CopFilterSet {
         self.config_dir.as_deref()
     }
 
-    /// Check whether a cop (by registry index) should run on the given file.
-    /// Checks both the original path and the path relativized to the nearest
-    /// config directory (supports per-directory `.rubocop.yml` path relativity):
-    /// - Include: matches if EITHER path matches (supports absolute + relative patterns)
-    /// - Exclude: matches if EITHER path matches (catches project-relative patterns)
-    pub fn is_cop_match(&self, index: usize, path: &Path) -> bool {
-        let filter = &self.filters[index];
-        if !filter.enabled {
-            return false;
-        }
-
+    /// Build reusable path variants for repeated cop Include/Exclude checks.
+    ///
+    /// Lint hot loops may evaluate hundreds of pattern cops for the same file;
+    /// computing these once per file avoids repeating strip-prefix logic for
+    /// each cop.
+    pub fn path_match_context<'a>(&'a self, path: &'a Path) -> CopPathMatchContext<'a> {
         let rel_path = self
             .nearest_config_dir(path)
             .and_then(|cd| path.strip_prefix(cd).ok());
 
         // Also relativize against base_dir when it differs from config_dir.
-        // For non-.rubocop configs (e.g., baseline_rubocop.yml), base_dir is cwd,
-        // which may differ from the config file's parent directory.
         let rel_to_base = self.base_dir.as_deref().and_then(|bd| {
-            // Skip if base_dir == config_dir (already covered by rel_path)
             if self.config_dir.as_deref() == Some(bd) {
                 return None;
             }
             path.strip_prefix(bd).ok()
         });
 
-        // Strip `./` prefix for matching: file discovery produces `./test/foo.rb`
-        // but cop Exclude patterns use `test/**/*`. Without stripping, patterns
-        // that don't start with `./` won't match.
         let stripped = path.strip_prefix("./").ok();
 
-        // Include: file must match on at least one path form.
-        // This supports both absolute patterns (/tmp/test/db/**) and
-        // relative patterns (db/migrate/**).
-        let included = filter.is_included(path)
-            || rel_path.is_some_and(|rel| filter.is_included(rel))
-            || rel_to_base.is_some_and(|rel| filter.is_included(rel))
-            || stripped.is_some_and(|s| filter.is_included(s));
+        CopPathMatchContext {
+            path,
+            rel_path,
+            rel_to_base,
+            stripped,
+        }
+    }
+
+    /// Check whether a cop (by registry index) should run on the given file.
+    /// Checks both the original path and the path relativized to the nearest
+    /// config directory (supports per-directory `.rubocop.yml` path relativity):
+    /// - Include: matches if EITHER path matches (supports absolute + relative patterns)
+    /// - Exclude: matches if EITHER path matches (catches project-relative patterns)
+    pub fn is_cop_match(&self, index: usize, path: &Path) -> bool {
+        let ctx = self.path_match_context(path);
+        self.is_cop_match_with_context(index, &ctx)
+    }
+
+    /// Same as `is_cop_match`, but reuses a precomputed path context.
+    pub fn is_cop_match_with_context(&self, index: usize, ctx: &CopPathMatchContext<'_>) -> bool {
+        let filter = &self.filters[index];
+        if !filter.enabled {
+            return false;
+        }
+
+        let included = filter.is_included(ctx.path)
+            || ctx.rel_path.is_some_and(|rel| filter.is_included(rel))
+            || ctx.rel_to_base.is_some_and(|rel| filter.is_included(rel))
+            || ctx.stripped.is_some_and(|s| filter.is_included(s));
         if !included {
             return false;
         }
 
-        // Exclude: file is excluded if EITHER path form matches.
-        // This catches project-relative Exclude patterns (lib/tasks/*.rake)
-        // even when the file path has a prefix (bench/repos/mastodon/...).
-        let excluded = filter.is_excluded(path)
-            || rel_path.is_some_and(|rel| filter.is_excluded(rel))
-            || rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
-            || stripped.is_some_and(|s| filter.is_excluded(s));
+        let excluded = filter.is_excluded(ctx.path)
+            || ctx.rel_path.is_some_and(|rel| filter.is_excluded(rel))
+            || ctx.rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
+            || ctx.stripped.is_some_and(|s| filter.is_excluded(s));
         if excluded {
             return false;
         }
