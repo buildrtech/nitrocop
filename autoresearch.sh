@@ -9,8 +9,18 @@ OUT_TXT="/tmp/nitrocop-autoresearch-output.txt"
 # Ensure benchmark uses the latest source changes. Build cost is excluded from metric.
 cargo build --release -q
 
-# Ensure benchmark uses the latest source changes. Build cost is excluded from metric.
-cargo build --release -q
+# Ensure benchmark uses the latest source changes without perturbing run-time
+# caches when no rebuild is needed.
+needs_build=0
+if [[ ! -x "$BIN" ]]; then
+  needs_build=1
+elif find src Cargo.toml Cargo.lock -type f -newer "$BIN" | head -n 1 | grep -q .; then
+  needs_build=1
+fi
+
+if [[ $needs_build -eq 1 ]]; then
+  cargo build --release -q
+fi
 
 if [[ ! -x "$BIN" ]]; then
   echo "nitrocop binary missing at $BIN; build with: cargo build --release" >&2
