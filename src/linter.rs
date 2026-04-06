@@ -39,7 +39,7 @@ where
         let available = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        let capped = available.min(12);
+        let capped = available.min(16);
         if capped == available {
             return None;
         }
