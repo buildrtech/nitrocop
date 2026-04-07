@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use crate::cop::node_type::{CALL_NODE, STRING_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -27,6 +29,17 @@ use crate::parse::source::SourceFile;
 /// These FPs are not fixable at the cop level; they require config-level awareness of
 /// which plugin cops are enabled per-project.
 pub struct WhereEquals;
+
+static EQ_ANON_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[\w.]+\s+=\s+\?$").unwrap());
+static IN_ANON_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)^[\w.]+\s+IN\s+\(\?\)$").unwrap());
+static IS_NULL_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)^[\w.]+\s+IS\s+NULL$").unwrap());
+static EQ_NAMED_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[\w.]+\s+=\s+:\w+$").unwrap());
+static IN_NAMED_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)^[\w.]+\s+IN\s+\(:\w+\)$").unwrap());
 
 impl Cop for WhereEquals {
     fn name(&self) -> &'static str {
@@ -79,27 +92,27 @@ impl Cop for WhereEquals {
             Some(a) => a,
             None => return,
         };
-        let arg_list: Vec<_> = args.arguments().iter().collect();
-        if arg_list.is_empty() {
+        let mut arg_iter = args.arguments().iter();
+        let Some(first_arg) = arg_iter.next() else {
             return;
-        }
+        };
 
         // Extract the SQL template string. It can appear in two forms:
         // 1. Direct: where("col = ?", val)  — first arg is a StringNode
         // 2. Array:  where(["col = ?", val]) — first arg is an ArrayNode containing a StringNode
-        let template = if let Some(str_node) = arg_list[0].as_string_node() {
+        let template: String = if let Some(str_node) = first_arg.as_string_node() {
             std::str::from_utf8(str_node.unescaped())
                 .unwrap_or("")
-                .to_string()
-        } else if let Some(array_node) = arg_list[0].as_array_node() {
-            let elements: Vec<_> = array_node.elements().iter().collect();
-            if elements.is_empty() {
+                .to_owned()
+        } else if let Some(array_node) = first_arg.as_array_node() {
+            let mut elements = array_node.elements().iter();
+            let Some(first_element) = elements.next() else {
                 return;
-            }
-            if let Some(str_node) = elements[0].as_string_node() {
+            };
+            if let Some(str_node) = first_element.as_string_node() {
                 std::str::from_utf8(str_node.unescaped())
                     .unwrap_or("")
-                    .to_string()
+                    .to_owned()
             } else {
                 return;
             }
@@ -111,17 +124,11 @@ impl Cop for WhereEquals {
         // column = ?
         // column IS NULL
         // column IN (?)
-        let eq_anon = regex::Regex::new(r"^[\w.]+\s+=\s+\?$").unwrap();
-        let in_anon = regex::Regex::new(r"(?i)^[\w.]+\s+IN\s+\(\?\)$").unwrap();
-        let is_null = regex::Regex::new(r"(?i)^[\w.]+\s+IS\s+NULL$").unwrap();
-        let eq_named = regex::Regex::new(r"^[\w.]+\s+=\s+:\w+$").unwrap();
-        let in_named = regex::Regex::new(r"(?i)^[\w.]+\s+IN\s+\(:\w+\)$").unwrap();
-
-        let is_simple_sql = eq_anon.is_match(&template)
-            || in_anon.is_match(&template)
-            || is_null.is_match(&template)
-            || eq_named.is_match(&template)
-            || in_named.is_match(&template);
+        let is_simple_sql = EQ_ANON_RE.is_match(&template)
+            || IN_ANON_RE.is_match(&template)
+            || IS_NULL_RE.is_match(&template)
+            || EQ_NAMED_RE.is_match(&template)
+            || IN_NAMED_RE.is_match(&template);
 
         if !is_simple_sql {
             return;
