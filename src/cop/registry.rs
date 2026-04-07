@@ -6,6 +6,7 @@ pub struct CopRegistry {
     cops: Vec<Box<dyn Cop>>,
     names: Vec<&'static str>,
     supports_autocorrect: Vec<bool>,
+    uses_node_check: Vec<bool>,
     index: HashMap<&'static str, usize>,
 }
 
@@ -17,6 +18,7 @@ impl CopRegistry {
             cops: Vec::new(),
             names: Vec::new(),
             supports_autocorrect: Vec::new(),
+            uses_node_check: Vec::new(),
             index: HashMap::new(),
         }
     }
@@ -45,9 +47,11 @@ impl CopRegistry {
     pub fn register(&mut self, cop: Box<dyn Cop>) {
         let name = cop.name();
         let supports_autocorrect = cop.supports_autocorrect();
+        let uses_node_check = cop.uses_node_check();
         let idx = self.cops.len();
         self.names.push(name);
         self.supports_autocorrect.push(supports_autocorrect);
+        self.uses_node_check.push(uses_node_check);
         self.cops.push(cop);
         self.index.insert(name, idx);
     }
@@ -74,6 +78,10 @@ impl CopRegistry {
 
     pub fn cop_supports_autocorrect(&self, idx: usize) -> bool {
         self.supports_autocorrect[idx]
+    }
+
+    pub fn cop_uses_node_check(&self, idx: usize) -> bool {
+        self.uses_node_check[idx]
     }
 
     pub fn len(&self) -> usize {
