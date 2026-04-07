@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -20,7 +20,7 @@ struct GemPathCache {
 
 static GEM_PATH_CACHE: Mutex<Option<GemPathCache>> = Mutex::new(None);
 
-const GEM_PATH_DISK_CACHE_VERSION: u32 = 1;
+const GEM_PATH_DISK_CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GemPathDiskCache {
@@ -29,6 +29,8 @@ struct GemPathDiskCache {
     lockfile_mtime_nanos: u32,
     lockfile_size: u64,
     entries: HashMap<String, String>,
+    #[serde(default)]
+    missing: Vec<String>,
 }
 
 fn lockfile_meta(working_dir: &Path) -> (Option<SystemTime>, Option<(u64, u32, u64)>) {
@@ -63,35 +65,44 @@ fn gem_path_disk_cache_path(working_dir: &Path) -> PathBuf {
         .join(format!("gem-paths-{}.json", &hash[..16]))
 }
 
-fn load_disk_cache_entries(working_dir: &Path, stamp: (u64, u32, u64)) -> HashMap<String, PathBuf> {
+fn load_disk_cache(
+    working_dir: &Path,
+    stamp: (u64, u32, u64),
+) -> (HashMap<String, PathBuf>, HashSet<String>) {
     let cache_path = gem_path_disk_cache_path(working_dir);
     let Ok(bytes) = std::fs::read(cache_path) else {
-        return HashMap::new();
+        return (HashMap::new(), HashSet::new());
     };
     let Ok(cache) = serde_json::from_slice::<GemPathDiskCache>(&bytes) else {
-        return HashMap::new();
+        return (HashMap::new(), HashSet::new());
     };
     if cache.version != GEM_PATH_DISK_CACHE_VERSION
         || cache.lockfile_mtime_secs != stamp.0
         || cache.lockfile_mtime_nanos != stamp.1
         || cache.lockfile_size != stamp.2
     {
-        return HashMap::new();
+        return (HashMap::new(), HashSet::new());
     }
 
-    cache
+    let entries = cache
         .entries
         .into_iter()
         .map(|(gem, path)| (gem, PathBuf::from(path)))
         .filter(|(_, path)| path.exists())
-        .collect()
+        .collect();
+    let missing = cache.missing.into_iter().collect();
+    (entries, missing)
 }
 
-fn write_disk_cache_entries(
+fn write_disk_cache(
     working_dir: &Path,
     stamp: (u64, u32, u64),
     entries: &HashMap<String, PathBuf>,
+    missing: &HashSet<String>,
 ) {
+    let mut missing_vec: Vec<String> = missing.iter().cloned().collect();
+    missing_vec.sort();
+
     let cache = GemPathDiskCache {
         version: GEM_PATH_DISK_CACHE_VERSION,
         lockfile_mtime_secs: stamp.0,
@@ -101,6 +112,7 @@ fn write_disk_cache_entries(
             .iter()
             .map(|(gem, path)| (gem.clone(), path.to_string_lossy().to_string()))
             .collect(),
+        missing: missing_vec,
     };
 
     let Ok(bytes) = serde_json::to_vec(&cache) else {
@@ -140,10 +152,18 @@ pub fn resolve_gem_path(gem_name: &str, working_dir: &Path) -> Result<PathBuf> {
 
     // Check persistent cache keyed by Gemfile.lock stamp.
     if let Some(stamp) = lockfile_stamp {
-        let disk_entries = load_disk_cache_entries(working_dir, stamp);
+        let (disk_entries, disk_missing) = load_disk_cache(working_dir, stamp);
         if let Some(path) = disk_entries.get(gem_name) {
             insert_cache_entry(working_dir, lockfile_mtime, gem_name, path);
             return Ok(path.clone());
+        }
+        if disk_missing.contains(gem_name) {
+            anyhow::bail!(
+                "Gem '{}' not found in cached bundle resolution for {}. \
+                 Run `bundle install` or remove it from inherit_gem.",
+                gem_name,
+                working_dir.display()
+            );
         }
     }
 
@@ -210,9 +230,10 @@ pub fn resolve_gem_path(gem_name: &str, working_dir: &Path) -> Result<PathBuf> {
     insert_cache_entry(working_dir, lockfile_mtime, gem_name, &path);
 
     if let Some(stamp) = lockfile_stamp {
-        let mut disk_entries = load_disk_cache_entries(working_dir, stamp);
+        let (mut disk_entries, mut disk_missing) = load_disk_cache(working_dir, stamp);
         disk_entries.insert(gem_name.to_string(), path.clone());
-        write_disk_cache_entries(working_dir, stamp, &disk_entries);
+        disk_missing.remove(gem_name);
+        write_disk_cache(working_dir, stamp, &disk_entries, &disk_missing);
     }
 
     Ok(path)
@@ -254,25 +275,32 @@ pub fn resolve_gem_paths_batch(
         }
     }
 
-    let mut disk_entries = lockfile_stamp.map(|stamp| load_disk_cache_entries(working_dir, stamp));
-    if !missing.is_empty() {
-        if let Some(ref entries) = disk_entries {
-            let mut still_missing = Vec::new();
-            for gem in missing {
-                if let Some(path) = entries.get(&gem) {
-                    resolved.insert(gem.clone(), path.clone());
-                    insert_cache_entry(working_dir, lockfile_mtime, &gem, path);
-                } else {
-                    still_missing.push(gem);
-                }
+    let (mut disk_entries, mut disk_missing) = if let Some(stamp) = lockfile_stamp {
+        load_disk_cache(working_dir, stamp)
+    } else {
+        (HashMap::new(), HashSet::new())
+    };
+
+    if !missing.is_empty() && lockfile_stamp.is_some() {
+        let mut still_missing = Vec::new();
+        for gem in missing {
+            if let Some(path) = disk_entries.get(&gem) {
+                resolved.insert(gem.clone(), path.clone());
+                insert_cache_entry(working_dir, lockfile_mtime, &gem, path);
+            } else if disk_missing.contains(&gem) {
+                // Known missing gem for this lockfile; skip Bundler lookup.
+            } else {
+                still_missing.push(gem);
             }
-            missing = still_missing;
         }
+        missing = still_missing;
     }
 
     if missing.is_empty() {
         return Ok(resolved);
     }
+
+    let requested_missing = missing.clone();
 
     let script = r##"
 require 'bundler'
@@ -319,6 +347,7 @@ end
         );
     }
 
+    let mut resolved_now: HashSet<String> = HashSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let mut parts = line.splitn(2, '\t');
         let Some(gem_name) = parts.next() else {
@@ -329,16 +358,24 @@ end
         };
         let path = PathBuf::from(path_str);
         if path.exists() {
-            resolved.insert(gem_name.to_string(), path.clone());
-            insert_cache_entry(working_dir, lockfile_mtime, gem_name, &path);
-            if let Some(ref mut entries) = disk_entries {
-                entries.insert(gem_name.to_string(), path);
+            let gem_name = gem_name.to_string();
+            resolved_now.insert(gem_name.clone());
+            resolved.insert(gem_name.clone(), path.clone());
+            insert_cache_entry(working_dir, lockfile_mtime, &gem_name, &path);
+            if lockfile_stamp.is_some() {
+                disk_entries.insert(gem_name.clone(), path);
+                disk_missing.remove(&gem_name);
             }
         }
     }
 
-    if let (Some(stamp), Some(ref entries)) = (lockfile_stamp, disk_entries.as_ref()) {
-        write_disk_cache_entries(working_dir, stamp, entries);
+    if let Some(stamp) = lockfile_stamp {
+        for gem in requested_missing {
+            if !resolved_now.contains(&gem) && !disk_entries.contains_key(&gem) {
+                disk_missing.insert(gem);
+            }
+        }
+        write_disk_cache(working_dir, stamp, &disk_entries, &disk_missing);
     }
 
     Ok(resolved)
