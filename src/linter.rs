@@ -1169,16 +1169,23 @@ fn lint_source_once(
     let has_only = !args.only.is_empty();
     let has_except = !args.except.is_empty();
     let apply_selectors = has_only || has_except;
+    let redundant_disable_idx = registry.cop_index(REDUNDANT_DISABLE_COP);
 
     let autocorrect_off = autocorrect_mode == crate::cli::AutocorrectMode::Off;
 
     // Pass 1: Universal cops
     for &i in active_filters.universal_cop_indices() {
         let cop = &cops[i];
-        let name = registry.cop_name(i);
-        if name == REDUNDANT_DISABLE_COP {
+        if Some(i) == redundant_disable_idx {
             continue;
         }
+
+        let name = if apply_selectors || !autocorrect_off {
+            registry.cop_name(i)
+        } else {
+            ""
+        };
+
         if apply_selectors {
             if has_only && !args.only.iter().any(|o| o == name) {
                 continue;
@@ -1230,10 +1237,16 @@ fn lint_source_once(
     let path_ctx = active_filters.path_match_context(&source.path);
     for &i in active_filters.pattern_cop_indices() {
         let cop = &cops[i];
-        let name = registry.cop_name(i);
-        if name == REDUNDANT_DISABLE_COP {
+        if Some(i) == redundant_disable_idx {
             continue;
         }
+
+        let name = if apply_selectors || !autocorrect_off {
+            registry.cop_name(i)
+        } else {
+            ""
+        };
+
         if apply_selectors {
             if has_only && !args.only.iter().any(|o| o == name) {
                 continue;
