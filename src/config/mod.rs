@@ -2034,10 +2034,34 @@ fn load_config_recursive_inner(
 
         // 1. Process inherit_gem
         if let Some(Value::Mapping(gem_map)) = map.get(Value::String("inherit_gem".to_string())) {
+            let inherit_gem_names: Vec<String> = gem_map
+                .keys()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect();
+            let inherit_batch_paths = match gem_path::resolve_gem_paths_batch(&inherit_gem_names, working_dir) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    eprintln!("warning: inherit_gem batch path resolution failed: {e:#}");
+                    HashMap::new()
+                }
+            };
+
+            let mut merged_gem_cache = HashMap::new();
+            if let Some(existing) = gem_cache {
+                merged_gem_cache.extend(existing.clone());
+            }
+            merged_gem_cache.extend(inherit_batch_paths);
+            let merged_gem_cache_ref = Some(&merged_gem_cache);
+
             for (gem_key, gem_paths) in gem_map {
                 if let Some(gem_name) = gem_key.as_str() {
-                    let gem_layers =
-                        resolve_inherit_gem(gem_name, gem_paths, working_dir, visited, gem_cache)?;
+                    let gem_layers = resolve_inherit_gem(
+                        gem_name,
+                        gem_paths,
+                        working_dir,
+                        visited,
+                        merged_gem_cache_ref,
+                    )?;
                     for layer in gem_layers {
                         // Propagate user_mentioned from the layer's recursive loading.
                         // Don't use cop_configs.keys() — that includes require: defaults.
