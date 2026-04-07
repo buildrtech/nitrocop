@@ -4,16 +4,49 @@ set -euo pipefail
 TARGET_PATH="${1:-$HOME/Dev/wt-gph-rspec-rip-out}"
 EXPECTED_OFFENSES=3992
 BIN="target/release/nitrocop"
+BUILD_STAMP="target/release/.nitrocop_autoresearch_stamp"
+RELEVANT_PATHS=(src bench Cargo.toml Cargo.lock)
 
-rebuild_if_needed() {
-  if [[ ! -x "$BIN" ]]; then
-    cargo build --release >/dev/null
+current_build_fingerprint() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "nogit"
     return
   fi
 
-  if find src bench Cargo.toml Cargo.lock -type f -newer "$BIN" -print -quit | grep -q .; then
-    cargo build --release >/dev/null
+  local dirty=0
+  if ! git diff --quiet -- "${RELEVANT_PATHS[@]}"; then
+    dirty=1
   fi
+  if ! git diff --cached --quiet -- "${RELEVANT_PATHS[@]}"; then
+    dirty=1
+  fi
+  if git ls-files --others --exclude-standard -- "${RELEVANT_PATHS[@]}" | grep -q .; then
+    dirty=1
+  fi
+
+  if [[ "$dirty" -eq 0 ]]; then
+    echo "head:$(git rev-parse HEAD)"
+    return
+  fi
+
+  {
+    git diff -- "${RELEVANT_PATHS[@]}"
+    git diff --cached -- "${RELEVANT_PATHS[@]}"
+    git ls-files --others --exclude-standard -- "${RELEVANT_PATHS[@]}"
+  } | shasum -a 256 | awk '{print "dirty:" $1}'
+}
+
+rebuild_if_needed() {
+  local fingerprint
+  fingerprint="$(current_build_fingerprint)"
+
+  if [[ -x "$BIN" ]] && [[ -f "$BUILD_STAMP" ]] && [[ "$(<"$BUILD_STAMP")" == "$fingerprint" ]]; then
+    return
+  fi
+
+  cargo build --release >/dev/null
+  mkdir -p "$(dirname "$BUILD_STAMP")"
+  printf '%s\n' "$fingerprint" >"$BUILD_STAMP"
 }
 
 run_once_ms() {
