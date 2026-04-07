@@ -875,14 +875,13 @@ impl ScopeAnalyzer {
             return;
         }
 
-        // For other node types, fall through — use generic Visit to find reads
+        // For other node types, fall through — use generic Visit to find reads.
         // This handles literals, constants, etc. that don't affect liveness.
-        // We use a simple visitor to find any local variable reads in the subtree.
-        let mut read_finder = ReadFinder { reads: Vec::new() };
-        read_finder.visit(node);
-        for name in read_finder.reads {
-            self.record_read(state, &name);
-        }
+        let mut read_recorder = ReadRecorder {
+            analyzer: self,
+            state,
+        };
+        read_recorder.visit(node);
     }
 
     fn analyze_multi_target(&mut self, target: &ruby_prism::Node<'_>, state: &mut LiveState) {
@@ -1424,15 +1423,17 @@ fn standalone_line_range_from_span(
     Some((line_start, delete_end))
 }
 
-/// Simple visitor that collects all local variable reads in a subtree.
-/// Used as fallback for node types not explicitly handled by the analyzer.
-struct ReadFinder {
-    reads: Vec<String>,
+/// Fallback visitor for node kinds not explicitly handled in ScopeAnalyzer.
+/// Records local-variable reads directly into the live state.
+struct ReadRecorder<'a, 'b> {
+    analyzer: &'a mut ScopeAnalyzer,
+    state: &'b mut LiveState,
 }
 
-impl<'pr> Visit<'pr> for ReadFinder {
+impl<'pr> Visit<'pr> for ReadRecorder<'_, '_> {
     fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
-        self.reads.push(node_name(node.name().as_slice()));
+        let name = std::str::from_utf8(node.name().as_slice()).unwrap_or("");
+        self.analyzer.record_read(self.state, name);
     }
 
     // Don't recurse into new scopes
