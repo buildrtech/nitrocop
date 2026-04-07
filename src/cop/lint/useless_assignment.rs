@@ -300,10 +300,14 @@ impl ScopeAnalyzer {
         }
     }
 
-    /// Analyze a sequence of statements for useless assignments.
-    fn analyze_statements(&mut self, stmts: &[ruby_prism::Node<'_>], state: &mut LiveState) {
-        for stmt in stmts {
-            self.analyze_node(stmt, state);
+    /// Analyze a statements node without allocating an intermediate Vec.
+    fn analyze_statements_node(
+        &mut self,
+        stmts: &ruby_prism::StatementsNode<'_>,
+        state: &mut LiveState,
+    ) {
+        for stmt in stmts.body().iter() {
+            self.analyze_node(&stmt, state);
         }
     }
 
@@ -582,8 +586,7 @@ impl ScopeAnalyzer {
 
         // Statements node (sequence of statements)
         if let Some(stmts_node) = node.as_statements_node() {
-            let stmts: Vec<_> = stmts_node.body().iter().collect();
-            self.analyze_statements(&stmts, state);
+            self.analyze_statements_node(&stmts_node, state);
             return;
         }
 
@@ -915,8 +918,7 @@ impl ScopeAnalyzer {
         // Analyze consequent (if-branch)
         let mut if_state = before.clone();
         if let Some(stmts) = node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            self.analyze_statements(&body, &mut if_state);
+            self.analyze_statements_node(&stmts, &mut if_state);
         }
 
         // Analyze else branch
@@ -925,8 +927,7 @@ impl ScopeAnalyzer {
             // else clause can be ElseNode or IfNode (elsif)
             if let Some(else_node) = else_clause.as_else_node() {
                 if let Some(stmts) = else_node.statements() {
-                    let body: Vec<_> = stmts.body().iter().collect();
-                    self.analyze_statements(&body, &mut else_state);
+                    self.analyze_statements_node(&stmts, &mut else_state);
                 }
             } else if let Some(elsif_node) = else_clause.as_if_node() {
                 self.analyze_if(&elsif_node, &mut else_state);
@@ -968,15 +969,13 @@ impl ScopeAnalyzer {
 
         let mut body_state = before.clone();
         if let Some(stmts) = node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            self.analyze_statements(&body, &mut body_state);
+            self.analyze_statements_node(&stmts, &mut body_state);
         }
 
         if let Some(else_clause) = node.else_clause() {
             let mut else_state = before.clone();
             if let Some(stmts) = else_clause.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                self.analyze_statements(&body, &mut else_state);
+                self.analyze_statements_node(&stmts, &mut else_state);
             }
             // Track extra writes from both branches (same as analyze_if)
             for (name, &body_offset) in &body_state.live_writes {
@@ -1010,8 +1009,7 @@ impl ScopeAnalyzer {
                     self.analyze_node(&cond, &mut branch_state);
                 }
                 if let Some(stmts) = when_node.statements() {
-                    let body: Vec<_> = stmts.body().iter().collect();
-                    self.analyze_statements(&body, &mut branch_state);
+                    self.analyze_statements_node(&stmts, &mut branch_state);
                 }
                 branch_states.push(branch_state);
             }
@@ -1021,8 +1019,7 @@ impl ScopeAnalyzer {
             has_else = true;
             let mut else_state = before.clone();
             if let Some(stmts) = else_clause.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                self.analyze_statements(&body, &mut else_state);
+                self.analyze_statements_node(&stmts, &mut else_state);
             }
             branch_states.push(else_state);
         }
@@ -1058,8 +1055,7 @@ impl ScopeAnalyzer {
                 let mut branch_state = before.clone();
                 self.analyze_node(&in_node.pattern(), &mut branch_state);
                 if let Some(stmts) = in_node.statements() {
-                    let body: Vec<_> = stmts.body().iter().collect();
-                    self.analyze_statements(&body, &mut branch_state);
+                    self.analyze_statements_node(&stmts, &mut branch_state);
                 }
                 branch_states.push(branch_state);
             }
@@ -1069,8 +1065,7 @@ impl ScopeAnalyzer {
             has_else = true;
             let mut else_state = before.clone();
             if let Some(stmts) = else_clause.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                self.analyze_statements(&body, &mut else_state);
+                self.analyze_statements_node(&stmts, &mut else_state);
             }
             branch_states.push(else_state);
         }
@@ -1112,9 +1107,8 @@ impl ScopeAnalyzer {
         // First pass: find reads/writes in the body
         // Second pass: propagate reads from start of loop to end
         if let Some(stmts) = node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
             let mut loop_state = before.clone();
-            self.analyze_statements(&body, &mut loop_state);
+            self.analyze_statements_node(&stmts, &mut loop_state);
             self.analyze_node(&node.predicate(), &mut loop_state);
             // Protect writes from pass 1 before pass 2 — a write in the loop
             // body from the first iteration may be read in the next iteration
@@ -1122,7 +1116,7 @@ impl ScopeAnalyzer {
             // the second simulation pass.
             self.protect_live_writes(&loop_state);
             let mut loop_state2 = loop_state.clone();
-            self.analyze_statements(&body, &mut loop_state2);
+            self.analyze_statements_node(&stmts, &mut loop_state2);
             self.analyze_node(&node.predicate(), &mut loop_state2);
             *state = LiveState::merge_optional_branch(&before, &loop_state2);
         }
@@ -1142,13 +1136,12 @@ impl ScopeAnalyzer {
         let before = state.clone();
         self.protect_live_writes(&before);
         if let Some(stmts) = node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
             let mut loop_state = before.clone();
-            self.analyze_statements(&body, &mut loop_state);
+            self.analyze_statements_node(&stmts, &mut loop_state);
             self.analyze_node(&node.predicate(), &mut loop_state);
             self.protect_live_writes(&loop_state);
             let mut loop_state2 = loop_state.clone();
-            self.analyze_statements(&body, &mut loop_state2);
+            self.analyze_statements_node(&stmts, &mut loop_state2);
             self.analyze_node(&node.predicate(), &mut loop_state2);
             *state = LiveState::merge_optional_branch(&before, &loop_state2);
         }
@@ -1165,12 +1158,11 @@ impl ScopeAnalyzer {
         let before = state.clone();
         let saved_protected = self.protect_live_writes(&before);
         if let Some(stmts) = node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
             let mut loop_state = before.clone();
-            self.analyze_statements(&body, &mut loop_state);
+            self.analyze_statements_node(&stmts, &mut loop_state);
             self.analyze_for_index(&node.index(), &mut loop_state);
             let mut loop_state2 = loop_state.clone();
-            self.analyze_statements(&body, &mut loop_state2);
+            self.analyze_statements_node(&stmts, &mut loop_state2);
             *state = LiveState::merge_optional_branch(&before, &loop_state2);
         }
         self.restore_protected(saved_protected);
@@ -1215,8 +1207,7 @@ impl ScopeAnalyzer {
         // Begin body
         let before = state.clone();
         if let Some(stmts) = node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            self.analyze_statements(&body, state);
+            self.analyze_statements_node(&stmts, state);
         }
 
         // Rescue clauses — each is an optional branch from the begin body.
@@ -1254,16 +1245,14 @@ impl ScopeAnalyzer {
         // Else clause (runs if no exception)
         if let Some(else_node) = node.else_clause() {
             if let Some(stmts) = else_node.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                self.analyze_statements(&body, state);
+                self.analyze_statements_node(&stmts, state);
             }
         }
 
         // Ensure clause (always runs)
         if let Some(ensure_node) = node.ensure_clause() {
             if let Some(stmts) = ensure_node.statements() {
-                let body: Vec<_> = stmts.body().iter().collect();
-                self.analyze_statements(&body, state);
+                self.analyze_statements_node(&stmts, state);
             }
         }
 
@@ -1295,8 +1284,7 @@ impl ScopeAnalyzer {
 
         // Rescue body
         if let Some(stmts) = rescue_node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            self.analyze_statements(&body, &mut rescue_state);
+            self.analyze_statements_node(&stmts, &mut rescue_state);
         }
 
         // Merge rescue state (optional branch)
