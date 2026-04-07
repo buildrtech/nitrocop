@@ -1168,6 +1168,7 @@ fn lint_source_once(
     let cops = registry.cops();
     let has_only = !args.only.is_empty();
     let has_except = !args.except.is_empty();
+    let apply_selectors = has_only || has_except;
 
     let autocorrect_off = autocorrect_mode == crate::cli::AutocorrectMode::Off;
 
@@ -1178,11 +1179,13 @@ fn lint_source_once(
         if name == REDUNDANT_DISABLE_COP {
             continue;
         }
-        if has_only && !args.only.iter().any(|o| o == name) {
-            continue;
-        }
-        if has_except && args.except.iter().any(|e| e == name) {
-            continue;
+        if apply_selectors {
+            if has_only && !args.only.iter().any(|o| o == name) {
+                continue;
+            }
+            if has_except && args.except.iter().any(|e| e == name) {
+                continue;
+            }
         }
 
         let cop_config = &active_base_configs[i];
@@ -1231,11 +1234,13 @@ fn lint_source_once(
         if name == REDUNDANT_DISABLE_COP {
             continue;
         }
-        if has_only && !args.only.iter().any(|o| o == name) {
-            continue;
-        }
-        if has_except && args.except.iter().any(|e| e == name) {
-            continue;
+        if apply_selectors {
+            if has_only && !args.only.iter().any(|o| o == name) {
+                continue;
+            }
+            if has_except && args.except.iter().any(|e| e == name) {
+                continue;
+            }
         }
 
         if !active_filters.is_cop_match_with_context(i, &path_ctx) {
