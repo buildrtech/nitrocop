@@ -41,7 +41,10 @@ impl Cop for NestedParenthesizedCalls {
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let allowed_methods = config.get_string_array("AllowedMethods");
+        let allowed_methods = config
+            .options
+            .get("AllowedMethods")
+            .and_then(|v| v.as_sequence());
 
         // Looking for outer_method(inner_method arg) where inner_method has no parens
         let outer_call = match node.as_call_node() {
@@ -63,6 +66,8 @@ impl Cop for NestedParenthesizedCalls {
             Some(a) => a,
             None => return,
         };
+
+        let outer_arg_count = args.arguments().iter().count();
 
         for arg in args.arguments().iter() {
             let inner_call = match arg.as_call_node() {
@@ -98,18 +103,18 @@ impl Cop for NestedParenthesizedCalls {
             }
 
             // Check AllowedMethods - only allowed when outer has 1 arg and inner has 1 arg
-            if let Some(ref allowed) = allowed_methods {
-                let name_str = std::str::from_utf8(inner_bytes).unwrap_or("");
-                let outer_arg_count = args.arguments().iter().count();
-                let inner_arg_count = inner_call
-                    .arguments()
-                    .map(|a| a.arguments().iter().count())
-                    .unwrap_or(0);
-                if outer_arg_count == 1
-                    && inner_arg_count == 1
-                    && allowed.iter().any(|m| m == name_str)
-                {
-                    continue;
+            if let Some(allowed) = allowed_methods {
+                if outer_arg_count == 1 {
+                    let inner_arg_count = inner_call
+                        .arguments()
+                        .map(|a| a.arguments().iter().count())
+                        .unwrap_or(0);
+                    if inner_arg_count == 1 {
+                        let name_str = std::str::from_utf8(inner_bytes).unwrap_or("");
+                        if allowed.iter().any(|m| m.as_str() == Some(name_str)) {
+                            continue;
+                        }
+                    }
                 }
             }
 
