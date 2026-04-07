@@ -89,11 +89,6 @@ impl Cop for DynamicFindBy {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // AllowedMethods (Whitelist is deprecated alias)
-        let allowed = config.get_string_array("AllowedMethods");
-        let whitelist = config.get_string_array("Whitelist");
-        let allowed_receivers = config.get_string_array("AllowedReceivers");
-
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -102,6 +97,11 @@ impl Cop for DynamicFindBy {
         if !name.starts_with(b"find_by_") {
             return;
         }
+
+        // AllowedMethods (Whitelist is deprecated alias)
+        let allowed = config.get_string_array("AllowedMethods");
+        let whitelist = config.get_string_array("Whitelist");
+        let allowed_receivers = config.get_string_array("AllowedReceivers");
 
         // For receiverless calls, only flag inside AR model classes
         if call.receiver().is_none()
@@ -145,17 +145,19 @@ impl Cop for DynamicFindBy {
 
         // Validate argument count and types match dynamic finder pattern
         if let Some(args) = call.arguments() {
-            let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
-            // Argument count must match column count
-            if arg_list.len() != expected_arg_count {
-                return;
-            }
-            // Skip if any argument is a hash (keyword args, hash literal) or splat
-            if arg_list.iter().any(|arg| {
-                arg.as_keyword_hash_node().is_some()
+            let mut arg_count = 0usize;
+            for arg in args.arguments().iter() {
+                arg_count += 1;
+                // Skip if any argument is a hash (keyword args, hash literal) or splat
+                if arg.as_keyword_hash_node().is_some()
                     || arg.as_hash_node().is_some()
                     || arg.as_splat_node().is_some()
-            }) {
+                {
+                    return;
+                }
+            }
+            // Argument count must match column count
+            if arg_count != expected_arg_count {
                 return;
             }
         } else {
