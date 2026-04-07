@@ -1,37 +1,23 @@
-# Autoresearch: speed up nitrocop on wt-gph-rspec-rip-out
+# Autoresearch rules: nitrocop speed on wt-gph-rspec-rip-out
 
 ## Objective
-Make `nitrocop ~/Dev/wt-gph-rspec-rip-out` faster while preserving behavior: offense count must stay exactly **3992**.
-Benchmark uses the exact user command shape (default formatter, no `--format json`).
+Make `nitrocop ~/Dev/wt-gph-rspec-rip-out` faster.
 
-## Metrics
-- **Primary**: `total_ms` (ms, lower is better)
-- **Secondary**:
-  - `offense_count` (must remain 3992)
-  - `output_bytes` (output size sanity signal)
+## Primary metric
+- `total_ms` from `autoresearch.sh` (lower is better)
 
-## How to Run
-`./autoresearch.sh` (conditionally rebuilds `target/release/nitrocop` only when sources are newer; runs 3 no-cache benchmark samples and reports median `total_ms`)
+## Hard invariants (must never change)
+- Offense count must remain exactly `3992`.
+- Command behavior must remain equivalent for normal lint runs.
 
-The script prints structured metrics:
-- `METRIC total_ms=<number>`
-- `METRIC offense_count=<number>`
-- `METRIC output_bytes=<number>`
+## Benchmark harness constraints
+- Use `target/release/nitrocop`.
+- Rebuild only when Rust sources are newer than binary.
+- Run `--no-cache` to reduce cache artifacts.
+- Run 3 samples and use median wall time.
+- Parse summary line and fail run if offense count is not exactly 3992.
 
-## Files in Scope
-- `src/**/*.rs` — nitrocop implementation and performance changes
-- `Cargo.toml` / `Cargo.lock` — only if needed for optimization
-- `autoresearch.md` / `autoresearch.sh` / `autoresearch.ideas.md` — experiment control files
-
-## Off Limits
-- Corpus artifacts and benchmark cheating hacks
-- Changing CLI behavior or filtering diagnostics to reduce offense count
-- Any change that alters offense count from 3992 on this workload
-
-## Constraints
-- Do not overfit by special-casing this path or this repo.
-- Preserve offense count = 3992.
-- Prefer generally useful performance improvements.
-
-## What's Been Tried
-- Baseline pending.
+## Anti-overfitting guidance
+- Prefer broadly useful hot-path improvements over path-specific hacks.
+- Do not special-case this repository path.
+- Preserve correctness checks in every experiment.
