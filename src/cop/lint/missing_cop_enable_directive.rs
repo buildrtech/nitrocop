@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -57,26 +57,19 @@ impl Cop for MissingCopEnableDirective {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Fast reject: most files have no rubocop directives.
+        if !contains_subslice(source.as_bytes(), b"rubocop:") {
+            return;
+        }
+
         let max_range = get_max_range_size(config);
-        // Build set of cop names that are disabled in project config.
-        // When a disabled cop is never re-enabled (range to EOF), RuboCop's
-        // `acceptable_range?` skips the offense because the disable is harmless.
-        let disabled_cop_names: HashSet<String> = config
-            .options
-            .get("DisabledCopNames")
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
         // Track open disables: cop_name -> (line_number, column)
         let mut open_disables: HashMap<String, (usize, usize)> = HashMap::new();
-        let lines: Vec<&[u8]> = source.lines().collect();
 
         let mut byte_offset = 0usize;
-        for (i, line) in lines.iter().enumerate() {
+        let mut line_count = 0usize;
+        for (i, line) in source.lines().enumerate() {
+            line_count = i + 1;
             let line_str = match std::str::from_utf8(line) {
                 Ok(s) => s,
                 Err(_) => {
@@ -154,15 +147,19 @@ impl Cop for MissingCopEnableDirective {
             byte_offset += line.len() + 1;
         }
 
+        if open_disables.is_empty() {
+            return;
+        }
+
         // Report all remaining open disables (never re-enabled)
         for (cop, (line, _col)) in &open_disables {
             // RuboCop's acceptable_range? skips offenses when the disabled cop is
             // itself not enabled in config — the disable is harmless.
-            if disabled_cop_names.contains(cop) {
+            if is_cop_disabled_in_config(config, cop) {
                 continue;
             }
             if max_range.is_finite() {
-                let range_size = lines.len().saturating_sub(*line);
+                let range_size = line_count.saturating_sub(*line);
                 if range_size > max_range as usize {
                     diagnostics.push(self.diagnostic(
                         source,
@@ -198,6 +195,23 @@ fn format_message(cop: &str, max_range: Option<usize>) -> String {
             cop, kind,
         ),
     }
+}
+
+fn is_cop_disabled_in_config(config: &CopConfig, cop: &str) -> bool {
+    config
+        .options
+        .get("DisabledCopNames")
+        .and_then(|v| v.as_sequence())
+        .is_some_and(|seq| seq.iter().any(|item| item.as_str() == Some(cop)))
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 fn get_max_range_size(config: &CopConfig) -> f64 {
