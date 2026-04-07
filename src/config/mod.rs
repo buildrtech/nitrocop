@@ -1893,6 +1893,14 @@ fn load_config_recursive_inner(
         let visited_before_require = visited.clone();
 
         if !gems.is_empty() {
+            let batch_gem_paths = match gem_path::resolve_gem_paths_batch(&gems, working_dir) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    eprintln!("warning: batch gem path resolution failed: {e:#}");
+                    HashMap::new()
+                }
+            };
+
             for gem_name in &gems {
                 // Determine what config file to load for this gem.
                 // rubocop-* gems use config/default.yml.
@@ -1908,6 +1916,8 @@ fn load_config_recursive_inner(
                 };
 
                 let gem_root = if let Some(path) = gem_cache.and_then(|c| c.get(gem_name)) {
+                    path.clone()
+                } else if let Some(path) = batch_gem_paths.get(gem_name) {
                     path.clone()
                 } else {
                     match gem_path::resolve_gem_path(gem_name, working_dir) {

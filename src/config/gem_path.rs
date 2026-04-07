@@ -102,24 +102,138 @@ pub fn resolve_gem_path(gem_name: &str, working_dir: &Path) -> Result<PathBuf> {
         );
     }
 
-    // Store in cache
-    {
-        let mut cache = GEM_PATH_CACHE.lock().unwrap();
-        let c = cache.get_or_insert_with(|| GemPathCache {
-            entries: HashMap::new(),
-            lockfile_mtime,
-            working_dir: working_dir.to_path_buf(),
-        });
-        // Reset cache if lockfile or working_dir changed
-        if c.lockfile_mtime != lockfile_mtime || c.working_dir != working_dir {
-            c.entries.clear();
-            c.lockfile_mtime = lockfile_mtime;
-            c.working_dir = working_dir.to_path_buf();
-        }
-        c.entries.insert(cache_key, path.clone());
-    }
+    insert_cache_entry(working_dir, lockfile_mtime, gem_name, &path);
 
     Ok(path)
+}
+
+/// Resolve multiple gem paths in one Bundler process.
+///
+/// Returns only successfully resolved gems and updates the in-process cache.
+pub fn resolve_gem_paths_batch(
+    gem_names: &[String],
+    working_dir: &Path,
+) -> Result<HashMap<String, PathBuf>> {
+    if gem_names.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let lockfile_mtime = working_dir
+        .join("Gemfile.lock")
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok();
+
+    let mut resolved: HashMap<String, PathBuf> = HashMap::new();
+    let mut missing: Vec<String> = Vec::new();
+
+    {
+        let cache = GEM_PATH_CACHE.lock().unwrap();
+        if let Some(ref c) = *cache {
+            if c.working_dir == working_dir && c.lockfile_mtime == lockfile_mtime {
+                for gem in gem_names {
+                    let key = (working_dir.to_path_buf(), gem.clone());
+                    if let Some(path) = c.entries.get(&key) {
+                        resolved.insert(gem.clone(), path.clone());
+                    } else {
+                        missing.push(gem.clone());
+                    }
+                }
+            } else {
+                missing.extend(gem_names.iter().cloned());
+            }
+        } else {
+            missing.extend(gem_names.iter().cloned());
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(resolved);
+    }
+
+    let script = r##"
+require 'bundler'
+specs = Bundler.load.specs.each_with_object({}) { |s, h| h[s.name] = s.full_gem_path }
+ARGV.each do |name|
+  path = specs[name]
+  puts "#{name}\t#{path}" if path
+end
+"##;
+
+    let bundle_start = std::time::Instant::now();
+    let needs_mise = needs_mise_exec(working_dir);
+    let output = if needs_mise {
+        Command::new("mise")
+            .args(["exec", "--", "ruby", "-e", script, "--"])
+            .args(&missing)
+            .current_dir(working_dir)
+            .output()
+            .with_context(|| {
+                "Cannot resolve gem paths in batch: `mise exec -- ruby` failed. Ensure mise is installed and bundle is available."
+            })?
+    } else {
+        Command::new("bundle")
+            .args(["exec", "--", "ruby", "-e", script, "--"])
+            .args(&missing)
+            .current_dir(working_dir)
+            .output()
+            .with_context(|| {
+                "Cannot resolve gem paths in batch: `bundle exec ruby` failed. Ensure Bundler is installed and Gemfile is valid."
+            })?
+    };
+    eprintln!(
+        "debug: bundle batch gem path resolve ({} gems): {:.0?}",
+        missing.len(),
+        bundle_start.elapsed()
+    );
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Batch gem resolution failed in {}: {}",
+            working_dir.display(),
+            stderr.trim()
+        );
+    }
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let Some(gem_name) = parts.next() else {
+            continue;
+        };
+        let Some(path_str) = parts.next() else {
+            continue;
+        };
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            resolved.insert(gem_name.to_string(), path.clone());
+            insert_cache_entry(working_dir, lockfile_mtime, gem_name, &path);
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn insert_cache_entry(
+    working_dir: &Path,
+    lockfile_mtime: Option<SystemTime>,
+    gem_name: &str,
+    path: &Path,
+) {
+    let mut cache = GEM_PATH_CACHE.lock().unwrap();
+    let c = cache.get_or_insert_with(|| GemPathCache {
+        entries: HashMap::new(),
+        lockfile_mtime,
+        working_dir: working_dir.to_path_buf(),
+    });
+    // Reset cache if lockfile or working_dir changed
+    if c.lockfile_mtime != lockfile_mtime || c.working_dir != working_dir {
+        c.entries.clear();
+        c.lockfile_mtime = lockfile_mtime;
+        c.working_dir = working_dir.to_path_buf();
+    }
+    c.entries
+        .insert((working_dir.to_path_buf(), gem_name.to_string()), path.to_path_buf());
 }
 
 /// Extract all resolved gem paths from the in-process cache.
