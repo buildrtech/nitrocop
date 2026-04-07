@@ -11,7 +11,7 @@ Benchmark uses the exact user command shape (default formatter, no `--format jso
   - `output_bytes` (output size sanity signal)
 
 ## How to Run
-`./autoresearch.sh` (conditionally rebuilds `target/release/nitrocop` only when sources are newer)
+`./autoresearch.sh` (conditionally rebuilds `target/release/nitrocop` only when sources are newer; runs 3 no-cache benchmark samples and reports median `total_ms`)
 
 The script prints structured metrics:
 - `METRIC total_ms=<number>`

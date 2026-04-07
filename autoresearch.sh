@@ -24,31 +24,48 @@ if [[ ! -x "$BIN" ]]; then
   exit 2
 fi
 
-start_s=$(perl -MTime::HiRes=time -e 'print time')
-set +e
-"$BIN" "$TARGET_DIR" > "$OUT_TXT" 2>&1
-cmd_status=$?
-set -e
-end_s=$(perl -MTime::HiRes=time -e 'print time')
+runs=(1 2 3)
+run_ms=()
+offense_count=""
+output_bytes=0
 
-# nitrocop returns non-zero when offenses are found; tolerate that.
-if [[ $cmd_status -ne 0 && $cmd_status -ne 1 ]]; then
-  echo "nitrocop failed with exit code $cmd_status" >&2
-  tail -n 20 "$OUT_TXT" >&2 || true
-  exit $cmd_status
-fi
+for run_id in "${runs[@]}"; do
+  out_run="${OUT_TXT}.${run_id}"
 
-summary_line=$(rg -N "files inspected, .* offenses detected" "$OUT_TXT" | tail -n 1)
-if [[ -z "$summary_line" ]]; then
-  echo "Failed to parse summary line from nitrocop output" >&2
-  tail -n 20 "$OUT_TXT" >&2 || true
-  exit 4
-fi
+  start_s=$(perl -MTime::HiRes=time -e 'print time')
+  set +e
+  "$BIN" --no-cache "$TARGET_DIR" > "$out_run" 2>&1
+  cmd_status=$?
+  set -e
+  end_s=$(perl -MTime::HiRes=time -e 'print time')
 
-offense_count=$(echo "$summary_line" | sed -E 's/.* ([0-9][0-9,]*) offenses detected.*/\1/' | tr -d ',')
-output_bytes=$(wc -c < "$OUT_TXT" | tr -d ' ')
+  # nitrocop returns non-zero when offenses are found; tolerate that.
+  if [[ $cmd_status -ne 0 && $cmd_status -ne 1 ]]; then
+    echo "nitrocop failed with exit code $cmd_status" >&2
+    tail -n 20 "$out_run" >&2 || true
+    exit $cmd_status
+  fi
 
-total_ms=$(awk -v s="$start_s" -v e="$end_s" 'BEGIN { printf "%.3f", (e-s)*1000 }')
+  summary_line=$(rg -N "files inspected, .* offenses detected" "$out_run" | tail -n 1)
+  if [[ -z "$summary_line" ]]; then
+    echo "Failed to parse summary line from nitrocop output" >&2
+    tail -n 20 "$out_run" >&2 || true
+    exit 4
+  fi
+
+  current_offense_count=$(echo "$summary_line" | sed -E 's/.* ([0-9][0-9,]*) offenses detected.*/\1/' | tr -d ',')
+  if [[ -z "$offense_count" ]]; then
+    offense_count="$current_offense_count"
+  elif [[ "$offense_count" -ne "$current_offense_count" ]]; then
+    echo "Offense count drifted across repeated runs: $offense_count vs $current_offense_count" >&2
+    exit 5
+  fi
+
+  output_bytes=$(wc -c < "$out_run" | tr -d ' ')
+  run_ms+=("$(awk -v s="$start_s" -v e="$end_s" 'BEGIN { printf "%.3f", (e-s)*1000 }')")
+done
+
+total_ms=$(printf '%s\n' "${run_ms[@]}" | sort -n | awk 'NR==2 { print $1 }')
 
 echo "METRIC total_ms=$total_ms"
 echo "METRIC offense_count=$offense_count"
