@@ -1172,115 +1172,64 @@ fn lint_source_once(
     let redundant_disable_idx = registry.cop_index(REDUNDANT_DISABLE_COP);
 
     let autocorrect_off = autocorrect_mode == crate::cli::AutocorrectMode::Off;
-
-    // Pass 1: Universal cops
-    for &i in active_filters.universal_cop_indices() {
-        let cop = &cops[i];
-        if Some(i) == redundant_disable_idx {
-            continue;
-        }
-
-        let name = if apply_selectors || !autocorrect_off {
-            registry.cop_name(i)
-        } else {
-            ""
-        };
-
-        if apply_selectors {
-            if has_only && !args.only.iter().any(|o| o == name) {
-                continue;
-            }
-            if has_except && args.except.iter().any(|e| e == name) {
-                continue;
-            }
-        }
-
-        let cop_config = &active_base_configs[i];
-
-        if autocorrect_off {
-            cop.check_lines(source, cop_config, &mut diagnostics, None);
-            cop.check_source(source, &parse_result, &code_map, cop_config, &mut diagnostics, None);
-        } else {
-            let should_correct = registry.cop_supports_autocorrect(i)
-                && cop_config.should_autocorrect(autocorrect_mode)
-                && (autocorrect_mode == crate::cli::AutocorrectMode::All || allowlist.contains(name));
-
-            if should_correct {
-                cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
-                cop.check_source(
-                    source,
-                    &parse_result,
-                    &code_map,
-                    cop_config,
-                    &mut diagnostics,
-                    Some(&mut corrections),
-                );
-            } else {
-                cop.check_lines(source, cop_config, &mut diagnostics, None);
-                cop.check_source(
-                    source,
-                    &parse_result,
-                    &code_map,
-                    cop_config,
-                    &mut diagnostics,
-                    None,
-                );
-            }
-        }
-
-        if cop.uses_node_check() {
-            ast_cop_indices.push(i);
-        }
-    }
-
-    // Pass 2: Pattern cops
     let path_ctx = active_filters.path_match_context(&source.path);
-    for &i in active_filters.pattern_cop_indices() {
-        let cop = &cops[i];
-        if Some(i) == redundant_disable_idx {
-            continue;
-        }
 
-        let name = if apply_selectors || !autocorrect_off {
-            registry.cop_name(i)
-        } else {
-            ""
-        };
-
-        if apply_selectors {
-            if has_only && !args.only.iter().any(|o| o == name) {
+    // Hot-path for the default CLI: no selectors and no autocorrect.
+    if autocorrect_off && !apply_selectors {
+        for &i in active_filters.universal_cop_indices() {
+            if Some(i) == redundant_disable_idx {
                 continue;
             }
-            if has_except && args.except.iter().any(|e| e == name) {
-                continue;
-            }
-        }
-
-        if !active_filters.is_cop_match_with_context(i, &path_ctx) {
-            continue;
-        }
-
-        let cop_config = &active_base_configs[i];
-
-        if autocorrect_off {
+            let cop = &cops[i];
+            let cop_config = &active_base_configs[i];
             cop.check_lines(source, cop_config, &mut diagnostics, None);
             cop.check_source(source, &parse_result, &code_map, cop_config, &mut diagnostics, None);
-        } else {
-            let should_correct = registry.cop_supports_autocorrect(i)
-                && cop_config.should_autocorrect(autocorrect_mode)
-                && (autocorrect_mode == crate::cli::AutocorrectMode::All || allowlist.contains(name));
+            if cop.uses_node_check() {
+                ast_cop_indices.push(i);
+            }
+        }
 
-            if should_correct {
-                cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
-                cop.check_source(
-                    source,
-                    &parse_result,
-                    &code_map,
-                    cop_config,
-                    &mut diagnostics,
-                    Some(&mut corrections),
-                );
+        for &i in active_filters.pattern_cop_indices() {
+            if Some(i) == redundant_disable_idx {
+                continue;
+            }
+            if !active_filters.is_cop_match_with_context(i, &path_ctx) {
+                continue;
+            }
+            let cop = &cops[i];
+            let cop_config = &active_base_configs[i];
+            cop.check_lines(source, cop_config, &mut diagnostics, None);
+            cop.check_source(source, &parse_result, &code_map, cop_config, &mut diagnostics, None);
+            if cop.uses_node_check() {
+                ast_cop_indices.push(i);
+            }
+        }
+    } else {
+        // Pass 1: Universal cops
+        for &i in active_filters.universal_cop_indices() {
+            let cop = &cops[i];
+            if Some(i) == redundant_disable_idx {
+                continue;
+            }
+
+            let name = if apply_selectors || !autocorrect_off {
+                registry.cop_name(i)
             } else {
+                ""
+            };
+
+            if apply_selectors {
+                if has_only && !args.only.iter().any(|o| o == name) {
+                    continue;
+                }
+                if has_except && args.except.iter().any(|e| e == name) {
+                    continue;
+                }
+            }
+
+            let cop_config = &active_base_configs[i];
+
+            if autocorrect_off {
                 cop.check_lines(source, cop_config, &mut diagnostics, None);
                 cop.check_source(
                     source,
@@ -1290,11 +1239,110 @@ fn lint_source_once(
                     &mut diagnostics,
                     None,
                 );
+            } else {
+                let should_correct = registry.cop_supports_autocorrect(i)
+                    && cop_config.should_autocorrect(autocorrect_mode)
+                    && (autocorrect_mode == crate::cli::AutocorrectMode::All
+                        || allowlist.contains(name));
+
+                if should_correct {
+                    cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
+                    cop.check_source(
+                        source,
+                        &parse_result,
+                        &code_map,
+                        cop_config,
+                        &mut diagnostics,
+                        Some(&mut corrections),
+                    );
+                } else {
+                    cop.check_lines(source, cop_config, &mut diagnostics, None);
+                    cop.check_source(
+                        source,
+                        &parse_result,
+                        &code_map,
+                        cop_config,
+                        &mut diagnostics,
+                        None,
+                    );
+                }
+            }
+
+            if cop.uses_node_check() {
+                ast_cop_indices.push(i);
             }
         }
 
-        if cop.uses_node_check() {
-            ast_cop_indices.push(i);
+        // Pass 2: Pattern cops
+        for &i in active_filters.pattern_cop_indices() {
+            let cop = &cops[i];
+            if Some(i) == redundant_disable_idx {
+                continue;
+            }
+
+            let name = if apply_selectors || !autocorrect_off {
+                registry.cop_name(i)
+            } else {
+                ""
+            };
+
+            if apply_selectors {
+                if has_only && !args.only.iter().any(|o| o == name) {
+                    continue;
+                }
+                if has_except && args.except.iter().any(|e| e == name) {
+                    continue;
+                }
+            }
+
+            if !active_filters.is_cop_match_with_context(i, &path_ctx) {
+                continue;
+            }
+
+            let cop_config = &active_base_configs[i];
+
+            if autocorrect_off {
+                cop.check_lines(source, cop_config, &mut diagnostics, None);
+                cop.check_source(
+                    source,
+                    &parse_result,
+                    &code_map,
+                    cop_config,
+                    &mut diagnostics,
+                    None,
+                );
+            } else {
+                let should_correct = registry.cop_supports_autocorrect(i)
+                    && cop_config.should_autocorrect(autocorrect_mode)
+                    && (autocorrect_mode == crate::cli::AutocorrectMode::All
+                        || allowlist.contains(name));
+
+                if should_correct {
+                    cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
+                    cop.check_source(
+                        source,
+                        &parse_result,
+                        &code_map,
+                        cop_config,
+                        &mut diagnostics,
+                        Some(&mut corrections),
+                    );
+                } else {
+                    cop.check_lines(source, cop_config, &mut diagnostics, None);
+                    cop.check_source(
+                        source,
+                        &parse_result,
+                        &code_map,
+                        cop_config,
+                        &mut diagnostics,
+                        None,
+                    );
+                }
+            }
+
+            if cop.uses_node_check() {
+                ast_cop_indices.push(i);
+            }
         }
     }
 
