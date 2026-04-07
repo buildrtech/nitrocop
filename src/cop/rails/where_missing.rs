@@ -102,12 +102,14 @@ fn left_joins_assoc<'a>(call: &ruby_prism::CallNode<'a>) -> Option<Vec<u8>> {
         return None;
     }
     let args = call.arguments()?;
-    let arg_list: Vec<_> = args.arguments().iter().collect();
-    if arg_list.len() != 1 {
+    let mut arg_iter = args.arguments().iter();
+    let first = arg_iter.next()?;
+    // Require exactly one arg.
+    if arg_iter.next().is_some() {
         return None;
     }
     // Must be a simple symbol argument, not a hash like `left_joins(foo: :bar)`
-    let sym = arg_list[0].as_symbol_node()?;
+    let sym = first.as_symbol_node()?;
     Some(sym.unescaped().to_vec())
 }
 
@@ -168,6 +170,22 @@ impl Cop for WhereMissing {
     ) {
         // minimum_target_rails_version 6.1
         if !config.rails_version_at_least(6.1) {
+            return;
+        }
+
+        let call = match node.as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Only process chains whose current (outermost) call could participate
+        // in the offense pair. Other outer calls (e.g., `order`, `select`) never
+        // report here due the index-0 pair check below.
+        let current_name = call.name().as_slice();
+        if current_name != b"left_joins"
+            && current_name != b"left_outer_joins"
+            && current_name != b"where"
+        {
             return;
         }
 
