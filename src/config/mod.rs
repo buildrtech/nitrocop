@@ -1892,15 +1892,33 @@ fn load_config_recursive_inner(
         // causing them to be disabled under DisabledByDefault.
         let visited_before_require = visited.clone();
 
-        if !gems.is_empty() {
-            let batch_gem_paths = match gem_path::resolve_gem_paths_batch(&gems, working_dir) {
-                Ok(paths) => paths,
-                Err(e) => {
-                    eprintln!("warning: batch gem path resolution failed: {e:#}");
-                    HashMap::new()
-                }
-            };
+        let inherit_gem_names: Vec<String> = map
+            .get(Value::String("inherit_gem".to_string()))
+            .and_then(|v| v.as_mapping())
+            .map(|gem_map| {
+                gem_map
+                    .keys()
+                    .filter_map(|k| k.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
+        let mut batch_lookup_gems = gems.clone();
+        for gem_name in &inherit_gem_names {
+            if !batch_lookup_gems.iter().any(|g| g == gem_name) {
+                batch_lookup_gems.push(gem_name.clone());
+            }
+        }
+
+        let pre_resolved_gem_paths = match gem_path::resolve_gem_paths_batch(&batch_lookup_gems, working_dir) {
+            Ok(paths) => paths,
+            Err(e) => {
+                eprintln!("warning: batch gem path resolution failed: {e:#}");
+                HashMap::new()
+            }
+        };
+
+        if !gems.is_empty() {
             for gem_name in &gems {
                 // Determine what config file to load for this gem.
                 // rubocop-* gems use config/default.yml.
@@ -1917,7 +1935,7 @@ fn load_config_recursive_inner(
 
                 let gem_root = if let Some(path) = gem_cache.and_then(|c| c.get(gem_name)) {
                     path.clone()
-                } else if let Some(path) = batch_gem_paths.get(gem_name) {
+                } else if let Some(path) = pre_resolved_gem_paths.get(gem_name) {
                     path.clone()
                 } else {
                     match gem_path::resolve_gem_path(gem_name, working_dir) {
@@ -2034,23 +2052,11 @@ fn load_config_recursive_inner(
 
         // 1. Process inherit_gem
         if let Some(Value::Mapping(gem_map)) = map.get(Value::String("inherit_gem".to_string())) {
-            let inherit_gem_names: Vec<String> = gem_map
-                .keys()
-                .filter_map(|k| k.as_str().map(String::from))
-                .collect();
-            let inherit_batch_paths = match gem_path::resolve_gem_paths_batch(&inherit_gem_names, working_dir) {
-                Ok(paths) => paths,
-                Err(e) => {
-                    eprintln!("warning: inherit_gem batch path resolution failed: {e:#}");
-                    HashMap::new()
-                }
-            };
-
             let mut merged_gem_cache = HashMap::new();
             if let Some(existing) = gem_cache {
                 merged_gem_cache.extend(existing.clone());
             }
-            merged_gem_cache.extend(inherit_batch_paths);
+            merged_gem_cache.extend(pre_resolved_gem_paths.clone());
             let merged_gem_cache_ref = Some(&merged_gem_cache);
 
             for (gem_key, gem_paths) in gem_map {
