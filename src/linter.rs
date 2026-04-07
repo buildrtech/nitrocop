@@ -1183,7 +1183,14 @@ fn lint_source_once(
             let cop = &cops[i];
             let cop_config = &active_base_configs[i];
             cop.check_lines(source, cop_config, &mut diagnostics, None);
-            cop.check_source(source, &parse_result, &code_map, cop_config, &mut diagnostics, None);
+            cop.check_source(
+                source,
+                &parse_result,
+                &code_map,
+                cop_config,
+                &mut diagnostics,
+                None,
+            );
             if registry.cop_uses_node_check(i) {
                 ast_cop_indices.push(i);
             }
@@ -1199,7 +1206,14 @@ fn lint_source_once(
             let cop = &cops[i];
             let cop_config = &active_base_configs[i];
             cop.check_lines(source, cop_config, &mut diagnostics, None);
-            cop.check_source(source, &parse_result, &code_map, cop_config, &mut diagnostics, None);
+            cop.check_source(
+                source,
+                &parse_result,
+                &code_map,
+                cop_config,
+                &mut diagnostics,
+                None,
+            );
             if registry.cop_uses_node_check(i) {
                 ast_cop_indices.push(i);
             }

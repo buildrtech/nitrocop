@@ -6,6 +6,7 @@ EXPECTED_OFFENSES=3992
 BIN="target/release/nitrocop"
 BUILD_STAMP="target/release/.nitrocop_autoresearch_stamp"
 RELEVANT_PATHS=(src bench Cargo.toml Cargo.lock)
+REBUILT=0
 
 current_build_fingerprint() {
   if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -47,6 +48,7 @@ rebuild_if_needed() {
   cargo build --release >/dev/null
   mkdir -p "$(dirname "$BUILD_STAMP")"
   printf '%s\n' "$fingerprint" >"$BUILD_STAMP"
+  REBUILT=1
 }
 
 run_once_ms() {
@@ -115,5 +117,9 @@ median_three() {
 }
 
 rebuild_if_needed
+if [[ "$REBUILT" -eq 1 ]]; then
+  # Freshly built binaries have a cold first execution; discard one warm-up sample.
+  run_once_ms >/dev/null
+fi
 median="$(median_three)"
 echo "METRIC total_ms=$median"

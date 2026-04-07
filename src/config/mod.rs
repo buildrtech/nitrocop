@@ -1910,13 +1910,14 @@ fn load_config_recursive_inner(
             }
         }
 
-        let pre_resolved_gem_paths = match gem_path::resolve_gem_paths_batch(&batch_lookup_gems, working_dir) {
-            Ok(paths) => paths,
-            Err(e) => {
-                eprintln!("warning: batch gem path resolution failed: {e:#}");
-                HashMap::new()
-            }
-        };
+        let pre_resolved_gem_paths =
+            match gem_path::resolve_gem_paths_batch(&batch_lookup_gems, working_dir) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    eprintln!("warning: batch gem path resolution failed: {e:#}");
+                    HashMap::new()
+                }
+            };
 
         if !gems.is_empty() {
             for gem_name in &gems {
