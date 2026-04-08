@@ -107,6 +107,8 @@ const MANIPULATIVE_METHODS: &[&[u8]] = &[
 
 /// Deprecated methods called directly on errors (e.g., errors.keys, errors.values).
 const DEPRECATED_ERRORS_METHODS: &[&[u8]] = &[b"keys", b"values", b"to_h", b"to_xml"];
+/// RuboCop only autocorrects these methods for this cop.
+const AUTOCORRECTABLE_METHODS: &[&[u8]] = &[b"<<", b"clear", b"keys"];
 
 /// Check if the file path contains `/models/`, matching RuboCop's `model_file?`.
 fn is_model_file(source: &SourceFile) -> bool {
@@ -295,6 +297,90 @@ fn is_errors_bracket_access(node: &ruby_prism::Node<'_>, model_file: bool) -> bo
     false
 }
 
+struct AutoEdit {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
+fn build_autocorrect(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Option<AutoEdit> {
+    let method = call.name().as_slice();
+    if !AUTOCORRECTABLE_METHODS.contains(&method) {
+        return None;
+    }
+
+    if method == b"keys" {
+        let recv = call.receiver()?;
+        let errors_call = recv.as_call_node()?;
+        if errors_call.name().as_slice() != b"errors" {
+            return None;
+        }
+
+        return Some(AutoEdit {
+            start: errors_call.location().end_offset(),
+            end: call.location().end_offset(),
+            replacement: ".attribute_names".to_string(),
+        });
+    }
+
+    // `<<` and `clear` corrections require `errors[...]` style receiver.
+    let bracket_call = call.receiver()?.as_call_node()?;
+    if bracket_call.name().as_slice() != b"[]" {
+        return None;
+    }
+
+    // RuboCop skip: do not autocorrect `errors.details[:key] << value`.
+    if method == b"<<"
+        && bracket_call
+            .receiver()
+            .and_then(|r| r.as_call_node())
+            .is_some_and(|c| c.name().as_slice() == b"details")
+    {
+        return None;
+    }
+
+    let key_node = bracket_call.arguments()?.arguments().iter().next()?;
+    let key_loc = key_node.location();
+    let key_source = source
+        .byte_slice(key_loc.start_offset(), key_loc.end_offset(), "")
+        .to_string();
+
+    // Find the right-most `.errors` in receiver chain to replace from there.
+    let mut cursor = bracket_call.receiver();
+    let mut errors_end = None;
+    while let Some(node) = cursor {
+        let call_node = match node.as_call_node() {
+            Some(c) => c,
+            None => break,
+        };
+
+        if call_node.name().as_slice() == b"errors" {
+            errors_end = Some(call_node.location().end_offset());
+            break;
+        }
+
+        cursor = call_node.receiver();
+    }
+
+    let start = errors_end?;
+    let replacement = if method == b"<<" {
+        let value_node = call.arguments()?.arguments().iter().next()?;
+        let value_loc = value_node.location();
+        let value_source = source
+            .byte_slice(value_loc.start_offset(), value_loc.end_offset(), "")
+            .to_string();
+        format!(".add({key_source}, {value_source})")
+    } else {
+        format!(".delete({key_source})")
+    };
+
+    Some(AutoEdit {
+        start,
+        end: call.location().end_offset(),
+        replacement,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,4 +388,13 @@ mod tests {
         DeprecatedActiveModelErrorsMethods,
         "cops/rails/deprecated_active_model_errors_methods"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        DeprecatedActiveModelErrorsMethods,
+        "cops/rails/deprecated_active_model_errors_methods"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DeprecatedActiveModelErrorsMethods.supports_autocorrect());
+    }
 }

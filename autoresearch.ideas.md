@@ -1,4 +1,4 @@
 # Deferred autoresearch ideas
 
-- Rails/WhereRange: investigate why in-flight autocorrect patches are not surviving attribution-clean runs despite passing targeted tests; only keep once count script reliably reflects `supports_autocorrect`.
-- Rails/DeprecatedActiveModelErrorsMethods: implement RuboCop-aligned partial autocorrect for `<<`, `clear`, and `keys` paths (`.add`, `.delete`, `.attribute_names`) with conservative skip for `errors.details[:key] << ...`.
+- Rails/WhereRange: revisit conservative autocorrect (`where("x >= ?", a)` -> `where(x: a..)` and related shapes) only after attribution-clean run succeeds end-to-end with stable metrics capture.
+- Rails/IndexBy or Rails/IndexWith: evaluate selector-level autocorrect opportunities with strict shape guards to avoid semantic drift.

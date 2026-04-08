@@ -28,6 +28,10 @@ impl Cop for SafeNavigation {
         &[CALL_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -35,7 +39,7 @@ impl Cop for SafeNavigation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let convert_try = config.get_bool("ConvertTry", false);
 
@@ -84,7 +88,7 @@ impl Cop for SafeNavigation {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
@@ -92,7 +96,60 @@ impl Cop for SafeNavigation {
                 "Use safe navigation (`&.`) instead of `{}`.",
                 String::from_utf8_lossy(name),
             ),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let method = std::str::from_utf8(sym.unescaped()).unwrap_or("");
+            let params: Vec<String> = args
+                .arguments()
+                .iter()
+                .skip(1)
+                .map(|arg| {
+                    source
+                        .byte_slice(
+                            arg.location().start_offset(),
+                            arg.location().end_offset(),
+                            "",
+                        )
+                        .to_string()
+                })
+                .collect();
+
+            let replacement_suffix = if method.ends_with('=') {
+                let lhs = method.trim_end_matches('=');
+                format!("&.{lhs} = {}", params.join(", "))
+            } else if params.is_empty() {
+                format!("&.{method}")
+            } else {
+                format!("&.{method}({})", params.join(", "))
+            };
+
+            let (start, end, replacement) = if call.receiver().is_some() {
+                let op = call.call_operator_loc().unwrap_or(loc);
+                (
+                    op.start_offset(),
+                    loc.end_offset(),
+                    replacement_suffix,
+                )
+            } else {
+                (
+                    loc.start_offset(),
+                    loc.end_offset(),
+                    format!("self{replacement_suffix}"),
+                )
+            };
+
+            corr.push(crate::correction::Correction {
+                start,
+                end,
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -100,6 +157,12 @@ impl Cop for SafeNavigation {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SafeNavigation, "cops/rails/safe_navigation");
+    crate::cop_autocorrect_fixture_tests!(SafeNavigation, "cops/rails/safe_navigation");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(SafeNavigation.supports_autocorrect());
+    }
 
     #[test]
     fn convert_try_false_skips_try() {
