@@ -31,6 +31,10 @@ impl Cop for EmptyMetadata {
         &[CALL_NODE, HASH_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -38,7 +42,7 @@ impl Cop for EmptyMetadata {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Detect empty metadata hash `{}` in example groups/examples
         let call = match node.as_call_node() {
@@ -81,12 +85,36 @@ impl Cop for EmptyMetadata {
                 if hash.elements().iter().count() == 0 {
                     let loc = hash.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Avoid empty metadata hash.".to_string(),
-                    ));
+                    let mut diagnostic =
+                        self.diagnostic(source, line, column, "Avoid empty metadata hash.".to_string());
+
+                    if let Some(ref mut corr) = corrections {
+                        let bytes = source.as_bytes();
+                        let mut start = loc.start_offset();
+                        let end = loc.end_offset();
+
+                        // Match RuboCop behavior by removing surrounding comma/space on the left
+                        while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+                            start -= 1;
+                        }
+                        if start > 0 && bytes[start - 1] == b',' {
+                            start -= 1;
+                            while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+                                start -= 1;
+                            }
+                        }
+
+                        corr.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: "".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -97,4 +125,5 @@ impl Cop for EmptyMetadata {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyMetadata, "cops/rspec/empty_metadata");
+    crate::cop_autocorrect_fixture_tests!(EmptyMetadata, "cops/rspec/empty_metadata");
 }
