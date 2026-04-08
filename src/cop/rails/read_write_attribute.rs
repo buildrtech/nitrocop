@@ -27,6 +27,10 @@ impl Cop for ReadWriteAttribute {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -34,16 +38,20 @@ impl Cop for ReadWriteAttribute {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = RWVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             enclosing_method: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -51,6 +59,7 @@ struct RWVisitor<'a, 'src> {
     cop: &'a ReadWriteAttribute,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     /// Name of the enclosing def method, if any.
     enclosing_method: Option<Vec<u8>>,
 }
@@ -94,8 +103,56 @@ impl<'pr> RWVisitor<'_, '_> {
         } else {
             "Use `self[:attr] = val` instead of `write_attribute`.".to_string()
         };
-        self.diagnostics
-            .push(self.cop.diagnostic(self.source, line, column, msg));
+        let mut diagnostic = self.cop.diagnostic(self.source, line, column, msg);
+
+        if let Some(args) = call.arguments() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            let replacement = if is_read && !arg_list.is_empty() {
+                let first = &arg_list[0];
+                let first_loc = first.location();
+                let first_src = self
+                    .source
+                    .byte_slice(first_loc.start_offset(), first_loc.end_offset(), "")
+                    .to_string();
+                Some(format!("self[{first_src}]"))
+            } else if is_write && arg_list.len() >= 2 {
+                let first = &arg_list[0];
+                let second = &arg_list[1];
+                let first_src = self
+                    .source
+                    .byte_slice(
+                        first.location().start_offset(),
+                        first.location().end_offset(),
+                        "",
+                    )
+                    .to_string();
+                let second_src = self
+                    .source
+                    .byte_slice(
+                        second.location().start_offset(),
+                        second.location().end_offset(),
+                        "",
+                    )
+                    .to_string();
+                Some(format!("self[{first_src}] = {second_src}"))
+            } else {
+                None
+            };
+
+            if let Some(replacement) = replacement {
+                let call_loc = call.location();
+                self.corrections.push(crate::correction::Correction {
+                    start: call_loc.start_offset(),
+                    end: call_loc.end_offset(),
+                    replacement,
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -153,6 +210,24 @@ end
             diags.is_empty(),
             "should not flag write_attribute inside setter: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn autocorrects_read_attribute_call() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReadWriteAttribute,
+            b"read_attribute(:name)\n",
+            b"self[:name]\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_write_attribute_call() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReadWriteAttribute,
+            b"write_attribute(:name, value)\n",
+            b"self[:name] = value\n",
         );
     }
 }

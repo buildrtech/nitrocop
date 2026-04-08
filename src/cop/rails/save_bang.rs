@@ -506,6 +506,10 @@ impl Cop for SaveBang {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -513,7 +517,7 @@ impl Cop for SaveBang {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_implicit_return = config.get_bool("AllowImplicitReturn", true);
         let allowed_receivers = config
@@ -526,6 +530,7 @@ impl Cop for SaveBang {
             allow_implicit_return,
             allowed_receivers,
             diagnostics: Vec::new(),
+            corrections,
             context_stack: Vec::new(),
             suppress_create_assignment: false,
             in_local_assignment: false,
@@ -545,6 +550,7 @@ struct SaveBangVisitor<'a, 'src> {
     allow_implicit_return: bool,
     allowed_receivers: Vec<String>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     context_stack: Vec<Context>,
     /// When true, suppress create-in-assignment offenses because a persisted? check follows.
     suppress_create_assignment: bool,
@@ -881,35 +887,60 @@ impl SaveBangVisitor<'_, '_> {
         finder.found
     }
 
+    fn add_selector_autocorrect(
+        &mut self,
+        call: &ruby_prism::CallNode<'_>,
+        replacement: &str,
+        diagnostic: &mut Diagnostic,
+    ) {
+        if let Some(ref mut corrections) = self.corrections {
+            let selector = call.message_loc().unwrap_or(call.location());
+            corrections.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: replacement.to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+    }
+
     fn flag_void_context(&mut self, call: &ruby_prism::CallNode<'_>) {
         let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("save");
+        let bang_method = format!("{method_name}!");
         let msg_loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
         let message = MSG
-            .replace("%prefer%", &format!("{method_name}!"))
+            .replace("%prefer%", &bang_method)
             .replace("%current%", method_name);
-        self.diagnostics
-            .push(self.cop.diagnostic(self.source, line, column, message));
+        let mut diagnostic = self.cop.diagnostic(self.source, line, column, message);
+        self.add_selector_autocorrect(call, &bang_method, &mut diagnostic);
+        self.diagnostics.push(diagnostic);
     }
 
     fn flag_create_conditional(&mut self, call: &ruby_prism::CallNode<'_>) {
         let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("create");
+        let bang_method = format!("{method_name}!");
         let msg_loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
         let message = CREATE_CONDITIONAL_MSG.replace("%current%", method_name);
-        self.diagnostics
-            .push(self.cop.diagnostic(self.source, line, column, message));
+        let mut diagnostic = self.cop.diagnostic(self.source, line, column, message);
+        self.add_selector_autocorrect(call, &bang_method, &mut diagnostic);
+        self.diagnostics.push(diagnostic);
     }
 
     fn flag_create_assignment(&mut self, call: &ruby_prism::CallNode<'_>) {
         let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("create");
+        let bang_method = format!("{method_name}!");
         let msg_loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
         let message = CREATE_MSG
-            .replace("%prefer%", &format!("{method_name}!"))
+            .replace("%prefer%", &bang_method)
             .replace("%current%", method_name);
-        self.diagnostics
-            .push(self.cop.diagnostic(self.source, line, column, message));
+        let mut diagnostic = self.cop.diagnostic(self.source, line, column, message);
+        self.add_selector_autocorrect(call, &bang_method, &mut diagnostic);
+        self.diagnostics.push(diagnostic);
     }
 
     /// Process a call node that has been identified as a persist method.
@@ -2162,5 +2193,19 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(diagnostics[0].location.line, 3);
+    }
+
+    #[test]
+    fn autocorrects_save_to_save_bang_in_void_context() {
+        crate::testutil::assert_cop_autocorrect(&SaveBang, b"user.save\n", b"user.save!\n");
+    }
+
+    #[test]
+    fn autocorrects_create_assignment_to_create_bang() {
+        crate::testutil::assert_cop_autocorrect(
+            &SaveBang,
+            b"user = User.create(name: 'joe')\n",
+            b"user = User.create!(name: 'joe')\n",
+        );
     }
 }

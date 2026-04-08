@@ -46,6 +46,10 @@ impl Cop for UniqBeforePluck {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -53,7 +57,7 @@ impl Cop for UniqBeforePluck {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "conservative");
         let mut visitor = UniqBeforePluckVisitor {
@@ -62,6 +66,7 @@ impl Cop for UniqBeforePluck {
             conservative: style == "conservative",
             in_block_body: false,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -72,6 +77,7 @@ struct UniqBeforePluckVisitor<'a, 'src> {
     cop: &'a UniqBeforePluck,
     source: &'src SourceFile,
     conservative: bool,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// True when we're visiting statements that are the direct body of a block.
     /// In Parser AST, a single-statement block body has the statement as a direct
     /// child of the block node, so `!^any_block` excludes it. For multi-statement
@@ -126,12 +132,45 @@ impl UniqBeforePluckVisitor<'_, '_> {
         // Report at the `uniq` selector (message_loc)
         let loc = node.message_loc().unwrap_or_else(|| node.location());
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Use `distinct` before `pluck`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = self.corrections {
+            let uniq_selector = node.message_loc().unwrap_or_else(|| node.location());
+            corr.push(crate::correction::Correction {
+                start: pluck_call.location().end_offset(),
+                end: uniq_selector.end_offset(),
+                replacement: String::new(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+
+            if let Some(dot) = pluck_call.call_operator_loc() {
+                corr.push(crate::correction::Correction {
+                    start: dot.start_offset(),
+                    end: dot.start_offset(),
+                    replacement: ".distinct".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+            } else {
+                corr.push(crate::correction::Correction {
+                    start: pluck_call.location().start_offset(),
+                    end: pluck_call.location().start_offset(),
+                    replacement: "distinct.".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+            }
+
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -207,5 +246,37 @@ impl<'pr> Visit<'pr> for UniqBeforePluckVisitor<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
+
     crate::cop_fixture_tests!(UniqBeforePluck, "cops/rails/uniq_before_pluck");
+
+    fn config_with_style(style: &str) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String(style.to_string()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn autocorrects_model_pluck_uniq() {
+        crate::testutil::assert_cop_autocorrect(
+            &UniqBeforePluck,
+            b"Model.pluck(:name).uniq\n",
+            b"Model.distinct.pluck(:name)\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_receiverless_pluck_uniq_in_aggressive_style() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &UniqBeforePluck,
+            b"pluck(:name).uniq\n",
+            b"distinct.pluck(:name)\n",
+            config_with_style("aggressive"),
+        );
+    }
 }
