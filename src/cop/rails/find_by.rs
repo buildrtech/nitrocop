@@ -40,6 +40,10 @@ impl Cop for FindBy {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -47,7 +51,7 @@ impl Cop for FindBy {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let ignore_where_first = config.get_bool("IgnoreWhereFirst", true);
 
@@ -83,20 +87,47 @@ impl Cop for FindBy {
 
         let method_name = if is_first { "first" } else { "take" };
         // RuboCop's offense_range goes from `where` to `take`/`first`, starting at `where`.
-        // Report at the `where` keyword location to match RuboCop's line number.
-        // For single-line calls this is the same line; for multiline `where(\n...\n).take`
-        // this correctly reports at the `where` line instead of the `take` line.
         let where_call = &chain.inner_call;
         let loc = where_call
             .message_loc()
             .unwrap_or_else(|| where_call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `find_by` instead of `where.{method_name}`."),
-        ));
+        );
+
+        // Match RuboCop: only autocorrect `where.take`, not `where.first`.
+        if !is_first
+            && let Some(ref mut corr) = corrections
+            && let Some(where_selector) = where_call.message_loc()
+            && let Some(outer_selector) = outer_call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: where_selector.start_offset(),
+                end: where_selector.end_offset(),
+                replacement: "find_by".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+
+            let remove_start = where_call.location().end_offset();
+            let remove_end = outer_selector.end_offset();
+            if remove_start < remove_end {
+                corr.push(crate::correction::Correction {
+                    start: remove_start,
+                    end: remove_end,
+                    replacement: String::new(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -104,6 +135,7 @@ impl Cop for FindBy {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FindBy, "cops/rails/find_by");
+    crate::cop_autocorrect_fixture_tests!(FindBy, "cops/rails/find_by");
 
     #[test]
     fn ignore_where_first_true_skips_first() {
