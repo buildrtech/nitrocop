@@ -1,0 +1,5 @@
+'some_string'.start_with?('prefix')
+'some_string'.end_with?('suffix')
+"hello world".start_with?("hello")
+[1, 2, 3].append(4)
+[1, 2, 3].unshift(0)

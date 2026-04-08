@@ -37,6 +37,10 @@ impl Cop for ActiveSupportAliases {
         &[ARRAY_NODE, CALL_NODE, INTERPOLATED_STRING_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -44,7 +48,7 @@ impl Cop for ActiveSupportAliases {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -75,12 +79,27 @@ impl Cop for ActiveSupportAliases {
 
         let loc = call.message_loc().unwrap_or(node.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{replacement}` instead of `{original}`."),
-        ));
+        );
+
+        // Match RuboCop behavior: skip autocorrect for `append` (selector `<<` cannot
+        // be applied via simple selector replacement).
+        if let Some(ref mut corr) = corrections && name != b"append" {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: replacement.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -88,4 +107,5 @@ impl Cop for ActiveSupportAliases {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ActiveSupportAliases, "cops/rails/active_support_aliases");
+    crate::cop_autocorrect_fixture_tests!(ActiveSupportAliases, "cops/rails/active_support_aliases");
 }
