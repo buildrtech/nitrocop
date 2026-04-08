@@ -1,4 +1,5 @@
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
@@ -18,6 +19,10 @@ impl Cop for RedundantTravelBack {
         &["spec/**/*.rb"]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -25,7 +30,7 @@ impl Cop for RedundantTravelBack {
         _code_map: &crate::cop::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<Correction>>,
     ) {
         // minimum_target_rails_version 5.2
         if !config.rails_version_at_least(5.2) {
@@ -36,10 +41,16 @@ impl Cop for RedundantTravelBack {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             in_teardown_or_after: false,
+            autocorrect: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+
+        if let Some(correction_vec) = corrections {
+            correction_vec.extend(visitor.corrections);
+        }
     }
 }
 
@@ -47,7 +58,30 @@ struct TravelBackVisitor<'a> {
     cop: &'a RedundantTravelBack,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
     in_teardown_or_after: bool,
+    autocorrect: bool,
+}
+
+fn redundant_travel_back_line_range(
+    source: &SourceFile,
+    call_loc: &ruby_prism::Location<'_>,
+) -> (usize, usize) {
+    let bytes = source.as_bytes();
+    let start_offset = call_loc.start_offset();
+    let end_offset = call_loc.end_offset();
+
+    let line_start = bytes[..start_offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |idx| idx + 1);
+
+    let line_end = bytes[end_offset..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(bytes.len(), |idx| end_offset + idx + 1);
+
+    (line_start, line_end)
 }
 
 impl<'a, 'pr> Visit<'pr> for TravelBackVisitor<'a> {
@@ -65,15 +99,29 @@ impl<'a, 'pr> Visit<'pr> for TravelBackVisitor<'a> {
         if self.in_teardown_or_after && method_name == b"travel_back" && node.receiver().is_none() {
             let loc = node.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(
-                self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    "Redundant `travel_back` detected. It is automatically called after each test."
-                        .to_string(),
-                ),
+            let mut diagnostic = self.cop.diagnostic(
+                self.source,
+                line,
+                column,
+                "Redundant `travel_back` detected. It is automatically called after each test."
+                    .to_string(),
             );
+
+            if self.autocorrect {
+                let (start, end) = redundant_travel_back_line_range(self.source, &loc);
+                if start < end {
+                    self.corrections.push(Correction {
+                        start,
+                        end,
+                        replacement: String::new(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+
+            self.diagnostics.push(diagnostic);
         }
 
         let was = self.in_teardown_or_after;

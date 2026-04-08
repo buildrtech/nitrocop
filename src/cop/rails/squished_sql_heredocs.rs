@@ -151,6 +151,10 @@ impl Cop for SquishedSQLHeredocs {
         &[INTERPOLATED_STRING_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -158,7 +162,7 @@ impl Cop for SquishedSQLHeredocs {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check for heredocs with SQL tag that don't have .squish
         // Could be a StringNode or InterpolatedStringNode
@@ -283,12 +287,25 @@ impl Cop for SquishedSQLHeredocs {
         };
 
         let (line, column) = source.offset_to_line_col(opening_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{heredoc_style}.squish` instead of `{heredoc_style}`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: opening_loc.end_offset(),
+                end: opening_loc.end_offset(),
+                replacement: ".squish".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -296,4 +313,22 @@ impl Cop for SquishedSQLHeredocs {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SquishedSQLHeredocs, "cops/rails/squished_sql_heredocs");
+
+    #[test]
+    fn autocorrects_simple_sql_heredoc_by_adding_squish() {
+        crate::testutil::assert_cop_autocorrect(
+            &SquishedSQLHeredocs,
+            b"<<~SQL\n  SELECT * FROM posts\nSQL\n",
+            b"<<~SQL.squish\n  SELECT * FROM posts\nSQL\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_sql_heredoc_passed_as_method_argument() {
+        crate::testutil::assert_cop_autocorrect(
+            &SquishedSQLHeredocs,
+            b"execute(<<~SQL, 'Post Load')\n  SELECT * FROM posts\nSQL\n",
+            b"execute(<<~SQL.squish, 'Post Load')\n  SELECT * FROM posts\nSQL\n",
+        );
+    }
 }
