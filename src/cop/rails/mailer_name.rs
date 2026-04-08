@@ -25,6 +25,10 @@ impl Cop for MailerName {
         &[CLASS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -32,7 +36,7 @@ impl Cop for MailerName {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let class_node = match node.as_class_node() {
             Some(c) => c,
@@ -64,12 +68,26 @@ impl Cop for MailerName {
 
         let loc = class_name_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Mailer should end with `Mailer` suffix.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let current_name = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("{current_name}Mailer"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -77,4 +95,5 @@ impl Cop for MailerName {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MailerName, "cops/rails/mailer_name");
+    crate::cop_autocorrect_fixture_tests!(MailerName, "cops/rails/mailer_name");
 }
