@@ -23,6 +23,10 @@ impl Cop for ApplicationRecord {
         &[CLASS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for ApplicationRecord {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.0
         if !config.rails_version_at_least(5.0) {
@@ -64,12 +68,28 @@ impl Cop for ApplicationRecord {
         if parent_trimmed == b"ActiveRecord::Base" {
             let loc = class.class_keyword_loc();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Models should subclass `ApplicationRecord`.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections
+                && let Some(superclass) = class.superclass()
+            {
+                let super_loc = superclass.location();
+                corr.push(crate::correction::Correction {
+                    start: super_loc.start_offset(),
+                    end: super_loc.end_offset(),
+                    replacement: "ApplicationRecord".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -150,6 +170,26 @@ mod tests {
         assert!(
             diagnostics.is_empty(),
             "Should not fire when railties is not in Gemfile.lock (matches RuboCop 1.84+ requires_gem gate)"
+        );
+    }
+
+    #[test]
+    fn autocorrects_active_record_base_to_application_record() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ApplicationRecord,
+            b"class User < ActiveRecord::Base\nend\n",
+            b"class User < ApplicationRecord\nend\n",
+            config_with_rails(5.0),
+        );
+    }
+
+    #[test]
+    fn autocorrects_cbase_active_record_base_to_application_record() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ApplicationRecord,
+            b"class User < ::ActiveRecord::Base\nend\n",
+            b"class User < ApplicationRecord\nend\n",
+            config_with_rails(5.0),
         );
     }
 }
