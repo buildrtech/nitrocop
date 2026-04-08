@@ -3,6 +3,7 @@ use crate::cop::node_type::{
     UNLESS_NODE,
 };
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
@@ -46,6 +47,10 @@ impl Cop for HttpStatusNameConsistency {
         &["**/app/controllers/**/*.rb"]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ASSOC_NODE,
@@ -66,7 +71,7 @@ impl Cop for HttpStatusNameConsistency {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // requires_gem 'rack', '>= 3.1.0' — only fire when the project has
         // Rack >= 3.1 in its lockfile (where status names were renamed).
@@ -98,9 +103,22 @@ impl Cop for HttpStatusNameConsistency {
             None => return,
         };
 
+        let autocorrect_enabled = corrections.is_some();
+        let mut pending_corrections: Vec<Correction> = Vec::new();
+
         // Look for deprecated status symbols in arguments
         for arg in args.arguments().iter() {
-            self.check_for_deprecated_status(source, &arg, diagnostics);
+            self.check_for_deprecated_status(
+                source,
+                &arg,
+                diagnostics,
+                &mut pending_corrections,
+                autocorrect_enabled,
+            );
+        }
+
+        if let Some(ref mut corr) = corrections {
+            corr.extend(pending_corrections);
         }
     }
 }
@@ -111,6 +129,8 @@ impl HttpStatusNameConsistency {
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Vec<Correction>,
+        autocorrect_enabled: bool,
     ) {
         // Check symbol nodes
         if let Some(sym) = node.as_symbol_node() {
@@ -119,7 +139,7 @@ impl HttpStatusNameConsistency {
                 if AsRef::<[u8]>::as_ref(name) == deprecated {
                     let loc = node.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
@@ -127,7 +147,18 @@ impl HttpStatusNameConsistency {
                             "Prefer `:{preferred}` over `:{}`.",
                             String::from_utf8_lossy(deprecated)
                         ),
-                    ));
+                    );
+                    if autocorrect_enabled {
+                        corrections.push(Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: format!(":{preferred}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                     return;
                 }
             }
@@ -136,12 +167,17 @@ impl HttpStatusNameConsistency {
         // Check hash nodes for `status: :deprecated_name`
         if let Some(hash) = node.as_hash_node() {
             for element in hash.elements().iter() {
-                if let Some(pair) = element.as_assoc_node() {
-                    if let Some(key_sym) = pair.key().as_symbol_node() {
-                        if AsRef::<[u8]>::as_ref(key_sym.unescaped()) == b"status" {
-                            self.check_for_deprecated_status(source, &pair.value(), diagnostics);
-                        }
-                    }
+                if let Some(pair) = element.as_assoc_node()
+                    && let Some(key_sym) = pair.key().as_symbol_node()
+                    && AsRef::<[u8]>::as_ref(key_sym.unescaped()) == b"status"
+                {
+                    self.check_for_deprecated_status(
+                        source,
+                        &pair.value(),
+                        diagnostics,
+                        corrections,
+                        autocorrect_enabled,
+                    );
                 }
             }
         }
@@ -149,12 +185,17 @@ impl HttpStatusNameConsistency {
         // Check keyword hash nodes (inline keyword args)
         if let Some(hash) = node.as_keyword_hash_node() {
             for element in hash.elements().iter() {
-                if let Some(pair) = element.as_assoc_node() {
-                    if let Some(key_sym) = pair.key().as_symbol_node() {
-                        if AsRef::<[u8]>::as_ref(key_sym.unescaped()) == b"status" {
-                            self.check_for_deprecated_status(source, &pair.value(), diagnostics);
-                        }
-                    }
+                if let Some(pair) = element.as_assoc_node()
+                    && let Some(key_sym) = pair.key().as_symbol_node()
+                    && AsRef::<[u8]>::as_ref(key_sym.unescaped()) == b"status"
+                {
+                    self.check_for_deprecated_status(
+                        source,
+                        &pair.value(),
+                        diagnostics,
+                        corrections,
+                        autocorrect_enabled,
+                    );
                 }
             }
         }
@@ -163,18 +204,36 @@ impl HttpStatusNameConsistency {
         if let Some(if_node) = node.as_if_node() {
             if let Some(stmts) = if_node.statements() {
                 for stmt in stmts.body().iter() {
-                    self.check_for_deprecated_status(source, &stmt, diagnostics);
+                    self.check_for_deprecated_status(
+                        source,
+                        &stmt,
+                        diagnostics,
+                        corrections,
+                        autocorrect_enabled,
+                    );
                 }
             }
             if let Some(subsequent) = if_node.subsequent() {
                 if let Some(else_node) = subsequent.as_else_node() {
                     if let Some(stmts) = else_node.statements() {
                         for stmt in stmts.body().iter() {
-                            self.check_for_deprecated_status(source, &stmt, diagnostics);
+                            self.check_for_deprecated_status(
+                                source,
+                                &stmt,
+                                diagnostics,
+                                corrections,
+                                autocorrect_enabled,
+                            );
                         }
                     }
                 } else if let Some(elsif_node) = subsequent.as_if_node() {
-                    self.check_for_deprecated_status(source, &elsif_node.as_node(), diagnostics);
+                    self.check_for_deprecated_status(
+                        source,
+                        &elsif_node.as_node(),
+                        diagnostics,
+                        corrections,
+                        autocorrect_enabled,
+                    );
                 }
             }
         }
@@ -183,14 +242,26 @@ impl HttpStatusNameConsistency {
         if let Some(unless_node) = node.as_unless_node() {
             if let Some(stmts) = unless_node.statements() {
                 for stmt in stmts.body().iter() {
-                    self.check_for_deprecated_status(source, &stmt, diagnostics);
+                    self.check_for_deprecated_status(
+                        source,
+                        &stmt,
+                        diagnostics,
+                        corrections,
+                        autocorrect_enabled,
+                    );
                 }
             }
-            if let Some(else_clause) = unless_node.else_clause() {
-                if let Some(stmts) = else_clause.statements() {
-                    for stmt in stmts.body().iter() {
-                        self.check_for_deprecated_status(source, &stmt, diagnostics);
-                    }
+            if let Some(else_clause) = unless_node.else_clause()
+                && let Some(stmts) = else_clause.statements()
+            {
+                for stmt in stmts.body().iter() {
+                    self.check_for_deprecated_status(
+                        source,
+                        &stmt,
+                        diagnostics,
+                        corrections,
+                        autocorrect_enabled,
+                    );
                 }
             }
         }
@@ -238,6 +309,40 @@ mod tests {
             &HttpStatusNameConsistency,
             include_bytes!(
                 "../../../tests/fixtures/cops/rails/http_status_name_consistency/no_offense.rb"
+            ),
+            rack31_config(),
+        );
+    }
+
+    #[test]
+    fn autocorrects_positional_status_symbol() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &HttpStatusNameConsistency,
+            b"head :unprocessable_entity\n",
+            b"head :unprocessable_content\n",
+            rack31_config(),
+        );
+    }
+
+    #[test]
+    fn autocorrects_hash_status_symbol() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &HttpStatusNameConsistency,
+            b"render json: {}, status: :payload_too_large\n",
+            b"render json: {}, status: :content_too_large\n",
+            rack31_config(),
+        );
+    }
+
+    #[test]
+    fn autocorrect_fixture() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &HttpStatusNameConsistency,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rails/http_status_name_consistency/offense.rb"
+            ),
+            include_bytes!(
+                "../../../tests/fixtures/cops/rails/http_status_name_consistency/corrected.rb"
             ),
             rack31_config(),
         );

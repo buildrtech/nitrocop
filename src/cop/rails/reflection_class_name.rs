@@ -133,6 +133,32 @@ fn should_flag_value(value: &ruby_prism::Node<'_>, root: &ruby_prism::Node<'_>) 
     true
 }
 
+fn autocorrect_replacement(value: &ruby_prism::Node<'_>, source: &SourceFile) -> Option<String> {
+    if is_constant(value) {
+        let loc = value.location();
+        let raw = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+        return Some(format!(
+            "\"{}\"",
+            raw.replace('\\', "\\\\").replace('"', "\\\"")
+        ));
+    }
+
+    if let Some(call) = value.as_call_node()
+        && (call.name().as_slice() == b"name" || call.name().as_slice() == b"to_s")
+        && let Some(recv) = call.receiver()
+        && is_constant(&recv)
+    {
+        let loc = recv.location();
+        let raw = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+        return Some(format!(
+            "\"{}\"",
+            raw.replace('\\', "\\\\").replace('"', "\\\"")
+        ));
+    }
+
+    None
+}
+
 impl Cop for ReflectionClassName {
     fn name(&self) -> &'static str {
         "Rails/ReflectionClassName"
@@ -146,6 +172,10 @@ impl Cop for ReflectionClassName {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -153,7 +183,7 @@ impl Cop for ReflectionClassName {
         parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -170,12 +200,28 @@ impl Cop for ReflectionClassName {
             let root = parse_result.node();
             if should_flag_value(&value, &root) {
                 let (line, column) = source.offset_to_line_col(pair_loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use a string value for `class_name`.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections
+                    && let Some(replacement) = autocorrect_replacement(&value, source)
+                {
+                    let vloc = value.location();
+                    corr.push(crate::correction::Correction {
+                        start: vloc.start_offset(),
+                        end: vloc.end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -185,4 +231,36 @@ impl Cop for ReflectionClassName {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReflectionClassName, "cops/rails/reflection_class_name");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ReflectionClassName.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_constant_class_name_value_to_string_literal() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReflectionClassName,
+            b"has_many :accounts, class_name: Account\n",
+            b"has_many :accounts, class_name: \"Account\"\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_constant_name_call_to_string_literal() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReflectionClassName,
+            b"has_many :accounts, class_name: Account.name\n",
+            b"has_many :accounts, class_name: \"Account\"\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_constant_to_s_call_to_string_literal() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReflectionClassName,
+            b"has_many :accounts, class_name: Account.to_s\n",
+            b"has_many :accounts, class_name: \"Account\"\n",
+        );
+    }
 }

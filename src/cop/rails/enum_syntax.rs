@@ -18,6 +18,10 @@ impl Cop for EnumSyntax {
         &[ASSOC_NODE, CALL_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for EnumSyntax {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 7.0
         if !config.rails_version_at_least(7.0) {
@@ -64,22 +68,45 @@ impl Cop for EnumSyntax {
             return;
         }
 
-        // Check if first arg is a keyword hash with a symbol key mapped to a hash value
+        // Check if first arg is a keyword hash with a symbol key mapped to enum values.
         if let Some(kw) = arg_list[0].as_keyword_hash_node() {
-            for elem in kw.elements().iter() {
-                if let Some(assoc) = elem.as_assoc_node() {
-                    if assoc.key().as_symbol_node().is_some() {
-                        // This is old syntax: enum status: { ... } or enum status: [...]
-                        let loc = node.location();
-                        let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.".to_string(),
-                        ));
-                    }
+            let assoc = kw
+                .elements()
+                .iter()
+                .find_map(|elem| elem.as_assoc_node())
+                .filter(|pair| pair.key().as_symbol_node().is_some());
+
+            if let Some(assoc) = assoc {
+                // This is old syntax: enum status: { ... } or enum status: [...]
+                let loc = node.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                let mut diagnostic = self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.".to_string(),
+                );
+
+                if let Some(key_sym) = assoc.key().as_symbol_node()
+                    && kw.elements().iter().count() == 1
+                    && let Some(ref mut corr) = corrections
+                {
+                    let key = String::from_utf8_lossy(key_sym.unescaped());
+                    let value_loc = assoc.value().location();
+                    let value_src =
+                        source.byte_slice(value_loc.start_offset(), value_loc.end_offset(), "");
+
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: format!("enum :{key}, {value_src}"),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
                 }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -149,6 +176,26 @@ mod tests {
         assert!(
             diagnostics.is_empty(),
             "Should not fire when TargetRailsVersion defaults to 5.0"
+        );
+    }
+
+    #[test]
+    fn autocorrects_keyword_hash_enum_to_positional_enum() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &EnumSyntax,
+            b"enum status: { active: 0, archived: 1 }\n",
+            b"enum :status, { active: 0, archived: 1 }\n",
+            config_with_rails(7.0),
+        );
+    }
+
+    #[test]
+    fn autocorrects_keyword_hash_enum_with_array_values() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &EnumSyntax,
+            b"enum role: [:admin, :user]\n",
+            b"enum :role, [:admin, :user]\n",
+            config_with_rails(7.0),
         );
     }
 }
