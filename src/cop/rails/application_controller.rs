@@ -41,6 +41,10 @@ impl Cop for ApplicationController {
         &[CLASS_NODE, CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -48,12 +52,12 @@ impl Cop for ApplicationController {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(class) = node.as_class_node() {
-            self.check_class(source, &class, diagnostics);
+            self.check_class(source, &class, diagnostics, corrections);
         } else if let Some(call) = node.as_call_node() {
-            self.check_class_new(source, &call, diagnostics);
+            self.check_class_new(source, &call, diagnostics, corrections);
         }
     }
 }
@@ -103,6 +107,7 @@ impl ApplicationController {
         source: &SourceFile,
         class: &ruby_prism::ClassNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Skip if the class IS ApplicationController itself
         let class_name = full_constant_path(source, &class.constant_path());
@@ -129,12 +134,25 @@ impl ApplicationController {
             let superclass = class.superclass().unwrap();
             let loc = superclass.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Controllers should subclass `ApplicationController`.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "ApplicationController".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 
@@ -149,6 +167,7 @@ impl ApplicationController {
         source: &SourceFile,
         call: &ruby_prism::CallNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Must be `Class.new(...)` — receiver is `Class`, method is `new`
         if call.name().as_slice() != b"new" {
@@ -219,12 +238,25 @@ impl ApplicationController {
         // Report offense on the argument (ActionController::Base)
         let loc = arg.location();
         let (arg_line, arg_col) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             arg_line,
             arg_col,
             "Controllers should subclass `ApplicationController`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "ApplicationController".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -232,4 +264,22 @@ impl ApplicationController {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ApplicationController, "cops/rails/application_controller");
+
+    #[test]
+    fn autocorrects_class_superclass_to_application_controller() {
+        crate::testutil::assert_cop_autocorrect(
+            &ApplicationController,
+            b"class UsersController < ActionController::Base\nend\n",
+            b"class UsersController < ApplicationController\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_class_new_argument_to_application_controller() {
+        crate::testutil::assert_cop_autocorrect(
+            &ApplicationController,
+            b"Class.new(ActionController::Base) {}\n",
+            b"Class.new(ApplicationController) {}\n",
+        );
+    }
 }
