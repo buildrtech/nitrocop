@@ -18,6 +18,10 @@ impl Cop for IgnoredColumnsAssignment {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for IgnoredColumnsAssignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -39,12 +43,31 @@ impl Cop for IgnoredColumnsAssignment {
 
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Use `+=` instead of `=`.".to_string(),
-        ));
+        let mut diagnostic = self.diagnostic(source, line, column, "Use `+=` instead of `=`.".to_string());
+
+        if let Some(ref mut corr) = corrections
+            && let Some(args) = call.arguments()
+            && let Some(first_arg) = args.arguments().iter().next()
+        {
+            let search_start = loc.end_offset();
+            let search_end = first_arg.location().start_offset();
+            if search_start < search_end {
+                let haystack = &source.as_bytes()[search_start..search_end];
+                if let Some(eq_idx) = haystack.iter().position(|b| *b == b'=') {
+                    let eq_offset = search_start + eq_idx;
+                    corr.push(crate::correction::Correction {
+                        start: eq_offset,
+                        end: eq_offset + 1,
+                        replacement: "+=".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -55,4 +78,22 @@ mod tests {
         IgnoredColumnsAssignment,
         "cops/rails/ignored_columns_assignment"
     );
+
+    #[test]
+    fn autocorrects_assignment_to_plus_equals() {
+        crate::testutil::assert_cop_autocorrect(
+            &IgnoredColumnsAssignment,
+            b"self.ignored_columns = [:one]\n",
+            b"self.ignored_columns += [:one]\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_compact_assignment_spacing() {
+        crate::testutil::assert_cop_autocorrect(
+            &IgnoredColumnsAssignment,
+            b"self.ignored_columns=[:one]\n",
+            b"self.ignored_columns+=[:one]\n",
+        );
+    }
 }
