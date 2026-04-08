@@ -23,6 +23,10 @@ impl Cop for ClassCheck {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for ClassCheck {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -54,12 +58,25 @@ impl Cop for ClassCheck {
                     let method_str = std::str::from_utf8(method).unwrap_or("be_kind_of");
                     let loc = call.message_loc().unwrap_or_else(|| call.location());
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         format!("Prefer `be_a` over `{method_str}`."),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "be_a".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
             "be_kind_of" => {
@@ -74,12 +91,25 @@ impl Cop for ClassCheck {
                     let method_str = std::str::from_utf8(method).unwrap_or("be_a");
                     let loc = call.message_loc().unwrap_or_else(|| call.location());
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         format!("Prefer `be_kind_of` over `{method_str}`."),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "be_kind_of".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
             _ => {}
@@ -91,4 +121,5 @@ impl Cop for ClassCheck {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ClassCheck, "cops/rspec/class_check");
+    crate::cop_autocorrect_fixture_tests!(ClassCheck, "cops/rspec/class_check");
 }
