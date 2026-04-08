@@ -126,6 +126,10 @@ impl Cop for Dialect {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -133,7 +137,7 @@ impl Cop for Dialect {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -182,12 +186,27 @@ impl Cop for Dialect {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Prefer `{preferred_name}` over `{method_str}`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector_loc) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: selector_loc.end_offset(),
+                replacement: preferred_name.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -239,6 +258,30 @@ mod tests {
         crate::testutil::assert_cop_no_offenses_full(
             &Dialect,
             b"context 'test' do\n  it 'works' do\n    expect(true).to eq(true)\n  end\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_context_to_describe_with_preferred_methods() {
+        use crate::testutil::assert_cop_autocorrect_with_config;
+
+        assert_cop_autocorrect_with_config(
+            &Dialect,
+            b"context 'display name presence' do\nend\n",
+            b"describe 'display name presence' do\nend\n",
+            config_with_preferred(&[("context", "describe")]),
+        );
+    }
+
+    #[test]
+    fn autocorrects_raise_exception_to_raise_error_with_preferred_methods() {
+        use crate::testutil::assert_cop_autocorrect_with_config;
+
+        assert_cop_autocorrect_with_config(
+            &Dialect,
+            b"expect { run }.to raise_exception(ArgumentError, 'bad input')\n",
+            b"expect { run }.to raise_error(ArgumentError, 'bad input')\n",
+            config_with_preferred(&[("raise_exception", "raise_error")]),
         );
     }
 }
