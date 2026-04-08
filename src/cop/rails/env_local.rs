@@ -53,6 +53,10 @@ impl Cop for EnvLocal {
         &[CALL_NODE, OR_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -60,7 +64,7 @@ impl Cop for EnvLocal {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 7.1
         if !config.rails_version_at_least(7.1) {
@@ -86,12 +90,25 @@ impl Cop for EnvLocal {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `Rails.env.local?` instead of checking for development or test.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "Rails.env.local?".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -99,4 +116,60 @@ impl Cop for EnvLocal {
 mod tests {
     use super::*;
     crate::cop_rails_fixture_tests!(EnvLocal, "cops/rails/env_local", 7.1);
+
+    #[test]
+    fn autocorrects_development_or_test_to_local() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(7.1)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &EnvLocal,
+            b"Rails.env.development? || Rails.env.test?\n",
+            b"Rails.env.local?\n",
+            config,
+        );
+    }
+
+    #[test]
+    fn autocorrects_test_or_development_to_local() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(7.1)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &EnvLocal,
+            b"Rails.env.test? || Rails.env.development?\n",
+            b"Rails.env.local?\n",
+            config,
+        );
+    }
 }
