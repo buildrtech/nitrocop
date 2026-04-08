@@ -33,6 +33,10 @@ impl Cop for RelativeDateConstant {
         &[CONSTANT_PATH_WRITE_NODE, CONSTANT_WRITE_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -40,7 +44,7 @@ impl Cop for RelativeDateConstant {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let value = if let Some(cw) = node.as_constant_write_node() {
             cw.value()
@@ -59,12 +63,35 @@ impl Cop for RelativeDateConstant {
         if finder.found {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Do not assign relative dates to constants.".to_string(),
-            ));
+            );
+
+            if let Some(cw) = node.as_constant_write_node()
+                && let Some(ref mut corr) = corrections
+            {
+                let const_name = String::from_utf8_lossy(cw.name().as_slice()).to_lowercase();
+                let value = cw.value();
+                let value_loc = value.location();
+                let value_src =
+                    source.byte_slice(value_loc.start_offset(), value_loc.end_offset(), "");
+                let indent = " ".repeat(column);
+                let replacement =
+                    format!("def self.{const_name}\n{indent}  {value_src}\n{indent}end");
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -99,4 +126,13 @@ impl<'a> Visit<'a> for RelativeDateFinder {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RelativeDateConstant, "cops/rails/relative_date_constant");
+    crate::cop_autocorrect_fixture_tests!(
+        RelativeDateConstant,
+        "cops/rails/relative_date_constant"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RelativeDateConstant.supports_autocorrect());
+    }
 }
