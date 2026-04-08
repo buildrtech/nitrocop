@@ -1,4 +1,5 @@
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
@@ -28,6 +29,10 @@ impl Cop for I18nLazyLookup {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -35,7 +40,7 @@ impl Cop for I18nLazyLookup {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let path = source.path_str();
         if !is_controller_file(path) {
@@ -54,9 +59,14 @@ impl Cop for I18nLazyLookup {
             in_controller_class: false,
             method_visibility: Visibility::Public,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            autocorrect_enabled: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -76,6 +86,8 @@ struct I18nLazyLookupVisitor<'a> {
     in_controller_class: bool,
     method_visibility: Visibility,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
+    autocorrect_enabled: bool,
 }
 
 impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
@@ -122,16 +134,17 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
             if let Some(args) = node.arguments() {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
                 if !arg_list.is_empty() {
-                    let (key, is_symbol) = if let Some(s) = arg_list[0].as_string_node() {
+                    let key_node = &arg_list[0];
+                    let (key, is_symbol) = if let Some(s) = key_node.as_string_node() {
                         (Some(s.unescaped().to_vec()), false)
-                    } else if let Some(sym) = arg_list[0].as_symbol_node() {
+                    } else if let Some(sym) = key_node.as_symbol_node() {
                         (Some(sym.unescaped().to_vec()), true)
                     } else {
                         (None, false)
                     };
 
                     if let Some(key) = key {
-                        self.check_key(node, &key, is_symbol);
+                        self.check_key(node, key_node, &key, is_symbol);
                     }
                 }
             }
@@ -142,7 +155,13 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
 }
 
 impl I18nLazyLookupVisitor<'_> {
-    fn check_key(&mut self, node: &ruby_prism::CallNode<'_>, key: &[u8], is_symbol: bool) {
+    fn check_key(
+        &mut self,
+        node: &ruby_prism::CallNode<'_>,
+        key_node: &ruby_prism::Node<'_>,
+        key: &[u8],
+        is_symbol: bool,
+    ) {
         // Only flag inside Controller classes with public methods
         if !self.in_controller_class {
             return;
@@ -157,14 +176,40 @@ impl I18nLazyLookupVisitor<'_> {
                 if !key.starts_with(b".") {
                     return;
                 }
-                let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    "Use explicit lookup for i18n keys.".to_string(),
-                ));
+                let mut diagnostic = {
+                    let loc = node.location();
+                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                    self.cop.diagnostic(
+                        self.source,
+                        line,
+                        column,
+                        "Use explicit lookup for i18n keys.".to_string(),
+                    )
+                };
+
+                if self.autocorrect_enabled
+                    && let Some(ref prefix) = self.controller_prefix
+                    && let Some(method_name) = &self.current_method
+                {
+                    let method_str = std::str::from_utf8(method_name).unwrap_or("");
+                    let key_str = std::str::from_utf8(key).unwrap_or("");
+                    let last_segment = match key_str.rsplit('.').next() {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let replacement = format!("'{}.{}.{}'", prefix, method_str, last_segment);
+                    let key_loc = key_node.location();
+                    self.corrections.push(Correction {
+                        start: key_loc.start_offset(),
+                        end: key_loc.end_offset(),
+                        replacement,
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                self.diagnostics.push(diagnostic);
             }
             _ => {
                 // "lazy" (default): flag explicit lookups that could use lazy lookup
@@ -207,14 +252,35 @@ impl I18nLazyLookupVisitor<'_> {
                     }
                 }
 
-                let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    "Use lazy lookup for i18n keys.".to_string(),
-                ));
+                let mut diagnostic = {
+                    let loc = node.location();
+                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                    self.cop.diagnostic(
+                        self.source,
+                        line,
+                        column,
+                        "Use lazy lookup for i18n keys.".to_string(),
+                    )
+                };
+
+                if self.autocorrect_enabled {
+                    let key_str = std::str::from_utf8(key).unwrap_or("");
+                    let last_segment = match key_str.rsplit('.').next() {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let key_loc = key_node.location();
+                    self.corrections.push(Correction {
+                        start: key_loc.start_offset(),
+                        end: key_loc.end_offset(),
+                        replacement: format!("'.{last_segment}'"),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                self.diagnostics.push(diagnostic);
             }
         }
     }
@@ -259,6 +325,7 @@ fn controller_prefix_from_path(path: &str) -> Option<String> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(I18nLazyLookup, "cops/rails/i18n_lazy_lookup");
+    crate::cop_autocorrect_fixture_tests!(I18nLazyLookup, "cops/rails/i18n_lazy_lookup");
 
     #[test]
     fn explicit_style_flags_lazy_key() {
@@ -340,5 +407,10 @@ mod tests {
             Some("books".to_string())
         );
         assert_eq!(controller_prefix_from_path("app/models/user.rb"), None);
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(I18nLazyLookup.supports_autocorrect());
     }
 }

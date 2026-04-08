@@ -16,7 +16,7 @@ struct ChainCallInfo {
     msg_offset: usize,
     assoc_name: Option<Vec<u8>>,    // For left_joins(:assoc) calls
     where_nil_assocs: Vec<Vec<u8>>, // For where(assoc: { id: nil }) — which table names matched
-    where_pair_count: usize,         // Top-level hash pair count in where(...)
+    where_pair_count: usize,        // Top-level hash pair count in where(...)
 }
 
 /// Walk a method chain and collect info about each call.
