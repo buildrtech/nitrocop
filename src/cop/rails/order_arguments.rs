@@ -27,6 +27,10 @@ impl Cop for OrderArguments {
         &[CALL_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -34,7 +38,7 @@ impl Cop for OrderArguments {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -130,12 +134,22 @@ impl Cop for OrderArguments {
 
         let first_arg_loc = arg_list[0].location();
         let (line, column) = source.offset_to_line_col(first_arg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            format!("Prefer `{prefer}` instead."),
-        ));
+        let mut diagnostic =
+            self.diagnostic(source, line, column, format!("Prefer `{prefer}` instead."));
+
+        if let Some(ref mut corr) = corrections {
+            let last_arg_loc = arg_list[arg_list.len() - 1].location();
+            corr.push(crate::correction::Correction {
+                start: first_arg_loc.start_offset(),
+                end: last_arg_loc.end_offset(),
+                replacement: prefer.clone(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -143,4 +157,10 @@ impl Cop for OrderArguments {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(OrderArguments, "cops/rails/order_arguments");
+    crate::cop_autocorrect_fixture_tests!(OrderArguments, "cops/rails/order_arguments");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(OrderArguments.supports_autocorrect());
+    }
 }

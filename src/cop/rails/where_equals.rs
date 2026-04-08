@@ -5,41 +5,26 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// Detects `.where()` and `.where.not()` calls with SQL strings that could be
-/// replaced with hash syntax.
-///
-/// ## Investigation findings (2026-03-15)
-///
-/// Root cause of 198 FNs:
-/// 1. **Array argument form not handled** — RuboCop accepts both `where("col = ?", val)`
-///    and `where(["col = ?", val])`. nitrocop only handled the non-array form. The array
-///    form wraps the SQL template and bind values in a single Array argument.
-/// 2. **Receiverless `where` rejected** — `where('col = ?', val)` without an explicit
-///    receiver (common in scopes, class methods, and blocks) was rejected by the
-///    `receiver().is_none()` guard. RuboCop flags these. The `not` method still requires
-///    a `where` receiver (`where.not(...)`).
-///
-/// ## Investigation findings (2026-03-23)
-///
-/// Extended corpus: FP=3, FN=0. All 3 FPs are from `discourse/mini_sql`, a non-Rails
-/// SQL builder library. RuboCop reports 0 offenses for this cop in that repo because
-/// the repo does not load `rubocop-rails` — the cop is never activated. nitrocop fires
-/// because it runs all cops unconditionally. Both RuboCop and nitrocop use the same
-/// pattern matching (any receiver on `.where`), so the cop logic itself is correct.
-/// These FPs are not fixable at the cop level; they require config-level awareness of
-/// which plugin cops are enabled per-project.
 pub struct WhereEquals;
 
 static EQ_ANON_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^[\w.]+\s+=\s+\?$").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"^([\w.]+)\s+=\s+\?$").unwrap());
 static IN_ANON_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(?i)^[\w.]+\s+IN\s+\(\?\)$").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"(?i)^([\w.]+)\s+IN\s+\(\?\)$").unwrap());
 static IS_NULL_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(?i)^[\w.]+\s+IS\s+NULL$").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"(?i)^([\w.]+)\s+IS\s+NULL$").unwrap());
 static EQ_NAMED_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^[\w.]+\s+=\s+:\w+$").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"^([\w.]+)\s+=\s+:(\w+)$").unwrap());
 static IN_NAMED_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(?i)^[\w.]+\s+IN\s+\(:\w+\)$").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"(?i)^([\w.]+)\s+IN\s+\(:(\w+)\)$").unwrap());
+
+enum SqlPattern {
+    EqAnon { column: String },
+    InAnon { column: String },
+    IsNull { column: String },
+    EqNamed { column: String, key: String },
+    InNamed { column: String, key: String },
+}
 
 impl Cop for WhereEquals {
     fn name(&self) -> &'static str {
@@ -54,6 +39,10 @@ impl Cop for WhereEquals {
         &[CALL_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -61,7 +50,7 @@ impl Cop for WhereEquals {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -97,62 +86,168 @@ impl Cop for WhereEquals {
             return;
         };
 
-        // Extract the SQL template string. It can appear in two forms:
-        // 1. Direct: where("col = ?", val)  — first arg is a StringNode
-        // 2. Array:  where(["col = ?", val]) — first arg is an ArrayNode containing a StringNode
-        let template: String = if let Some(str_node) = first_arg.as_string_node() {
-            std::str::from_utf8(str_node.unescaped())
-                .unwrap_or("")
-                .to_owned()
-        } else if let Some(array_node) = first_arg.as_array_node() {
-            let mut elements = array_node.elements().iter();
-            let Some(first_element) = elements.next() else {
-                return;
-            };
-            if let Some(str_node) = first_element.as_string_node() {
-                std::str::from_utf8(str_node.unescaped())
-                    .unwrap_or("")
-                    .to_owned()
+        let (template, value_nodes): (String, Vec<ruby_prism::Node<'_>>) =
+            if let Some(str_node) = first_arg.as_string_node() {
+                (
+                    std::str::from_utf8(str_node.unescaped())
+                        .unwrap_or("")
+                        .to_owned(),
+                    arg_iter.collect(),
+                )
+            } else if let Some(array_node) = first_arg.as_array_node() {
+                let mut elems = array_node.elements().iter();
+                let Some(first_elem) = elems.next() else {
+                    return;
+                };
+                let Some(str_node) = first_elem.as_string_node() else {
+                    return;
+                };
+                (
+                    std::str::from_utf8(str_node.unescaped())
+                        .unwrap_or("")
+                        .to_owned(),
+                    elems.collect(),
+                )
             } else {
                 return;
-            }
-        } else {
+            };
+
+        let Some(pattern) = parse_sql_pattern(&template) else {
             return;
         };
 
-        // Check patterns:
-        // column = ?
-        // column IS NULL
-        // column IN (?)
-        let is_simple_sql = EQ_ANON_RE.is_match(&template)
-            || IN_ANON_RE.is_match(&template)
-            || IS_NULL_RE.is_match(&template)
-            || EQ_NAMED_RE.is_match(&template)
-            || IN_NAMED_RE.is_match(&template);
+        let column = match &pattern {
+            SqlPattern::EqAnon { column }
+            | SqlPattern::InAnon { column }
+            | SqlPattern::IsNull { column }
+            | SqlPattern::EqNamed { column, .. }
+            | SqlPattern::InNamed { column, .. } => column,
+        };
 
-        if !is_simple_sql {
+        // Reject database-qualified columns: allow `col` or `table.col`, reject `db.table.col`.
+        if column.chars().filter(|&c| c == '.').count() > 1 {
             return;
         }
 
-        // Reject database-qualified columns (e.g., "database.table.column") — only
-        // table.column (one dot) or plain column (zero dots) are replaceable.
-        let column_part = template
-            .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
-            .next()
-            .unwrap_or("");
-        if column_part.chars().filter(|&c| c == '.').count() > 1 {
+        let Some(value_source) = extract_value_source(source, &pattern, &value_nodes) else {
             return;
-        }
+        };
+
+        let method = std::str::from_utf8(name).unwrap_or("where");
+        let good_method = build_good_method(method, column, &value_source);
 
         let loc = call.message_loc().unwrap_or(call.location());
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let method = std::str::from_utf8(name).unwrap_or("where");
-        diagnostics.push(self.diagnostic(
+        let (line, column_no) = source.offset_to_line_col(loc.start_offset());
+        let mut diagnostic = self.diagnostic(
             source,
             line,
-            column,
-            format!("Use `{method}(attribute: value)` instead of manually constructing SQL."),
-        ));
+            column_no,
+            format!("Use `{good_method}` instead of manually constructing SQL."),
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: call.location().end_offset(),
+                replacement: good_method,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
+    }
+}
+
+fn parse_sql_pattern(template: &str) -> Option<SqlPattern> {
+    if let Some(caps) = EQ_ANON_RE.captures(template) {
+        return Some(SqlPattern::EqAnon {
+            column: caps.get(1)?.as_str().to_string(),
+        });
+    }
+    if let Some(caps) = IN_ANON_RE.captures(template) {
+        return Some(SqlPattern::InAnon {
+            column: caps.get(1)?.as_str().to_string(),
+        });
+    }
+    if let Some(caps) = IS_NULL_RE.captures(template) {
+        return Some(SqlPattern::IsNull {
+            column: caps.get(1)?.as_str().to_string(),
+        });
+    }
+    if let Some(caps) = EQ_NAMED_RE.captures(template) {
+        return Some(SqlPattern::EqNamed {
+            column: caps.get(1)?.as_str().to_string(),
+            key: caps.get(2)?.as_str().to_string(),
+        });
+    }
+    if let Some(caps) = IN_NAMED_RE.captures(template) {
+        return Some(SqlPattern::InNamed {
+            column: caps.get(1)?.as_str().to_string(),
+            key: caps.get(2)?.as_str().to_string(),
+        });
+    }
+    None
+}
+
+fn extract_value_source(
+    source: &SourceFile,
+    pattern: &SqlPattern,
+    value_nodes: &[ruby_prism::Node<'_>],
+) -> Option<String> {
+    match pattern {
+        SqlPattern::IsNull { .. } => Some("nil".to_string()),
+        SqlPattern::EqAnon { .. } | SqlPattern::InAnon { .. } => {
+            let value = value_nodes.first()?;
+            let loc = value.location();
+            Some(
+                source
+                    .byte_slice(loc.start_offset(), loc.end_offset(), "")
+                    .to_string(),
+            )
+        }
+        SqlPattern::EqNamed { key, .. } | SqlPattern::InNamed { key, .. } => {
+            let hash_like = value_nodes.first()?;
+            let elements = if let Some(hash) = hash_like.as_hash_node() {
+                hash.elements()
+            } else if let Some(kw_hash) = hash_like.as_keyword_hash_node() {
+                kw_hash.elements()
+            } else {
+                return None;
+            };
+
+            for elem in elements.iter() {
+                let assoc = elem.as_assoc_node()?;
+                let assoc_key = assoc.key();
+                let key_matches = assoc_key
+                    .as_symbol_node()
+                    .is_some_and(|sym| sym.unescaped() == key.as_bytes())
+                    || assoc_key
+                        .as_string_node()
+                        .is_some_and(|s| s.unescaped() == key.as_bytes());
+                if !key_matches {
+                    continue;
+                }
+
+                let vloc = assoc.value().location();
+                return Some(
+                    source
+                        .byte_slice(vloc.start_offset(), vloc.end_offset(), "")
+                        .to_string(),
+                );
+            }
+
+            None
+        }
+    }
+}
+
+fn build_good_method(method_name: &str, column: &str, value: &str) -> String {
+    if let Some((table, col)) = column.split_once('.') {
+        format!("{method_name}({table}: {{ {col}: {value} }})")
+    } else {
+        format!("{method_name}({column}: {value})")
     }
 }
 
@@ -160,6 +255,12 @@ impl Cop for WhereEquals {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(WhereEquals, "cops/rails/where_equals");
+    crate::cop_autocorrect_fixture_tests!(WhereEquals, "cops/rails/where_equals");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(WhereEquals.supports_autocorrect());
+    }
 
     #[test]
     fn test_array_argument_form() {

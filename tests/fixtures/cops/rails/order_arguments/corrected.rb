@@ -1,0 +1,5 @@
+User.order(:name)
+User.order(name: :desc)
+User.order(:email)
+order(created_at: :desc)
+Post.includes(:comments).order()
