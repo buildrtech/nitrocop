@@ -187,7 +187,12 @@ impl PluckVisitor<'_, '_> {
 
         let selector = call.message_loc().unwrap_or(call.location());
         let block_end = block_node.location().end_offset();
-        Some((diag, selector.start_offset(), block_end, format!("pluck({key_src})")))
+        Some((
+            diag,
+            selector.start_offset(),
+            block_end,
+            format!("pluck({key_src})"),
+        ))
     }
 }
 

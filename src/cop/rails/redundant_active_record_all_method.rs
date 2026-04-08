@@ -307,9 +307,12 @@ impl<'pr> AllMethodVisitor<'_, '_> {
         // Report at the `all` method name location
         let msg_loc = inner_call.message_loc().unwrap_or(inner_call.location());
         let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
-        let mut diagnostic =
-            self.cop
-                .diagnostic(self.source, line, column, "Redundant `all` detected.".to_string());
+        let mut diagnostic = self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            "Redundant `all` detected.".to_string(),
+        );
 
         if let Some(ref mut corr) = self.corrections {
             let outer_selector = outer_call.message_loc().unwrap_or(outer_call.location());

@@ -150,5 +150,8 @@ impl Cop for EnvironmentComparison {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EnvironmentComparison, "cops/rails/environment_comparison");
-    crate::cop_autocorrect_fixture_tests!(EnvironmentComparison, "cops/rails/environment_comparison");
+    crate::cop_autocorrect_fixture_tests!(
+        EnvironmentComparison,
+        "cops/rails/environment_comparison"
+    );
 }

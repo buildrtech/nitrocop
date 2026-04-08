@@ -243,7 +243,10 @@ impl<'pr> BlankVisitor<'_, '_> {
                         if let Some(ref mut corr) = self.corrections {
                             let replacement = match nil_recv {
                                 Some(recv_bytes) => {
-                                    format!("{}.blank?", std::str::from_utf8(recv_bytes).unwrap_or(""))
+                                    format!(
+                                        "{}.blank?",
+                                        std::str::from_utf8(recv_bytes).unwrap_or("")
+                                    )
                                 }
                                 None => "blank?".to_string(),
                             };

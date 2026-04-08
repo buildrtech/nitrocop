@@ -85,8 +85,12 @@ impl Cop for EmptyMetadata {
                 if hash.elements().iter().count() == 0 {
                     let loc = hash.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    let mut diagnostic =
-                        self.diagnostic(source, line, column, "Avoid empty metadata hash.".to_string());
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Avoid empty metadata hash.".to_string(),
+                    );
 
                     if let Some(ref mut corr) = corrections {
                         let bytes = source.as_bytes();

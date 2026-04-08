@@ -43,7 +43,8 @@ impl Cop for IgnoredColumnsAssignment {
 
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diagnostic = self.diagnostic(source, line, column, "Use `+=` instead of `=`.".to_string());
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Use `+=` instead of `=`.".to_string());
 
         if let Some(ref mut corr) = corrections
             && let Some(args) = call.arguments()

@@ -161,11 +161,10 @@ impl Cop for ExpectActual {
             )
             .unwrap_or("")
             .to_string();
-            let actual_src = std::str::from_utf8(
-                &source.as_bytes()[loc.start_offset()..loc.end_offset()],
-            )
-            .unwrap_or("")
-            .to_string();
+            let actual_src =
+                std::str::from_utf8(&source.as_bytes()[loc.start_offset()..loc.end_offset()])
+                    .unwrap_or("")
+                    .to_string();
 
             corr.push(crate::correction::Correction {
                 start: loc.start_offset(),

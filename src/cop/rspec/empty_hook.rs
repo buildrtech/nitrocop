@@ -79,7 +79,8 @@ impl Cop for EmptyHook {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diagnostic = self.diagnostic(source, line, column, "Empty hook detected.".to_string());
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Empty hook detected.".to_string());
 
         if let Some(ref mut corr) = corrections
             && let Some(block_node) = block.as_block_node()

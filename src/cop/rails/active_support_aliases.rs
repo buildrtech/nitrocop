@@ -88,7 +88,9 @@ impl Cop for ActiveSupportAliases {
 
         // Match RuboCop behavior: skip autocorrect for `append` (selector `<<` cannot
         // be applied via simple selector replacement).
-        if let Some(ref mut corr) = corrections && name != b"append" {
+        if let Some(ref mut corr) = corrections
+            && name != b"append"
+        {
             corr.push(crate::correction::Correction {
                 start: loc.start_offset(),
                 end: loc.end_offset(),
@@ -107,5 +109,8 @@ impl Cop for ActiveSupportAliases {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ActiveSupportAliases, "cops/rails/active_support_aliases");
-    crate::cop_autocorrect_fixture_tests!(ActiveSupportAliases, "cops/rails/active_support_aliases");
+    crate::cop_autocorrect_fixture_tests!(
+        ActiveSupportAliases,
+        "cops/rails/active_support_aliases"
+    );
 }

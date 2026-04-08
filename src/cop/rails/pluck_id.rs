@@ -192,9 +192,9 @@ impl<'pr> Visit<'pr> for PluckIdVisitor<'_, '_> {
                     None => call_loc.start_offset(),
                 };
                 let (line, column) = self.source.offset_to_line_col(start_offset);
-                let mut diagnostic = self
-                    .cop
-                    .diagnostic(self.source, line, column, message.to_string());
+                let mut diagnostic =
+                    self.cop
+                        .diagnostic(self.source, line, column, message.to_string());
 
                 if let Some(ref mut corr) = self.corrections {
                     let call_loc = node.location();

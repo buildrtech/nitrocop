@@ -6,6 +6,18 @@ use crate::parse::source::SourceFile;
 
 pub struct ChangeByZero;
 
+fn find_to_selector_before_offset(source: &SourceFile, end: usize) -> Option<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let start = end.saturating_sub(160);
+    let mut found: Option<(usize, usize)> = None;
+    for i in start..end.saturating_sub(3) {
+        if bytes.get(i..i + 4) == Some(&b".to "[..]) {
+            found = Some((i + 1, i + 3));
+        }
+    }
+    found
+}
+
 /// Detects `change { ... }.by(0)` or `change(X, :y).by(0)`.
 impl Cop for ChangeByZero {
     fn name(&self) -> &'static str {
@@ -24,6 +36,10 @@ impl Cop for ChangeByZero {
         &[BLOCK_NODE, CALL_NODE, INTEGER_NODE, STATEMENTS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -31,7 +47,7 @@ impl Cop for ChangeByZero {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: NegatedMatcher — name of a custom negated matcher (e.g. "not_change")
         let negated_matcher = config.get_str("NegatedMatcher", "");
@@ -161,7 +177,32 @@ impl Cop for ChangeByZero {
         } else {
             format!("Prefer `{negated_matcher}` over `to change.by(0)`.")
         };
-        diagnostics.push(self.diagnostic(source, line, column, msg));
+        let mut diagnostic = self.diagnostic(source, line, column, msg);
+
+        if let Some(ref mut corr) = corrections {
+            if let Some((to_start, to_end)) = find_to_selector_before_offset(source, change_call.location().start_offset()) {
+                corr.push(crate::correction::Correction {
+                    start: to_start,
+                    end: to_end,
+                    replacement: "not_to".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+
+            let by_loc = call.location();
+            let change_end = change_call.location().end_offset();
+            corr.push(crate::correction::Correction {
+                start: change_end,
+                end: by_loc.end_offset(),
+                replacement: "".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -193,5 +234,23 @@ mod tests {
         let source = b"expect { x }.not_to change { y }\n";
         let diags = crate::testutil::run_cop_full(&ChangeByZero, source);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn autocorrects_change_by_zero_with_arguments() {
+        crate::testutil::assert_cop_autocorrect(
+            &ChangeByZero,
+            b"expect { foo }.to change(Foo, :bar).by(0)\n",
+            b"expect { foo }.not_to change(Foo, :bar)\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_change_by_zero_with_block() {
+        crate::testutil::assert_cop_autocorrect(
+            &ChangeByZero,
+            b"expect { foo }.to change { Foo.bar }.by(0)\n",
+            b"expect { foo }.not_to change { Foo.bar }\n",
+        );
     }
 }

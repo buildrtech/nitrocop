@@ -309,7 +309,9 @@ fn check_presence_patterns(
     if nil_text == "nil" {
         let value_node = if is_present { then_node } else { else_node };
         if let Some(vn) = value_node {
-            if let Some(diags) = check_chain_pattern(cop, source, node, receiver_text, vn, corrections) {
+            if let Some(diags) =
+                check_chain_pattern(cop, source, node, receiver_text, vn, corrections)
+            {
                 return diags;
             }
         }
@@ -374,7 +376,13 @@ fn check_chain_pattern(
         replacement.push_str(&args_parts.join(", "));
         replacement.push(')');
     }
-    Some(emit_offense(cop, source, if_node, &replacement, corrections))
+    Some(emit_offense(
+        cop,
+        source,
+        if_node,
+        &replacement,
+        corrections,
+    ))
 }
 
 fn emit_offense(

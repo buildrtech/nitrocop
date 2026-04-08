@@ -105,11 +105,7 @@ impl Cop for ContentTag {
                     .iter()
                     .map(|n| {
                         source
-                            .byte_slice(
-                                n.location().start_offset(),
-                                n.location().end_offset(),
-                                "",
-                            )
+                            .byte_slice(n.location().start_offset(), n.location().end_offset(), "")
                             .to_string()
                     })
                     .collect::<Vec<_>>()

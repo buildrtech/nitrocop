@@ -219,7 +219,11 @@ impl Cop for ActiveSupportOnLoad {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         let preferred = if let Some(args) = call.arguments() {
             let args_src = source
-                .byte_slice(args.location().start_offset(), args.location().end_offset(), "")
+                .byte_slice(
+                    args.location().start_offset(),
+                    args.location().end_offset(),
+                    "",
+                )
                 .to_string();
             format!("ActiveSupport.on_load(:{hook}) {{ {method_str} {args_src} }}")
         } else {

@@ -72,12 +72,8 @@ impl Cop for BeEq {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diagnostic = self.diagnostic(
-            source,
-            line,
-            column,
-            "Prefer `be` over `eq`.".to_string(),
-        );
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Prefer `be` over `eq`.".to_string());
 
         if let Some(ref mut corr) = corrections
             && let Some(selector) = call.message_loc()

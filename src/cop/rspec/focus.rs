@@ -147,9 +147,12 @@ impl FocusVisitor<'_> {
             if call.receiver().is_none() && !is_chained_call(self.source, call) {
                 let loc = call.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                let mut diagnostic =
-                    self.cop
-                        .diagnostic(self.source, line, column, "Focused spec found.".to_string());
+                let mut diagnostic = self.cop.diagnostic(
+                    self.source,
+                    line,
+                    column,
+                    "Focused spec found.".to_string(),
+                );
 
                 let method_str = std::str::from_utf8(method_name).unwrap_or("");
                 if method_str.starts_with('f') && method_str != "focus" {
