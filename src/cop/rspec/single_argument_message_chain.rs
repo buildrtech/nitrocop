@@ -23,6 +23,10 @@ impl Cop for SingleArgumentMessageChain {
         &[ARRAY_NODE, CALL_NODE, STRING_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for SingleArgumentMessageChain {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -78,14 +82,29 @@ impl Cop for SingleArgumentMessageChain {
         let method_str = std::str::from_utf8(method).unwrap_or("receive_message_chain");
         let loc = call.message_loc().unwrap_or_else(|| call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!(
                 "Use `{replacement}` instead of calling `{method_str}` with a single argument."
             ),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector_loc) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: selector_loc.end_offset(),
+                replacement: replacement.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -93,6 +112,10 @@ impl Cop for SingleArgumentMessageChain {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        SingleArgumentMessageChain,
+        "cops/rspec/single_argument_message_chain"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         SingleArgumentMessageChain,
         "cops/rspec/single_argument_message_chain"
     );
