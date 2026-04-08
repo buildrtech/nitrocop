@@ -23,6 +23,10 @@ impl Cop for MatchArray {
         &[ARRAY_NODE, CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for MatchArray {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Detect `match_array([...])` with a non-empty array literal argument.
         // Suggest `contain_exactly` instead.
@@ -75,12 +79,37 @@ impl Cop for MatchArray {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Prefer `contain_exactly` when matching an array literal.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let args = array_node
+                .elements()
+                .iter()
+                .map(|n| {
+                    let l = n.location();
+                    std::str::from_utf8(&source.as_bytes()[l.start_offset()..l.end_offset()])
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("contain_exactly({args})"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -88,4 +117,5 @@ impl Cop for MatchArray {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MatchArray, "cops/rspec/match_array");
+    crate::cop_autocorrect_fixture_tests!(MatchArray, "cops/rspec/match_array");
 }
