@@ -43,6 +43,10 @@ impl Cop for CompactBlank {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -50,7 +54,7 @@ impl Cop for CompactBlank {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 6.1
         if !config.rails_version_at_least(6.1) {
@@ -101,12 +105,27 @@ impl Cop for CompactBlank {
                     if unescaped == expected_predicate {
                         let loc = node.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             format!("Use `{}` instead.", preferred_method(method_name)),
-                        ));
+                        );
+
+                        if let Some(ref mut corr) = corrections
+                            && let Some(selector_loc) = call.message_loc()
+                        {
+                            corr.push(crate::correction::Correction {
+                                start: selector_loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: preferred_method(method_name).to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -190,12 +209,27 @@ impl Cop for CompactBlank {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{}` instead.", preferred_method(method_name)),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector_loc) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: preferred_method(method_name).to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -263,6 +297,26 @@ mod tests {
         assert!(
             diagnostics.is_empty(),
             "safe-navigation calls should not be flagged"
+        );
+    }
+
+    #[test]
+    fn autocorrects_reject_blank_to_compact_blank() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &CompactBlank,
+            b"arr.reject { |x| x.blank? }\n",
+            b"arr.compact_blank\n",
+            config_with_rails(6.1),
+        );
+    }
+
+    #[test]
+    fn autocorrects_delete_if_blank_to_compact_blank_bang() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &CompactBlank,
+            b"hash.delete_if { |_k, v| v.blank? }\n",
+            b"hash.compact_blank!\n",
+            config_with_rails(6.1),
         );
     }
 }
