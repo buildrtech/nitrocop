@@ -28,6 +28,21 @@ fn is_string_or_symbol_literal(node: &ruby_prism::Node<'_>) -> bool {
     node.as_string_node().is_some() || node.as_symbol_node().is_some()
 }
 
+fn env_name_from_literal(node: &ruby_prism::Node<'_>) -> Option<String> {
+    if let Some(sym) = node.as_symbol_node() {
+        let value_loc = sym.value_loc()?;
+        let value = std::str::from_utf8(value_loc.as_slice()).ok()?;
+        return Some(value.to_string());
+    }
+
+    if let Some(str_node) = node.as_string_node() {
+        let value = std::str::from_utf8(str_node.unescaped()).ok()?;
+        return Some(value.to_string());
+    }
+
+    None
+}
+
 impl Cop for EnvironmentComparison {
     fn name(&self) -> &'static str {
         "Rails/EnvironmentComparison"
@@ -41,6 +56,10 @@ impl Cop for EnvironmentComparison {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -48,7 +67,7 @@ impl Cop for EnvironmentComparison {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -91,12 +110,39 @@ impl Cop for EnvironmentComparison {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `Rails.env.production?` instead of comparing `Rails.env`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let (rails_env_node, literal_node) = if is_rails_env(&recv_node) {
+                (&recv_node, arg_node)
+            } else {
+                (arg_node, &recv_node)
+            };
+
+            if let Some(env_name) = env_name_from_literal(literal_node) {
+                let bang = if method == b"!=" { "!" } else { "" };
+                let rails_src = source.byte_slice(
+                    rails_env_node.location().start_offset(),
+                    rails_env_node.location().end_offset(),
+                    "Rails.env",
+                );
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!("{bang}{rails_src}.{env_name}?"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -104,4 +150,5 @@ impl Cop for EnvironmentComparison {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EnvironmentComparison, "cops/rails/environment_comparison");
+    crate::cop_autocorrect_fixture_tests!(EnvironmentComparison, "cops/rails/environment_comparison");
 }
