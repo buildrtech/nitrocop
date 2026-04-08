@@ -125,12 +125,11 @@ impl Cop for SafeNavigation {
             };
 
             let (start, end, replacement) = if call.receiver().is_some() {
-                let op = call.call_operator_loc().unwrap_or(loc);
-                (
-                    op.start_offset(),
-                    loc.end_offset(),
-                    replacement_suffix,
-                )
+                let start = call
+                    .call_operator_loc()
+                    .map(|op| op.start_offset())
+                    .unwrap_or(loc.start_offset());
+                (start, loc.end_offset(), replacement_suffix)
             } else {
                 (
                     loc.start_offset(),
