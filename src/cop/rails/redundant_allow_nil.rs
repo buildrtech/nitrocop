@@ -29,6 +29,10 @@ pub struct RedundantAllowNil;
 struct AllowNilResult {
     offset: usize,
     is_true: bool,
+    assoc_start: usize,
+    assoc_end: usize,
+    prev_end: Option<usize>,
+    next_start: Option<usize>,
 }
 
 /// Search the argument tree for allow_nil + allow_blank pair in the same hash scope.
@@ -60,10 +64,10 @@ fn search_hash_elements<'a>(
         return None;
     };
 
-    let mut allow_nil: Option<AllowNilResult> = None;
+    let mut allow_nil: Option<(usize, AllowNilResult)> = None;
     let mut allow_blank_true: Option<bool> = None;
 
-    for elem in &elements {
+    for (idx, elem) in elements.iter().enumerate() {
         if let Some(assoc) = elem.as_assoc_node() {
             if let Some(sym) = assoc.key().as_symbol_node() {
                 // Skip hash-rocket style: key source starts with `:` (e.g., `:allow_nil`)
@@ -78,10 +82,18 @@ fn search_hash_elements<'a>(
                     let is_true = assoc.value().as_true_node().is_some();
                     let is_false = assoc.value().as_false_node().is_some();
                     if is_true || is_false {
-                        allow_nil = Some(AllowNilResult {
-                            offset: assoc.key().location().start_offset(),
-                            is_true,
-                        });
+                        let assoc_loc = assoc.location();
+                        allow_nil = Some((
+                            idx,
+                            AllowNilResult {
+                                offset: assoc.key().location().start_offset(),
+                                is_true,
+                                assoc_start: assoc_loc.start_offset(),
+                                assoc_end: assoc_loc.end_offset(),
+                                prev_end: None,
+                                next_start: None,
+                            },
+                        ));
                     }
                 } else if name == b"allow_blank" {
                     let is_true = assoc.value().as_true_node().is_some();
@@ -97,7 +109,13 @@ fn search_hash_elements<'a>(
         }
     }
 
-    if let (Some(nil_result), Some(blank_is_true)) = (allow_nil, allow_blank_true) {
+    if let (Some((idx, mut nil_result)), Some(blank_is_true)) = (allow_nil, allow_blank_true) {
+        if idx > 0 {
+            nil_result.prev_end = Some(elements[idx - 1].location().end_offset());
+        }
+        if idx + 1 < elements.len() {
+            nil_result.next_start = Some(elements[idx + 1].location().start_offset());
+        }
         Some((nil_result, blank_is_true))
     } else {
         None
@@ -151,6 +169,10 @@ impl Cop for RedundantAllowNil {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -158,7 +180,7 @@ impl Cop for RedundantAllowNil {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -194,7 +216,30 @@ impl Cop for RedundantAllowNil {
         };
 
         let (line, column) = source.offset_to_line_col(nil_result.offset);
-        diagnostics.push(self.diagnostic(source, line, column, msg.to_string()));
+        let mut diagnostic = self.diagnostic(source, line, column, msg.to_string());
+
+        if let Some(ref mut corr) = corrections {
+            let (start, end) = if let Some(next_start) = nil_result.next_start {
+                (nil_result.assoc_start, next_start)
+            } else if let Some(prev_end) = nil_result.prev_end {
+                (prev_end, nil_result.assoc_end)
+            } else {
+                (nil_result.assoc_start, nil_result.assoc_end)
+            };
+
+            if start < end {
+                corr.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: String::new(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -202,4 +247,5 @@ impl Cop for RedundantAllowNil {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantAllowNil, "cops/rails/redundant_allow_nil");
+    crate::cop_autocorrect_fixture_tests!(RedundantAllowNil, "cops/rails/redundant_allow_nil");
 }
