@@ -52,6 +52,10 @@ impl Cop for PluckId {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -59,7 +63,7 @@ impl Cop for PluckId {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if config.enabled != EnabledState::True {
             return;
@@ -73,6 +77,7 @@ impl Cop for PluckId {
             // and what the receiver start offset is (so we can exclude pluck-as-receiver).
             parent_call_stack: Vec::new(),
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -97,6 +102,7 @@ struct PluckIdVisitor<'a, 'src> {
     /// Stack of parent call info. Top of stack = immediate enclosing call.
     parent_call_stack: Vec<ParentCallInfo>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl PluckIdVisitor<'_, '_> {
@@ -186,12 +192,23 @@ impl<'pr> Visit<'pr> for PluckIdVisitor<'_, '_> {
                     None => call_loc.start_offset(),
                 };
                 let (line, column) = self.source.offset_to_line_col(start_offset);
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    message.to_string(),
-                ));
+                let mut diagnostic = self
+                    .cop
+                    .diagnostic(self.source, line, column, message.to_string());
+
+                if let Some(ref mut corr) = self.corrections {
+                    let call_loc = node.location();
+                    corr.push(crate::correction::Correction {
+                        start: start_offset,
+                        end: call_loc.end_offset(),
+                        replacement: "ids".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                self.diagnostics.push(diagnostic);
             }
             // No children to visit for a valid pluck(:id) call (the arg is :id or primary_key)
             return;
@@ -250,6 +267,26 @@ mod tests {
         crate::testutil::assert_cop_no_offenses_full_with_config(
             &PluckId,
             include_bytes!("../../../tests/fixtures/cops/rails/pluck_id/no_offense.rb"),
+            enabled_config(),
+        );
+    }
+
+    #[test]
+    fn autocorrects_pluck_id_to_ids() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &PluckId,
+            b"User.pluck(:id)\n",
+            b"User.ids\n",
+            enabled_config(),
+        );
+    }
+
+    #[test]
+    fn autocorrects_pluck_primary_key_to_ids() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &PluckId,
+            b"pluck(primary_key)\n",
+            b"ids\n",
             enabled_config(),
         );
     }
