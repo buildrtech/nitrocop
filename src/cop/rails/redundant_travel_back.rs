@@ -101,4 +101,32 @@ impl<'a, 'pr> Visit<'pr> for TravelBackVisitor<'a> {
 mod tests {
     use super::*;
     crate::cop_rails_fixture_tests!(RedundantTravelBack, "cops/rails/redundant_travel_back", 5.2);
+
+    #[test]
+    fn autocorrect_fixture() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(5.2)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &RedundantTravelBack,
+            include_bytes!("../../../tests/fixtures/cops/rails/redundant_travel_back/offense.rb"),
+            include_bytes!("../../../tests/fixtures/cops/rails/redundant_travel_back/corrected.rb"),
+            config,
+        );
+    }
 }

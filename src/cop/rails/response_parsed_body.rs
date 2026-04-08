@@ -28,6 +28,10 @@ impl Cop for ResponseParsedBody {
         &[CALL_NODE, CONSTANT_PATH_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -35,7 +39,7 @@ impl Cop for ResponseParsedBody {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.0
         if !config.rails_version_at_least(5.0) {
@@ -52,9 +56,6 @@ impl Cop for ResponseParsedBody {
         }
 
         // Must have exactly 1 argument (response.body) — no keyword args or extra args.
-        // RuboCop's node pattern requires exactly one argument:
-        //   (send (const {nil? cbase} :JSON) :parse (send (send nil? :response) :body))
-        // If there are additional arguments (e.g., symbolize_names: true), it does NOT match.
         let args = match call.arguments() {
             Some(a) => a,
             None => return,
@@ -95,33 +96,60 @@ impl Cop for ResponseParsedBody {
         if util::constant_name(&recv) == Some(b"JSON") {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `response.parsed_body` to `JSON.parse(response.body)`.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "response.parsed_body".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
 
         // Check for Nokogiri::HTML.parse(response.body) / Nokogiri::HTML5.parse(response.body)
-        if let Some(cp) = recv.as_constant_path_node() {
-            if let Some(name) = cp.name() {
-                let name_bytes = name.as_slice();
-                if name_bytes == b"HTML" || name_bytes == b"HTML5" {
-                    if let Some(parent) = cp.parent() {
-                        if util::constant_name(&parent) == Some(b"Nokogiri") {
-                            let const_name = std::str::from_utf8(name_bytes).unwrap_or("HTML");
-                            let loc = node.location();
-                            let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                format!("Prefer `response.parsed_body` to `Nokogiri::{const_name}.parse(response.body)`."),
-                            ));
-                        }
-                    }
+        if let Some(cp) = recv.as_constant_path_node()
+            && let Some(name) = cp.name()
+        {
+            let name_bytes = name.as_slice();
+            if (name_bytes == b"HTML" || name_bytes == b"HTML5")
+                && let Some(parent) = cp.parent()
+                && util::constant_name(&parent) == Some(b"Nokogiri")
+            {
+                let const_name = std::str::from_utf8(name_bytes).unwrap_or("HTML");
+                let loc = node.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                let mut diagnostic = self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!(
+                        "Prefer `response.parsed_body` to `Nokogiri::{const_name}.parse(response.body)`."
+                    ),
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "response.parsed_body".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
                 }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -132,4 +160,60 @@ mod tests {
     use super::*;
 
     crate::cop_rails_fixture_tests!(ResponseParsedBody, "cops/rails/response_parsed_body", 5.0);
+
+    #[test]
+    fn autocorrects_json_parse_response_body() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(5.0)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &ResponseParsedBody,
+            b"JSON.parse(response.body)\n",
+            b"response.parsed_body\n",
+            config,
+        );
+    }
+
+    #[test]
+    fn autocorrects_nokogiri_parse_response_body() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(7.1)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &ResponseParsedBody,
+            b"Nokogiri::HTML.parse(response.body)\n",
+            b"response.parsed_body\n",
+            config,
+        );
+    }
 }
