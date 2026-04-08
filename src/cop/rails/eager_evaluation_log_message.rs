@@ -1,4 +1,5 @@
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
@@ -54,6 +55,10 @@ impl Cop for EagerEvaluationLogMessage {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -61,16 +66,21 @@ impl Cop for EagerEvaluationLogMessage {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = EagerEvalVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             sole_block_stmt: false,
+            autocorrect_enabled: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -78,6 +88,7 @@ struct EagerEvalVisitor<'a> {
     cop: &'a EagerEvaluationLogMessage,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
     /// True when visiting the sole statement inside a block body.
     /// Matches RuboCop's `return if node.parent&.block_type?` — in Parser AST,
     /// a block with a single statement has the statement as a direct child of the
@@ -90,6 +101,7 @@ struct EagerEvalVisitor<'a> {
     /// — the outer each block has 1 stmt so sole_block_stmt=true, but the inner
     /// transaction block has 2 stmts so the debug inside it IS an offense.
     sole_block_stmt: bool,
+    autocorrect_enabled: bool,
 }
 
 impl<'pr> Visit<'pr> for EagerEvalVisitor<'_> {
@@ -256,12 +268,34 @@ impl EagerEvalVisitor<'_> {
 
         let loc = call.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Pass a block to `Rails.logger.debug`.".to_string(),
-        ));
+        );
+
+        if self.autocorrect_enabled && arg_list.len() == 1 {
+            let selector_end = call
+                .message_loc()
+                .map(|m| m.end_offset())
+                .unwrap_or_else(|| loc.start_offset());
+            let arg_loc = arg_list[0].location();
+            let arg_source = self
+                .source
+                .byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "")
+                .to_string();
+            self.corrections.push(Correction {
+                start: selector_end,
+                end: loc.end_offset(),
+                replacement: format!(" {{ {arg_source} }}"),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -272,4 +306,13 @@ mod tests {
         EagerEvaluationLogMessage,
         "cops/rails/eager_evaluation_log_message"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        EagerEvaluationLogMessage,
+        "cops/rails/eager_evaluation_log_message"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EagerEvaluationLogMessage.supports_autocorrect());
+    }
 }
