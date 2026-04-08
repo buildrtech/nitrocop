@@ -23,6 +23,10 @@ impl Cop for AttributeDefaultBlockValue {
         &[ARRAY_NODE, CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for AttributeDefaultBlockValue {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -71,12 +75,29 @@ impl Cop for AttributeDefaultBlockValue {
         if is_mutable {
             let loc = call.message_loc().unwrap_or(call.location());
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Pass a block to `default:` to avoid sharing mutable objects.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                let value_loc = default_value.location();
+                let expr = source
+                    .byte_slice(value_loc.start_offset(), value_loc.end_offset(), "")
+                    .to_string();
+                corr.push(crate::correction::Correction {
+                    start: value_loc.start_offset(),
+                    end: value_loc.end_offset(),
+                    replacement: format!("-> {{ {expr} }}"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -85,6 +106,10 @@ impl Cop for AttributeDefaultBlockValue {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        AttributeDefaultBlockValue,
+        "cops/rails/attribute_default_block_value"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         AttributeDefaultBlockValue,
         "cops/rails/attribute_default_block_value"
     );
