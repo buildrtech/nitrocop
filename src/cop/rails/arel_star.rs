@@ -23,6 +23,10 @@ impl Cop for ArelStar {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for ArelStar {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -78,12 +82,25 @@ impl Cop for ArelStar {
 
         let loc = str_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `Arel.star` instead of `\"*\"` for expanded column lists.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "Arel.star".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -91,4 +108,5 @@ impl Cop for ArelStar {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ArelStar, "cops/rails/arel_star");
+    crate::cop_autocorrect_fixture_tests!(ArelStar, "cops/rails/arel_star");
 }
