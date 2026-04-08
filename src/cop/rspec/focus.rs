@@ -85,6 +85,10 @@ impl Cop for Focus {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -92,12 +96,13 @@ impl Cop for Focus {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = FocusVisitor {
             cop: self,
             source,
             diagnostics,
+            corrections,
             def_depth: 0,
         };
         visitor.visit(&parse_result.node());
@@ -108,6 +113,7 @@ struct FocusVisitor<'a> {
     cop: &'a Focus,
     source: &'a SourceFile,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// Depth inside method definitions (def/defs). When > 0, skip flagging.
     /// Matches RuboCop's `node.each_ancestor(:any_def).any?`.
     def_depth: u32,
@@ -141,14 +147,28 @@ impl FocusVisitor<'_> {
             if call.receiver().is_none() && !is_chained_call(self.source, call) {
                 let loc = call.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(Diagnostic {
-                    path: self.source.path_str().to_string(),
-                    location: crate::diagnostic::Location { line, column },
-                    severity: Severity::Convention,
-                    cop_name: self.cop.name().to_string(),
-                    message: "Focused spec found.".to_string(),
-                    corrected: false,
-                });
+                let mut diagnostic =
+                    self.cop
+                        .diagnostic(self.source, line, column, "Focused spec found.".to_string());
+
+                let method_str = std::str::from_utf8(method_name).unwrap_or("");
+                if method_str.starts_with('f') && method_str != "focus" {
+                    let unfocused = &method_str[1..];
+                    if let Some(ref mut corrections) = self.corrections
+                        && let Some(selector_loc) = call.message_loc()
+                    {
+                        corrections.push(crate::correction::Correction {
+                            start: selector_loc.start_offset(),
+                            end: selector_loc.end_offset(),
+                            replacement: unfocused.to_string(),
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                }
+
+                self.diagnostics.push(diagnostic);
             }
             return;
         }
@@ -215,4 +235,5 @@ impl FocusVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Focus, "cops/rspec/focus");
+    crate::cop_autocorrect_fixture_tests!(Focus, "cops/rspec/focus");
 }
