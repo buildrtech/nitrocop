@@ -89,7 +89,11 @@ impl Cop for ShortI18n {
         if let Some(ref mut corr) = corrections
             && let Some(selector) = call.message_loc()
         {
-            let replacement = if method_name == b"translate" { "t" } else { "l" };
+            let replacement = if method_name == b"translate" {
+                "t"
+            } else {
+                "l"
+            };
             corr.push(crate::correction::Correction {
                 start: selector.start_offset(),
                 end: selector.end_offset(),
