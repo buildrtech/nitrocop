@@ -73,6 +73,10 @@ impl Cop for HookArgument {
         &[CALL_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -80,7 +84,7 @@ impl Cop for HookArgument {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: EnforcedStyle — "implicit" (default), "each", or "example"
         let enforced_style = config.get_str("EnforcedStyle", "implicit");
@@ -178,12 +182,28 @@ impl Cop for HookArgument {
                 let scope_str = std::str::from_utf8(val).unwrap_or("each");
                 let loc = call.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Omit the default `:{scope_str}` argument for RSpec hooks.",),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections
+                    && let Some(selector_loc) = call.message_loc()
+                    && let Some(block) = call.block()
+                {
+                    corr.push(crate::correction::Correction {
+                        start: selector_loc.end_offset(),
+                        end: block.location().start_offset(),
+                        replacement: " ".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -193,6 +213,7 @@ impl Cop for HookArgument {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HookArgument, "cops/rspec/hook_argument");
+    crate::cop_autocorrect_fixture_tests!(HookArgument, "cops/rspec/hook_argument");
 
     #[test]
     fn each_style_flags_implicit() {
