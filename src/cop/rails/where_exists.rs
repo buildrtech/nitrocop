@@ -40,6 +40,10 @@ impl Cop for WhereExists {
         &[ARRAY_NODE, CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -47,7 +51,7 @@ impl Cop for WhereExists {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "exists");
 
@@ -56,6 +60,133 @@ impl Cop for WhereExists {
             _ => self.check_exists_style(source, node),
         };
         diagnostics.extend(result);
+
+        let Some(ref mut corr) = corrections else {
+            return;
+        };
+
+        if style == "where" {
+            let call = match node.as_call_node() {
+                Some(c) => c,
+                None => return,
+            };
+            if call.name().as_slice() != b"exists?" {
+                return;
+            }
+            let args = match call.arguments() {
+                Some(a) => a,
+                None => return,
+            };
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() != 1 {
+                return;
+            }
+            let first = &arg_list[0];
+            if first.as_splat_node().is_some() {
+                return;
+            }
+            let is_convertible = first.as_hash_node().is_some()
+                || first.as_keyword_hash_node().is_some()
+                || first.as_array_node().is_some();
+            if !is_convertible {
+                return;
+            }
+
+            if let Some(selector) = call.message_loc() {
+                let arg_src = source
+                    .byte_slice(
+                        first.location().start_offset(),
+                        first.location().end_offset(),
+                        "",
+                    )
+                    .to_string();
+                let dot_source = call
+                    .call_operator_loc()
+                    .map(|loc| source.byte_slice(loc.start_offset(), loc.end_offset(), ""))
+                    .unwrap_or(".");
+                let replacement = format!("where({arg_src}){dot_source}exists?");
+                corr.push(crate::correction::Correction {
+                    start: selector.start_offset(),
+                    end: call.location().end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+            return;
+        }
+
+        // exists style (default)
+        let chain = match as_method_chain(node) {
+            Some(c) => c,
+            None => return,
+        };
+        if chain.outer_method != b"exists?" || chain.inner_method != b"where" {
+            return;
+        }
+
+        let inner_args = match chain.inner_call.arguments() {
+            Some(a) => a,
+            None => return,
+        };
+        if !Self::convertible_args(inner_args) {
+            return;
+        }
+
+        let outer_call = match node.as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
+        if outer_call.arguments().is_some() {
+            return;
+        }
+
+        let args = match chain.inner_call.arguments() {
+            Some(a) => a,
+            None => return,
+        };
+        let arg_list: Vec<_> = args.arguments().iter().collect();
+        if arg_list.is_empty() {
+            return;
+        }
+
+        let replacement = if arg_list.len() > 1 {
+            let joined = arg_list
+                .iter()
+                .map(|arg| {
+                    source
+                        .byte_slice(
+                            arg.location().start_offset(),
+                            arg.location().end_offset(),
+                            "",
+                        )
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("exists?([{joined}])")
+        } else {
+            let arg_src = source
+                .byte_slice(
+                    arg_list[0].location().start_offset(),
+                    arg_list[0].location().end_offset(),
+                    "",
+                )
+                .to_string();
+            format!("exists?({arg_src})")
+        };
+
+        if let (Some(where_loc), Some(exists_loc)) =
+            (chain.inner_call.message_loc(), outer_call.message_loc())
+        {
+            corr.push(crate::correction::Correction {
+                start: where_loc.start_offset(),
+                end: exists_loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+        }
     }
 }
 
@@ -274,5 +405,45 @@ mod tests {
         };
         let source = b"User.exists?(*conditions)\n";
         assert_cop_no_offenses_full_with_config(&WhereExists, source, config);
+    }
+
+    #[test]
+    fn autocorrects_exists_style_where_chain_to_exists_with_hash_arg() {
+        crate::testutil::assert_cop_autocorrect(
+            &WhereExists,
+            b"User.where(active: true).exists?\n",
+            b"User.exists?(active: true)\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_exists_style_where_chain_with_multiple_args_to_array_exists_arg() {
+        crate::testutil::assert_cop_autocorrect(
+            &WhereExists,
+            b"User.where('name = ?', 'john').exists?\n",
+            b"User.exists?(['name = ?', 'john'])\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_where_style_exists_to_where_exists_preserving_safe_navigation() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("where".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &WhereExists,
+            b"user&.exists?(published: true)\n",
+            b"user&.where(published: true)&.exists?\n",
+            config,
+        );
     }
 }

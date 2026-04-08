@@ -19,6 +19,10 @@ impl Cop for RedirectBackOrTo {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -26,7 +30,7 @@ impl Cop for RedirectBackOrTo {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 7.0
         if !config.rails_version_at_least(7.0) {
@@ -48,14 +52,108 @@ impl Cop for RedirectBackOrTo {
             return;
         }
 
+        let mut fallback_value_src: Option<String> = None;
+        let mut replacement_options: Vec<String> = Vec::new();
+        let mut hash_range: Option<(usize, usize)> = None;
+
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                if let Some(kw_hash) = arg.as_keyword_hash_node() {
+                    let loc = kw_hash.location();
+                    hash_range = Some((loc.start_offset(), loc.end_offset()));
+                    for elem in kw_hash.elements().iter() {
+                        if let Some(assoc) = elem.as_assoc_node()
+                            && let Some(sym) = assoc.key().as_symbol_node()
+                        {
+                            let key = sym.unescaped();
+                            if key == b"fallback_location" {
+                                let vloc = assoc.value().location();
+                                fallback_value_src = Some(
+                                    source
+                                        .byte_slice(vloc.start_offset(), vloc.end_offset(), "")
+                                        .to_string(),
+                                );
+                                continue;
+                            }
+                        }
+                        let ploc = elem.location();
+                        replacement_options.push(
+                            source
+                                .byte_slice(ploc.start_offset(), ploc.end_offset(), "")
+                                .to_string(),
+                        );
+                    }
+                    break;
+                }
+
+                if let Some(hash) = arg.as_hash_node() {
+                    let loc = hash.location();
+                    hash_range = Some((loc.start_offset(), loc.end_offset()));
+                    for elem in hash.elements().iter() {
+                        if let Some(assoc) = elem.as_assoc_node()
+                            && let Some(sym) = assoc.key().as_symbol_node()
+                        {
+                            let key = sym.unescaped();
+                            if key == b"fallback_location" {
+                                let vloc = assoc.value().location();
+                                fallback_value_src = Some(
+                                    source
+                                        .byte_slice(vloc.start_offset(), vloc.end_offset(), "")
+                                        .to_string(),
+                                );
+                                continue;
+                            }
+                        }
+                        let ploc = elem.location();
+                        replacement_options.push(
+                            source
+                                .byte_slice(ploc.start_offset(), ploc.end_offset(), "")
+                                .to_string(),
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `redirect_back_or_to` instead of `redirect_back` with `:fallback_location` keyword argument.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "redirect_back_or_to".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+
+            if let (Some(fallback), Some((hash_start, hash_end))) = (fallback_value_src, hash_range)
+            {
+                let arg_replacement = if replacement_options.is_empty() {
+                    fallback
+                } else {
+                    format!("{fallback}, {}", replacement_options.join(", "))
+                };
+
+                corr.push(crate::correction::Correction {
+                    start: hash_start,
+                    end: hash_end,
+                    replacement: arg_replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
