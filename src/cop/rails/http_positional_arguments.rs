@@ -17,6 +17,10 @@ impl Cop for HttpPositionalArguments {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -24,7 +28,7 @@ impl Cop for HttpPositionalArguments {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.0
         if !config.rails_version_at_least(5.0) {
@@ -42,9 +46,14 @@ impl Cop for HttpPositionalArguments {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            autocorrect_enabled: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -100,6 +109,8 @@ struct HttpPosArgsVisitor<'a> {
     cop: &'a HttpPositionalArguments,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    autocorrect_enabled: bool,
 }
 
 impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
@@ -115,12 +126,52 @@ impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
                 if arg_list.len() >= 2 && arg_list[1].as_hash_node().is_some() {
                     let loc = node.location();
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diagnostic = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
                         "Use keyword arguments for HTTP request methods.".to_string(),
-                    ));
+                    );
+
+                    // Conservative RuboCop-aligned baseline: second positional arg -> params,
+                    // optional third positional arg -> session.
+                    if self.autocorrect_enabled && arg_list.len() <= 3 {
+                        let params = self
+                            .source
+                            .byte_slice(
+                                arg_list[1].location().start_offset(),
+                                arg_list[1].location().end_offset(),
+                                "",
+                            )
+                            .to_string();
+
+                        let mut replacement = format!("params: {params}");
+                        let mut correction_end = arg_list[1].location().end_offset();
+
+                        if arg_list.len() == 3 {
+                            let session = self
+                                .source
+                                .byte_slice(
+                                    arg_list[2].location().start_offset(),
+                                    arg_list[2].location().end_offset(),
+                                    "",
+                                )
+                                .to_string();
+                            replacement.push_str(&format!(", session: {session}"));
+                            correction_end = arg_list[2].location().end_offset();
+                        }
+
+                        self.corrections.push(crate::correction::Correction {
+                            start: arg_list[1].location().start_offset(),
+                            end: correction_end,
+                            replacement,
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    self.diagnostics.push(diagnostic);
                 }
             }
         }
@@ -170,6 +221,25 @@ mod tests {
             ),
             config_with_rails(5.0),
         );
+    }
+
+    #[test]
+    fn autocorrect_fixture() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &HttpPositionalArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rails/http_positional_arguments/offense.rb"
+            ),
+            include_bytes!(
+                "../../../tests/fixtures/cops/rails/http_positional_arguments/corrected.rb"
+            ),
+            config_with_rails(5.0),
+        );
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(HttpPositionalArguments.supports_autocorrect());
     }
 
     #[test]
