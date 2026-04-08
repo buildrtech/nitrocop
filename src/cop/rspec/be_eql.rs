@@ -36,6 +36,10 @@ impl Cop for BeEql {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -43,7 +47,7 @@ impl Cop for BeEql {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Detect eql(true), eql(false), eql(nil), eql(integer), eql(float), eql(:symbol)
         // Suggest using `be` instead. Only flags positive expectations (`.to`).
@@ -102,12 +106,27 @@ impl Cop for BeEql {
 
         let loc = eql_call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Prefer `be` over `eql`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector_loc) = eql_call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: selector_loc.end_offset(),
+                replacement: "be".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -115,4 +134,5 @@ impl Cop for BeEql {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BeEql, "cops/rspec/be_eql");
+    crate::cop_autocorrect_fixture_tests!(BeEql, "cops/rspec/be_eql");
 }
