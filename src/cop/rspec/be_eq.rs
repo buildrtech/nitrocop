@@ -23,6 +23,10 @@ impl Cop for BeEq {
         &[CALL_NODE, FALSE_NODE, NIL_NODE, TRUE_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for BeEq {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Detect eq(true), eq(false), eq(nil) and suggest be(true), be(false), be_nil
         let call = match node.as_call_node() {
@@ -68,12 +72,27 @@ impl Cop for BeEq {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Prefer `be` over `eq`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: "be".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -81,4 +100,5 @@ impl Cop for BeEq {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BeEq, "cops/rspec/be_eq");
+    crate::cop_autocorrect_fixture_tests!(BeEq, "cops/rspec/be_eq");
 }
