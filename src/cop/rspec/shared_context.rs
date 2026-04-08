@@ -55,6 +55,10 @@ impl Cop for SharedContext {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -62,7 +66,7 @@ impl Cop for SharedContext {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -112,21 +116,51 @@ impl Cop for SharedContext {
         let (line, col) = source.offset_to_line_col(loc.start_offset());
 
         if is_shared_context && has_examples && !has_context_setup {
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 col,
                 "Use `shared_examples` when you don't define context.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections
+                && let Some(selector) = call.message_loc()
+            {
+                corr.push(crate::correction::Correction {
+                    start: selector.start_offset(),
+                    end: selector.end_offset(),
+                    replacement: "shared_examples".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
 
         if is_shared_examples && has_context_setup && !has_examples {
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 col,
                 "Use `shared_context` when you don't define examples.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections
+                && let Some(selector) = call.message_loc()
+            {
+                corr.push(crate::correction::Correction {
+                    start: selector.start_offset(),
+                    end: selector.end_offset(),
+                    replacement: "shared_context".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -235,4 +269,22 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SharedContext, "cops/rspec/shared_context");
+
+    #[test]
+    fn autocorrects_shared_context_to_shared_examples_when_only_examples() {
+        crate::testutil::assert_cop_autocorrect(
+            &SharedContext,
+            b"shared_context 'foo' do\n  it('works') { }\nend\n",
+            b"shared_examples 'foo' do\n  it('works') { }\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_shared_examples_for_to_shared_context_when_only_setup() {
+        crate::testutil::assert_cop_autocorrect(
+            &SharedContext,
+            b"shared_examples_for 'foo' do\n  let(:x) { 1 }\nend\n",
+            b"shared_context 'foo' do\n  let(:x) { 1 }\nend\n",
+        );
+    }
 }
