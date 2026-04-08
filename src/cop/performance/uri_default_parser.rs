@@ -22,6 +22,10 @@ impl Cop for UriDefaultParser {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -29,7 +33,7 @@ impl Cop for UriDefaultParser {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -91,14 +95,27 @@ impl Cop for UriDefaultParser {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!(
                 "Use `{double_colon}URI::DEFAULT_PARSER` instead of `{double_colon}URI::Parser.new`."
             ),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("{double_colon}URI::DEFAULT_PARSER"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -107,4 +124,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(UriDefaultParser, "cops/performance/uri_default_parser");
+    crate::cop_autocorrect_fixture_tests!(UriDefaultParser, "cops/performance/uri_default_parser");
 }
