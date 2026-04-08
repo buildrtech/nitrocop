@@ -18,6 +18,10 @@ impl Cop for ToFormattedS {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for ToFormattedS {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 7.0
         if !config.rails_version_at_least(7.0) {
@@ -58,12 +62,27 @@ impl Cop for ToFormattedS {
         let wrong_str = std::str::from_utf8(wrong_method).unwrap_or("?");
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{preferred}` instead of `{wrong_str}`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: preferred.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -71,6 +90,66 @@ impl Cop for ToFormattedS {
 mod tests {
     use super::*;
     crate::cop_rails_fixture_tests!(ToFormattedS, "cops/rails/to_formatted_s", 7.0);
+
+    #[test]
+    fn autocorrects_to_formatted_s_to_to_fs() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &ToFormattedS,
+            b"time.to_formatted_s(:db)\n",
+            b"time.to_fs(:db)\n",
+            config,
+        );
+    }
+
+    #[test]
+    fn autocorrects_to_fs_to_to_formatted_s_for_style() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".to_string(),
+                    serde_yml::Value::String("to_formatted_s".to_string()),
+                ),
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &ToFormattedS,
+            b"time.to_fs(:db)\n",
+            b"time.to_formatted_s(:db)\n",
+            config,
+        );
+    }
 
     #[test]
     fn to_formatted_s_style_flags_to_fs() {
