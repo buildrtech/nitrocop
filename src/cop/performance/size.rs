@@ -40,6 +40,10 @@ impl Cop for Size {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -47,16 +51,27 @@ impl Cop for Size {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = SizeVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            autocorrecting: corrections.is_some(),
             block_body_stmt_range: None,
         };
         visitor.visit(&parse_result.node());
-        diagnostics.extend(visitor.diagnostics);
+
+        let SizeVisitor {
+            diagnostics: visitor_diagnostics,
+            corrections: visitor_corrections,
+            ..
+        } = visitor;
+        diagnostics.extend(visitor_diagnostics);
+        if let Some(corrections) = corrections {
+            corrections.extend(visitor_corrections);
+        }
     }
 }
 
@@ -64,6 +79,8 @@ struct SizeVisitor<'a, 'src> {
     cop: &'a Size,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    autocorrecting: bool,
     /// Byte range (start, end) of the sole statement in a block body, if any.
     /// Used to match RuboCop's `node.parent&.block_type?` — only the call node
     /// spanning this exact range is suppressed, not chained or nested children.
@@ -117,12 +134,25 @@ impl<'pr> Visit<'pr> for SizeVisitor<'_, '_> {
                     if is_array_or_hash_receiver(&recv) {
                         let loc = node.message_loc().unwrap_or(node.location());
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Use `size` instead of `count`.".to_string(),
-                        ));
+                        );
+
+                        if self.autocorrecting {
+                            self.corrections.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: "size".to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -212,4 +242,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(Size, "cops/performance/size");
+    crate::cop_autocorrect_fixture_tests!(Size, "cops/performance/size");
 }
