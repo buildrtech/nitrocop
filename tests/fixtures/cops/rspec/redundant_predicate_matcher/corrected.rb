@@ -1,0 +1,5 @@
+expect(foo).to include(bar, baz)
+expect(foo).to cover(bar, baz)
+expect(foo).to eql(bar)
+result.should include("value")
+result.should_not include("value")
