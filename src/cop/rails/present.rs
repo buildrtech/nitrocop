@@ -90,6 +90,10 @@ impl Cop for Present {
         &[AND_NODE, CALL_NODE, UNLESS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -97,7 +101,7 @@ impl Cop for Present {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let not_nil_and_not_empty = config.get_bool("NotNilAndNotEmpty", true);
         let not_blank = config.get_bool("NotBlank", true);
@@ -105,14 +109,14 @@ impl Cop for Present {
 
         // Check for `unless foo.blank?` => `if foo.present?` (UnlessBlank)
         if unless_blank {
-            if let Some(diag) = self.check_unless_blank(source, node) {
+            if let Some(diag) = self.check_unless_blank(source, node, &mut corrections) {
                 diagnostics.push(diag);
             }
         }
 
         // Check for `!nil? && !empty?` => `present?` (NotNilAndNotEmpty)
         if not_nil_and_not_empty {
-            if let Some(diag) = self.check_not_nil_and_not_empty(source, node) {
+            if let Some(diag) = self.check_not_nil_and_not_empty(source, node, &mut corrections) {
                 diagnostics.push(diag);
             }
         }
@@ -161,12 +165,33 @@ impl Cop for Present {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `present?` instead of `!blank?`.".to_string(),
-        ));
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            let replacement = if let Some(recv) = inner_call.receiver() {
+                let recv_src = &source.as_bytes()
+                    [recv.location().start_offset()..recv.location().end_offset()];
+                format!("{}.present?", std::str::from_utf8(recv_src).unwrap_or(""))
+            } else {
+                "present?".to_string()
+            };
+
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -183,6 +208,7 @@ impl Present {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) -> Option<Diagnostic> {
         let unless_node = node.as_unless_node()?;
 
@@ -227,12 +253,32 @@ impl Present {
         let current_end = predicate.location().end_offset();
         let current_src = &bytes[kw_loc.start_offset()..current_end];
         let current = std::str::from_utf8(current_src).unwrap_or("unless blank?");
-        Some(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `if {prefer}` instead of `{current}`."),
-        ))
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            corr.push(crate::correction::Correction {
+                start: kw_loc.start_offset(),
+                end: kw_loc.end_offset(),
+                replacement: "if".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            corr.push(crate::correction::Correction {
+                start: predicate.location().start_offset(),
+                end: predicate.location().end_offset(),
+                replacement: prefer,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        Some(diagnostic)
     }
 
     /// Check for `!foo.nil? && !foo.empty?` or `foo && !foo.empty?` pattern.
@@ -240,6 +286,7 @@ impl Present {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) -> Option<Diagnostic> {
         let and_node = node.as_and_node()?;
 
@@ -362,12 +409,30 @@ impl Present {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        Some(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `present?` instead of `!nil? && !empty?`.".to_string(),
-        ))
+        );
+
+        if let Some(corr) = corrections.as_mut() {
+            let replacement = if let Some(rr_src) = right_recv_src {
+                format!("{}.present?", std::str::from_utf8(rr_src).unwrap_or(""))
+            } else {
+                "present?".to_string()
+            };
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        Some(diagnostic)
     }
 }
 
@@ -436,6 +501,20 @@ mod tests {
         assert_eq!(
             diag.message,
             "Use `present?` instead of `!nil? && !empty?`."
+        );
+    }
+
+    #[test]
+    fn autocorrects_not_blank_to_present() {
+        crate::testutil::assert_cop_autocorrect(&Present, b"!x.blank?\n", b"x.present?\n");
+    }
+
+    #[test]
+    fn autocorrects_unless_blank_to_if_present() {
+        crate::testutil::assert_cop_autocorrect(
+            &Present,
+            b"do_something unless foo.blank?\n",
+            b"do_something if foo.present?\n",
         );
     }
 }
