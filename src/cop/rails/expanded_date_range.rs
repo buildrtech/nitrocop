@@ -18,6 +18,10 @@ impl Cop for ExpandedDateRange {
         &[CALL_NODE, RANGE_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for ExpandedDateRange {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.1
         if !config.rails_version_at_least(5.1) {
