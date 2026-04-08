@@ -48,6 +48,25 @@ fn has_sole_id_keyword_arg(call: &ruby_prism::CallNode<'_>) -> bool {
     sym.unescaped() == b"id"
 }
 
+fn sole_id_keyword_value<'a>(call: &ruby_prism::CallNode<'a>) -> Option<ruby_prism::Node<'a>> {
+    let args = call.arguments()?;
+    let all_args: Vec<_> = args.arguments().iter().collect();
+    if all_args.len() != 1 {
+        return None;
+    }
+    let kw = all_args[0].as_keyword_hash_node()?;
+    let elements: Vec<_> = kw.elements().iter().collect();
+    if elements.len() != 1 {
+        return None;
+    }
+    let assoc = elements[0].as_assoc_node()?;
+    let sym = assoc.key().as_symbol_node()?;
+    if sym.unescaped() != b"id" {
+        return None;
+    }
+    Some(assoc.value())
+}
+
 impl Cop for FindById {
     fn name(&self) -> &'static str {
         "Rails/FindById"
@@ -61,6 +80,10 @@ impl Cop for FindById {
         &[ASSOC_NODE, CALL_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -68,7 +91,7 @@ impl Cop for FindById {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -80,15 +103,36 @@ impl Cop for FindById {
         // Pattern 1: find_by_id!(id)
         // Fires with or without an explicit receiver (matches implicit self inside class methods).
         if name == b"find_by_id!" {
-            if call.arguments().is_some() {
-                let loc = call.message_loc().unwrap_or(call.location());
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use `find` instead of `find_by_id!`.".to_string(),
-                ));
+            if let Some(args) = call.arguments() {
+                let all_args: Vec<_> = args.arguments().iter().collect();
+                if let Some(id_value) = all_args.first() {
+                    let loc = call.message_loc().unwrap_or(call.location());
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use `find` instead of `find_by_id!`.".to_string(),
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        let id_loc = id_value.location();
+                        let id_src = std::str::from_utf8(
+                            &source.as_bytes()[id_loc.start_offset()..id_loc.end_offset()],
+                        )
+                        .unwrap_or("id");
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: call.location().end_offset(),
+                            replacement: format!("find({id_src})"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
+                }
             }
             return;
         }
@@ -96,15 +140,33 @@ impl Cop for FindById {
         // Pattern 2: find_by!(id: value) — only when id is the sole argument.
         // Fires with or without an explicit receiver (matches implicit self inside class methods).
         if name == b"find_by!" {
-            if has_sole_id_keyword_arg(&call) {
+            if let Some(id_value) = sole_id_keyword_value(&call) {
                 let loc = call.message_loc().unwrap_or(call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use `find` instead of `find_by!`.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    let id_loc = id_value.location();
+                    let id_src = std::str::from_utf8(
+                        &source.as_bytes()[id_loc.start_offset()..id_loc.end_offset()],
+                    )
+                    .unwrap_or("id");
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: call.location().end_offset(),
+                        replacement: format!("find({id_src})"),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
             return;
         }
@@ -119,18 +181,36 @@ impl Cop for FindById {
                 return;
             }
             // Check that `where` has `id:` as the sole keyword arg
-            if has_sole_id_keyword_arg(&chain.inner_call) {
+            if let Some(id_value) = sole_id_keyword_value(&chain.inner_call) {
                 let loc = chain
                     .inner_call
                     .message_loc()
                     .unwrap_or(chain.inner_call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use `find` instead of `where(id: ...).take!`.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    let id_loc = id_value.location();
+                    let id_src = std::str::from_utf8(
+                        &source.as_bytes()[id_loc.start_offset()..id_loc.end_offset()],
+                    )
+                    .unwrap_or("id");
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: call.location().end_offset(),
+                        replacement: format!("find({id_src})"),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -140,4 +220,5 @@ impl Cop for FindById {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FindById, "cops/rails/find_by_id");
+    crate::cop_autocorrect_fixture_tests!(FindById, "cops/rails/find_by_id");
 }
