@@ -54,6 +54,10 @@ impl Cop for Presence {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -61,7 +65,7 @@ impl Cop for Presence {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(if_node) = node.as_if_node() {
             // Skip elsif nodes
@@ -115,6 +119,7 @@ impl Cop for Presence {
                     ElseNodeResult::Single(n) => Some(n),
                     _ => None,
                 },
+                &mut corrections,
             ));
             return;
         }
@@ -163,6 +168,7 @@ impl Cop for Presence {
                     ElseNodeResult::Single(n) => Some(n),
                     _ => None,
                 },
+                &mut corrections,
             ));
         }
     }
@@ -247,6 +253,7 @@ fn check_presence_patterns(
     else_is_ignored: bool,
     then_node: Option<&ruby_prism::Node<'_>>,
     else_node: Option<&ruby_prism::Node<'_>>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) -> Vec<Diagnostic> {
     let (value_text, nil_text) = if is_present {
         (then_text, else_text)
@@ -291,7 +298,7 @@ fn check_presence_patterns(
             format!("{receiver_text}.presence || {nil_text}")
         };
 
-        return emit_offense(cop, source, node, &replacement);
+        return emit_offense(cop, source, node, &replacement, corrections);
     }
 
     // Pattern 2: value branch is a method call on receiver, nil branch is nil/absent.
@@ -302,7 +309,7 @@ fn check_presence_patterns(
     if nil_text == "nil" {
         let value_node = if is_present { then_node } else { else_node };
         if let Some(vn) = value_node {
-            if let Some(diags) = check_chain_pattern(cop, source, node, receiver_text, vn) {
+            if let Some(diags) = check_chain_pattern(cop, source, node, receiver_text, vn, corrections) {
                 return diags;
             }
         }
@@ -318,6 +325,7 @@ fn check_chain_pattern(
     if_node: &ruby_prism::Node<'_>,
     receiver_text: &str,
     value_node: &ruby_prism::Node<'_>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) -> Option<Vec<Diagnostic>> {
     let call = value_node.as_call_node()?;
     if is_ignored_chain_node(&call) {
@@ -366,7 +374,7 @@ fn check_chain_pattern(
         replacement.push_str(&args_parts.join(", "));
         replacement.push(')');
     }
-    Some(emit_offense(cop, source, if_node, &replacement))
+    Some(emit_offense(cop, source, if_node, &replacement, corrections))
 }
 
 fn emit_offense(
@@ -374,6 +382,7 @@ fn emit_offense(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
     replacement: &str,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) -> Vec<Diagnostic> {
     let loc = node.location();
     let current = node_text(source, node);
@@ -384,12 +393,25 @@ fn emit_offense(
         current
     };
     let (line, column) = source.offset_to_line_col(loc.start_offset());
-    vec![cop.diagnostic(
+    let mut diagnostic = cop.diagnostic(
         source,
         line,
         column,
         format!("Use `{replacement}` instead of `{current_display}`."),
-    )]
+    );
+
+    if let Some(corr) = corrections.as_mut() {
+        corr.push(crate::correction::Correction {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+            replacement: replacement.to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+
+    vec![diagnostic]
 }
 
 fn node_text(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
@@ -557,6 +579,26 @@ mod tests {
         crate::testutil::assert_cop_no_offenses_full_with_config(
             &Presence,
             include_bytes!("../../../tests/fixtures/cops/rails/presence/no_offense.rb"),
+            test_config(),
+        );
+    }
+
+    #[test]
+    fn autocorrects_ternary_to_presence() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &Presence,
+            b"a.present? ? a : nil\n",
+            b"a.presence\n",
+            test_config(),
+        );
+    }
+
+    #[test]
+    fn autocorrects_modifier_if_to_safe_nav_chain() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &Presence,
+            b"field.destroy if field.present?\n",
+            b"field.presence&.destroy\n",
             test_config(),
         );
     }
