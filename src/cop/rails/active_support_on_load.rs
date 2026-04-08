@@ -169,6 +169,10 @@ impl Cop for ActiveSupportOnLoad {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -176,7 +180,7 @@ impl Cop for ActiveSupportOnLoad {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -213,14 +217,37 @@ impl Cop for ActiveSupportOnLoad {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let preferred = if let Some(args) = call.arguments() {
+            let args_src = source
+                .byte_slice(args.location().start_offset(), args.location().end_offset(), "")
+                .to_string();
+            format!("ActiveSupport.on_load(:{hook}) {{ {method_str} {args_src} }}")
+        } else {
+            format!("ActiveSupport.on_load(:{hook}) {{ {method_str} }}")
+        };
+
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!(
                 "Use `ActiveSupport.on_load(:{hook}) {{ {method_str} ... }}` instead of `{recv_text}.{method_str}(...)`."
             ),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let loc = node.location();
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: preferred,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -352,6 +379,26 @@ ActiveRecord::ConnectionAdapters::SQLite3Adapter.prepend(SqliteUuidAdapter)\nend
             diags.len(),
             1,
             "Expected 1 offense for SQLite3Adapter.prepend without railties in lockfile"
+        );
+    }
+
+    #[test]
+    fn autocorrects_include_to_on_load_wrapper() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ActiveSupportOnLoad,
+            b"ActiveRecord::Base.include(MyClass)\n",
+            b"ActiveSupport.on_load(:active_record) { include MyClass }\n",
+            rails_config(7.0),
+        );
+    }
+
+    #[test]
+    fn autocorrects_prepend_to_on_load_wrapper() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ActiveSupportOnLoad,
+            b"ActionController::Base.prepend(MyModule)\n",
+            b"ActiveSupport.on_load(:action_controller) { prepend MyModule }\n",
+            rails_config(7.0),
         );
     }
 }
