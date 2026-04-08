@@ -41,6 +41,10 @@ impl Cop for SharedExamples {
         &[CALL_NODE, KEYWORD_HASH_NODE, STRING_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -48,7 +52,7 @@ impl Cop for SharedExamples {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: EnforcedStyle — "string" (default) or "symbol"
         let enforced_style = config.get_str("EnforcedStyle", "string");
@@ -88,26 +92,39 @@ impl Cop for SharedExamples {
                 // "symbol" style: flag string arguments, prefer symbols
                 if let Some(s) = arg.as_string_node() {
                     let str_val = std::str::from_utf8(s.unescaped()).unwrap_or("");
-                    let sym_name = str_val.replace(' ', "_");
+                    let sym_name = str_val.to_lowercase().replace(' ', "_");
+                    let replacement = format!(":{sym_name}");
                     let loc = s.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
-                        format!(
-                            "Prefer `:{sym_name}` over '{str_val}' to symbolize shared examples."
-                        ),
-                    ));
+                        format!("Prefer `{replacement}` over `{str_val:?}` to symbolize shared examples."),
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             } else {
                 // Default "string" style: flag symbol arguments, prefer strings
                 if let Some(sym) = arg.as_symbol_node() {
                     let sym_name = std::str::from_utf8(sym.unescaped()).unwrap_or("");
                     let title = sym_name.replace('_', " ");
+                    let replacement = format!("'{title}'");
                     let loc = sym.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
@@ -115,7 +132,20 @@ impl Cop for SharedExamples {
                             "Prefer '{}' over `:{sym_name}` to titleize shared examples.",
                             title
                         ),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
             break;
@@ -161,5 +191,36 @@ mod tests {
         let source = b"it_behaves_like :some_example\n";
         let diags = crate::testutil::run_cop_full_with_config(&SharedExamples, source, config);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn autocorrects_symbol_to_string_title() {
+        crate::testutil::assert_cop_autocorrect(
+            &SharedExamples,
+            b"shared_examples :foo_bar_baz\n",
+            b"shared_examples 'foo bar baz'\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_string_to_symbol_when_enforced() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("symbol".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &SharedExamples,
+            b"include_examples 'Foo Bar Baz'\n",
+            b"include_examples :foo_bar_baz\n",
+            config,
+        );
     }
 }

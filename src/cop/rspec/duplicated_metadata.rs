@@ -23,6 +23,10 @@ impl Cop for DuplicatedMetadata {
         &[CALL_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for DuplicatedMetadata {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -66,12 +70,42 @@ impl Cop for DuplicatedMetadata {
                 if seen_symbols.contains(&name) {
                     let loc = sym.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Avoid duplicated metadata.".to_string(),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = corrections {
+                        let bytes = source.as_bytes();
+                        let mut remove_start = loc.start_offset();
+
+                        while remove_start > 0
+                            && bytes[remove_start - 1].is_ascii_whitespace()
+                            && bytes[remove_start - 1] != b'\n'
+                        {
+                            remove_start -= 1;
+                        }
+
+                        if remove_start > 0 && bytes[remove_start - 1] == b',' {
+                            remove_start -= 1;
+                            while remove_start > 0 && bytes[remove_start - 1] == b' ' {
+                                remove_start -= 1;
+                            }
+                        }
+
+                        corr.push(crate::correction::Correction {
+                            start: remove_start,
+                            end: loc.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 } else {
                     seen_symbols.push(name);
                 }
@@ -84,4 +118,22 @@ impl Cop for DuplicatedMetadata {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicatedMetadata, "cops/rspec/duplicated_metadata");
+
+    #[test]
+    fn autocorrects_duplicate_metadata_symbol() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicatedMetadata,
+            b"describe 'Something', :a, :a do\nend\n",
+            b"describe 'Something', :a do\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_compact_duplicate_metadata_symbol() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicatedMetadata,
+            b"it 'x', :slow,:slow do\nend\n",
+            b"it 'x', :slow do\nend\n",
+        );
+    }
 }
