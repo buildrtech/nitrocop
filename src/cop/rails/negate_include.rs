@@ -64,6 +64,10 @@ impl Cop for NegateInclude {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -71,7 +75,7 @@ impl Cop for NegateInclude {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -119,12 +123,46 @@ impl Cop for NegateInclude {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `exclude?` instead of `!include?`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(receiver_node) = inner_call.receiver()
+            && let Some(args) = inner_call.arguments()
+        {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() == 1 {
+                let recv_src = source
+                    .byte_slice(
+                        receiver_node.location().start_offset(),
+                        receiver_node.location().end_offset(),
+                        "",
+                    )
+                    .to_string();
+                let arg_src = source
+                    .byte_slice(
+                        arg_list[0].location().start_offset(),
+                        arg_list[0].location().end_offset(),
+                        "",
+                    )
+                    .to_string();
+
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!("{recv_src}.exclude?({arg_src})"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -132,4 +170,22 @@ impl Cop for NegateInclude {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NegateInclude, "cops/rails/negate_include");
+
+    #[test]
+    fn autocorrects_negated_include_call() {
+        crate::testutil::assert_cop_autocorrect(
+            &NegateInclude,
+            b"!array.include?(2)\n",
+            b"array.exclude?(2)\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_negated_include_with_complex_receiver() {
+        crate::testutil::assert_cop_autocorrect(
+            &NegateInclude,
+            b"!user.tags.include?(name)\n",
+            b"user.tags.exclude?(name)\n",
+        );
+    }
 }
