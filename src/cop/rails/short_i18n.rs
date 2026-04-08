@@ -24,6 +24,10 @@ impl Cop for ShortI18n {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -31,7 +35,7 @@ impl Cop for ShortI18n {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "conservative");
 
@@ -80,18 +84,74 @@ impl Cop for ShortI18n {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+        let mut diagnostic = self.diagnostic(source, line, column, message.to_string());
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector) = call.message_loc()
+        {
+            let replacement = if method_name == b"translate" { "t" } else { "l" };
+            corr.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: replacement.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
+
     crate::cop_fixture_tests!(ShortI18n, "cops/rails/short_i18n");
+
+    fn config_with_style(style: &str) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String(style.to_string()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn autocorrects_i18n_translate_to_t() {
+        crate::testutil::assert_cop_autocorrect(
+            &ShortI18n,
+            b"I18n.translate :key\n",
+            b"I18n.t :key\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_root_i18n_localize_to_l() {
+        crate::testutil::assert_cop_autocorrect(
+            &ShortI18n,
+            b"::I18n.localize Time.now\n",
+            b"::I18n.l Time.now\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_bare_translate_in_aggressive_style() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ShortI18n,
+            b"translate :key\n",
+            b"t :key\n",
+            config_with_style("aggressive"),
+        );
+    }
 
     #[test]
     fn conservative_style_skips_bare_translate() {
-        use crate::cop::CopConfig;
         use crate::testutil::assert_cop_no_offenses_full_with_config;
 
         let config = CopConfig::default();
@@ -101,19 +161,10 @@ mod tests {
 
     #[test]
     fn aggressive_style_flags_bare_translate() {
-        use crate::cop::CopConfig;
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
 
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".to_string(),
-                serde_yml::Value::String("aggressive".to_string()),
-            )]),
-            ..CopConfig::default()
-        };
         let source = b"translate :key\n";
-        let diags = run_cop_full_with_config(&ShortI18n, source, config);
+        let diags = run_cop_full_with_config(&ShortI18n, source, config_with_style("aggressive"));
         assert!(
             !diags.is_empty(),
             "aggressive style should flag bare translate"
@@ -122,19 +173,10 @@ mod tests {
 
     #[test]
     fn aggressive_style_flags_bare_localize() {
-        use crate::cop::CopConfig;
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
 
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".to_string(),
-                serde_yml::Value::String("aggressive".to_string()),
-            )]),
-            ..CopConfig::default()
-        };
         let source = b"localize Time.now\n";
-        let diags = run_cop_full_with_config(&ShortI18n, source, config);
+        let diags = run_cop_full_with_config(&ShortI18n, source, config_with_style("aggressive"));
         assert!(
             !diags.is_empty(),
             "aggressive style should flag bare localize"
