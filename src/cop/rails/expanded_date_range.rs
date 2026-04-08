@@ -87,35 +87,52 @@ impl Cop for ExpandedDateRange {
             return;
         }
 
+        // Baseline RuboCop-aligned scope: only autocorrect no-argument day ranges.
+        if left_call.arguments().is_some() || right_call.arguments().is_some() {
+            return;
+        }
+
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `all_day` instead of explicit date range expansion.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let receiver_src = source
+                .byte_slice(left_recv.start_offset(), left_recv.end_offset(), "")
+                .to_string();
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("{receiver_src}.all_day"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
     use crate::testutil::run_cop_full_internal;
 
     crate::cop_rails_fixture_tests!(ExpandedDateRange, "cops/rails/expanded_date_range", 5.1);
 
-    #[test]
-    fn different_receivers_are_not_flagged() {
-        let source = b"where(recorded_at: start_date.beginning_of_day..end_date.end_of_day)\n";
-        use crate::cop::CopConfig;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([
+    fn config_with_rails(version: f64) -> CopConfig {
+        CopConfig {
+            options: std::collections::HashMap::from([
                 (
                     "TargetRailsVersion".to_string(),
-                    serde_yml::Value::Number(serde_yml::value::Number::from(6.1)),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(version)),
                 ),
                 (
                     "__RailtiesInLockfile".to_string(),
@@ -123,9 +140,33 @@ mod tests {
                 ),
             ]),
             ..CopConfig::default()
-        };
+        }
+    }
 
-        let diags = run_cop_full_internal(&ExpandedDateRange, source, config, "test.rb");
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ExpandedDateRange.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_fixture() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ExpandedDateRange,
+            include_bytes!("../../../tests/fixtures/cops/rails/expanded_date_range/offense.rb"),
+            include_bytes!("../../../tests/fixtures/cops/rails/expanded_date_range/corrected.rb"),
+            config_with_rails(5.1),
+        );
+    }
+
+    #[test]
+    fn different_receivers_are_not_flagged() {
+        let source = b"where(recorded_at: start_date.beginning_of_day..end_date.end_of_day)\n";
+        let diags = run_cop_full_internal(
+            &ExpandedDateRange,
+            source,
+            config_with_rails(6.1),
+            "test.rb",
+        );
         assert!(
             diags.is_empty(),
             "start_date..end_date expanded ranges should not be flagged"
