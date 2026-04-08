@@ -164,6 +164,10 @@ impl Cop for Blank {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -171,7 +175,7 @@ impl Cop for Blank {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let nil_or_empty = config.get_bool("NilOrEmpty", true);
         let not_present = config.get_bool("NotPresent", true);
@@ -186,6 +190,7 @@ impl Cop for Blank {
             inside_def_blank: false,
             inside_in_node: false,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -201,6 +206,7 @@ struct BlankVisitor<'a, 'src> {
     inside_def_blank: bool,
     inside_in_node: bool,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'src mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> BlankVisitor<'_, '_> {
@@ -231,12 +237,27 @@ impl<'pr> BlankVisitor<'_, '_> {
                             }
                             None => format!("Use `blank?` instead of `{current_str}`."),
                         };
-                        self.diagnostics.push(self.cop.diagnostic(
-                            self.source,
-                            line,
-                            column,
-                            message,
-                        ));
+                        let mut diagnostic =
+                            self.cop.diagnostic(self.source, line, column, message);
+
+                        if let Some(ref mut corr) = self.corrections {
+                            let replacement = match nil_recv {
+                                Some(recv_bytes) => {
+                                    format!("{}.blank?", std::str::from_utf8(recv_bytes).unwrap_or(""))
+                                }
+                                None => "blank?".to_string(),
+                            };
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement,
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -289,12 +310,32 @@ impl<'pr> BlankVisitor<'_, '_> {
 
         let loc = call.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Use `blank?` instead of `!present?`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = self.corrections {
+            let replacement = if let Some(recv) = inner_call.receiver() {
+                let recv_src = &self.source.as_bytes()
+                    [recv.location().start_offset()..recv.location().end_offset()];
+                format!("{}.blank?", std::str::from_utf8(recv_src).unwrap_or(""))
+            } else {
+                "blank?".to_string()
+            };
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 
     /// Check UnlessPresent: `unless foo.present?` or `something unless foo.present?`
@@ -378,12 +419,33 @@ impl<'pr> BlankVisitor<'_, '_> {
         // For the offense range length, count from keyword to end of predicate
         let _ = offense_end; // used implicitly via the annotation range
 
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
-            format!("Use `if {recv_str}` instead of `{current}`."),
-        ));
+            format!("Use `if {}` instead of `{current}`.", recv_str),
+        );
+
+        if let Some(ref mut corr) = self.corrections {
+            let kw_loc = unless_node.keyword_loc();
+            corr.push(crate::correction::Correction {
+                start: kw_loc.start_offset(),
+                end: kw_loc.end_offset(),
+                replacement: "if".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            corr.push(crate::correction::Correction {
+                start: predicate.location().start_offset(),
+                end: predicate.location().end_offset(),
+                replacement: recv_str.clone(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -459,4 +521,18 @@ impl<'pr> Visit<'pr> for BlankVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Blank, "cops/rails/blank");
+
+    #[test]
+    fn autocorrects_not_present_to_blank() {
+        crate::testutil::assert_cop_autocorrect(&Blank, b"!x.present?\n", b"x.blank?\n");
+    }
+
+    #[test]
+    fn autocorrects_unless_present_to_if_blank() {
+        crate::testutil::assert_cop_autocorrect(
+            &Blank,
+            b"something unless foo.present?\n",
+            b"something if foo.blank?\n",
+        );
+    }
 }
