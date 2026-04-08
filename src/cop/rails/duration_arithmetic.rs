@@ -95,6 +95,10 @@ impl Cop for DurationArithmetic {
         &[CALL_NODE, FLOAT_NODE, INTEGER_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -102,7 +106,7 @@ impl Cop for DurationArithmetic {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -139,12 +143,34 @@ impl Cop for DurationArithmetic {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not add or subtract duration.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let arg_loc = arg_list[0].location();
+            let arg_source = source
+                .byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "")
+                .to_string();
+            let replacement = if method_name == b"-" {
+                format!("{arg_source}.ago")
+            } else {
+                format!("{arg_source}.from_now")
+            };
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -152,4 +178,10 @@ impl Cop for DurationArithmetic {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DurationArithmetic, "cops/rails/duration_arithmetic");
+    crate::cop_autocorrect_fixture_tests!(DurationArithmetic, "cops/rails/duration_arithmetic");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DurationArithmetic.supports_autocorrect());
+    }
 }
