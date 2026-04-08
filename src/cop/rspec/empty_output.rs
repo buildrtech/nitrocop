@@ -23,6 +23,10 @@ impl Cop for EmptyOutput {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for EmptyOutput {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Match:
         //   expect { ... }.to output('').to_stdout
@@ -99,12 +103,35 @@ impl Cop for EmptyOutput {
         let preferred_runner = if runner == b"to" { "not_to" } else { "to" };
         let loc = output_call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{preferred_runner}` instead of matching on an empty output."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            if let Some(runner_selector) = call.message_loc() {
+                corr.push(crate::correction::Correction {
+                    start: runner_selector.start_offset(),
+                    end: runner_selector.end_offset(),
+                    replacement: preferred_runner.to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "output".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -112,4 +139,5 @@ impl Cop for EmptyOutput {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyOutput, "cops/rspec/empty_output");
+    crate::cop_autocorrect_fixture_tests!(EmptyOutput, "cops/rspec/empty_output");
 }
