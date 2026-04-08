@@ -183,6 +183,10 @@ impl Cop for RedundantActiveRecordAllMethod {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -190,7 +194,7 @@ impl Cop for RedundantActiveRecordAllMethod {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_receivers = config.get_string_array("AllowedReceivers");
 
@@ -199,6 +203,7 @@ impl Cop for RedundantActiveRecordAllMethod {
             source,
             allowed_receivers,
             diagnostics: Vec::new(),
+            corrections,
             in_ar_class: false,
         };
         visitor.visit(&parse_result.node());
@@ -211,6 +216,7 @@ struct AllMethodVisitor<'a, 'src> {
     source: &'src SourceFile,
     allowed_receivers: Option<Vec<String>>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// Whether we are currently inside a class that inherits from ActiveRecord.
     in_ar_class: bool,
 }
@@ -301,12 +307,37 @@ impl<'pr> AllMethodVisitor<'_, '_> {
         // Report at the `all` method name location
         let msg_loc = inner_call.message_loc().unwrap_or(inner_call.location());
         let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
-            self.source,
-            line,
-            column,
-            "Redundant `all` detected.".to_string(),
-        ));
+        let mut diagnostic =
+            self.cop
+                .diagnostic(self.source, line, column, "Redundant `all` detected.".to_string());
+
+        if let Some(ref mut corr) = self.corrections {
+            let outer_selector = outer_call.message_loc().unwrap_or(outer_call.location());
+
+            let (remove_start, remove_end) = if inner_call.receiver().is_some() {
+                // `User.all.where` => remove `.all` but keep `.where`
+                (
+                    msg_loc.start_offset().saturating_sub(1),
+                    outer_selector.start_offset().saturating_sub(1),
+                )
+            } else {
+                // `all.where` => remove `all.`
+                (msg_loc.start_offset(), outer_selector.start_offset())
+            };
+
+            if remove_start < remove_end {
+                corr.push(crate::correction::Correction {
+                    start: remove_start,
+                    end: remove_end,
+                    replacement: String::new(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -337,6 +368,10 @@ impl<'pr> Visit<'pr> for AllMethodVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        RedundantActiveRecordAllMethod,
+        "cops/rails/redundant_active_record_all_method"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RedundantActiveRecordAllMethod,
         "cops/rails/redundant_active_record_all_method"
     );
