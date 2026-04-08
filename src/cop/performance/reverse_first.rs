@@ -27,6 +27,10 @@ impl Cop for ReverseFirst {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -34,7 +38,7 @@ impl Cop for ReverseFirst {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match as_method_chain(node) {
             Some(c) => c,
@@ -71,24 +75,46 @@ impl Cop for ReverseFirst {
             .unwrap_or(chain.inner_call.location());
         let (line, column) = source.offset_to_line_col(inner_msg_loc.start_offset());
 
-        let msg = if let Some(args) = outer_call.arguments() {
+        let good_method = if let Some(args) = outer_call.arguments() {
             if let Some(first_arg) = args.arguments().iter().next() {
                 let arg_text = std::str::from_utf8(first_arg.location().as_slice()).unwrap_or("n");
                 let dot = match outer_call.call_operator_loc() {
                     Some(loc) if loc.as_slice() == b"&." => "&.",
                     _ => ".",
                 };
-                format!(
-                    "Use `last({arg_text}){dot}reverse` instead of `reverse{dot}first({arg_text})`."
-                )
+                format!("last({arg_text}){dot}reverse")
             } else {
-                "Use `last` instead of `reverse.first`.".to_string()
+                "last".to_string()
             }
         } else {
-            "Use `last` instead of `reverse.first`.".to_string()
+            "last".to_string()
         };
 
-        diagnostics.push(self.diagnostic(source, line, column, msg));
+        let bad_method_start = inner_msg_loc.start_offset();
+        let bad_method_end = outer_call.location().end_offset();
+        let bad_method = source
+            .byte_slice(bad_method_start, bad_method_end, "reverse.first")
+            .to_string();
+
+        let mut diagnostic = self.diagnostic(
+            source,
+            line,
+            column,
+            format!("Use `{good_method}` instead of `{bad_method}`."),
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: bad_method_start,
+                end: bad_method_end,
+                replacement: good_method,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -97,4 +123,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(ReverseFirst, "cops/performance/reverse_first");
+    crate::cop_autocorrect_fixture_tests!(ReverseFirst, "cops/performance/reverse_first");
 }
