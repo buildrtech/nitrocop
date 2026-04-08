@@ -126,6 +126,10 @@ impl Cop for DeprecatedActiveModelErrorsMethods {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -133,7 +137,7 @@ impl Cop for DeprecatedActiveModelErrorsMethods {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -154,7 +158,20 @@ impl Cop for DeprecatedActiveModelErrorsMethods {
                 if is_errors_call(&recv, model_file) {
                     let loc = node.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+                    let mut diagnostic = self.diagnostic(source, line, column, MSG.to_string());
+                    if let Some(ref mut corr) = corrections
+                        && let Some(edit) = build_autocorrect(source, &call)
+                    {
+                        corr.push(crate::correction::Correction {
+                            start: edit.start,
+                            end: edit.end,
+                            replacement: edit.replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -166,7 +183,20 @@ impl Cop for DeprecatedActiveModelErrorsMethods {
                 if is_errors_bracket_access(&recv, model_file) {
                     let loc = node.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+                    let mut diagnostic = self.diagnostic(source, line, column, MSG.to_string());
+                    if let Some(ref mut corr) = corrections
+                        && let Some(edit) = build_autocorrect(source, &call)
+                    {
+                        corr.push(crate::correction::Correction {
+                            start: edit.start,
+                            end: edit.end,
+                            replacement: edit.replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
