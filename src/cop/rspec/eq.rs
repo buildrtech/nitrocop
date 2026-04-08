@@ -23,6 +23,10 @@ impl Cop for Eq {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for Eq {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for matcher runner calls where the matcher arg is `be == value`:
         // `expect(foo).to be == 42`
@@ -92,17 +96,28 @@ impl Cop for Eq {
         }
 
         let loc = be_call.location();
-        let end_loc = eq_call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let (_, end_column) = source.offset_to_line_col(end_loc.start_offset());
-        // The offense covers "be ==" - the be call + == call name
-        let _ = end_column;
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `eq` instead of `be ==` to compare objects.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(eq_selector) = eq_call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: eq_selector.end_offset(),
+                replacement: "eq".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -110,4 +125,5 @@ impl Cop for Eq {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Eq, "cops/rspec/eq");
+    crate::cop_autocorrect_fixture_tests!(Eq, "cops/rspec/eq");
 }
