@@ -279,6 +279,10 @@ impl Cop for HttpStatus {
         &[CALL_NODE, INTEGER_NODE, STRING_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -286,7 +290,7 @@ impl Cop for HttpStatus {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "symbolic");
 
@@ -316,97 +320,124 @@ impl Cop for HttpStatus {
             keyword_arg_value(&call, b"status")
         };
 
-        let check_status = |status_value: &ruby_prism::Node<'_>| -> Option<Diagnostic> {
-            match style {
-                "numeric" => {
-                    if let Some(sym) = status_value.as_symbol_node() {
-                        let sym_name = sym.unescaped();
-                        if PERMITTED_SYMBOLS.contains(&sym_name) {
-                            return None;
+        let check_status =
+            |status_value: &ruby_prism::Node<'_>| -> Option<(Diagnostic, String, usize, usize)> {
+                match style {
+                    "numeric" => {
+                        if let Some(sym) = status_value.as_symbol_node() {
+                            let sym_name = sym.unescaped();
+                            if PERMITTED_SYMBOLS.contains(&sym_name) {
+                                return None;
+                            }
+                            if let Some(code) = symbol_to_status_code(sym_name) {
+                                let sym_str = std::str::from_utf8(sym_name).unwrap_or("?");
+                                let val_loc = status_value.location();
+                                let (line, column) =
+                                    source.offset_to_line_col(val_loc.start_offset());
+                                return Some((
+                                    self.diagnostic(
+                                        source,
+                                        line,
+                                        column,
+                                        format!(
+                                            "Prefer `{code}` over `:{sym_str}` to define HTTP status code."
+                                        ),
+                                    ),
+                                    code.to_string(),
+                                    val_loc.start_offset(),
+                                    val_loc.end_offset(),
+                                ));
+                            }
                         }
-                        if let Some(code) = symbol_to_status_code(sym_name) {
-                            let sym_str = std::str::from_utf8(sym_name).unwrap_or("?");
-                            let val_loc = status_value.location();
-                            let (line, column) = source.offset_to_line_col(val_loc.start_offset());
-                            return Some(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                format!(
-                                    "Prefer `{code}` over `:{sym_str}` to define HTTP status code."
-                                ),
-                            ));
-                        }
+                        None
                     }
-                    None
-                }
-                _ => {
-                    // symbolic style: flag integer and string status codes
-                    // `display_val` is the "current" value shown in the message (matches RuboCop).
-                    // For integers it's the number itself; for strings it's the original string
-                    // content (e.g. "404 Not Found" stays as-is, not truncated to "404").
-                    let (code_num_opt, display_val, val_loc) =
-                        if let Some(_int) = status_value.as_integer_node() {
-                            let loc = status_value.location();
-                            let code_text = std::str::from_utf8(loc.as_slice()).unwrap_or("");
-                            let num = code_text.parse::<i64>().ok();
-                            let disp = code_text.to_string();
-                            (num, disp, loc)
-                        } else if let Some(str_node) = status_value.as_string_node() {
-                            let content = str_node.unescaped();
-                            let code_text = std::str::from_utf8(content).unwrap_or("");
-                            // Support strings like "404" as well as "404 Not Found" (Rack-style).
-                            // RuboCop uses Rack::Utils which only recognizes known reason phrases.
-                            // Strings with custom/unknown reason phrases like "404 AWOL" must NOT
-                            // be flagged. Validate that strings with whitespace exactly match
-                            // a known Rack "code reason-phrase" pair before flagging.
-                            let numeric_prefix =
-                                code_text.split_ascii_whitespace().next().unwrap_or("");
-                            let num = numeric_prefix.parse::<i64>().ok();
-                            // If the string contains more than just the number, validate the
-                            // reason phrase matches the canonical Rack reason phrase exactly.
-                            let validated_num = if code_text.contains(' ') {
-                                num.filter(|&n| {
-                                    status_code_to_rack_reason(n)
-                                        .map(|reason| {
-                                            let expected = format!("{n} {reason}");
-                                            code_text == expected
-                                        })
-                                        .unwrap_or(false)
-                                })
+                    _ => {
+                        // symbolic style: flag integer and string status codes
+                        // `display_val` is the "current" value shown in the message (matches RuboCop).
+                        // For integers it's the number itself; for strings it's the original string
+                        // content (e.g. "404 Not Found" stays as-is, not truncated to "404").
+                        let (code_num_opt, display_val, val_loc) =
+                            if let Some(_int) = status_value.as_integer_node() {
+                                let loc = status_value.location();
+                                let code_text = std::str::from_utf8(loc.as_slice()).unwrap_or("");
+                                let num = code_text.parse::<i64>().ok();
+                                let disp = code_text.to_string();
+                                (num, disp, loc)
+                            } else if let Some(str_node) = status_value.as_string_node() {
+                                let content = str_node.unescaped();
+                                let code_text = std::str::from_utf8(content).unwrap_or("");
+                                // Support strings like "404" as well as "404 Not Found" (Rack-style).
+                                // RuboCop uses Rack::Utils which only recognizes known reason phrases.
+                                // Strings with custom/unknown reason phrases like "404 AWOL" must NOT
+                                // be flagged. Validate that strings with whitespace exactly match
+                                // a known Rack "code reason-phrase" pair before flagging.
+                                let numeric_prefix =
+                                    code_text.split_ascii_whitespace().next().unwrap_or("");
+                                let num = numeric_prefix.parse::<i64>().ok();
+                                // If the string contains more than just the number, validate the
+                                // reason phrase matches the canonical Rack reason phrase exactly.
+                                let validated_num = if code_text.contains(' ') {
+                                    num.filter(|&n| {
+                                        status_code_to_rack_reason(n)
+                                            .map(|reason| {
+                                                let expected = format!("{n} {reason}");
+                                                code_text == expected
+                                            })
+                                            .unwrap_or(false)
+                                    })
+                                } else {
+                                    num
+                                };
+                                (
+                                    validated_num,
+                                    code_text.to_string(),
+                                    status_value.location(),
+                                )
                             } else {
-                                num
+                                (None, String::new(), status_value.location())
                             };
-                            (
-                                validated_num,
-                                code_text.to_string(),
-                                status_value.location(),
-                            )
-                        } else {
-                            (None, String::new(), status_value.location())
-                        };
-                    if let Some(code_num) = code_num_opt {
-                        if let Some(sym) = status_code_to_symbol(code_num) {
-                            let (line, column) = source.offset_to_line_col(val_loc.start_offset());
-                            return Some(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                format!(
-                                    "Prefer `{sym}` over `{display_val}` to define HTTP status code."
-                                ),
-                            ));
+                        if let Some(code_num) = code_num_opt {
+                            if let Some(sym) = status_code_to_symbol(code_num) {
+                                let (line, column) =
+                                    source.offset_to_line_col(val_loc.start_offset());
+                                return Some((
+                                    self.diagnostic(
+                                        source,
+                                        line,
+                                        column,
+                                        format!(
+                                            "Prefer `{sym}` over `{display_val}` to define HTTP status code."
+                                        ),
+                                    ),
+                                    sym.to_string(),
+                                    val_loc.start_offset(),
+                                    val_loc.end_offset(),
+                                ));
+                            }
                         }
+                        None
                     }
-                    None
                 }
+            };
+
+        let mut maybe_push = |status_value: &ruby_prism::Node<'_>| {
+            if let Some((mut diag, replacement, start, end)) = check_status(status_value) {
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
         };
 
         if let Some(ref kw) = keyword_status {
-            if let Some(diag) = check_status(kw) {
-                diagnostics.push(diag);
-            }
+            maybe_push(kw);
         }
 
         // For head and assert_response, also check first direct argument
@@ -417,9 +448,7 @@ impl Cop for HttpStatus {
                         || first.as_symbol_node().is_some()
                         || first.as_string_node().is_some()
                     {
-                        if let Some(diag) = check_status(&first) {
-                            diagnostics.push(diag);
-                        }
+                        maybe_push(&first);
                     }
                 }
             }
@@ -431,6 +460,12 @@ impl Cop for HttpStatus {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HttpStatus, "cops/rails/http_status");
+    crate::cop_autocorrect_fixture_tests!(HttpStatus, "cops/rails/http_status");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(HttpStatus.supports_autocorrect());
+    }
 
     #[test]
     fn numeric_style_flags_symbolic_status() {
@@ -487,5 +522,36 @@ mod tests {
         };
         let source = b"render :foo, status: :error\n";
         assert_cop_no_offenses_full_with_config(&HttpStatus, source, config);
+    }
+
+    #[test]
+    fn autocorrects_symbolic_style_integer_status() {
+        crate::testutil::assert_cop_autocorrect(
+            &HttpStatus,
+            b"render status: 200\n",
+            b"render status: :ok\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_numeric_style_symbol_status() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("numeric".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &HttpStatus,
+            b"render status: :not_found\n",
+            b"render status: 404\n",
+            config,
+        );
     }
 }
