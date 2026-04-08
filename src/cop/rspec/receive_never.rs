@@ -23,6 +23,10 @@ impl Cop for ReceiveNever {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for ReceiveNever {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for .to / .to_not / .not_to calls (the matcher dispatch)
         let to_call = match node.as_call_node() {
@@ -88,12 +92,40 @@ impl Cop for ReceiveNever {
             .message_loc()
             .unwrap_or_else(|| arg_call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `not_to receive` instead of `never`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            if let Some(to_selector) = to_call.message_loc() {
+                corr.push(crate::correction::Correction {
+                    start: to_selector.start_offset(),
+                    end: to_selector.end_offset(),
+                    replacement: "not_to".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+
+            if let Some(dot_loc) = arg_call.call_operator_loc()
+                && let Some(never_selector) = arg_call.message_loc()
+            {
+                corr.push(crate::correction::Correction {
+                    start: dot_loc.start_offset(),
+                    end: never_selector.end_offset(),
+                    replacement: "".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -132,4 +164,5 @@ fn has_receive_in_chain(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReceiveNever, "cops/rspec/receive_never");
+    crate::cop_autocorrect_fixture_tests!(ReceiveNever, "cops/rspec/receive_never");
 }
