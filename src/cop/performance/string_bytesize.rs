@@ -19,6 +19,10 @@ impl Cop for StringBytesize {
         &[CALL_NODE, INTEGER_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -26,7 +30,7 @@ impl Cop for StringBytesize {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match as_method_chain(node) {
             Some(c) => c,
@@ -73,12 +77,25 @@ impl Cop for StringBytesize {
         // Build annotation-compatible offset
         let _ = end_col_offset;
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `String#bytesize` instead of calculating the size of the bytes array.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start,
+                end: outer_end,
+                replacement: "bytesize".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
