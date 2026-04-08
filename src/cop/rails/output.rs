@@ -107,6 +107,10 @@ impl Cop for Output {
         &[] // Using check_source with visitor instead
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -114,12 +118,13 @@ impl Cop for Output {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = OutputVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             parent_is_call: false,
         };
         visitor.visit(&parse_result.node());
@@ -131,6 +136,7 @@ struct OutputVisitor<'a> {
     cop: &'a Output,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// True when the current node is a direct child (receiver/argument) of a CallNode.
     /// Matches RuboCop's `return if node.parent&.call_type?`.
     parent_is_call: bool,
@@ -149,12 +155,22 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
                     // Report at message_loc (method name only), matching RuboCop's node.loc.selector
                     if let Some(msg_loc) = node.message_loc() {
                         let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
-                            self.source,
-                            line,
-                            column,
-                            MSG.to_string(),
-                        ));
+                        let mut diagnostic =
+                            self.cop
+                                .diagnostic(self.source, line, column, MSG.to_string());
+
+                        if let Some(ref mut corr) = self.corrections {
+                            corr.push(crate::correction::Correction {
+                                start: msg_loc.start_offset(),
+                                end: msg_loc.end_offset(),
+                                replacement: "Rails.logger.debug".to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             } else if IO_WRITE_METHODS.contains(&method) {
@@ -179,12 +195,24 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
                         let recv_loc = recv.location();
                         let (line, column) =
                             self.source.offset_to_line_col(recv_loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
-                            self.source,
-                            line,
-                            column,
-                            MSG.to_string(),
-                        ));
+                        let mut diagnostic =
+                            self.cop
+                                .diagnostic(self.source, line, column, MSG.to_string());
+
+                        if let Some(ref mut corr) = self.corrections
+                            && let Some(selector) = node.message_loc()
+                        {
+                            corr.push(crate::correction::Correction {
+                                start: recv_loc.start_offset(),
+                                end: selector.end_offset(),
+                                replacement: "Rails.logger.debug".to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -353,6 +381,24 @@ mod tests {
             1,
             "p inside nested array inside method chain should fire: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn autocorrects_receiverless_output_method() {
+        crate::testutil::assert_cop_autocorrect(
+            &Output,
+            b"puts \"hello\"\n",
+            b"Rails.logger.debug \"hello\"\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_io_output_method() {
+        crate::testutil::assert_cop_autocorrect(
+            &Output,
+            b"$stdout.write \"data\"\n",
+            b"Rails.logger.debug \"data\"\n",
         );
     }
 }
