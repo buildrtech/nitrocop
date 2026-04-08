@@ -44,6 +44,10 @@ impl Cop for RefuteMethods {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -51,7 +55,7 @@ impl Cop for RefuteMethods {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "assert_not");
 
@@ -67,7 +71,7 @@ impl Cop for RefuteMethods {
         let name = call.name().as_slice();
         let name_str = std::str::from_utf8(name).unwrap_or("");
 
-        let (is_bad, message) = match style {
+        let (is_bad, message, preferred_method) = match style {
             "refute" => {
                 // Flag assert_not_* methods, suggest refute_*
                 // Use the reverse mapping from CORRECTIONS.
@@ -75,9 +79,13 @@ impl Cop for RefuteMethods {
                     .iter()
                     .find(|(_, assert_name)| *assert_name == name_str)
                 {
-                    (true, format!("Prefer `{refute_name}` over `{name_str}`."))
+                    (
+                        true,
+                        format!("Prefer `{refute_name}` over `{name_str}`."),
+                        (*refute_name).to_string(),
+                    )
                 } else {
-                    (false, String::new())
+                    (false, String::new(), String::new())
                 }
             }
             _ => {
@@ -87,9 +95,13 @@ impl Cop for RefuteMethods {
                     .iter()
                     .find(|(refute_name, _)| *refute_name == name_str)
                 {
-                    (true, format!("Prefer `{assert_name}` over `{name_str}`."))
+                    (
+                        true,
+                        format!("Prefer `{assert_name}` over `{name_str}`."),
+                        (*assert_name).to_string(),
+                    )
                 } else {
-                    (false, String::new())
+                    (false, String::new(), String::new())
                 }
             }
         };
@@ -100,7 +112,22 @@ impl Cop for RefuteMethods {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, message));
+        let mut diagnostic = self.diagnostic(source, line, column, message);
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector_loc) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: selector_loc.end_offset(),
+                replacement: preferred_method,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -108,6 +135,7 @@ impl Cop for RefuteMethods {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RefuteMethods, "cops/rails/refute_methods");
+    crate::cop_autocorrect_fixture_tests!(RefuteMethods, "cops/rails/refute_methods");
 
     #[test]
     fn refute_style_flags_assert_not() {
