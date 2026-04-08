@@ -60,6 +60,10 @@ impl Cop for ExpectActual {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -67,7 +71,7 @@ impl Cop for ExpectActual {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for expect(literal).to/to_not/not_to matcher(args) chains
         // RuboCop only flags when the full chain has a matcher with arguments.
@@ -135,12 +139,52 @@ impl Cop for ExpectActual {
 
         let loc = literal_arg.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Provide the actual value you are testing to `expect(...)`.".to_string(),
-        ));
+        );
+
+        // Baseline RuboCop-aligned autocorrect for swappable matchers.
+        if let Some(ref mut corr) = corrections
+            && (matcher_name == b"eq"
+                || matcher_name == b"eql"
+                || matcher_name == b"equal"
+                || matcher_name == b"be")
+            && let Some(expected_node) = matcher_expected_node(matcher)
+            && !is_literal_value(source, &expected_node)
+        {
+            let expected_loc = expected_node.location();
+            let expected_src = std::str::from_utf8(
+                &source.as_bytes()[expected_loc.start_offset()..expected_loc.end_offset()],
+            )
+            .unwrap_or("")
+            .to_string();
+            let actual_src = std::str::from_utf8(
+                &source.as_bytes()[loc.start_offset()..loc.end_offset()],
+            )
+            .unwrap_or("")
+            .to_string();
+
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: expected_src,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            corr.push(crate::correction::Correction {
+                start: expected_loc.start_offset(),
+                end: expected_loc.end_offset(),
+                replacement: actual_src,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -225,6 +269,36 @@ fn is_literal_value(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
+fn matcher_expected_node<'a>(node: &'a ruby_prism::Node<'_>) -> Option<ruby_prism::Node<'a>> {
+    let matcher = node.as_call_node()?;
+
+    // Regular matcher call: eq(expected), include(expected), etc.
+    if matcher.receiver().is_none() {
+        if let Some(args) = matcher.arguments() {
+            let mut it = args.arguments().iter();
+            if let Some(first) = it.next() {
+                return Some(first);
+            }
+        }
+    }
+
+    // Special RuboCop pattern: be == expected
+    if matcher.name().as_slice() == b"==" && matcher.arguments().is_some() {
+        let be_call = matcher.receiver().and_then(|r| r.as_call_node())?;
+        if be_call.receiver().is_none() && be_call.name().as_slice() == b"be" {
+            let args = matcher.arguments()?;
+            let mut it = args.arguments().iter();
+            if let Some(first) = it.next() {
+                if it.next().is_none() {
+                    return Some(first);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn expect_actual_matcher_name<'a>(node: &'a ruby_prism::Node<'_>) -> Option<&'a [u8]> {
     let matcher = node.as_call_node()?;
 
@@ -248,4 +322,5 @@ fn expect_actual_matcher_name<'a>(node: &'a ruby_prism::Node<'_>) -> Option<&'a 
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ExpectActual, "cops/rspec/expect_actual");
+    crate::cop_autocorrect_fixture_tests!(ExpectActual, "cops/rspec/expect_actual");
 }
