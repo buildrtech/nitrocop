@@ -33,6 +33,10 @@ impl Cop for ItBehavesLike {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -40,7 +44,7 @@ impl Cop for ItBehavesLike {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -66,7 +70,7 @@ impl Cop for ItBehavesLike {
         let bad_name = std::str::from_utf8(bad_method).unwrap_or("?");
         let loc = call.location();
         let (line, col) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             col,
@@ -74,7 +78,22 @@ impl Cop for ItBehavesLike {
                 "Prefer `{}` over `{}` when including examples in a nested context.",
                 good_method, bad_name
             ),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector_loc) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: selector_loc.end_offset(),
+                replacement: good_method.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -83,4 +102,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(ItBehavesLike, "cops/rspec/it_behaves_like");
+    crate::cop_autocorrect_fixture_tests!(ItBehavesLike, "cops/rspec/it_behaves_like");
 }
