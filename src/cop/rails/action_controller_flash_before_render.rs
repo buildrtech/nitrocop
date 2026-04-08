@@ -169,6 +169,10 @@ impl Cop for ActionControllerFlashBeforeRender {
     // No Include restriction — vendor config/default.yml has none.
     // Class-inheritance detection scopes to ActionController descendants.
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -176,12 +180,13 @@ impl Cop for ActionControllerFlashBeforeRender {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = FlashVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             in_action_controller: false,
         };
         visitor.visit(&parse_result.node());
@@ -193,6 +198,7 @@ struct FlashVisitor<'a> {
     cop: &'a ActionControllerFlashBeforeRender,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     in_action_controller: bool,
 }
 
@@ -305,7 +311,7 @@ impl FlashVisitor<'_> {
                 };
 
                 if is_offense {
-                    self.emit_diagnostic(flash_loc);
+                    self.emit_diagnostic(flash_loc.0, flash_loc.1);
                 }
             }
 
@@ -439,7 +445,7 @@ impl FlashVisitor<'_> {
                                 let remaining = &body_nodes[i + 1..];
                                 let has_redirect = remaining.iter().any(|s| is_redirect_sibling(s));
                                 if !has_redirect {
-                                    self.emit_diagnostic(flash_loc);
+                                    self.emit_diagnostic(flash_loc.0, flash_loc.1);
                                 }
                             }
                         }
@@ -586,7 +592,7 @@ impl FlashVisitor<'_> {
                 };
 
                 if is_offense {
-                    self.emit_diagnostic(flash_loc);
+                    self.emit_diagnostic(flash_loc.0, flash_loc.1);
                 }
             }
 
@@ -683,7 +689,7 @@ impl FlashVisitor<'_> {
                 };
 
                 if is_offense {
-                    self.emit_diagnostic(flash_loc);
+                    self.emit_diagnostic(flash_loc.0, flash_loc.1);
                 }
             }
 
@@ -785,14 +791,27 @@ impl FlashVisitor<'_> {
         visitor.visit(node);
     }
 
-    fn emit_diagnostic(&mut self, flash_loc: usize) {
-        let (line, column) = self.source.offset_to_line_col(flash_loc);
-        self.diagnostics.push(self.cop.diagnostic(
+    fn emit_diagnostic(&mut self, flash_start: usize, flash_end: usize) {
+        let (line, column) = self.source.offset_to_line_col(flash_start);
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Use `flash.now` before `render`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corrections) = self.corrections {
+            corrections.push(crate::correction::Correction {
+                start: flash_start,
+                end: flash_end,
+                replacement: "flash.now".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -983,8 +1002,8 @@ impl<'pr> Visit<'pr> for ActionControllerRefFinder {
     }
 }
 
-/// Check if a node is `flash[:key] = value` and return the flash receiver location offset.
-fn get_flash_assignment(node: &ruby_prism::Node<'_>) -> Option<usize> {
+/// Check if a node is `flash[:key] = value` and return the flash receiver start/end offsets.
+fn get_flash_assignment(node: &ruby_prism::Node<'_>) -> Option<(usize, usize)> {
     let call = node.as_call_node()?;
     if call.name().as_slice() != b"[]=" {
         return None;
@@ -995,7 +1014,7 @@ fn get_flash_assignment(node: &ruby_prism::Node<'_>) -> Option<usize> {
         return None;
     }
     let loc = recv_call.message_loc().unwrap_or(recv_call.location());
-    Some(loc.start_offset())
+    Some((loc.start_offset(), loc.end_offset()))
 }
 
 /// Check if a node contains a `render` call (no receiver).
@@ -1056,6 +1075,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        ActionControllerFlashBeforeRender,
+        "cops/rails/action_controller_flash_before_render"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         ActionControllerFlashBeforeRender,
         "cops/rails/action_controller_flash_before_render"
     );
