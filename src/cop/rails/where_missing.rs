@@ -12,9 +12,11 @@ pub struct WhereMissing;
 struct ChainCallInfo {
     name: Vec<u8>,
     start_offset: usize,
+    end_offset: usize,
     msg_offset: usize,
     assoc_name: Option<Vec<u8>>,    // For left_joins(:assoc) calls
     where_nil_assocs: Vec<Vec<u8>>, // For where(assoc: { id: nil }) — which table names matched
+    where_pair_count: usize,         // Top-level hash pair count in where(...)
 }
 
 /// Walk a method chain and collect info about each call.
@@ -32,24 +34,27 @@ fn collect_chain_info_inner(node: &ruby_prism::Node<'_>, infos: &mut Vec<ChainCa
 
     let name = call.name().as_slice().to_vec();
     let start_offset = call.location().start_offset();
+    let end_offset = call.location().end_offset();
     let msg_offset = call
         .message_loc()
         .map(|l| l.start_offset())
         .unwrap_or(start_offset);
 
     let assoc_name = left_joins_assoc(&call);
-    let where_nil_assocs = if name == b"where" {
+    let (where_nil_assocs, where_pair_count) = if name == b"where" {
         extract_where_nil_assocs(&call)
     } else {
-        Vec::new()
+        (Vec::new(), 0)
     };
 
     infos.push(ChainCallInfo {
         name,
         start_offset,
+        end_offset,
         msg_offset,
         assoc_name,
         where_nil_assocs,
+        where_pair_count,
     });
 
     if let Some(recv) = call.receiver() {
@@ -57,12 +62,14 @@ fn collect_chain_info_inner(node: &ruby_prism::Node<'_>, infos: &mut Vec<ChainCa
     }
 }
 
-/// Extract association table names from `where(assocs: { id: nil })` patterns.
-fn extract_where_nil_assocs(call: &ruby_prism::CallNode<'_>) -> Vec<Vec<u8>> {
+/// Extract association table names from `where(assocs: { id: nil })` patterns
+/// and count top-level where hash pairs.
+fn extract_where_nil_assocs(call: &ruby_prism::CallNode<'_>) -> (Vec<Vec<u8>>, usize) {
     let mut assocs = Vec::new();
+    let mut pair_count = 0;
     let args = match call.arguments() {
         Some(a) => a,
-        None => return assocs,
+        None => return (assocs, pair_count),
     };
     for arg in args.arguments().iter() {
         let kw = match arg.as_keyword_hash_node() {
@@ -78,6 +85,7 @@ fn extract_where_nil_assocs(call: &ruby_prism::CallNode<'_>) -> Vec<Vec<u8>> {
                 Some(s) => s,
                 None => continue,
             };
+            pair_count += 1;
             let value = assoc_node.value();
             let has_nil_id = if let Some(hash) = value.as_hash_node() {
                 hash_has_id_nil(&hash)
@@ -91,7 +99,7 @@ fn extract_where_nil_assocs(call: &ruby_prism::CallNode<'_>) -> Vec<Vec<u8>> {
             }
         }
     }
-    assocs
+    (assocs, pair_count)
 }
 
 /// Check if a call is `left_joins(:assoc)` or `left_outer_joins(:assoc)`.
@@ -159,6 +167,10 @@ impl Cop for WhereMissing {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -166,7 +178,7 @@ impl Cop for WhereMissing {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 6.1
         if !config.rails_version_at_least(6.1) {
@@ -189,22 +201,10 @@ impl Cop for WhereMissing {
             return;
         }
 
-        // We look for a method chain that contains both:
-        // 1. left_joins(:assoc) or left_outer_joins(:assoc)
-        // 2. where(assoc_table: { id: nil })
-        // These two calls should be in the same chain (not separated by `or` or `and`).
-
         let chain = collect_chain_info(node);
         if chain.is_empty() {
             return;
         }
-
-        // Only process this node if it's the outermost call in the chain.
-        // If chain[0] (this node) is a receiver of another call, a higher-level
-        // check_node invocation will handle it. We detect this by only processing
-        // when chain[0] is the current node AND is either the left_joins or the
-        // matching where — i.e., when index 0 is part of the pattern pair.
-        // Simpler approach: only fire if chain[0] is part of the pair.
 
         // Find left_joins calls
         let left_joins_info: Vec<(usize, &Vec<u8>)> = chain
@@ -226,38 +226,76 @@ impl Cop for WhereMissing {
                 if i == *lj_idx {
                     continue;
                 }
+
                 // Check if this is a where call with matching nil-id assoc
                 if !info.where_nil_assocs.iter().any(|a| {
                     a.as_slice() == assoc_name.as_slice() || a.as_slice() == plural.as_slice()
                 }) {
                     continue;
                 }
+
                 // Only fire if the closer-to-root element of the pair is at index 0
                 // (the current node). This prevents outer chain calls from duplicating.
                 let outermost_idx = (*lj_idx).min(i);
                 if outermost_idx != 0 {
                     continue;
                 }
+
                 let max_idx = (*lj_idx).max(i);
                 let has_separator = (outermost_idx + 1..max_idx).any(|j| {
                     let n = &chain[j].name;
                     n == b"or" || n == b"and"
                 });
-                if !has_separator {
-                    let lj_info = &chain[*lj_idx];
-                    let (line, column) = source.offset_to_line_col(lj_info.msg_offset);
-                    let assoc_str = std::str::from_utf8(assoc_name).unwrap_or("assoc");
-                    let method_name = std::str::from_utf8(&lj_info.name).unwrap_or("left_joins");
 
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        format!(
-                            "Use `where.missing(:{assoc_str})` instead of `{method_name}(:{assoc_str}).where({assoc_str}s: {{ id: nil }})`."),
-                    ));
-                    break;
+                if has_separator {
+                    continue;
                 }
+
+                let lj_info = &chain[*lj_idx];
+                let where_idx = if chain[i].name == b"where" {
+                    i
+                } else if chain[*lj_idx].name == b"where" {
+                    *lj_idx
+                } else {
+                    continue;
+                };
+                let where_info = &chain[where_idx];
+
+                let (line, column) = source.offset_to_line_col(lj_info.msg_offset);
+                let assoc_str = std::str::from_utf8(assoc_name).unwrap_or("assoc");
+                let method_name = std::str::from_utf8(&lj_info.name).unwrap_or("left_joins");
+
+                let mut diagnostic = self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!(
+                        "Use `where.missing(:{assoc_str})` instead of `{method_name}(:{assoc_str}).where({assoc_str}s: {{ id: nil }})`."
+                    ),
+                );
+
+                // Conservative autocorrect: only when where(...) contains exactly one
+                // top-level key/value pair (the nil-association condition).
+                if where_info.where_pair_count == 1 {
+                    if let Some(ref mut corr) = corrections {
+                        let (start, end) = if where_idx < *lj_idx {
+                            (lj_info.msg_offset, where_info.end_offset)
+                        } else {
+                            (where_info.msg_offset, lj_info.end_offset)
+                        };
+                        corr.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: format!("where.missing(:{assoc_str})"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diagnostic);
+                break;
             }
         }
     }
@@ -266,5 +304,40 @@ impl Cop for WhereMissing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use crate::testutil::assert_cop_autocorrect_with_config;
+    use std::collections::HashMap;
+
     crate::cop_rails_fixture_tests!(WhereMissing, "cops/rails/where_missing", 6.1);
+
+    fn where_missing_config() -> CopConfig {
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(6.1)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(WhereMissing.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_fixture() {
+        assert_cop_autocorrect_with_config(
+            &WhereMissing,
+            include_bytes!("../../../tests/fixtures/cops/rails/where_missing/offense.rb"),
+            include_bytes!("../../../tests/fixtures/cops/rails/where_missing/corrected.rb"),
+            where_missing_config(),
+        );
+    }
 }
