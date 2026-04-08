@@ -23,6 +23,10 @@ impl Cop for ContainExactly {
         &[CALL_NODE, SPLAT_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for ContainExactly {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Detect `contain_exactly(*array)` where ALL arguments are splats.
         // Suggest `match_array` instead.
@@ -61,12 +65,43 @@ impl Cop for ContainExactly {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Prefer `match_array` when matching array values.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let mut parts = Vec::new();
+            for arg in &arg_list {
+                let Some(splat) = arg.as_splat_node() else {
+                    return;
+                };
+                let Some(expr) = splat.expression() else {
+                    return;
+                };
+                let expr_loc = expr.location();
+                parts.push(
+                    source
+                        .byte_slice(expr_loc.start_offset(), expr_loc.end_offset(), "")
+                        .to_string(),
+                );
+            }
+
+            if !parts.is_empty() {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!("match_array({})", parts.join(" + ")),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -74,4 +109,5 @@ impl Cop for ContainExactly {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ContainExactly, "cops/rspec/contain_exactly");
+    crate::cop_autocorrect_fixture_tests!(ContainExactly, "cops/rspec/contain_exactly");
 }
