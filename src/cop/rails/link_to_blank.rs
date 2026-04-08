@@ -95,6 +95,10 @@ impl Cop for LinkToBlank {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -102,7 +106,7 @@ impl Cop for LinkToBlank {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -140,12 +144,40 @@ impl Cop for LinkToBlank {
             // Report on the entire hash arg that has target: _blank
             let loc = arg.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Specify a `:rel` option containing noopener.".to_string(),
-            ));
+            );
+
+            // Conservative autocorrect: when no rel: key is present, append one.
+            let has_rel_key = elements.iter().any(|elem| {
+                elem.as_assoc_node().is_some_and(|assoc| {
+                    assoc
+                        .key()
+                        .as_symbol_node()
+                        .is_some_and(|sym| sym.unescaped() == b"rel")
+                        || assoc
+                            .key()
+                            .as_string_node()
+                            .is_some_and(|s| s.unescaped() == b"rel")
+                })
+            });
+
+            if !has_rel_key && let Some(ref mut corr) = corrections {
+                let insert_pos = loc.end_offset();
+                corr.push(crate::correction::Correction {
+                    start: insert_pos,
+                    end: insert_pos,
+                    replacement: ", rel: 'noopener'".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -154,4 +186,10 @@ impl Cop for LinkToBlank {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(LinkToBlank, "cops/rails/link_to_blank");
+    crate::cop_autocorrect_fixture_tests!(LinkToBlank, "cops/rails/link_to_blank");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(LinkToBlank.supports_autocorrect());
+    }
 }
