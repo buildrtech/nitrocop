@@ -61,6 +61,10 @@ impl Cop for DescribedClass {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -68,7 +72,7 @@ impl Cop for DescribedClass {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let skip_blocks = config.get_bool("SkipBlocks", false);
         let enforced_style = config.get_str("EnforcedStyle", "described_class");
@@ -88,6 +92,7 @@ impl Cop for DescribedClass {
             in_scope_change: false,
             // Track enclosing namespace from module/class nodes
             namespace: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -111,6 +116,7 @@ struct DescribedClassVisitor<'a> {
     in_scope_change: bool,
     /// Enclosing namespace segments from module/class nodes outside describe blocks.
     namespace: Vec<Vec<u8>>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 /// Extract const_name segments from a Prism node.
@@ -349,22 +355,41 @@ impl DescribedClassVisitor<'_> {
             .and_then(|s| std::str::from_utf8(s).ok())
             .unwrap_or("?");
         let ref_text = std::str::from_utf8(source_text).unwrap_or("?");
+        let replacement = if self.enforced_style == "described_class" {
+            "described_class".to_string()
+        } else {
+            described_source.to_string()
+        };
 
-        if self.enforced_style == "described_class" {
-            self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = if self.enforced_style == "described_class" {
+            self.cop.diagnostic(
                 self.source,
                 line,
                 col,
                 format!("Use `described_class` instead of `{}`.", ref_text),
-            ));
+            )
         } else {
-            self.diagnostics.push(self.cop.diagnostic(
+            self.cop.diagnostic(
                 self.source,
                 line,
                 col,
                 format!("Use `{}` instead of `described_class`.", described_source),
-            ));
+            )
+        };
+
+        if let Some(ref mut corr) = self.corrections {
+            let end_offset = start_offset + source_text.len();
+            corr.push(crate::correction::Correction {
+                start: start_offset,
+                end: end_offset,
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
         }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -647,6 +672,35 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&DescribedClass, source, config);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("MyClass"));
+    }
+
+    #[test]
+    fn autocorrects_constant_to_described_class() {
+        crate::testutil::assert_cop_autocorrect(
+            &DescribedClass,
+            b"describe MyClass do\n  subject { MyClass.new }\nend\n",
+            b"describe MyClass do\n  subject { described_class.new }\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_explicit_style_to_named_constant() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &DescribedClass,
+            b"describe MyClass do\n  subject { described_class.new }\nend\n",
+            b"describe MyClass do\n  subject { MyClass.new }\nend\n",
+            config,
+        );
     }
 
     #[test]
