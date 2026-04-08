@@ -32,6 +32,10 @@ impl Cop for BeNil {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -39,7 +43,7 @@ impl Cop for BeNil {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -72,12 +76,23 @@ impl Cop for BeNil {
             }
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `be_nil` over `be(nil)`.".to_string(),
-            ));
+            );
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "be_nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         } else {
             // Flag `be_nil` — prefer `be(nil)`
             if method_name != b"be_nil" {
@@ -88,12 +103,23 @@ impl Cop for BeNil {
             }
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `be(nil)` over `be_nil`.".to_string(),
-            ));
+            );
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "be(nil)".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -102,4 +128,27 @@ impl Cop for BeNil {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BeNil, "cops/rspec/be_nil");
+    crate::cop_autocorrect_fixture_tests!(BeNil, "cops/rspec/be_nil");
+
+    #[test]
+    fn autocorrects_be_style_from_be_nil() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("be".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &BeNil,
+            b"expect(foo).to be_nil\n",
+            b"expect(foo).to be(nil)\n",
+            config,
+        );
+    }
 }
