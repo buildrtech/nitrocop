@@ -63,6 +63,10 @@ impl Cop for Output {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -70,12 +74,13 @@ impl Cop for Output {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = OutputVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             parent_is_call: false,
         };
         visitor.visit(&parse_result.node());
@@ -87,6 +92,7 @@ struct OutputVisitor<'a> {
     cop: &'a Output,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// True when the current node is a direct child (receiver/argument) of a CallNode.
     parent_is_call: bool,
 }
@@ -118,12 +124,23 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
                     if !skip {
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Do not write to stdout in specs.".to_string(),
-                        ));
+                        );
+                        if let Some(ref mut corr) = self.corrections {
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: "".to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             } else if IO_WRITE_METHODS.contains(&method) {
@@ -143,12 +160,23 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
                     if is_io_target && node.block().is_none() {
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Do not write to stdout in specs.".to_string(),
-                        ));
+                        );
+                        if let Some(ref mut corr) = self.corrections {
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: "".to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -300,4 +328,14 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Output, "cops/rspec/output");
+
+    #[test]
+    fn autocorrect_removes_receiverless_output_call() {
+        crate::testutil::assert_cop_autocorrect(&Output, b"puts \"sinbad\"\n", b"\n");
+    }
+
+    #[test]
+    fn autocorrect_removes_io_output_call() {
+        crate::testutil::assert_cop_autocorrect(&Output, b"$stdout.write \"x\"\n", b"\n");
+    }
 }
