@@ -142,7 +142,7 @@ impl Cop for WhereEquals {
             source,
             line,
             column_no,
-            format!("Use `{good_method}` instead of manually constructing SQL."),
+            "Use `where(attribute: value)` instead of manually constructing SQL.".to_string(),
         );
 
         if let Some(ref mut corr) = corrections {
