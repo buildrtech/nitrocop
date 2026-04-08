@@ -14,6 +14,10 @@ impl Cop for ReverseEach {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -21,16 +25,28 @@ impl Cop for ReverseEach {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ReverseEachVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
+            autocorrecting: corrections.is_some(),
             value_used: false,
         };
         visitor.visit(&parse_result.node());
-        diagnostics.extend(visitor.diagnostics);
+
+        let ReverseEachVisitor {
+            diagnostics: visitor_diagnostics,
+            corrections: visitor_corrections,
+            ..
+        } = visitor;
+
+        diagnostics.extend(visitor_diagnostics);
+        if let Some(corrections) = corrections {
+            corrections.extend(visitor_corrections);
+        }
     }
 }
 
@@ -38,6 +54,8 @@ struct ReverseEachVisitor<'a, 'src> {
     cop: &'a ReverseEach,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    autocorrecting: bool,
     /// Whether the current expression's return value is used by a parent.
     value_used: bool,
 }
@@ -87,12 +105,28 @@ impl<'a, 'src> ReverseEachVisitor<'a, 'src> {
             |loc| loc.start_offset(),
         );
         let (line, column) = self.source.offset_to_line_col(start_offset);
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Use `reverse_each` instead of `reverse.each`.".to_string(),
-        ));
+        );
+
+        if self.autocorrecting
+            && let (Some(inner_message_loc), Some(outer_message_loc)) =
+                (inner_call.message_loc(), node.message_loc())
+        {
+            self.corrections.push(crate::correction::Correction {
+                start: inner_message_loc.start_offset(),
+                end: outer_message_loc.end_offset(),
+                replacement: "reverse_each".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 
     /// Helper: visit a node with value_used set to a given value, then restore.
@@ -378,4 +412,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(ReverseEach, "cops/performance/reverse_each");
+    crate::cop_autocorrect_fixture_tests!(ReverseEach, "cops/performance/reverse_each");
 }
