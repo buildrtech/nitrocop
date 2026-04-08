@@ -1,3 +1,4 @@
 # Deferred autoresearch ideas
 
-- Rails/WhereMissing: evaluate RuboCop-aligned autocorrect opportunities for straightforward `left_joins(...).where(...: nil)` forms to `where.missing(...)` with strict receiver/arg-shape guards.
+- Rails/MigrationClassName: add conservative autocorrect only for underscore-style class names (`add_users` -> `AddUsers`) while leaving filename-mismatch and non-underscore variants diagnostic-only.
+- Rails/I18nLazyLookup: verify and harden autocorrect parity in both `lazy` and `explicit` styles (quoted string/symbol edge cases, controller path scoping).
