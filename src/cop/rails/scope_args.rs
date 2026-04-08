@@ -18,6 +18,10 @@ impl Cop for ScopeArgs {
         &[CALL_NODE, LAMBDA_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for ScopeArgs {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -75,12 +79,26 @@ impl Cop for ScopeArgs {
 
         let loc = second.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `lambda`/`proc` instead of a plain method call.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let second_src = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("-> {{ {second_src} }}"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -88,4 +106,13 @@ impl Cop for ScopeArgs {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ScopeArgs, "cops/rails/scope_args");
+
+    #[test]
+    fn autocorrects_plain_scope_call_to_lambda() {
+        crate::testutil::assert_cop_autocorrect(
+            &ScopeArgs,
+            b"scope :active, where(active: true)\n",
+            b"scope :active, -> { where(active: true) }\n",
+        );
+    }
 }
