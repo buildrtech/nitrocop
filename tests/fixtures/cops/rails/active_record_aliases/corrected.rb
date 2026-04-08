@@ -1,0 +1,7 @@
+book.update(author: 'Alice')
+book.update!(author: 'Alice')
+user.update(name: 'Bob', age: 30)
+record.update!(status: :active)
+update(name: 'Bob')
+update!(status: :active)
+update(params, *options)
