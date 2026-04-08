@@ -15,6 +15,10 @@ impl Cop for Pluck {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -22,7 +26,7 @@ impl Cop for Pluck {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.0
         if !config.rails_version_at_least(5.0) {
@@ -34,6 +38,7 @@ impl Cop for Pluck {
             source,
             nearest_block_has_receiver: false,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -49,6 +54,7 @@ struct PluckVisitor<'a, 'src> {
     /// don't set this flag.
     nearest_block_has_receiver: bool,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> Visit<'pr> for PluckVisitor<'_, '_> {
@@ -60,7 +66,18 @@ impl<'pr> Visit<'pr> for PluckVisitor<'_, '_> {
         // (RuboCop: `node.each_ancestor(:any_block).first&.receiver`).
         if (method_name == b"map" || method_name == b"collect") && !self.nearest_block_has_receiver
         {
-            if let Some(diag) = self.check_pluck_candidate(node) {
+            if let Some((diag, start, end, replacement)) = self.check_pluck_candidate(node) {
+                let mut diag = diag;
+                if let Some(ref mut corr) = self.corrections {
+                    corr.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement,
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
                 self.diagnostics.push(diag);
             }
         }
@@ -92,7 +109,10 @@ impl<'pr> Visit<'pr> for PluckVisitor<'_, '_> {
 }
 
 impl PluckVisitor<'_, '_> {
-    fn check_pluck_candidate(&self, call: &ruby_prism::CallNode<'_>) -> Option<Diagnostic> {
+    fn check_pluck_candidate(
+        &self,
+        call: &ruby_prism::CallNode<'_>,
+    ) -> Option<(Diagnostic, usize, usize, String)> {
         // Must have a block
         let block = call.block()?;
         let block_node = block.as_block_node()?;
@@ -151,12 +171,23 @@ impl PluckVisitor<'_, '_> {
 
         let loc = call.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        Some(self.cop.diagnostic(
+        let diag = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Use `pluck(:key)` instead of `map { |item| item[:key] }`.".to_string(),
-        ))
+        );
+
+        let key_loc = key.location();
+        let key_src = std::str::from_utf8(
+            &self.source.as_bytes()[key_loc.start_offset()..key_loc.end_offset()],
+        )
+        .unwrap_or(":key")
+        .to_string();
+
+        let selector = call.message_loc().unwrap_or(call.location());
+        let block_end = block_node.location().end_offset();
+        Some((diag, selector.start_offset(), block_end, format!("pluck({key_src})")))
     }
 }
 
@@ -236,6 +267,26 @@ mod tests {
         assert!(
             diagnostics.is_empty(),
             "Should not fire when TargetRailsVersion is not set (non-Rails project)"
+        );
+    }
+
+    #[test]
+    fn autocorrects_map_block_to_pluck() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &Pluck,
+            b"users.map { |u| u[:name] }\n",
+            b"users.pluck(:name)\n",
+            config_with_rails(5.0),
+        );
+    }
+
+    #[test]
+    fn autocorrects_collect_block_to_pluck() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &Pluck,
+            b"items.collect { |x| x[:key] }\n",
+            b"items.pluck(:key)\n",
+            config_with_rails(5.0),
         );
     }
 }
