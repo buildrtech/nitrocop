@@ -30,6 +30,10 @@ impl Cop for RequestReferer {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -37,7 +41,7 @@ impl Cop for RequestReferer {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "referer");
 
@@ -70,12 +74,28 @@ impl Cop for RequestReferer {
         let wrong_str = std::str::from_utf8(wrong_method).unwrap_or("?");
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `request.{preferred}` instead of `request.{wrong_str}`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(outer_call) = node.as_call_node()
+            && let Some(selector) = outer_call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: preferred.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -83,6 +103,7 @@ impl Cop for RequestReferer {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RequestReferer, "cops/rails/request_referer");
+    crate::cop_autocorrect_fixture_tests!(RequestReferer, "cops/rails/request_referer");
 
     #[test]
     fn referrer_style_flags_referer() {
