@@ -118,6 +118,10 @@ impl Cop for FindEach {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -125,7 +129,7 @@ impl Cop for FindEach {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_methods = config
             .get_string_array("AllowedMethods")
@@ -147,6 +151,7 @@ impl Cop for FindEach {
             allowed_methods,
             allowed_patterns,
             diagnostics: Vec::new(),
+            corrections,
             in_ar_class: false,
         };
         visitor.visit(&parse_result.node());
@@ -160,6 +165,7 @@ struct FindEachVisitor<'a, 'src> {
     allowed_methods: Vec<String>,
     allowed_patterns: Vec<String>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// Whether we are inside a class that inherits from ActiveRecord.
     in_ar_class: bool,
 }
@@ -225,12 +231,25 @@ impl<'pr> FindEachVisitor<'_, '_> {
             None => return,
         };
         let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Use `find_each` instead of `each` for batch processing.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = self.corrections {
+            corr.push(crate::correction::Correction {
+                start: msg_loc.start_offset(),
+                end: msg_loc.end_offset(),
+                replacement: "find_each".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 
     /// Walk the receiver chain and arguments of the `each` call node to check
@@ -320,6 +339,7 @@ impl<'pr> Visit<'pr> for FindEachVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FindEach, "cops/rails/find_each");
+    crate::cop_autocorrect_fixture_tests!(FindEach, "cops/rails/find_each");
 
     #[test]
     fn allowed_patterns_suppresses_offense() {
