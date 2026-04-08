@@ -24,6 +24,10 @@ impl Cop for IncludeExamples {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -31,7 +35,7 @@ impl Cop for IncludeExamples {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -49,12 +53,25 @@ impl Cop for IncludeExamples {
 
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, col) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             col,
             "Prefer `it_behaves_like` over `include_examples`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "it_behaves_like".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -63,4 +80,22 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(IncludeExamples, "cops/rspec/include_examples");
+
+    #[test]
+    fn autocorrects_include_examples_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &IncludeExamples,
+            b"include_examples 'examples'\n",
+            b"it_behaves_like 'examples'\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_with_metadata_args() {
+        crate::testutil::assert_cop_autocorrect(
+            &IncludeExamples,
+            b"include_examples 'examples', foo: :bar\n",
+            b"it_behaves_like 'examples', foo: :bar\n",
+        );
+    }
 }

@@ -180,7 +180,9 @@ impl Cop for ChangeByZero {
         let mut diagnostic = self.diagnostic(source, line, column, msg);
 
         if let Some(ref mut corr) = corrections {
-            if let Some((to_start, to_end)) = find_to_selector_before_offset(source, change_call.location().start_offset()) {
+            if let Some((to_start, to_end)) =
+                find_to_selector_before_offset(source, change_call.location().start_offset())
+            {
                 corr.push(crate::correction::Correction {
                     start: to_start,
                     end: to_end,
