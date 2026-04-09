@@ -53,6 +53,10 @@ impl Cop for RegexpMatch {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -60,7 +64,7 @@ impl Cop for RegexpMatch {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // RuboCop: minimum_target_ruby_version 2.4
         // match? was added in Ruby 2.4, so this cop only applies for 2.4+.
@@ -94,12 +98,16 @@ impl Cop for RegexpMatch {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             match_data_refs: ref_collector.refs,
             match_positions: match_collector.positions,
             current_scope: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -319,6 +327,7 @@ struct ConditionVisitor<'a, 'src> {
     cop: &'a RegexpMatch,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     match_data_refs: Vec<MatchDataRef>,
     match_positions: Vec<MatchExprPos>,
     current_scope: Option<ScopeId>,
@@ -369,6 +378,7 @@ impl<'pr> Visit<'pr> for ConditionVisitor<'_, '_> {
             &self.match_positions,
             self.current_scope,
             &mut self.diagnostics,
+            &mut self.corrections,
         );
         ruby_prism::visit_if_node(self, node);
     }
@@ -384,6 +394,7 @@ impl<'pr> Visit<'pr> for ConditionVisitor<'_, '_> {
             &self.match_positions,
             self.current_scope,
             &mut self.diagnostics,
+            &mut self.corrections,
         );
         ruby_prism::visit_unless_node(self, node);
     }
@@ -421,6 +432,7 @@ impl<'pr> Visit<'pr> for ConditionVisitor<'_, '_> {
                             &self.match_positions,
                             self.current_scope,
                             &mut self.diagnostics,
+                            &mut self.corrections,
                         );
                     }
                 }
@@ -443,6 +455,7 @@ fn check_condition(
     match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Vec<crate::correction::Correction>,
 ) {
     if let Some(call) = cond.as_call_node() {
         let method = call.name().as_slice();
@@ -458,6 +471,7 @@ fn check_condition(
                 match_positions,
                 current_scope,
                 diagnostics,
+                corrections,
             );
         } else if method == b"match" {
             check_match_method(
@@ -469,6 +483,7 @@ fn check_condition(
                 match_positions,
                 current_scope,
                 diagnostics,
+                corrections,
             );
         } else if method == b"===" {
             check_threequals(
@@ -480,6 +495,7 @@ fn check_condition(
                 match_positions,
                 current_scope,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -538,6 +554,7 @@ fn check_match_operator(
     match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Vec<crate::correction::Correction>,
 ) {
     // Skip if either side is nil (shouldn't happen for =~/!~ but be safe)
     if call.receiver().is_none() {
@@ -559,7 +576,7 @@ fn check_match_operator(
 
     let op_str = if method == b"!~" { "!~" } else { "=~" };
     let (line, column) = source.offset_to_line_col(match_expr_offset);
-    diagnostics.push(cop.diagnostic(
+    let mut diagnostic = cop.diagnostic(
         source,
         line,
         column,
@@ -567,7 +584,20 @@ fn check_match_operator(
             "Use `match?` instead of `{}` when `MatchData` is not used.",
             op_str
         ),
-    ));
+    );
+
+    if let Some(replacement) = autocorrect_match_operator(source, call, method) {
+        corrections.push(crate::correction::Correction {
+            start: call.location().start_offset(),
+            end: call.location().end_offset(),
+            replacement,
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+
+    diagnostics.push(diagnostic);
 }
 
 /// Check .match() method call usage.
@@ -581,6 +611,7 @@ fn check_match_method(
     match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Vec<crate::correction::Correction>,
 ) {
     // Must have arguments (x.match(y) or match(y))
     let arguments = match call.arguments() {
@@ -637,12 +668,25 @@ fn check_match_method(
     }
 
     let (line, column) = source.offset_to_line_col(match_expr_offset);
-    diagnostics.push(cop.diagnostic(
+    let mut diagnostic = cop.diagnostic(
         source,
         line,
         column,
         "Use `match?` instead of `match` when `MatchData` is not used.".to_string(),
-    ));
+    );
+
+    if let Some(selector) = call.message_loc() {
+        corrections.push(crate::correction::Correction {
+            start: selector.start_offset(),
+            end: selector.end_offset(),
+            replacement: "match?".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+
+    diagnostics.push(diagnostic);
 }
 
 /// Check === with regexp literal on LHS.
@@ -656,6 +700,7 @@ fn check_threequals(
     match_positions: &[MatchExprPos],
     current_scope: Option<ScopeId>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Vec<crate::correction::Correction>,
 ) {
     // RuboCop only flags /re/ === foo (regexp literal on LHS)
     let receiver = match call.receiver() {
@@ -687,12 +732,73 @@ fn check_threequals(
     }
 
     let (line, column) = source.offset_to_line_col(match_expr_offset);
-    diagnostics.push(cop.diagnostic(
+    let mut diagnostic = cop.diagnostic(
         source,
         line,
         column,
         "Use `match?` instead of `===` when `MatchData` is not used.".to_string(),
-    ));
+    );
+
+    if let Some(replacement) = autocorrect_threequals(source, call) {
+        corrections.push(crate::correction::Correction {
+            start: call.location().start_offset(),
+            end: call.location().end_offset(),
+            replacement,
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+
+    diagnostics.push(diagnostic);
+}
+
+fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    source
+        .byte_slice(
+            node.location().start_offset(),
+            node.location().end_offset(),
+            "",
+        )
+        .to_string()
+}
+
+fn autocorrect_match_operator(
+    source: &SourceFile,
+    call: &ruby_prism::CallNode<'_>,
+    method: &[u8],
+) -> Option<String> {
+    let recv = call.receiver()?;
+    let args = call.arguments()?;
+    let arg = args.arguments().iter().next()?;
+
+    let recv_src = node_source(source, &recv);
+    let arg_src = node_source(source, &arg);
+
+    let base = if is_match_literal(&recv) {
+        format!("{recv_src}.match?({arg_src})")
+    } else if is_match_literal(&arg) {
+        format!("{arg_src}.match?({recv_src})")
+    } else {
+        format!("{recv_src}&.match?({arg_src})")
+    };
+
+    if method == b"!~" {
+        Some(format!("!{base}"))
+    } else {
+        Some(base)
+    }
+}
+
+fn autocorrect_threequals(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    let recv = call.receiver()?;
+    let args = call.arguments()?;
+    let arg = args.arguments().iter().next()?;
+    Some(format!(
+        "{}.match?({})",
+        node_source(source, &recv),
+        node_source(source, &arg)
+    ))
 }
 
 /// Check if a node is a regexp, string, or symbol literal.
@@ -708,6 +814,33 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(RegexpMatch, "cops/performance/regexp_match");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RegexpMatch.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_operator_match_to_match_predicate() {
+        let input = b"if x =~ /re/\n  do_something\nend\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&RegexpMatch, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"if /re/.match?(x)\n  do_something\nend\n");
+    }
+
+    #[test]
+    fn autocorrects_match_method_selector() {
+        let input = b"if foo.match(/re/)\n  do_something\nend\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&RegexpMatch, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"if foo.match?(/re/)\n  do_something\nend\n");
+    }
 
     #[test]
     fn matchdata_used_in_if_body() {
