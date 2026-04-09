@@ -20,6 +20,7 @@
 - Rails/ActionOrder parity follow-up: extend autocorrect beyond single adjacent top-level swap to handle multi-offense reorder and comment/conditional-aware movement like RuboCop.
 - Rails/Delegate parity follow-up: extend autocorrect beyond direct no-arg delegations to preserve prefix/options/comments and broader receiver forms (`::Const`, args-forwarding).
 - Rails/FindByOrAssignmentMemoization parity follow-up: align autocorrect closer to RuboCop's split behavior (`on_def` compact rewrite + endless-def conversion) while preserving initialize-ivar skip logic.
+- Rails/Validation parity follow-up: extend autocorrect beyond single-attribute baseline to hash/array/frozen-array forms and RuboCop-style option-shape rewrites.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
