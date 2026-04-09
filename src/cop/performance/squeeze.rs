@@ -111,6 +111,10 @@ impl Cop for Squeeze {
         &[CALL_NODE, REGULAR_EXPRESSION_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -118,7 +122,7 @@ impl Cop for Squeeze {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -188,7 +192,40 @@ impl Cop for Squeeze {
         } else {
             "Use `squeeze` instead of `gsub`.".to_string()
         };
-        diagnostics.push(self.diagnostic(source, line, column, message));
+        let mut diagnostic = self.diagnostic(source, line, column, message);
+
+        if let Some(ref mut corr) = corrections {
+            let receiver = call.receiver().unwrap();
+            let receiver_loc = receiver.location();
+            let receiver_source = source.byte_slice(
+                receiver_loc.start_offset(),
+                receiver_loc.end_offset(),
+                "",
+            );
+            let dot = call
+                .call_operator_loc()
+                .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))
+                .unwrap_or(".");
+            let replacement_loc = second_arg.location();
+            let replacement_source = source.byte_slice(
+                replacement_loc.start_offset(),
+                replacement_loc.end_offset(),
+                "''",
+            );
+            let preferred_method = if is_bang { "squeeze!" } else { "squeeze" };
+            corr.push(crate::correction::Correction {
+                start: call.location().start_offset(),
+                end: call.location().end_offset(),
+                replacement: format!(
+                    "{receiver_source}{dot}{preferred_method}({replacement_source})"
+                ),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -197,4 +234,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(Squeeze, "cops/performance/squeeze");
+    crate::cop_autocorrect_fixture_tests!(Squeeze, "cops/performance/squeeze");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Squeeze.supports_autocorrect());
+    }
 }
