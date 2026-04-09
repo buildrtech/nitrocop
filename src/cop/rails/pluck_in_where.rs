@@ -55,6 +55,10 @@ impl Cop for PluckInWhere {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -62,7 +66,7 @@ impl Cop for PluckInWhere {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "conservative");
 
@@ -101,12 +105,32 @@ impl Cop for PluckInWhere {
         for arg in args.arguments().iter() {
             if let Some((pluck_loc, pluck_name)) = self.find_pluck_call(&arg, style) {
                 let (line, column) = source.offset_to_line_col(pluck_loc);
-                let msg = if pluck_name == b"ids" {
-                    "Use `select(:id)` instead of `ids` within `where` query method.".to_string()
+                let (msg, replacement) = if pluck_name == b"ids" {
+                    (
+                        "Use `select(:id)` instead of `ids` within `where` query method."
+                            .to_string(),
+                        "select(:id)",
+                    )
                 } else {
-                    "Use `select` instead of `pluck` within `where` query method.".to_string()
+                    (
+                        "Use `select` instead of `pluck` within `where` query method."
+                            .to_string(),
+                        "select",
+                    )
                 };
-                diagnostics.push(self.diagnostic(source, line, column, msg));
+
+                let mut diagnostic = self.diagnostic(source, line, column, msg);
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: pluck_loc,
+                        end: pluck_loc + pluck_name.len(),
+                        replacement: replacement.to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -189,6 +213,12 @@ impl PluckInWhere {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(PluckInWhere, "cops/rails/pluck_in_where");
+    crate::cop_autocorrect_fixture_tests!(PluckInWhere, "cops/rails/pluck_in_where");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(PluckInWhere.supports_autocorrect());
+    }
 
     #[test]
     fn conservative_style_skips_non_constant_receiver() {
