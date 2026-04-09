@@ -53,6 +53,10 @@ impl Cop for DuplicateScope {
         &[CLASS_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -60,7 +64,7 @@ impl Cop for DuplicateScope {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let class = match node.as_class_node() {
             Some(c) => c,
@@ -97,16 +101,39 @@ impl Cop for DuplicateScope {
             if calls.len() < 2 {
                 continue;
             }
+            let last_start = calls
+                .last()
+                .map(|c| c.location().start_offset())
+                .unwrap_or(usize::MAX);
+
             // Flag all scopes in the group (RuboCop flags every duplicate)
             for call in calls {
                 let loc = call.message_loc().unwrap_or(call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Multiple scopes share this same expression.".to_string(),
-                ));
+                );
+
+                // Conservative baseline autocorrect: remove non-last duplicates,
+                // keeping the final declaration in source order.
+                if call.location().start_offset() != last_start
+                    && let Some(ref mut corr) = corrections
+                {
+                    let full = call.location();
+                    corr.push(crate::correction::Correction {
+                        start: full.start_offset(),
+                        end: full.end_offset(),
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -203,4 +230,24 @@ fn normalise_lambda_body(node: &ruby_prism::Node<'_>) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicateScope, "cops/rails/duplicate_scope");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DuplicateScope.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_duplicate_scope_by_removing_first() {
+        let input = b"class User < ApplicationRecord\n  scope :active, -> { where(active: true) }\n  scope :enabled, -> { where(active: true) }\nend\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&DuplicateScope, input);
+        assert_eq!(diags.len(), 2);
+        assert!(diags.iter().any(|d| d.corrected));
+
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(
+            corrected,
+            b"class User < ApplicationRecord\n  \n  scope :enabled, -> { where(active: true) }\nend\n"
+        );
+    }
 }

@@ -24,6 +24,7 @@
 - Rails/ActiveRecordCallbacksOrder parity follow-up: extend autocorrect beyond single adjacent swap to comment-aware and multi-violation callback reordering.
 - Rails/DuplicateAssociation parity follow-up: align autocorrect with RuboCop's replace-first/remove-rest and add class_name-duplicate correction parity.
 - RSpecRails/HttpStatus parity follow-up: extend autocorrect beyond symbolic integer baseline to numeric/string and be_status-style rewrites.
+- RSpecRails/HttpStatusNameConsistency parity follow-up: keep mapping table synchronized with upstream Rack status-name changes and extend tests for future alias additions.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
