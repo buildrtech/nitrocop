@@ -23,6 +23,10 @@ impl Cop for NegationBeValid {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for NegationBeValid {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "not_to");
 
@@ -98,12 +102,32 @@ impl Cop for NegationBeValid {
                 if is_to && matcher_name == b"be_invalid" {
                     let runner_loc = runner_call.message_loc().unwrap_or(runner_call.location());
                     let (line, column) = source.offset_to_line_col(runner_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Use `expect(...).not_to be_valid`.".to_string(),
-                    ));
+                    let mut diagnostic =
+                        self.diagnostic(source, line, column, "Use `expect(...).not_to be_valid`.".to_string());
+
+                    if let Some(ref mut corr) = corrections {
+                        if let Some(sel) = runner_call.message_loc() {
+                            corr.push(crate::correction::Correction {
+                                start: sel.start_offset(),
+                                end: sel.end_offset(),
+                                replacement: "not_to".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                        }
+                        if let Some(sel) = matcher.message_loc() {
+                            corr.push(crate::correction::Correction {
+                                start: sel.start_offset(),
+                                end: sel.end_offset(),
+                                replacement: "be_valid".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                        }
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
             "be_invalid" => {
@@ -111,12 +135,32 @@ impl Cop for NegationBeValid {
                 if is_not_to && matcher_name == b"be_valid" {
                     let runner_loc = runner_call.message_loc().unwrap_or(runner_call.location());
                     let (line, column) = source.offset_to_line_col(runner_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Use `expect(...).to be_invalid`.".to_string(),
-                    ));
+                    let mut diagnostic =
+                        self.diagnostic(source, line, column, "Use `expect(...).to be_invalid`.".to_string());
+
+                    if let Some(ref mut corr) = corrections {
+                        if let Some(sel) = runner_call.message_loc() {
+                            corr.push(crate::correction::Correction {
+                                start: sel.start_offset(),
+                                end: sel.end_offset(),
+                                replacement: "to".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                        }
+                        if let Some(sel) = matcher.message_loc() {
+                            corr.push(crate::correction::Correction {
+                                start: sel.start_offset(),
+                                end: sel.end_offset(),
+                                replacement: "be_invalid".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                        }
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
             _ => {}
@@ -128,6 +172,41 @@ impl Cop for NegationBeValid {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NegationBeValid, "cops/rspecrails/negation_be_valid");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(NegationBeValid.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_default_not_to_style() {
+        crate::testutil::assert_cop_autocorrect(
+            &NegationBeValid,
+            b"expect(foo).to be_invalid\n",
+            b"expect(foo).not_to be_valid\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_be_invalid_style() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("be_invalid".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &NegationBeValid,
+            b"expect(foo).not_to be_valid\n",
+            b"expect(foo).to be_invalid\n",
+            config,
+        );
+    }
 
     #[test]
     fn be_invalid_style_flags_not_to_be_valid() {
