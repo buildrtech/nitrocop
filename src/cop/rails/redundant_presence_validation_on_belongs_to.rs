@@ -31,6 +31,10 @@ impl Cop for RedundantPresenceValidationOnBelongsTo {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -38,7 +42,7 @@ impl Cop for RedundantPresenceValidationOnBelongsTo {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.0
         if !config.rails_version_at_least(5.0) {
@@ -103,12 +107,50 @@ impl Cop for RedundantPresenceValidationOnBelongsTo {
                     let loc = call.message_loc().unwrap_or(call.location());
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
                     let name_str = String::from_utf8_lossy(&name);
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         format!("Remove explicit `presence` validation for `{name_str}` `belongs_to` association (validated by default since Rails 5)."),
-                    ));
+                    );
+
+                    // Conservative baseline autocorrect: remove only exact
+                    // `validates :assoc, presence: true` shapes.
+                    if let Some(ref mut corr) = corrections {
+                        let syms = extract_all_symbol_args(call);
+                        let presence_only = call
+                            .arguments()
+                            .and_then(|a| {
+                                a.arguments().iter().find_map(|arg| {
+                                    let kw = arg.as_keyword_hash_node()?;
+                                    let elems: Vec<_> = kw.elements().iter().collect();
+                                    if elems.len() != 1 {
+                                        return None;
+                                    }
+                                    let assoc = elems[0].as_assoc_node()?;
+                                    let key = assoc.key().as_symbol_node()?;
+                                    let val = assoc.value();
+                                    Some(
+                                        key.unescaped() == b"presence" && val.as_true_node().is_some(),
+                                    )
+                                })
+                            })
+                            .unwrap_or(false);
+
+                        if syms.len() == 1 && presence_only {
+                            let full = call.location();
+                            corr.push(crate::correction::Correction {
+                                start: full.start_offset(),
+                                end: full.end_offset(),
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -186,9 +228,46 @@ fn extract_all_symbol_args(call: &ruby_prism::CallNode<'_>) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
+
     crate::cop_rails_fixture_tests!(
         RedundantPresenceValidationOnBelongsTo,
         "cops/rails/redundant_presence_validation_on_belongs_to",
         5.0
     );
+
+    fn config_with_rails(version: f64) -> CopConfig {
+        let mut options = HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(version)),
+        );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantPresenceValidationOnBelongsTo.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_single_symbol_presence_validation() {
+        let input = b"class Post < ApplicationRecord\n  belongs_to :user\n  validates :user, presence: true\nend\n";
+        let expected =
+            b"class Post < ApplicationRecord\n  belongs_to :user\n  \nend\n";
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &RedundantPresenceValidationOnBelongsTo,
+            input,
+            expected,
+            config_with_rails(5.0),
+        );
+    }
 }
