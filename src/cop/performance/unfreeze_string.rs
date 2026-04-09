@@ -23,6 +23,10 @@ impl Cop for UnfreezeString {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for UnfreezeString {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -86,12 +90,43 @@ impl Cop for UnfreezeString {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use unary plus to get an unfrozen string literal.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let mut replacement = match call.arguments() {
+                None => "+''".to_string(),
+                Some(arguments) => {
+                    let first_arg = arguments.arguments().iter().next().unwrap();
+                    let arg_loc = first_arg.location();
+                    let arg_source =
+                        source.byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "");
+                    format!("+{arg_source}")
+                }
+            };
+
+            let trailing = source.as_bytes()[loc.end_offset()..]
+                .iter()
+                .find(|&&b| b != b' ' && b != b'\t' && b != b'\n' && b != b'\r');
+            if trailing == Some(&b'.') {
+                replacement = format!("({replacement})");
+            }
+
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -100,4 +135,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(UnfreezeString, "cops/performance/unfreeze_string");
+    crate::cop_autocorrect_fixture_tests!(UnfreezeString, "cops/performance/unfreeze_string");
 }
