@@ -24,6 +24,10 @@ impl Cop for InefficientHashSearch {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -31,7 +35,7 @@ impl Cop for InefficientHashSearch {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match as_method_chain(node) {
             Some(c) => c,
@@ -53,17 +57,60 @@ impl Cop for InefficientHashSearch {
             return;
         }
 
-        let message = if chain.inner_method == b"keys" {
-            "Use `key?` instead of `keys.include?`."
+        let (message, replacement_method) = if chain.inner_method == b"keys" {
+            ("Use `key?` instead of `keys.include?`.", "key?")
         } else if chain.inner_method == b"values" {
-            "Use `value?` instead of `values.include?`."
+            ("Use `value?` instead of `values.include?`.", "value?")
         } else {
             return;
         };
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+        let mut diagnostic = self.diagnostic(source, line, column, message.to_string());
+
+        if let Some(ref mut corr) = corrections {
+            let outer_call = match node.as_call_node() {
+                Some(c) => c,
+                None => return,
+            };
+            let first_arg = match outer_call
+                .arguments()
+                .and_then(|args| args.arguments().iter().next())
+            {
+                Some(a) => a,
+                None => return,
+            };
+            let arg_loc = first_arg.location();
+            let arg_source = source.byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "");
+
+            let hash_recv = match chain.inner_call.receiver() {
+                Some(r) => r,
+                None => return,
+            };
+            let recv_loc = hash_recv.location();
+            let recv_source = source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+            let call_op = chain
+                .inner_call
+                .call_operator_loc()
+                .map(|op| {
+                    source
+                        .byte_slice(op.start_offset(), op.end_offset(), "")
+                        .to_string()
+                })
+                .unwrap_or_else(|| ".".to_string());
+
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("{recv_source}{call_op}{replacement_method}({arg_source})"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -74,4 +121,13 @@ mod tests {
         InefficientHashSearch,
         "cops/performance/inefficient_hash_search"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        InefficientHashSearch,
+        "cops/performance/inefficient_hash_search"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(InefficientHashSearch.supports_autocorrect());
+    }
 }
