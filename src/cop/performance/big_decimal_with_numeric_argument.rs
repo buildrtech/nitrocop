@@ -22,6 +22,10 @@ impl Cop for BigDecimalWithNumericArgument {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -29,7 +33,7 @@ impl Cop for BigDecimalWithNumericArgument {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -66,27 +70,54 @@ impl Cop for BigDecimalWithNumericArgument {
             if let ruby_prism::Node::FloatNode { .. } = first_arg {
                 let loc = first_arg.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Convert float literal to string and pass it to `BigDecimal`.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    let arg_source = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: format!("'{arg_source}'"),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             } else if let Some(str_node) = first_arg.as_string_node() {
                 let content = str_node.unescaped();
                 // Only flag string integers like BigDecimal('1'), not BigDecimal('1.5')
                 if !content.is_empty() && content.iter().all(|b| b.is_ascii_digit()) {
                     let loc = first_arg.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Convert string literal to integer and pass it to `BigDecimal`."
-                                .to_string(),
-                        ),
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Convert string literal to integer and pass it to `BigDecimal`."
+                            .to_string(),
                     );
+
+                    if let Some(ref mut corr) = corrections
+                        && let Ok(int_value) = std::str::from_utf8(content)
+                    {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: int_value.to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         } else if method_name == b"to_d" {
@@ -99,26 +130,72 @@ impl Cop for BigDecimalWithNumericArgument {
             if let ruby_prism::Node::FloatNode { .. } = receiver {
                 let loc = receiver.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Convert float literal to string and pass it to `BigDecimal`.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    let recv_source = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+                    let args = call
+                        .arguments()
+                        .map(|a| {
+                            a.arguments()
+                                .iter()
+                                .map(|arg| {
+                                    source
+                                        .byte_slice(
+                                            arg.location().start_offset(),
+                                            arg.location().end_offset(),
+                                            "",
+                                        )
+                                        .to_string()
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let mut big_decimal_args = vec![format!("'{recv_source}'")];
+                    big_decimal_args.extend(args);
+                    corr.push(crate::correction::Correction {
+                        start: call.location().start_offset(),
+                        end: call.location().end_offset(),
+                        replacement: format!("BigDecimal({})", big_decimal_args.join(", ")),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             } else if let Some(str_node) = receiver.as_string_node() {
                 let content = str_node.unescaped();
                 if !content.is_empty() && content.iter().all(|b| b.is_ascii_digit()) {
                     let loc = receiver.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Convert string literal to integer and pass it to `BigDecimal`."
-                                .to_string(),
-                        ),
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Convert string literal to integer and pass it to `BigDecimal`."
+                            .to_string(),
                     );
+
+                    if let Some(ref mut corr) = corrections
+                        && let Ok(int_value) = std::str::from_utf8(content)
+                    {
+                        corr.push(crate::correction::Correction {
+                            start: call.location().start_offset(),
+                            end: call.location().end_offset(),
+                            replacement: format!("{int_value}.to_d"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -132,4 +209,13 @@ mod tests {
         BigDecimalWithNumericArgument,
         "cops/performance/big_decimal_with_numeric_argument"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        BigDecimalWithNumericArgument,
+        "cops/performance/big_decimal_with_numeric_argument"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(BigDecimalWithNumericArgument.supports_autocorrect());
+    }
 }
