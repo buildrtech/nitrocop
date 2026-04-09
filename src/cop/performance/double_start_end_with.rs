@@ -30,7 +30,6 @@ fn is_pure(node: &ruby_prism::Node<'_>) -> bool {
     }
 
     // Interpolated strings/symbols: pure only if all parts are pure
-    // (In practice, interpolation with method calls like `"#{foo.bar}"` is impure)
     if let Some(interp) = node.as_interpolated_string_node() {
         return interp.parts().iter().all(|part| is_pure(&part));
     }
@@ -93,6 +92,10 @@ impl Cop for DoubleStartEndWith {
         &[CALL_NODE, OR_NODE, AND_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -100,7 +103,7 @@ impl Cop for DoubleStartEndWith {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let include_as_aliases = config.get_bool("IncludeActiveSupportAliases", false);
 
@@ -115,9 +118,14 @@ impl Cop for DoubleStartEndWith {
                 None => return,
             };
 
-            if let Some(diag) =
-                self.check_pair(source, &left_call, &right_call, include_as_aliases, node)
-            {
+            if let Some(diag) = self.check_pair(
+                source,
+                &left_call,
+                &right_call,
+                include_as_aliases,
+                node,
+                corrections.as_deref_mut(),
+            ) {
                 diagnostics.push(diag);
             }
             return;
@@ -139,9 +147,14 @@ impl Cop for DoubleStartEndWith {
                 return;
             }
 
-            if let Some(diag) =
-                self.check_pair(source, &left_inner, &right_inner, include_as_aliases, node)
-            {
+            if let Some(diag) = self.check_pair(
+                source,
+                &left_inner,
+                &right_inner,
+                include_as_aliases,
+                node,
+                corrections.as_deref_mut(),
+            ) {
                 diagnostics.push(diag);
             }
         }
@@ -156,6 +169,7 @@ impl DoubleStartEndWith {
         right_call: &ruby_prism::CallNode<'_>,
         include_as_aliases: bool,
         node: &ruby_prism::Node<'_>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) -> Option<Diagnostic> {
         let left_name = left_call.name().as_slice();
         let right_name = right_call.name().as_slice();
@@ -192,17 +206,74 @@ impl DoubleStartEndWith {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        Some(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{method_display}` with multiple arguments instead of chaining `||`."),
-        ))
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let recv_loc = left_receiver.location();
+            let recv_source = source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+            let call_operator = left_call
+                .call_operator_loc()
+                .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))
+                .unwrap_or(".");
+            let method_name = std::str::from_utf8(left_name).unwrap_or(method_display);
+
+            let mut arg_sources = Vec::new();
+            if let Some(args) = left_call.arguments() {
+                for arg in args.arguments().iter() {
+                    let arg_loc = arg.location();
+                    arg_sources.push(
+                        source
+                            .byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "")
+                            .to_string(),
+                    );
+                }
+            }
+            if let Some(args) = right_call.arguments() {
+                for arg in args.arguments().iter() {
+                    let arg_loc = arg.location();
+                    arg_sources.push(
+                        source
+                            .byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "")
+                            .to_string(),
+                    );
+                }
+            }
+            let combined_args = arg_sources.join(", ");
+            let bang = if node.as_and_node().is_some() { "!" } else { "" };
+
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!(
+                    "{bang}{recv_source}{call_operator}{method_name}({combined_args})"
+                ),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        Some(diagnostic)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     crate::cop_fixture_tests!(DoubleStartEndWith, "cops/performance/double_start_end_with");
+    crate::cop_autocorrect_fixture_tests!(
+        DoubleStartEndWith,
+        "cops/performance/double_start_end_with"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DoubleStartEndWith.supports_autocorrect());
+    }
 }

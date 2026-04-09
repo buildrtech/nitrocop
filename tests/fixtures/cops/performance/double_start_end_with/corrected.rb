@@ -1,0 +1,5 @@
+x.start_with?("a", "b")
+x.end_with?(".rb", ".py")
+str.start_with?("http", "ftp")
+!x.start_with?("test/", "spec/")
+!x.end_with?("Error", "Exception")
