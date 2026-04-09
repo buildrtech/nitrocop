@@ -10,6 +10,7 @@
 - Rails/IndexWith parity follow-up: extend autocorrect to `Hash[map { ... }]` and additional block-shape variants (numblock/itblock and complex receiver forms) with robust range replacement.
 - Rails/IndexBy parity follow-up: extend autocorrect beyond explicit block-param direct patterns to numbered/`it` blocks and `Hash[map { ... }]` forms with safe range handling.
 - Rails/FilePath parity follow-up: extend autocorrect from current slashes-style `Rails.root.join("a", "b")` baseline to RuboCop-style `File.join`, dstr (`"#{Rails.root}/..."`), extension, and arguments-style conversions.
+- Rails/RakeEnvironment candidate: add conservative RuboCop-style autocorrect that inserts `:environment` dependency for offense patterns while preserving hash-arg/argument-list styles.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.

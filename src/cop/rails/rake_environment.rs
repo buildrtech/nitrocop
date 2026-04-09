@@ -74,6 +74,10 @@ impl Cop for RakeEnvironment {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -81,7 +85,7 @@ impl Cop for RakeEnvironment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Start from CallNode `task`, then check if it has a block
         let call = match node.as_call_node() {
@@ -196,12 +200,59 @@ impl Cop for RakeEnvironment {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Add `:environment` dependency to the rake task.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let replacement = if arg_list.len() > 1 && arg_list[1].as_array_node().is_some() {
+                let second = &arg_list[1];
+                let second_loc = second.location();
+                let second_src = source.byte_slice(
+                    second_loc.start_offset(),
+                    second_loc.end_offset(),
+                    "[]",
+                );
+                Some((
+                    second_loc.start_offset(),
+                    second_loc.end_offset(),
+                    format!("{second_src} => :environment"),
+                ))
+            } else {
+                let first_loc = first.location();
+                let first_src = source.byte_slice(
+                    first_loc.start_offset(),
+                    first_loc.end_offset(),
+                    "task_name",
+                );
+                let new_dep = if first.as_symbol_node().is_some() {
+                    let name = first_src
+                        .trim_start_matches(':')
+                        .trim_matches('"')
+                        .trim_matches('\'');
+                    format!("{name}: :environment")
+                } else {
+                    format!("{first_src} => :environment")
+                };
+                Some((first_loc.start_offset(), first_loc.end_offset(), new_dep))
+            };
+
+            if let Some((start, end, replacement)) = replacement {
+                corr.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -232,4 +283,36 @@ fn has_dependencies(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RakeEnvironment, "cops/rails/rake_environment");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RakeEnvironment.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_symbol_task_without_dependencies() {
+        crate::testutil::assert_cop_autocorrect(
+            &RakeEnvironment,
+            b"task :foo do\n  puts \"hello\"\nend\n",
+            b"task foo: :environment do\n  puts \"hello\"\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_string_task_without_dependencies() {
+        crate::testutil::assert_cop_autocorrect(
+            &RakeEnvironment,
+            b"task 'generate_report' do\n  Report.generate\nend\n",
+            b"task 'generate_report' => :environment do\n  Report.generate\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_task_with_argument_array() {
+        crate::testutil::assert_cop_autocorrect(
+            &RakeEnvironment,
+            b"task :build, [:version] do\n  puts :ok\nend\n",
+            b"task :build, [:version] => :environment do\n  puts :ok\nend\n",
+        );
+    }
 }
