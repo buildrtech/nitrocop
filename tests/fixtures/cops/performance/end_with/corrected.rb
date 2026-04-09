@@ -1,0 +1,16 @@
+x.end_with?("foo")
+str.end_with?("bar")
+name.end_with?("rb")
+# =~ with regex on the right
+str.end_with?("abc")
+# =~ with regex on the left (reversed)
+config.end_with?("icc")
+name.end_with?("_content")
+event.end_with?("_new")
+# Escaped metacharacters
+str.end_with?(")")
+str.end_with?(".")
+str.end_with?("$")
+# .match (without ?)
+str.end_with?("abc")
+str.end_with?("abc")
