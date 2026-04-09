@@ -59,6 +59,10 @@ impl Cop for RedundantMerge {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -66,19 +70,23 @@ impl Cop for RedundantMerge {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let max_kv_pairs = config.get_usize("MaxKeyValuePairs", 2);
         let mut visitor = RedundantMergeVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             max_kv_pairs,
             value_used: false,
             each_with_object_accumulator: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -86,6 +94,7 @@ struct RedundantMergeVisitor<'a, 'src> {
     cop: &'a RedundantMerge,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     max_kv_pairs: usize,
     /// Whether the current expression's value is used by a parent.
     value_used: bool,
@@ -215,9 +224,70 @@ impl<'a, 'src> RedundantMergeVisitor<'a, 'src> {
         } else {
             format!("Use `[]=` instead of `merge!` with {kv_count} key-value pairs.")
         };
-        self.diagnostics
-            .push(self.cop.diagnostic(self.source, line, column, msg));
+        let mut diagnostic = self.cop.diagnostic(self.source, line, column, msg);
+
+        // Conservative autocorrect: only single-pair merge! rewrites.
+        if kv_count == 1
+            && let Some(args_node) = call.arguments()
+            && let Some(arg0) = args_node.arguments().iter().next()
+            && let Some((key_src, value_src)) = extract_single_pair_key_value(self.source, &arg0)
+            && let Some(receiver) = call.receiver()
+        {
+            let recv_src = self.source.byte_slice(
+                receiver.location().start_offset(),
+                receiver.location().end_offset(),
+                "",
+            );
+            let replacement = format!("{recv_src}[{key_src}] = {value_src}");
+            self.corrections.push(crate::correction::Correction {
+                start: call.location().start_offset(),
+                end: call.location().end_offset(),
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
+}
+
+fn extract_single_pair_key_value<'a>(
+    source: &SourceFile,
+    arg: &ruby_prism::Node<'a>,
+) -> Option<(String, String)> {
+    let pair_node = if let Some(hash) = arg.as_hash_node() {
+        hash.elements().iter().find_map(|e| e.as_assoc_node())?
+    } else if let Some(kw) = arg.as_keyword_hash_node() {
+        kw.elements().iter().find_map(|e| e.as_assoc_node())?
+    } else {
+        return None;
+    };
+
+    let key_node = pair_node.key();
+    let key_src = if let Some(sym) = key_node.as_symbol_node() {
+        format!(":{}", String::from_utf8_lossy(sym.unescaped()))
+    } else {
+        source
+            .byte_slice(
+                key_node.location().start_offset(),
+                key_node.location().end_offset(),
+                "",
+            )
+            .to_string()
+    };
+
+    let value_node = pair_node.value();
+    let value_src = source
+        .byte_slice(
+            value_node.location().start_offset(),
+            value_node.location().end_offset(),
+            "",
+        )
+        .to_string();
+
+    Some((key_src, value_src))
 }
 
 impl<'pr> Visit<'pr> for RedundantMergeVisitor<'_, '_> {
@@ -648,6 +718,12 @@ impl<'pr> Visit<'pr> for RedundantMergeVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantMerge, "cops/performance/redundant_merge");
+    crate::cop_autocorrect_fixture_tests!(RedundantMerge, "cops/performance/redundant_merge");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantMerge.supports_autocorrect());
+    }
 
     #[test]
     fn config_max_kv_pairs_flags_two() {
