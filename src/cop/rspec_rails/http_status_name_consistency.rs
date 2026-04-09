@@ -71,6 +71,10 @@ impl Cop for HttpStatusNameConsistency {
         &[CALL_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -78,7 +82,7 @@ impl Cop for HttpStatusNameConsistency {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // requires_gem 'rack', '>= 3.1.0' — only fire when the project has
         // Rack >= 3.1 in its lockfile (where status names were renamed).
@@ -121,12 +125,25 @@ impl Cop for HttpStatusNameConsistency {
         if let Some(preferred) = preferred_status(sym_name) {
             let loc = arg.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Prefer `:{preferred}` over `:{current}`."),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!(":{preferred}"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -173,6 +190,21 @@ mod tests {
             include_bytes!(
                 "../../../tests/fixtures/cops/rspecrails/http_status_name_consistency/no_offense.rb"
             ),
+            rack31_config(),
+        );
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(HttpStatusNameConsistency.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_deprecated_symbol_name() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &HttpStatusNameConsistency,
+            b"it { is_expected.to have_http_status :unprocessable_entity }\n",
+            b"it { is_expected.to have_http_status :unprocessable_content }\n",
             rack31_config(),
         );
     }
