@@ -16,6 +16,10 @@ impl Cop for FixedSize {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -23,17 +27,21 @@ impl Cop for FixedSize {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = FixedSizeVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             in_constant_assignment: false,
             in_block: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -41,6 +49,7 @@ struct FixedSizeVisitor<'a, 'src> {
     cop: &'a FixedSize,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     in_constant_assignment: bool,
     in_block: bool,
 }
@@ -131,10 +140,20 @@ impl FixedSizeVisitor<'_, '_> {
 
         let loc = call.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(
-            self.cop
-                .diagnostic(self.source, line, column, MSG.to_string()),
-        );
+        let mut diagnostic = self.cop.diagnostic(self.source, line, column, MSG.to_string());
+
+        if let Some(size_literal) = fixed_size_literal(&recv, method_name, call.arguments()) {
+            self.corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: size_literal.to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -190,8 +209,42 @@ fn contains_double_splat(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
+fn fixed_size_literal(
+    recv: &ruby_prism::Node<'_>,
+    method_name: &[u8],
+    args: Option<ruby_prism::ArgumentsNode<'_>>,
+) -> Option<usize> {
+    if method_name == b"count"
+        && let Some(a) = args
+        && !a.arguments().is_empty()
+    {
+        return None;
+    }
+
+    if let Some(s) = recv.as_string_node() {
+        return Some(String::from_utf8_lossy(s.unescaped()).chars().count());
+    }
+    if let Some(sym) = recv.as_symbol_node() {
+        return Some(String::from_utf8_lossy(sym.unescaped()).chars().count());
+    }
+    if let Some(arr) = recv.as_array_node() {
+        return Some(arr.elements().iter().count());
+    }
+    if let Some(hash) = recv.as_hash_node() {
+        return Some(hash.elements().iter().count());
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FixedSize, "cops/performance/fixed_size");
+    crate::cop_autocorrect_fixture_tests!(FixedSize, "cops/performance/fixed_size");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(FixedSize.supports_autocorrect());
+    }
 }
