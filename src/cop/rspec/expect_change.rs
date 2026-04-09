@@ -35,6 +35,10 @@ impl Cop for ExpectChange {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -42,7 +46,7 @@ impl Cop for ExpectChange {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: EnforcedStyle — "method_call" (default) or "block"
         let enforced_style = config.get_str("EnforcedStyle", "method_call");
@@ -87,12 +91,33 @@ impl Cop for ExpectChange {
             }
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `change { }` over `change(obj, :attr)`.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                let recv = source.byte_slice(
+                    arg_list[0].location().start_offset(),
+                    arg_list[0].location().end_offset(),
+                    "",
+                );
+                if let Some(sym) = arg_list[1].as_symbol_node() {
+                    let attr = std::str::from_utf8(sym.unescaped()).unwrap_or("");
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: format!("change {{ {recv}.{attr} }}"),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+
+            diagnostics.push(diagnostic);
         }
 
         // Default: "method_call" style — flag `change { User.count }`
@@ -168,12 +193,26 @@ impl Cop for ExpectChange {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Prefer `change({recv_text}, :{method})`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let block_loc = block.location();
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: block_loc.end_offset(),
+                replacement: format!("change({recv_text}, :{method})"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -215,5 +254,40 @@ mod tests {
         let source = b"expect { x }.to change { User.count }\n";
         let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ExpectChange.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_method_call_style_from_block_form() {
+        crate::testutil::assert_cop_autocorrect(
+            &ExpectChange,
+            b"expect { run }.to change { User.count }\n",
+            b"expect { run }.to change(User, :count)\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_block_style_from_method_call_form() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ExpectChange,
+            b"expect { run }.to change(User, :count)\n",
+            b"expect { run }.to change { User.count }\n",
+            config,
+        );
     }
 }
