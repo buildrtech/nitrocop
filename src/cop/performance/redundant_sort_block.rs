@@ -28,6 +28,10 @@ impl Cop for RedundantSortBlock {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -35,7 +39,7 @@ impl Cop for RedundantSortBlock {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -46,18 +50,15 @@ impl Cop for RedundantSortBlock {
             return;
         }
 
-        // Must have a receiver
         if call.receiver().is_none() {
             return;
         }
 
-        // Must have a block
         let block = match call.block() {
             Some(b) => b,
             None => return,
         };
 
-        // Check if the block is `{ |a, b| a <=> b }` — the redundant default sort
         let block_node = match block.as_block_node() {
             Some(b) => b,
             None => return,
@@ -68,9 +69,7 @@ impl Cop for RedundantSortBlock {
             None => return,
         };
 
-        // Determine the expected parameter names based on block type
         let (name_a, name_b) = if let Some(block_params) = params.as_block_parameters_node() {
-            // Regular block: { |a, b| a <=> b }
             let param_list = match block_params.parameters() {
                 Some(pl) => pl,
                 None => return,
@@ -95,7 +94,6 @@ impl Cop for RedundantSortBlock {
                 param_b.name().as_slice().to_vec(),
             )
         } else if let Some(numbered) = params.as_numbered_parameters_node() {
-            // Numbered params: { _1 <=> _2 }
             if numbered.maximum() < 2 {
                 return;
             }
@@ -104,7 +102,6 @@ impl Cop for RedundantSortBlock {
             return;
         };
 
-        // Body should be a single `a <=> b` call
         let body = match block_node.body() {
             Some(b) => b,
             None => return,
@@ -129,7 +126,6 @@ impl Cop for RedundantSortBlock {
             return;
         }
 
-        // Check receiver is param_a and argument is param_b (a <=> b, not b <=> a)
         let recv = match spaceship_call.receiver() {
             Some(r) => r,
             None => return,
@@ -155,23 +151,34 @@ impl Cop for RedundantSortBlock {
             None => return,
         };
 
-        // Check that it's `a <=> b` (same order as parameters), making it redundant
         if recv_name != name_a.as_slice() || arg_name != name_b.as_slice() {
             return;
         }
 
-        // Report at the method selector (sort), not the entire expression
         let msg_loc = match call.message_loc() {
             Some(loc) => loc,
             None => return,
         };
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `sort` instead of `sort { |a, b| a <=> b }`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: msg_loc.start_offset(),
+                end: block_node.location().end_offset(),
+                replacement: "sort".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -179,4 +186,13 @@ impl Cop for RedundantSortBlock {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantSortBlock, "cops/performance/redundant_sort_block");
+    crate::cop_autocorrect_fixture_tests!(
+        RedundantSortBlock,
+        "cops/performance/redundant_sort_block"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantSortBlock.supports_autocorrect());
+    }
 }
