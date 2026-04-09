@@ -10,6 +10,13 @@ use crate::parse::source::SourceFile;
 /// Fix: parse hex (0x), binary (0b), octal (0o/0), and underscored integer literals.
 pub struct ArraySemiInfiniteRangeSlice;
 
+fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    let loc = node.location();
+    source
+        .byte_slice(loc.start_offset(), loc.end_offset(), "")
+        .to_string()
+}
+
 fn is_string_receiver(receiver: &ruby_prism::Node<'_>) -> bool {
     receiver.as_string_node().is_some()
         || receiver.as_interpolated_string_node().is_some()
@@ -17,57 +24,67 @@ fn is_string_receiver(receiver: &ruby_prism::Node<'_>) -> bool {
         || receiver.as_interpolated_x_string_node().is_some()
 }
 
-/// Check if a node is a positive integer literal.
-/// Handles decimal, hex (0x), octal (0o/0), and binary (0b) Ruby integer literals,
-/// as well as underscored variants (e.g. 1_000).
-fn is_positive_int(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
-    if let Some(int_node) = node.as_integer_node() {
-        let loc = int_node.location();
-        let src = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
-        if let Ok(s) = std::str::from_utf8(src) {
-            let stripped = s.replace('_', "");
-            let val = if let Some(hex) = stripped.strip_prefix("0x").or(stripped.strip_prefix("0X"))
-            {
-                i64::from_str_radix(hex, 16).ok()
-            } else if let Some(bin) = stripped.strip_prefix("0b").or(stripped.strip_prefix("0B")) {
-                i64::from_str_radix(bin, 2).ok()
-            } else if let Some(oct) = stripped.strip_prefix("0o").or(stripped.strip_prefix("0O")) {
-                i64::from_str_radix(oct, 8).ok()
-            } else if stripped.starts_with('0') && stripped.len() > 1 && !stripped.contains('.') {
-                // Legacy octal: 0777
-                i64::from_str_radix(&stripped[1..], 8).ok()
-            } else {
-                stripped.parse::<i64>().ok()
-            };
-            if let Some(v) = val {
-                return v > 0;
-            }
-        }
+/// Parse Ruby integer literal source into i64.
+/// Handles decimal, hex (0x), octal (0o/0), binary (0b), and underscores.
+fn parse_ruby_int_literal(src: &str) -> Option<i64> {
+    let stripped = src.replace('_', "");
+    if stripped.is_empty() {
+        return None;
     }
-    false
+
+    if let Some(hex) = stripped.strip_prefix("0x").or(stripped.strip_prefix("0X")) {
+        return i64::from_str_radix(hex, 16).ok();
+    }
+    if let Some(bin) = stripped.strip_prefix("0b").or(stripped.strip_prefix("0B")) {
+        return i64::from_str_radix(bin, 2).ok();
+    }
+    if let Some(oct) = stripped.strip_prefix("0o").or(stripped.strip_prefix("0O")) {
+        return i64::from_str_radix(oct, 8).ok();
+    }
+    if stripped.starts_with('0') && stripped.len() > 1 && stripped.chars().all(|c| c.is_ascii_digit())
+    {
+        // Legacy octal like 077
+        return i64::from_str_radix(&stripped[1..], 8).ok();
+    }
+
+    stripped.parse::<i64>().ok()
+}
+
+/// Parse a positive integer literal node.
+fn parse_positive_int(node: &ruby_prism::Node<'_>, source: &SourceFile) -> Option<i64> {
+    let int_node = node.as_integer_node()?;
+    let loc = int_node.location();
+    let src = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+    let value = parse_ruby_int_literal(src)?;
+    (value > 0).then_some(value)
+}
+
+fn is_exclusive_range(range: &ruby_prism::RangeNode<'_>) -> bool {
+    range.operator_loc().as_slice() == b"..."
+}
+
+enum SliceRewrite {
+    Drop(i64),
+    Take(i64),
 }
 
 /// Check if a range node is a semi-infinite range with a positive integer literal endpoint.
-/// Returns Some("drop") for endless ranges (N..) and Some("take") for beginless ranges (..N).
-fn semi_infinite_range_direction(
+/// Returns rewrite action with computed integer amount.
+fn semi_infinite_range_rewrite(
     range: &ruby_prism::RangeNode<'_>,
     source: &SourceFile,
-) -> Option<&'static str> {
+) -> Option<SliceRewrite> {
     match (range.left(), range.right()) {
         // Endless range: N.. or N...
-        (Some(left), None) => {
-            if is_positive_int(&left, source) {
-                Some("drop")
-            } else {
-                None
-            }
-        }
+        (Some(left), None) => parse_positive_int(&left, source).map(SliceRewrite::Drop),
+
         // Beginless range: ..N or ...N
         (None, Some(right)) => {
-            if is_positive_int(&right, source) {
-                Some("take")
+            let end = parse_positive_int(&right, source)?;
+            if is_exclusive_range(range) {
+                Some(SliceRewrite::Take(end))
             } else {
-                None
+                Some(SliceRewrite::Take(end + 1))
             }
         }
         _ => None,
@@ -91,6 +108,10 @@ impl Cop for ArraySemiInfiniteRangeSlice {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -98,7 +119,7 @@ impl Cop for ArraySemiInfiniteRangeSlice {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -115,10 +136,12 @@ impl Cop for ArraySemiInfiniteRangeSlice {
         }
 
         // Skip string literal receivers
-        if let Some(receiver) = call.receiver() {
-            if is_string_receiver(&receiver) {
-                return;
-            }
+        let receiver = match call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
+        if is_string_receiver(&receiver) {
+            return;
         }
 
         let arguments = match call.arguments() {
@@ -137,29 +160,58 @@ impl Cop for ArraySemiInfiniteRangeSlice {
             None => return,
         };
 
-        let direction = match semi_infinite_range_direction(&range, source) {
-            Some(d) => d,
+        let rewrite = match semi_infinite_range_rewrite(&range, source) {
+            Some(r) => r,
             None => return,
+        };
+
+        let (prefer, replacement_call) = match rewrite {
+            SliceRewrite::Drop(value) => ("drop", format!("drop({value})")),
+            SliceRewrite::Take(value) => ("take", format!("take({value})")),
         };
 
         let method_display = if is_bracket { "[]" } else { "slice" };
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
-            format!("Use `{direction}` instead of `{method_display}` with a semi-infinite range."),
-        ));
+            format!("Use `{prefer}` instead of `{method_display}` with a semi-infinite range."),
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let receiver_source = node_source(source, &receiver);
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("{receiver_source}.{replacement_call}"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     crate::cop_fixture_tests!(
         ArraySemiInfiniteRangeSlice,
         "cops/performance/array_semi_infinite_range_slice"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        ArraySemiInfiniteRangeSlice,
+        "cops/performance/array_semi_infinite_range_slice"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ArraySemiInfiniteRangeSlice.supports_autocorrect());
+    }
 }
