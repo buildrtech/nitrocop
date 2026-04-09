@@ -250,6 +250,10 @@ impl Cop for TimeZone {
         &[CALL_NODE, CALL_OPERATOR_WRITE_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -257,7 +261,7 @@ impl Cop for TimeZone {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle CallOperatorWriteNode (e.g., `Time.now += secs`).
         // In Prism, `a.b += c` is a CallOperatorWriteNode with read_name=b, receiver=a.
@@ -316,15 +320,38 @@ impl Cop for TimeZone {
                     if !has_timezone_specifier(content) {
                         let loc = call.message_loc().unwrap_or(call.location());
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(
-                            self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                "Do not use `String#to_time` without zone. Use `Time.zone.parse` instead."
-                                    .to_string(),
-                            ),
+                        let mut diagnostic = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Do not use `String#to_time` without zone. Use `Time.zone.parse` instead."
+                                .to_string(),
                         );
+
+                        // RuboCop autocorrect skips csend (`&.`).
+                        if let Some(ref mut corr) = corrections {
+                            let is_csend = call
+                                .call_operator_loc()
+                                .is_some_and(|op| op.as_slice() == b"&.");
+                            if !is_csend {
+                                let recv_loc = recv.location();
+                                let recv_src = source.byte_slice(
+                                    recv_loc.start_offset(),
+                                    recv_loc.end_offset(),
+                                    "",
+                                );
+                                corr.push(crate::correction::Correction {
+                                    start: call.location().start_offset(),
+                                    end: call.location().end_offset(),
+                                    replacement: format!("Time.zone.parse({recv_src})"),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
                 // Non-string receivers (variables, expressions) are never flagged
@@ -1197,5 +1224,21 @@ mod tests {
         // RuboCop only flags string literal receivers, not variable.to_time
         let source = b"date_str.to_time\nmy_var.to_time\nto_time\n";
         crate::testutil::assert_cop_no_offenses_full(&TimeZone, source);
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(TimeZone.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_string_to_time_to_time_zone_parse() {
+        let input = b"\"2012-03-02 16:05:37\".to_time\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&TimeZone, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"Time.zone.parse(\"2012-03-02 16:05:37\")\n");
     }
 }
