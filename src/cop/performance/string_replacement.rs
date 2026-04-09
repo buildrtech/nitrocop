@@ -63,6 +63,10 @@ impl Cop for StringReplacement {
         &[CALL_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -70,7 +74,7 @@ impl Cop for StringReplacement {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -155,12 +159,58 @@ impl Cop for StringReplacement {
         // RuboCop points at the method name through end of args (node.loc.selector → end)
         let loc = call.message_loc().unwrap_or_else(|| call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{prefer}` instead of `{current}`."),
-        ));
+        );
+
+        // Conservative RuboCop-aligned autocorrect: only rewrite deterministic
+        // string-literal first arguments. Regex first-arg forms stay diagnostic-only.
+        if let Some(ref mut corr) = corrections
+            && let Some(first_str_node) = first_node.as_string_node()
+        {
+            let first_src = source.byte_slice(
+                first_str_node.location().start_offset(),
+                first_str_node.location().end_offset(),
+                "",
+            );
+            let second_src = source.byte_slice(
+                second_node.location().start_offset(),
+                second_node.location().end_offset(),
+                "",
+            );
+            let args_src = if second_char_count == 0 {
+                // delete/delete! takes only one argument
+                first_src.to_string()
+            } else {
+                format!("{first_src}, {second_src}")
+            };
+
+            let replacement = if let Some(recv) = call.receiver() {
+                let recv_src =
+                    source.byte_slice(recv.location().start_offset(), recv.location().end_offset(), "");
+                let op = call
+                    .call_operator_loc()
+                    .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))
+                    .unwrap_or(".");
+                format!("{recv_src}{op}{prefer}({args_src})")
+            } else {
+                format!("{prefer}({args_src})")
+            };
+
+            corr.push(crate::correction::Correction {
+                start: call.location().start_offset(),
+                end: call.location().end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -301,4 +351,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(StringReplacement, "cops/performance/string_replacement");
+    crate::cop_autocorrect_fixture_tests!(StringReplacement, "cops/performance/string_replacement");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(StringReplacement.supports_autocorrect());
+    }
 }
