@@ -37,6 +37,10 @@ impl Cop for RedundantBlockCall {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -44,15 +48,19 @@ impl Cop for RedundantBlockCall {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = DefVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -60,11 +68,18 @@ struct DefVisitor<'a, 'src> {
     cop: &'a RedundantBlockCall,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 impl<'pr> Visit<'pr> for DefVisitor<'_, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        check_def(self.cop, self.source, node, &mut self.diagnostics);
+        check_def(
+            self.cop,
+            self.source,
+            node,
+            &mut self.diagnostics,
+            &mut self.corrections,
+        );
         // Continue recursing into nested defs (they have their own scope,
         // handled by BlockCallFinder not descending into defs)
         ruby_prism::visit_def_node(self, node);
@@ -77,6 +92,7 @@ fn check_def(
     source: &SourceFile,
     def_node: &ruby_prism::DefNode<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Vec<crate::correction::Correction>,
 ) {
     // Look for a &blockarg parameter
     let params = match def_node.parameters() {
@@ -148,6 +164,7 @@ fn check_def(
         source,
         arg_name,
         diagnostics,
+        corrections,
     };
     call_finder.visit(&body);
 }
@@ -241,14 +258,15 @@ impl<'pr> Visit<'pr> for BlockPassFinder<'_> {
     }
 }
 
-struct BlockCallFinder<'a, 'src, 'd> {
+struct BlockCallFinder<'a, 'src, 'd, 'c> {
     cop: &'a RedundantBlockCall,
     source: &'src SourceFile,
     arg_name: &'a [u8],
     diagnostics: &'d mut Vec<Diagnostic>,
+    corrections: &'c mut Vec<crate::correction::Correction>,
 }
 
-impl<'pr> Visit<'pr> for BlockCallFinder<'_, '_, '_> {
+impl<'pr> Visit<'pr> for BlockCallFinder<'_, '_, '_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if node.name().as_slice() == b"call" {
             // Skip safe navigation (&.call) — yield doesn't have nil-safe semantics
@@ -269,12 +287,40 @@ impl<'pr> Visit<'pr> for BlockCallFinder<'_, '_, '_> {
                                     "Use `yield` instead of `{}.call`.",
                                     std::str::from_utf8(self.arg_name).unwrap_or("block")
                                 );
-                                self.diagnostics.push(self.cop.diagnostic(
-                                    self.source,
-                                    line,
-                                    column,
-                                    msg,
-                                ));
+                                let mut diagnostic =
+                                    self.cop.diagnostic(self.source, line, column, msg);
+
+                                let replacement = if let Some(args) = node.arguments() {
+                                    let arg_src = args
+                                        .arguments()
+                                        .iter()
+                                        .map(|arg| {
+                                            self.source.byte_slice(
+                                                arg.location().start_offset(),
+                                                arg.location().end_offset(),
+                                                "",
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    if arg_src.is_empty() {
+                                        "yield".to_string()
+                                    } else {
+                                        format!("yield({})", arg_src.join(", "))
+                                    }
+                                } else {
+                                    "yield".to_string()
+                                };
+
+                                self.corrections.push(crate::correction::Correction {
+                                    start: node.location().start_offset(),
+                                    end: node.location().end_offset(),
+                                    replacement,
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+
+                                self.diagnostics.push(diagnostic);
                             }
                         }
                     }
@@ -316,4 +362,10 @@ fn block_params_include(block: &ruby_prism::BlockNode<'_>, name: &[u8]) -> bool 
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantBlockCall, "cops/performance/redundant_block_call");
+    crate::cop_autocorrect_fixture_tests!(RedundantBlockCall, "cops/performance/redundant_block_call");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantBlockCall.supports_autocorrect());
+    }
 }
