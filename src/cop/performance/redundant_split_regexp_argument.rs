@@ -111,6 +111,46 @@ fn is_simple_literal_regex(content: &[u8]) -> bool {
     true
 }
 
+fn regex_literal_to_string_content(content: &[u8]) -> String {
+    let mut tokens: Vec<Vec<u8>> = Vec::new();
+    let mut pending_backslash = false;
+
+    for &b in content {
+        if !pending_backslash && b == b'\\' {
+            pending_backslash = true;
+            continue;
+        }
+        if pending_backslash {
+            tokens.push(vec![b'\\', b]);
+            pending_backslash = false;
+        } else {
+            tokens.push(vec![b]);
+        }
+    }
+
+    if pending_backslash {
+        tokens.push(vec![b'\\']);
+    }
+
+    let mut out = String::new();
+    for token in tokens {
+        if token.len() == 2 && token[0] == b'\\' {
+            let esc = token[1];
+            match esc {
+                b'n' | b'"' | b'\'' | b'\\' | b't' | b'b' | b'f' | b'r' => {
+                    out.push('\\');
+                    out.push(esc as char);
+                }
+                _ => out.push(esc as char),
+            }
+        } else {
+            out.push_str(&String::from_utf8_lossy(&token));
+        }
+    }
+
+    out
+}
+
 impl Cop for RedundantSplitRegexpArgument {
     fn name(&self) -> &'static str {
         "Performance/RedundantSplitRegexpArgument"
@@ -124,6 +164,10 @@ impl Cop for RedundantSplitRegexpArgument {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -131,7 +175,7 @@ impl Cop for RedundantSplitRegexpArgument {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -197,12 +241,26 @@ impl Cop for RedundantSplitRegexpArgument {
 
         let loc = regex_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use string as argument instead of regexp.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let replacement_content = regex_literal_to_string_content(content);
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("\"{replacement_content}\""),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -213,4 +271,13 @@ mod tests {
         RedundantSplitRegexpArgument,
         "cops/performance/redundant_split_regexp_argument"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        RedundantSplitRegexpArgument,
+        "cops/performance/redundant_split_regexp_argument"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantSplitRegexpArgument.supports_autocorrect());
+    }
 }
