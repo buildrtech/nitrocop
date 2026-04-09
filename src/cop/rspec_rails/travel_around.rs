@@ -45,6 +45,10 @@ impl Cop for TravelAround {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -52,7 +56,7 @@ impl Cop for TravelAround {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // We look for `around` blocks and then check their body for travel patterns.
         let call = match node.as_call_node() {
@@ -106,6 +110,39 @@ impl Cop for TravelAround {
                 "Prefer to travel in `before` rather than `around`.".to_string(),
             ));
         }
+
+        // Conservative autocorrect baseline (RuboCop-aligned pattern 2 only):
+        // around do |example|
+        //   freeze_time(&example)
+        // end
+        // => before { freeze_time }
+        if let Some(ref mut corr) = corrections
+            && let Some(stmts) = body.as_statements_node()
+        {
+            let stmt_list: Vec<_> = stmts.body().iter().collect();
+            if stmt_list.len() == 1
+                && let Some(travel_call) = stmt_list[0].as_call_node()
+                && TRAVEL_METHODS.contains(&travel_call.name().as_slice())
+                && travel_call.receiver().is_none()
+                && travel_call.arguments().is_none()
+                && travel_call
+                    .block()
+                    .and_then(|b| b.as_block_argument_node())
+                    .is_some()
+            {
+                let method = std::str::from_utf8(travel_call.name().as_slice()).unwrap_or("freeze_time");
+                corr.push(crate::correction::Correction {
+                    start: call.location().start_offset(),
+                    end: block_node.location().end_offset(),
+                    replacement: format!("before {{ {method} }}"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                if let Some(last) = diagnostics.last_mut() {
+                    last.corrected = true;
+                }
+            }
+        }
     }
 }
 
@@ -153,4 +190,18 @@ impl<'pr> Visit<'pr> for TravelFinder {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(TravelAround, "cops/rspecrails/travel_around");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(TravelAround.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_block_pass_form_to_before() {
+        crate::testutil::assert_cop_autocorrect(
+            &TravelAround,
+            b"around do |example|\n  freeze_time(&example)\nend\n",
+            b"before { freeze_time }\n",
+        );
+    }
 }

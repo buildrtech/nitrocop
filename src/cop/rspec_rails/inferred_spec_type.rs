@@ -88,6 +88,10 @@ impl Cop for InferredSpecType {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -95,7 +99,7 @@ impl Cop for InferredSpecType {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -132,7 +136,12 @@ impl Cop for InferredSpecType {
         // Find a hash argument containing `type: :something`
         for (i, arg) in arg_list.iter().enumerate() {
             let has_positional_before = i > 0;
-            if let Some(diag) = self.check_hash_arg(source, arg, config, has_positional_before) {
+            let diag = if let Some(corr) = corrections.as_deref_mut() {
+                self.check_hash_arg(source, arg, config, has_positional_before, Some(corr))
+            } else {
+                self.check_hash_arg(source, arg, config, has_positional_before, None)
+            };
+            if let Some(diag) = diag {
                 diagnostics.push(diag);
             }
         }
@@ -146,9 +155,17 @@ impl InferredSpecType {
         arg: &ruby_prism::Node<'_>,
         config: &CopConfig,
         has_positional_before: bool,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) -> Option<Diagnostic> {
         if let Some(hash) = arg.as_hash_node() {
-            return self.check_pairs(source, arg, &hash.elements(), config, has_positional_before);
+            return self.check_pairs(
+                source,
+                arg,
+                &hash.elements(),
+                config,
+                has_positional_before,
+                corrections,
+            );
         }
         if let Some(kw_hash) = arg.as_keyword_hash_node() {
             return self.check_pairs(
@@ -157,6 +174,7 @@ impl InferredSpecType {
                 &kw_hash.elements(),
                 config,
                 has_positional_before,
+                corrections,
             );
         }
         None
@@ -169,6 +187,7 @@ impl InferredSpecType {
         pairs: &ruby_prism::NodeList<'_>,
         config: &CopConfig,
         has_positional_before: bool,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) -> Option<Diagnostic> {
         for element in pairs.iter() {
             let assoc = match element.as_assoc_node() {
@@ -220,12 +239,45 @@ impl InferredSpecType {
                         assoc.location()
                     };
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    return Some(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Remove redundant spec type.".to_string(),
-                    ));
+                    );
+
+                    // Conservative autocorrect baseline: only remove full `type: ...`
+                    // hash argument when it is the sole pair and follows a positional
+                    // argument (`describe User, type: :model`).
+                    if only_pair
+                        && has_positional_before
+                        && let Some(ref mut corr) = corrections
+                    {
+                        let mut start = hash_arg.location().start_offset();
+                        let end = hash_arg.location().end_offset();
+                        let src = source.as_bytes();
+
+                        while start > 0 && matches!(src[start - 1], b' ' | b'\t') {
+                            start -= 1;
+                        }
+                        if start > 0 && src[start - 1] == b',' {
+                            start -= 1;
+                            while start > 0 && matches!(src[start - 1], b' ' | b'\t') {
+                                start -= 1;
+                            }
+
+                            corr.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                    }
+
+                    return Some(diagnostic);
                 }
             }
         }
@@ -326,6 +378,20 @@ mod tests {
             diags.is_empty(),
             "Should not flag when custom Inferences doesn't include 'models', got {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(InferredSpecType.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_redundant_type_hash_arg() {
+        crate::testutil::assert_cop_autocorrect(
+            &InferredSpecType,
+            b"# nitrocop-filename: spec/models/user_spec.rb\nRSpec.describe User, type: :model do\nend\n",
+            b"RSpec.describe User do\nend\n",
         );
     }
 }

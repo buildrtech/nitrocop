@@ -27,6 +27,8 @@
 - RSpecRails/HttpStatus parity follow-up: extend autocorrect beyond symbolic integer baseline to numeric/string and be_status-style rewrites.
 - RSpecRails/HttpStatusNameConsistency parity follow-up: keep mapping table synchronized with upstream Rack status-name changes and extend tests for future alias additions.
 - RSpecRails/NegationBeValid parity follow-up: verify chained matcher edge contexts and keep selector-swap behavior aligned with upstream style handling.
+- RSpecRails/MinitestAssertions parity follow-up: extend autocorrect from no-failure-message baseline to RuboCop-style preservation of optional failure-message arguments (e.g., `expect(...).to(eq(...), msg)`) and expand fixture corrected snapshots across assertion families.
+- RSpecRails/InferredSpecType parity follow-up: extend autocorrect from sole-type-hash baseline to mixed-metadata pair removal (`other: true, type: :model`) with RuboCop-like sibling-range handling that preserves commas/comments.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
