@@ -110,6 +110,10 @@ impl Cop for StringIdentifierArgument {
         &[CALL_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -117,7 +121,7 @@ impl Cop for StringIdentifierArgument {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -223,12 +227,25 @@ impl Cop for StringIdentifierArgument {
             let arg_source = std::str::from_utf8(arg_loc.as_slice()).unwrap_or("'?'");
 
             let (line, column) = source.offset_to_line_col(arg_loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Use `{}` instead of `{}`.", symbol_str, arg_source),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: arg_loc.start_offset(),
+                    end: arg_loc.end_offset(),
+                    replacement: symbol_str.clone(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -241,4 +258,13 @@ mod tests {
         StringIdentifierArgument,
         "cops/performance/string_identifier_argument"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        StringIdentifierArgument,
+        "cops/performance/string_identifier_argument"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(StringIdentifierArgument.supports_autocorrect());
+    }
 }

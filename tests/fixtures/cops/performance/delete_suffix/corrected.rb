@@ -1,0 +1,8 @@
+str.delete_suffix("foo")
+str.delete_suffix("bar")
+str.delete_suffix("suffix")
+str.delete_suffix!("suffix")
+str.delete_suffix!("suffix")
+str.delete_suffix("test.")
+str.delete_suffix("}")
+str.delete_suffix("/")
