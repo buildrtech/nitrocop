@@ -43,6 +43,10 @@ impl Cop for BlockGivenWithExplicitBlock {
         &[DEF_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -50,7 +54,7 @@ impl Cop for BlockGivenWithExplicitBlock {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -73,9 +77,10 @@ impl Cop for BlockGivenWithExplicitBlock {
             Some(n) => n,
             None => return,
         };
+        let block_name_str = String::from_utf8_lossy(block_name.as_slice()).to_string();
 
         let mut finder = BlockGivenFinder {
-            offsets: Vec::new(),
+            locations: Vec::new(),
         };
 
         // Walk parameter default values for `block_given?` calls.
@@ -97,9 +102,20 @@ impl Cop for BlockGivenWithExplicitBlock {
             Some(b) => b,
             None => {
                 // No body, but we may have found offenses in param defaults
-                for offset in finder.offsets {
-                    let (line, column) = source.offset_to_line_col(offset);
-                    diagnostics.push(self.diagnostic(source, line, column, "Check `block` instead of using `block_given?` with explicit `&block` parameter.".to_string()));
+                for loc in finder.locations {
+                    let (line, column) = source.offset_to_line_col(loc.start);
+                    let mut diagnostic = self.diagnostic(source, line, column, "Check `block` instead of using `block_given?` with explicit `&block` parameter.".to_string());
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start,
+                            end: loc.end,
+                            replacement: block_name_str.clone(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
                 return;
             }
@@ -117,9 +133,20 @@ impl Cop for BlockGivenWithExplicitBlock {
 
         finder.visit(&body);
 
-        for offset in finder.offsets {
-            let (line, column) = source.offset_to_line_col(offset);
-            diagnostics.push(self.diagnostic(source, line, column, "Check `block` instead of using `block_given?` with explicit `&block` parameter.".to_string()));
+        for loc in finder.locations {
+            let (line, column) = source.offset_to_line_col(loc.start);
+            let mut diagnostic = self.diagnostic(source, line, column, "Check `block` instead of using `block_given?` with explicit `&block` parameter.".to_string());
+            if let Some(ref mut corr) = corrections {
+                corr.push(crate::correction::Correction {
+                    start: loc.start,
+                    end: loc.end,
+                    replacement: block_name_str.clone(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -146,8 +173,14 @@ fn is_kernel_or_no_receiver(receiver: Option<ruby_prism::Node<'_>>) -> bool {
     false
 }
 
+#[derive(Clone, Copy)]
+struct CallLoc {
+    start: usize,
+    end: usize,
+}
+
 struct BlockGivenFinder {
-    offsets: Vec<usize>,
+    locations: Vec<CallLoc>,
 }
 
 impl<'pr> Visit<'pr> for BlockGivenFinder {
@@ -156,7 +189,10 @@ impl<'pr> Visit<'pr> for BlockGivenFinder {
             && node.arguments().is_none()
             && is_kernel_or_no_receiver(node.receiver())
         {
-            self.offsets.push(node.location().start_offset());
+            self.locations.push(CallLoc {
+                start: node.location().start_offset(),
+                end: node.location().end_offset(),
+            });
         }
         // Recurse into children to find block_given? inside negation,
         // method arguments, ternary conditions, etc.
@@ -252,4 +288,13 @@ mod tests {
         BlockGivenWithExplicitBlock,
         "cops/performance/block_given_with_explicit_block"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        BlockGivenWithExplicitBlock,
+        "cops/performance/block_given_with_explicit_block"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(BlockGivenWithExplicitBlock.supports_autocorrect());
+    }
 }
