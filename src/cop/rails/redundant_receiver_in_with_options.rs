@@ -42,6 +42,10 @@ impl Cop for RedundantReceiverInWithOptions {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -49,7 +53,7 @@ impl Cop for RedundantReceiverInWithOptions {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -111,7 +115,7 @@ impl Cop for RedundantReceiverInWithOptions {
             // Check for numbered block parameter usage (_1)
             // or `it` usage (Ruby 3.4+)
             // For no block params, check if statements use _1/it as receiver
-            diagnostics.extend(self.check_numbered_params(source, &stmts));
+            self.check_numbered_params(source, &stmts, diagnostics, corrections.as_deref_mut());
             return;
         }
 
@@ -138,7 +142,13 @@ impl Cop for RedundantReceiverInWithOptions {
 
         // Second pass: collect offenses for all statements with redundant receiver
         for stmt in &body_stmts {
-            self.check_stmt_for_redundant_receiver(source, stmt, &param_bytes, diagnostics);
+            self.check_stmt_for_redundant_receiver(
+                source,
+                stmt,
+                &param_bytes,
+                diagnostics,
+                corrections.as_deref_mut(),
+            );
         }
     }
 }
@@ -415,6 +425,7 @@ impl RedundantReceiverInWithOptions {
         node: &ruby_prism::Node<'_>,
         param_name: &[u8],
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -422,23 +433,38 @@ impl RedundantReceiverInWithOptions {
         };
 
         // Check if the receiver is the block parameter
-        if let Some(receiver) = call.receiver() {
-            if self.is_param_receiver(&receiver, param_name) {
-                let recv_loc = receiver.location();
-                let (line, column) = source.offset_to_line_col(recv_loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Redundant receiver in `with_options`.".to_string(),
-                ));
+        if let Some(receiver) = call.receiver()
+            && self.is_param_receiver(&receiver, param_name)
+        {
+            let recv_loc = receiver.location();
+            let (line, column) = source.offset_to_line_col(recv_loc.start_offset());
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                "Redundant receiver in `with_options`.".to_string(),
+            );
+
+            if let Some(op) = call.call_operator_loc()
+                && let Some(corr) = corrections
+            {
+                corr.push(crate::correction::Correction {
+                    start: recv_loc.start_offset(),
+                    end: op.end_offset(),
+                    replacement: String::new(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
             }
+
+            diagnostics.push(diagnostic);
         }
 
         // Also check arguments for nested receiver usage
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
-                self.check_nested_receiver(source, &arg, param_name, diagnostics);
+                self.check_nested_receiver(source, &arg, param_name, diagnostics, None);
             }
         }
     }
@@ -449,24 +475,40 @@ impl RedundantReceiverInWithOptions {
         node: &ruby_prism::Node<'_>,
         param_name: &[u8],
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(call) = node.as_call_node() {
-            if let Some(receiver) = call.receiver() {
-                if self.is_param_receiver(&receiver, param_name) {
-                    let recv_loc = receiver.location();
-                    let (line, column) = source.offset_to_line_col(recv_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Redundant receiver in `with_options`.".to_string(),
-                    ));
+            if let Some(receiver) = call.receiver()
+                && self.is_param_receiver(&receiver, param_name)
+            {
+                let recv_loc = receiver.location();
+                let (line, column) = source.offset_to_line_col(recv_loc.start_offset());
+                let mut diagnostic = self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Redundant receiver in `with_options`.".to_string(),
+                );
+
+                if let Some(op) = call.call_operator_loc()
+                    && let Some(corr) = corrections
+                {
+                    corr.push(crate::correction::Correction {
+                        start: recv_loc.start_offset(),
+                        end: op.end_offset(),
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
                 }
+
+                diagnostics.push(diagnostic);
             }
             // Recurse into call arguments
             if let Some(args) = call.arguments() {
                 for arg in args.arguments().iter() {
-                    self.check_nested_receiver(source, &arg, param_name, diagnostics);
+                    self.check_nested_receiver(source, &arg, param_name, diagnostics, None);
                 }
             }
         }
@@ -489,27 +531,40 @@ impl RedundantReceiverInWithOptions {
         &self,
         source: &SourceFile,
         stmts: &ruby_prism::StatementsNode<'_>,
-    ) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
+        diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
         for stmt in stmts.body().iter() {
-            if let Some(call) = stmt.as_call_node() {
-                if let Some(receiver) = call.receiver() {
-                    // Check for _1 (numbered parameter reference) or `it`
-                    let loc = receiver.location();
-                    let text = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
-                    if text == b"_1" || text == b"it" {
-                        let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Redundant receiver in `with_options`.".to_string(),
-                        ));
+            if let Some(call) = stmt.as_call_node()
+                && let Some(receiver) = call.receiver()
+            {
+                // Check for _1 (numbered parameter reference) or `it`
+                let loc = receiver.location();
+                let text = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+                if text == b"_1" || text == b"it" {
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Redundant receiver in `with_options`.".to_string(),
+                    );
+                    if let Some(op) = call.call_operator_loc()
+                        && let Some(ref mut corr) = corrections
+                    {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: op.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
                     }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
-        diagnostics
     }
 }
 
@@ -520,4 +575,13 @@ mod tests {
         RedundantReceiverInWithOptions,
         "cops/rails/redundant_receiver_in_with_options"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        RedundantReceiverInWithOptions,
+        "cops/rails/redundant_receiver_in_with_options"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantReceiverInWithOptions.supports_autocorrect());
+    }
 }
