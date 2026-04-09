@@ -43,6 +43,10 @@ impl Cop for VerifiedDoubleReference {
         &[CALL_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -50,7 +54,7 @@ impl Cop for VerifiedDoubleReference {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -78,15 +82,31 @@ impl Cop for VerifiedDoubleReference {
         }
 
         let first_arg = &arg_list[0];
-        if first_arg.as_string_node().is_some() {
+        if let Some(string_node) = first_arg.as_string_node() {
             let loc = first_arg.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Use a constant class reference for verified doubles. String references are not verifying unless the class is loaded.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                let replacement = std::str::from_utf8(string_node.unescaped())
+                    .unwrap_or("")
+                    .to_string();
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -98,4 +118,18 @@ mod tests {
         VerifiedDoubleReference,
         "cops/rspec/verified_double_reference"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(VerifiedDoubleReference.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_string_reference_to_constant_reference() {
+        crate::testutil::assert_cop_autocorrect(
+            &VerifiedDoubleReference,
+            b"instance_double('ClassName')\n",
+            b"instance_double(ClassName)\n",
+        );
+    }
 }
