@@ -137,6 +137,10 @@ impl Cop for IoReadlines {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -144,7 +148,7 @@ impl Cop for IoReadlines {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let outer_call = match node.as_call_node() {
             Some(c) => c,
@@ -220,7 +224,61 @@ impl Cop for IoReadlines {
             .unwrap_or(readlines_call.location());
         let (line, column) = source.offset_to_line_col(readlines_loc.start_offset());
 
-        diagnostics.push(self.diagnostic(source, line, column, message));
+        let mut diagnostic = self.diagnostic(source, line, column, message);
+
+        if let Some(ref mut corr) = corrections {
+            // RuboCop only autocorrects instance-style calls with explicit receiver,
+            // not class receiver IO/File or implicit receiver.
+            if !is_class_pattern && readlines_call.receiver().is_some() {
+                let readlines_args = readlines_call
+                    .arguments()
+                    .map(|args| {
+                        args.arguments()
+                            .iter()
+                            .map(|arg| {
+                                source.byte_slice(
+                                    arg.location().start_offset(),
+                                    arg.location().end_offset(),
+                                    "",
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+
+                let replacement = if readlines_args.is_empty() {
+                    "each_line".to_string()
+                } else {
+                    format!("each_line({readlines_args})")
+                };
+
+                let end = if outer_method == b"each" {
+                    outer_call
+                        .message_loc()
+                        .map(|l| l.end_offset())
+                        .unwrap_or(outer_call.location().end_offset())
+                } else if let Some(dot) = outer_call.call_operator_loc() {
+                    dot.start_offset()
+                } else {
+                    outer_call
+                        .message_loc()
+                        .map(|l| l.start_offset())
+                        .unwrap_or(outer_call.location().start_offset())
+                };
+
+                corr.push(crate::correction::Correction {
+                    start: readlines_loc.start_offset(),
+                    end,
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -228,4 +286,11 @@ impl Cop for IoReadlines {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(IoReadlines, "cops/performance/io_readlines");
+    crate::cop_autocorrect_fixture_tests!(IoReadlines, "cops/performance/io_readlines");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(IoReadlines.supports_autocorrect());
+    }
 }
+
