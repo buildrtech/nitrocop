@@ -23,6 +23,48 @@ fn is_non_splat(condition: &ruby_prism::Node<'_>) -> bool {
     }
 }
 
+fn reorder_when_conditions_inline(
+    source: &SourceFile,
+    when_node: &ruby_prism::WhenNode<'_>,
+) -> Option<(usize, usize, String)> {
+    let conditions: Vec<_> = when_node.conditions().iter().collect();
+    if conditions.len() < 2 {
+        return None;
+    }
+
+    let mut non_splats: Vec<String> = Vec::new();
+    let mut splats: Vec<String> = Vec::new();
+    let mut original: Vec<String> = Vec::new();
+
+    for cond in &conditions {
+        let src = source
+            .byte_slice(cond.location().start_offset(), cond.location().end_offset(), "")
+            .to_string();
+        original.push(src.clone());
+        if cond.as_splat_node().is_some() {
+            splats.push(src);
+        } else {
+            non_splats.push(src);
+        }
+    }
+
+    if non_splats.is_empty() || splats.is_empty() {
+        return None;
+    }
+
+    let mut reordered = non_splats;
+    reordered.extend(splats);
+    if reordered == original {
+        return None;
+    }
+
+    Some((
+        conditions.first()?.location().start_offset(),
+        conditions.last()?.location().end_offset(),
+        reordered.join(", "),
+    ))
+}
+
 impl Cop for CaseWhenSplat {
     fn name(&self) -> &'static str {
         "Performance/CaseWhenSplat"
@@ -40,6 +82,10 @@ impl Cop for CaseWhenSplat {
         &[CASE_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -47,7 +93,7 @@ impl Cop for CaseWhenSplat {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let case_node = match node.as_case_node() {
             Some(n) => n,
@@ -93,12 +139,33 @@ impl Cop for CaseWhenSplat {
 
         for when_start in offending_when_offsets {
             let (line, column) = source.offset_to_line_col(when_start);
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Reorder `when` conditions with a splat to the end.".to_string(),
-            ));
+            );
+
+            // Conservative autocorrect: reorder condition list only within the
+            // offending `when` branch when both splat and non-splat conditions exist.
+            if let Some(when_node) = when_branches
+                .iter()
+                .filter_map(|w| w.as_when_node())
+                .find(|w| w.location().start_offset() == when_start)
+                && let Some((start, end, replacement)) = reorder_when_conditions_inline(source, &when_node)
+                && let Some(ref mut corr) = corrections
+            {
+                corr.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -107,4 +174,10 @@ impl Cop for CaseWhenSplat {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CaseWhenSplat, "cops/performance/case_when_splat");
+    crate::cop_autocorrect_fixture_tests!(CaseWhenSplat, "cops/performance/case_when_splat");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(CaseWhenSplat.supports_autocorrect());
+    }
 }
