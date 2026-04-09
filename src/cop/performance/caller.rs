@@ -16,6 +16,25 @@ use crate::parse::source::SourceFile;
 /// Fixed by checking `call_operator_loc()` for `&.` and rejecting `first` with arguments.
 pub struct Caller;
 
+fn parse_int_literal(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<i64> {
+    let int_node = node.as_integer_node()?;
+    let loc = int_node.location();
+    let mut text = source
+        .byte_slice(loc.start_offset(), loc.end_offset(), "")
+        .replace('_', "");
+
+    // Conservative parser for fixture/real-world decimal ints; skip uncommon bases.
+    if text.starts_with("0x") || text.starts_with("0X") || text.starts_with("0o") {
+        return None;
+    }
+
+    if let Some(stripped) = text.strip_prefix('+') {
+        text = stripped.to_string();
+    }
+
+    text.parse::<i64>().ok()
+}
+
 impl Cop for Caller {
     fn name(&self) -> &'static str {
         "Performance/Caller"
@@ -29,6 +48,10 @@ impl Cop for Caller {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -36,7 +59,7 @@ impl Cop for Caller {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Pattern: caller.first, caller[n], caller_locations.first, caller_locations[n]
         // Also: caller(n).first, caller(n)[n]
@@ -54,12 +77,17 @@ impl Cop for Caller {
                 if inner_arg_count > 1 {
                     return;
                 }
+
+                let mut n: i64 = 1;
                 if inner_arg_count == 1 {
                     let arg = inner_args.unwrap().arguments().iter().next().unwrap();
                     if arg.as_integer_node().is_none() {
-                        // Non-integer argument (e.g. range) — already the recommended form
                         return;
                     }
+                    n = match parse_int_literal(source, &arg) {
+                        Some(v) => v,
+                        None => return,
+                    };
                 }
 
                 let outer_call = node.as_call_node().unwrap();
@@ -86,32 +114,56 @@ impl Cop for Caller {
                 } else if is_bracket {
                     // caller[n] — only flag when the argument is a single integer
                     // caller[0..10], caller[2..-1], caller[2, 10] should NOT be flagged
-                    let is_single_integer = outer_call.arguments().is_some_and(|args| {
-                        let a = args.arguments();
-                        a.len() == 1 && a.iter().next().unwrap().as_integer_node().is_some()
-                    });
-                    if !is_single_integer {
+                    let args = match outer_call.arguments() {
+                        Some(a) => a,
+                        None => return,
+                    };
+                    if args.arguments().len() != 1 {
                         return;
                     }
+                    let idx = args.arguments().iter().next().unwrap();
+                    if idx.as_integer_node().is_none() {
+                        return;
+                    }
+                    let m = match parse_int_literal(source, &idx) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    n += m;
                 } else {
                     return;
                 }
 
-                let loc = node.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                let method = if is_caller {
+                let method_name = if is_caller {
                     "caller"
                 } else {
                     "caller_locations"
                 };
-                diagnostics.push(self.diagnostic(
+                let preferred_method = format!("{method_name}({n}..{n}).first");
+
+                let loc = node.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     format!(
-                        "Use `{method}(n..n).first` instead of `{method}.first` or `{method}[n]`."
+                        "Use `{method_name}(n..n).first` instead of `{method_name}.first` or `{method_name}[n]`."
                     ),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: preferred_method,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -121,4 +173,10 @@ impl Cop for Caller {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Caller, "cops/performance/caller");
+    crate::cop_autocorrect_fixture_tests!(Caller, "cops/performance/caller");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Caller.supports_autocorrect());
+    }
 }
