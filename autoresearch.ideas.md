@@ -7,6 +7,7 @@
 - Performance/Sum parity follow-up: extend autocorrect beyond no-block symbol forms to block-pass (`&:+`), block-body (`{ |acc, elem| acc + elem }`), and `map/collect...sum` rewrite paths.
 - Performance/FixedSize policy/parity follow-up: decide whether to keep nitrocop-only literal-size autocorrect (RuboCop currently has no autocorrect for this cop) and, if kept, extend coverage carefully (or gate behind explicit safety config).
 - Performance/MapMethodChain parity follow-up: decide whether to keep conservative two-hop-only autocorrect or extend to stable multi-hop normalization while preserving safe-navigation behavior.
+- Rails/IndexWith parity follow-up: extend autocorrect to `Hash[map { ... }]` and additional block-shape variants (numblock/itblock and complex receiver forms) with robust range replacement.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.

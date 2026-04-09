@@ -206,6 +206,72 @@ fn is_index_by_block_it(block_node: &ruby_prism::BlockNode<'_>) -> bool {
 }
 
 /// Check if the block is `each_with_object({}) { |el, memo| memo[key] = el }`
+fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    source
+        .byte_slice(
+            node.location().start_offset(),
+            node.location().end_offset(),
+            "",
+        )
+        .to_string()
+}
+
+fn index_by_parts(block_node: &ruby_prism::BlockNode<'_>, source: &SourceFile) -> Option<(String, String)> {
+    let params = block_node.parameters()?.as_block_parameters_node()?;
+    let param_list = params.parameters()?;
+    let requireds: Vec<_> = param_list.requireds().iter().collect();
+    if requireds.len() != 1 {
+        return None;
+    }
+    let param = requireds[0].as_required_parameter_node()?;
+    let param_name = String::from_utf8_lossy(param.name().as_slice()).to_string();
+
+    let body = block_node.body()?.as_statements_node()?;
+    let body_nodes: Vec<_> = body.body().iter().collect();
+    if body_nodes.len() != 1 {
+        return None;
+    }
+    let array = body_nodes[0].as_array_node()?;
+    let elems: Vec<_> = array.elements().iter().collect();
+    if elems.len() != 2 {
+        return None;
+    }
+    let value = &elems[0];
+    let second = elems[1].as_local_variable_read_node()?;
+    if second.name().as_slice() != param.name().as_slice() {
+        return None;
+    }
+    Some((param_name, node_source(source, &value)))
+}
+
+fn each_with_object_index_parts(
+    block_node: &ruby_prism::BlockNode<'_>,
+    source: &SourceFile,
+) -> Option<(String, String)> {
+    let params = block_node.parameters()?.as_block_parameters_node()?;
+    let param_list = params.parameters()?;
+    let requireds: Vec<_> = param_list.requireds().iter().collect();
+    if requireds.len() != 2 {
+        return None;
+    }
+    let el = requireds[0].as_required_parameter_node()?;
+    let el_name = String::from_utf8_lossy(el.name().as_slice()).to_string();
+
+    let body = block_node.body()?.as_statements_node()?;
+    let body_nodes: Vec<_> = body.body().iter().collect();
+    if body_nodes.len() != 1 {
+        return None;
+    }
+    let assign = body_nodes[0].as_call_node()?;
+    let args = assign.arguments()?;
+    let arg_list: Vec<_> = args.arguments().iter().collect();
+    if arg_list.len() != 2 {
+        return None;
+    }
+    let key_src = node_source(source, &arg_list[0]);
+    Some((el_name, key_src))
+}
+
 fn is_each_with_object_index(
     call: &ruby_prism::CallNode<'_>,
     block_node: &ruby_prism::BlockNode<'_>,
@@ -345,6 +411,10 @@ impl Cop for IndexBy {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -352,7 +422,7 @@ impl Cop for IndexBy {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Pattern 1: items.map { |e| [key, e] }.to_h  (also: numbered/it params)
         if let Some(chain) = util::as_method_chain(node) {
@@ -370,12 +440,32 @@ impl Cop for IndexBy {
                             {
                                 let loc = node.location();
                                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                                diagnostics.push(self.diagnostic(
+                                let mut diagnostic = self.diagnostic(
                                     source,
                                     line,
                                     column,
                                     "Use `index_by` instead of `map { ... }.to_h`.".to_string(),
-                                ));
+                                );
+
+                                if is_index_by_block(&block_node)
+                                    && let Some((param, key_src)) = index_by_parts(&block_node, source)
+                                    && let Some(base) = chain.inner_call.receiver()
+                                    && let Some(ref mut corr) = corrections
+                                {
+                                    let base_src = node_source(source, &base);
+                                    let replacement =
+                                        format!("{base_src}.index_by {{ |{param}| {key_src} }}");
+                                    corr.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement,
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+
+                                diagnostics.push(diagnostic);
                             }
                         }
                     }
@@ -398,12 +488,34 @@ impl Cop for IndexBy {
                     {
                         let loc = node.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             "Use `index_by` instead of `to_h { ... }`.".to_string(),
-                        ));
+                        );
+
+                        if is_index_by_block(&block_node)
+                            && let Some((param, key_src)) = index_by_parts(&block_node, source)
+                            && let Some(ref mut corr) = corrections
+                        {
+                            let replacement = if let Some(base) = call.receiver() {
+                                let base_src = node_source(source, &base);
+                                format!("{base_src}.index_by {{ |{param}| {key_src} }}")
+                            } else {
+                                format!("index_by {{ |{param}| {key_src} }}")
+                            };
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement,
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -416,12 +528,31 @@ impl Cop for IndexBy {
                     if is_each_with_object_index(&call, &block_node) {
                         let loc = node.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             "Use `index_by` instead of `each_with_object`.".to_string(),
-                        ));
+                        );
+
+                        if let Some((param, key_src)) = each_with_object_index_parts(&block_node, source)
+                            && let Some(base) = call.receiver()
+                            && let Some(ref mut corr) = corrections
+                        {
+                            let base_src = node_source(source, &base);
+                            let replacement =
+                                format!("{base_src}.index_by {{ |{param}| {key_src} }}");
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement,
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -472,6 +603,22 @@ mod tests {
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(IndexBy, "cops/rails/index_by");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(IndexBy.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_direct_map_to_h_pattern() {
+        let input = b"users.map { |u| [u.id, u] }.to_h\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&IndexBy, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"users.index_by { |u| u.id }\n");
+    }
 
     #[test]
     fn identity_each_with_object_not_flagged() {
