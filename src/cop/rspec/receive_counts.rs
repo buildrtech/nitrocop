@@ -28,6 +28,10 @@ impl Cop for ReceiveCounts {
         &[CALL_NODE, INTEGER_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -35,7 +39,7 @@ impl Cop for ReceiveCounts {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for .times call
         let times_call = match node.as_call_node() {
@@ -108,12 +112,27 @@ impl Cop for ReceiveCounts {
             .message_loc()
             .unwrap_or_else(|| count_call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use {suggestion} instead of `{current}`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(dot_loc) = count_call.call_operator_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: dot_loc.start_offset(),
+                end: times_call.location().end_offset(),
+                replacement: suggestion.trim_matches('`').to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -158,4 +177,18 @@ fn has_receive_in_arg(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReceiveCounts, "cops/rspec/receive_counts");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ReceiveCounts.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_exactly_once_chain() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReceiveCounts,
+            b"expect(foo).to receive(:bar).exactly(1).times\n",
+            b"expect(foo).to receive(:bar).once\n",
+        );
+    }
 }
