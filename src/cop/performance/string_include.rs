@@ -28,20 +28,15 @@ pub struct StringInclude;
 /// Matches: `[\w\s\-,"'!#%&<>=;:`~/]` from RuboCop's `Util::LITERAL_REGEX`.
 fn is_literal_char(b: u8) -> bool {
     match b {
-        // \w: [a-zA-Z0-9_]
         b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => true,
-        // \s: [ \t\n\r\f] (form feed = 0x0C)
         b' ' | b'\t' | b'\n' | b'\r' | 0x0C => true,
-        // Explicit punctuation from LITERAL_REGEX
         b'-' | b',' | b'"' | b'\'' | b'!' | b'#' | b'%' | b'&' | b'<' | b'>' | b'=' | b';'
         | b':' | b'`' | b'~' | b'/' => true,
         _ => false,
     }
 }
 
-/// Characters that, when preceded by a backslash, form a regex metachar class
-/// (e.g., `\d`, `\s`, `\A`). Escaped chars NOT in this set are just literals.
-/// Matches: `\\[^AbBdDgGhHkpPRwWXsSzZ0-9]` from RuboCop's `Util::LITERAL_REGEX`.
+/// Characters that, when preceded by a backslash, form a regex metachar class.
 fn is_regex_escape_metachar(b: u8) -> bool {
     matches!(
         b,
@@ -68,21 +63,12 @@ fn is_regex_escape_metachar(b: u8) -> bool {
     )
 }
 
-/// Check if a regex pattern (raw content between slashes) contains only
-/// characters that RuboCop considers literal — matching the allowlist in
-/// `Util::LITERAL_REGEX`.
-///
-/// RuboCop's parser gem pre-interprets regex escape sequences (e.g., `\c(`
-/// becomes `\x08`), so its LITERAL_REGEX only sees plain bytes. Prism gives
-/// us raw source, so we must also accept Ruby regex control-char escapes:
-/// - `\cX` (3 bytes: `\`, `c`, any char) — control character
-/// - `\C-X` (4 bytes: `\`, `C`, `-`, any char) — control character
-/// - `\M-X` (4 bytes: `\`, `M`, `-`, any char) — meta character
-/// - `\M-\C-X` / `\M-\cX` (nested meta+control combos)
+/// Check if a regex pattern contains only characters RuboCop considers literal.
 fn is_literal_regex(content: &[u8]) -> bool {
     if content.is_empty() {
         return false;
     }
+
     let mut i = 0;
     while i < content.len() {
         if content[i] == b'\\' {
@@ -91,7 +77,6 @@ fn is_literal_regex(content: &[u8]) -> bool {
             }
             let next = content[i + 1];
             if next == b'c' {
-                // \cX — control char escape, consumes 3 bytes total
                 if i + 2 >= content.len() {
                     return false;
                 }
@@ -100,7 +85,6 @@ fn is_literal_regex(content: &[u8]) -> bool {
                 && i + 2 < content.len()
                 && content[i + 2] == b'-'
             {
-                // \C-X or \M-X — control/meta char escape, consumes 4 bytes total
                 if i + 3 >= content.len() {
                     return false;
                 }
@@ -108,7 +92,6 @@ fn is_literal_regex(content: &[u8]) -> bool {
             } else if is_regex_escape_metachar(next) {
                 return false;
             } else {
-                // Simple backslash escape of a non-metachar (e.g., `\.`, `\t`, `\n`)
                 i += 2;
             }
         } else if is_literal_char(content[i]) {
@@ -117,22 +100,118 @@ fn is_literal_regex(content: &[u8]) -> bool {
             return false;
         }
     }
+
     true
 }
 
-/// Check if a node is a regex literal with no flags and a literal-only pattern.
 fn is_simple_regex_node(node: &ruby_prism::Node<'_>) -> bool {
     let regex_node = match node.as_regular_expression_node() {
         Some(r) => r,
         None => return false,
     };
-    // Skip if regex has flags (e.g., /pattern/i)
+
+    // RuboCop NodePattern requires `(regopt)` (no flags).
     let closing = regex_node.closing_loc().as_slice();
     if closing.len() > 1 {
         return false;
     }
-    let content = regex_node.content_loc().as_slice();
-    is_literal_regex(content)
+
+    is_literal_regex(regex_node.content_loc().as_slice())
+}
+
+#[inline]
+fn control_char(b: u8) -> u8 {
+    b & 0x1f
+}
+
+/// Decode regex content as RuboCop's interpret_string_escapes would for this literal subset.
+fn decode_regex_literal_bytes(content: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(content.len());
+    let mut i = 0;
+
+    while i < content.len() {
+        let b = content[i];
+        if b != b'\\' {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+
+        if i + 1 >= content.len() {
+            return None;
+        }
+
+        let next = content[i + 1];
+
+        if next == b'c' {
+            if i + 2 >= content.len() {
+                return None;
+            }
+            out.push(control_char(content[i + 2]));
+            i += 3;
+            continue;
+        }
+
+        if next == b'C' && i + 3 < content.len() && content[i + 2] == b'-' {
+            out.push(control_char(content[i + 3]));
+            i += 4;
+            continue;
+        }
+
+        if next == b'M' && i + 3 < content.len() && content[i + 2] == b'-' {
+            if content[i + 3] == b'\\' {
+                // \M-\cX
+                if i + 5 < content.len() && content[i + 4] == b'c' {
+                    out.push(control_char(content[i + 5]) | 0x80);
+                    i += 6;
+                    continue;
+                }
+                // \M-\C-X
+                if i + 6 < content.len() && content[i + 4] == b'C' && content[i + 5] == b'-' {
+                    out.push(control_char(content[i + 6]) | 0x80);
+                    i += 7;
+                    continue;
+                }
+            }
+
+            out.push(content[i + 3] | 0x80);
+            i += 4;
+            continue;
+        }
+
+        match next {
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'r' => out.push(b'\r'),
+            b'f' => out.push(0x0C),
+            b'v' => out.push(0x0B),
+            b'a' => out.push(0x07),
+            b'e' => out.push(0x1B),
+            _ => out.push(next),
+        }
+        i += 2;
+    }
+
+    Some(out)
+}
+
+fn to_double_quoted_string_literal(bytes: &[u8]) -> String {
+    let mut out = String::from("\"");
+    for &b in bytes {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x0B => out.push_str("\\v"),
+            0x0C => out.push_str("\\f"),
+            0x20..=0x7E => out.push(char::from(b)),
+            _ => out.push_str(&format!("\\x{:02X}", b)),
+        }
+    }
+    out.push('"');
+    out
 }
 
 impl Cop for StringInclude {
@@ -148,6 +227,10 @@ impl Cop for StringInclude {
         &[CALL_NODE, REGULAR_EXPRESSION_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -155,7 +238,7 @@ impl Cop for StringInclude {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -163,82 +246,191 @@ impl Cop for StringInclude {
         };
 
         let name = call.name().as_slice();
+        let dot = call
+            .call_operator_loc()
+            .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))
+            .unwrap_or(".");
 
-        let is_match = match name {
-            // str.match?(/regex/) or /regex/.match?(str) or str.match(/regex/) or /regex/.match(str)
+        let replacement = match name {
             b"match?" | b"match" => {
-                if call.receiver().is_none() {
-                    return;
-                }
+                let receiver = match call.receiver() {
+                    Some(r) => r,
+                    None => return,
+                };
                 let arguments = match call.arguments() {
                     Some(a) => a,
                     None => return,
                 };
                 let args: Vec<_> = arguments.arguments().iter().collect();
-                // RuboCop only matches single-argument calls; match(re, pos) is not flagged
                 if args.len() != 1 {
                     return;
                 }
-                let recv = call.receiver().unwrap();
+                let first_arg = &args[0];
 
-                // Either the argument or the receiver must be a simple regex
-                is_simple_regex_node(&args[0]) || is_simple_regex_node(&recv)
+                if let Some(regex_node) = first_arg.as_regular_expression_node() {
+                    if !is_simple_regex_node(first_arg) {
+                        return;
+                    }
+                    let literal =
+                        match decode_regex_literal_bytes(regex_node.content_loc().as_slice()) {
+                            Some(v) => v,
+                            None => return,
+                        };
+                    let recv_loc = receiver.location();
+                    let recv_source =
+                        source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+                    format!(
+                        "{recv_source}{dot}include?({})",
+                        to_double_quoted_string_literal(&literal)
+                    )
+                } else if let Some(regex_node) = receiver.as_regular_expression_node() {
+                    if !is_simple_regex_node(&receiver) {
+                        return;
+                    }
+                    let literal =
+                        match decode_regex_literal_bytes(regex_node.content_loc().as_slice()) {
+                            Some(v) => v,
+                            None => return,
+                        };
+                    let arg_loc = first_arg.location();
+                    let arg_source =
+                        source.byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "");
+                    format!(
+                        "{arg_source}{dot}include?({})",
+                        to_double_quoted_string_literal(&literal)
+                    )
+                } else {
+                    return;
+                }
             }
-
-            // /regex/ === str
             b"===" => {
-                let recv = match call.receiver() {
+                let receiver = match call.receiver() {
                     Some(r) => r,
                     None => return,
                 };
-                is_simple_regex_node(&recv)
+                if !is_simple_regex_node(&receiver) {
+                    return;
+                }
+                let regex_node = match receiver.as_regular_expression_node() {
+                    Some(r) => r,
+                    None => return,
+                };
+                let first_arg = match call.arguments().and_then(|a| a.arguments().iter().next()) {
+                    Some(a) => a,
+                    None => return,
+                };
+                let literal = match decode_regex_literal_bytes(regex_node.content_loc().as_slice())
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+                let arg_loc = first_arg.location();
+                let arg_source =
+                    source.byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "");
+                format!(
+                    "{arg_source}.include?({})",
+                    to_double_quoted_string_literal(&literal)
+                )
             }
-
-            // str =~ /regex/ or /regex/ =~ str (both directions)
             b"=~" => {
-                let recv = match call.receiver() {
+                let receiver = match call.receiver() {
                     Some(r) => r,
                     None => return,
                 };
-                let arguments = match call.arguments() {
+                let first_arg = match call.arguments().and_then(|a| a.arguments().iter().next()) {
                     Some(a) => a,
                     None => return,
                 };
-                let first_arg = match arguments.arguments().iter().next() {
-                    Some(a) => a,
-                    None => return,
-                };
-                is_simple_regex_node(&recv) || is_simple_regex_node(&first_arg)
-            }
 
-            // str !~ /regex/ (regex as argument only; /regex/ !~ str is NOT flagged by RuboCop)
+                if let Some(regex_node) = first_arg.as_regular_expression_node() {
+                    if !is_simple_regex_node(&first_arg) {
+                        return;
+                    }
+                    let literal =
+                        match decode_regex_literal_bytes(regex_node.content_loc().as_slice()) {
+                            Some(v) => v,
+                            None => return,
+                        };
+                    let recv_loc = receiver.location();
+                    let recv_source =
+                        source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+                    format!(
+                        "{recv_source}.include?({})",
+                        to_double_quoted_string_literal(&literal)
+                    )
+                } else if let Some(regex_node) = receiver.as_regular_expression_node() {
+                    if !is_simple_regex_node(&receiver) {
+                        return;
+                    }
+                    let literal =
+                        match decode_regex_literal_bytes(regex_node.content_loc().as_slice()) {
+                            Some(v) => v,
+                            None => return,
+                        };
+                    let arg_loc = first_arg.location();
+                    let arg_source =
+                        source.byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "");
+                    format!(
+                        "{arg_source}.include?({})",
+                        to_double_quoted_string_literal(&literal)
+                    )
+                } else {
+                    return;
+                }
+            }
             b"!~" => {
-                let arguments = match call.arguments() {
+                let receiver = match call.receiver() {
+                    Some(r) => r,
+                    None => return,
+                };
+                let first_arg = match call.arguments().and_then(|a| a.arguments().iter().next()) {
                     Some(a) => a,
                     None => return,
                 };
-                let first_arg = match arguments.arguments().iter().next() {
-                    Some(a) => a,
+                let regex_node = match first_arg.as_regular_expression_node() {
+                    Some(r) => r,
                     None => return,
                 };
-                is_simple_regex_node(&first_arg)
+                if !is_simple_regex_node(&first_arg) {
+                    return;
+                }
+                let literal = match decode_regex_literal_bytes(regex_node.content_loc().as_slice())
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+                let recv_loc = receiver.location();
+                let recv_source =
+                    source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+                format!(
+                    "!{recv_source}.include?({})",
+                    to_double_quoted_string_literal(&literal)
+                )
             }
-
             _ => return,
         };
 
-        if !is_match {
-            return;
-        }
-
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `String#include?` instead of a regex match with literal-only pattern.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -247,4 +439,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(StringInclude, "cops/performance/string_include");
+    crate::cop_autocorrect_fixture_tests!(StringInclude, "cops/performance/string_include");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(StringInclude.supports_autocorrect());
+    }
 }

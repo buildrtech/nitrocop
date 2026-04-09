@@ -15,14 +15,10 @@ use crate::parse::source::SourceFile;
 /// The `call.arguments().is_none()` guard already ensures no arguments.
 pub struct Casecmp;
 
-/// Check if a node is a valid RHS for casecmp: string literal, downcase/upcase call,
-/// or parenthesized string.
 fn is_valid_casecmp_operand(node: &ruby_prism::Node<'_>) -> bool {
-    // String literal (only simple strings, not interpolated)
     if node.as_string_node().is_some() {
         return true;
     }
-    // downcase/upcase call with receiver (no safe navigation)
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
         if (name == b"downcase" || name == b"upcase")
@@ -33,7 +29,6 @@ fn is_valid_casecmp_operand(node: &ruby_prism::Node<'_>) -> bool {
             return true;
         }
     }
-    // Parenthesized string: (begin str) — only simple strings
     if let Some(parens) = node.as_parentheses_node() {
         if let Some(body) = parens.body() {
             if let Some(stmts) = body.as_statements_node() {
@@ -50,7 +45,6 @@ fn is_valid_casecmp_operand(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-/// Check if a call node has safe navigation (&.) operator.
 fn has_safe_navigation(call: &ruby_prism::CallNode<'_>) -> bool {
     if let Some(op) = call.call_operator_loc() {
         return op.as_slice() == b"&.";
@@ -58,13 +52,38 @@ fn has_safe_navigation(call: &ruby_prism::CallNode<'_>) -> bool {
     false
 }
 
-/// Check if a call is a downcase/upcase call with no arguments and no safe navigation.
 fn is_case_method(call: &ruby_prism::CallNode<'_>) -> bool {
     let name = call.name().as_slice();
     (name == b"downcase" || name == b"upcase")
         && call.receiver().is_some()
         && call.arguments().is_none()
         && !has_safe_navigation(call)
+}
+
+fn build_casecmp_replacement(
+    source: &SourceFile,
+    variable: &ruby_prism::Node<'_>,
+    arg: &ruby_prism::Node<'_>,
+    negated: bool,
+) -> String {
+    let variable_loc = variable.location();
+    let variable_source = source.byte_slice(variable_loc.start_offset(), variable_loc.end_offset(), "");
+    let arg_loc = arg.location();
+    let arg_source = source.byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "");
+
+    let mut replacement = String::new();
+    if negated {
+        replacement.push('!');
+    }
+    replacement.push_str(variable_source);
+
+    if arg.as_call_node().is_some() || arg.as_parentheses_node().is_none() {
+        replacement.push_str(&format!(".casecmp({arg_source}).zero?"));
+    } else {
+        replacement.push_str(&format!(".casecmp{arg_source}.zero?"));
+    }
+
+    replacement
 }
 
 impl Cop for Casecmp {
@@ -84,6 +103,10 @@ impl Cop for Casecmp {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -91,7 +114,7 @@ impl Cop for Casecmp {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let outer_call = match node.as_call_node() {
             Some(c) => c,
@@ -100,7 +123,9 @@ impl Cop for Casecmp {
 
         let method = outer_call.name().as_slice();
 
-        // Handle == and != operators
+        let mut message = None::<String>;
+        let mut replacement = None::<String>;
+
         if method == b"==" || method == b"!=" {
             let receiver = match outer_call.receiver() {
                 Some(r) => r,
@@ -116,51 +141,55 @@ impl Cop for Casecmp {
             }
             let rhs = &args[0];
 
-            // Pattern 1: x.downcase == valid_rhs
             if let Some(recv_call) = receiver.as_call_node() {
                 if is_case_method(&recv_call) && is_valid_casecmp_operand(rhs) {
                     let case_method =
                         std::str::from_utf8(recv_call.name().as_slice()).unwrap_or("downcase");
                     let op = std::str::from_utf8(method).unwrap_or("==");
-                    let loc = node.location();
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    message = Some(format!("Use `casecmp` instead of `{case_method} {op}`."));
+
+                    let variable = match recv_call.receiver() {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    replacement = Some(build_casecmp_replacement(
                         source,
-                        line,
-                        column,
-                        format!("Use `casecmp` instead of `{case_method} {op}`."),
+                        &variable,
+                        rhs,
+                        method == b"!=",
                     ));
-                    return;
                 }
             }
 
-            // Pattern 2: valid_lhs == x.downcase (reversed operand order)
-            if let Some(rhs_call) = rhs.as_call_node() {
-                if is_case_method(&rhs_call) && is_valid_casecmp_operand(&receiver) {
-                    let case_method =
-                        std::str::from_utf8(rhs_call.name().as_slice()).unwrap_or("downcase");
-                    let op = std::str::from_utf8(method).unwrap_or("==");
-                    let loc = node.location();
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        format!("Use `casecmp` instead of `{op} {case_method}`."),
-                    ));
-                    return;
+            if replacement.is_none() {
+                if let Some(rhs_call) = rhs.as_call_node() {
+                    if is_case_method(&rhs_call) && is_valid_casecmp_operand(&receiver) {
+                        let case_method =
+                            std::str::from_utf8(rhs_call.name().as_slice()).unwrap_or("downcase");
+                        let op = std::str::from_utf8(method).unwrap_or("==");
+                        message = Some(format!("Use `casecmp` instead of `{op} {case_method}`."));
+
+                        let variable = match rhs_call.receiver() {
+                            Some(v) => v,
+                            None => return,
+                        };
+                        replacement = Some(build_casecmp_replacement(
+                            source,
+                            &variable,
+                            &receiver,
+                            method == b"!=",
+                        ));
+                    }
                 }
             }
         }
 
-        // Handle eql? method: x.downcase.eql?(y)
-        if method == b"eql?" {
+        if method == b"eql?" && replacement.is_none() {
             let receiver = match outer_call.receiver() {
                 Some(r) => r,
                 None => return,
             };
 
-            // receiver should be a downcase/upcase call
             let recv_call = match receiver.as_call_node() {
                 Some(c) => c,
                 None => return,
@@ -170,7 +199,6 @@ impl Cop for Casecmp {
                 return;
             }
 
-            // Get the argument to eql?
             let args: Vec<_> = match outer_call.arguments() {
                 Some(a) => a.arguments().iter().collect(),
                 None => return,
@@ -182,16 +210,37 @@ impl Cop for Casecmp {
             if is_valid_casecmp_operand(&args[0]) {
                 let case_method =
                     std::str::from_utf8(recv_call.name().as_slice()).unwrap_or("downcase");
-                let loc = node.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("Use `casecmp` instead of `{case_method} eql?`."),
-                ));
+                message = Some(format!("Use `casecmp` instead of `{case_method} eql?`."));
+
+                let variable = match recv_call.receiver() {
+                    Some(v) => v,
+                    None => return,
+                };
+                replacement = Some(build_casecmp_replacement(source, &variable, &args[0], false));
             }
         }
+
+        let (message, replacement) = match (message, replacement) {
+            (Some(m), Some(r)) => (m, r),
+            _ => return,
+        };
+
+        let loc = node.location();
+        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let mut diagnostic = self.diagnostic(source, line, column, message);
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -199,4 +248,10 @@ impl Cop for Casecmp {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Casecmp, "cops/performance/casecmp");
+    crate::cop_autocorrect_fixture_tests!(Casecmp, "cops/performance/casecmp");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Casecmp.supports_autocorrect());
+    }
 }
