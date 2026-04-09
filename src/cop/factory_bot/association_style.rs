@@ -116,6 +116,10 @@ impl Cop for AssociationStyle {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -123,7 +127,7 @@ impl Cop for AssociationStyle {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -173,12 +177,37 @@ impl Cop for AssociationStyle {
                 {
                     let loc = child.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Use implicit style to define associations.".to_string(),
-                    ));
+                    );
+
+                    // Conservative autocorrect baseline: only convert
+                    // `association :name` (single symbol, no extra args/options)
+                    // to `name`.
+                    if let Some(ref mut corr) = corrections
+                        && let Some(call) = child.as_call_node()
+                        && let Some(args) = call.arguments()
+                    {
+                        let arg_list: Vec<_> = args.arguments().iter().collect();
+                        if arg_list.len() == 1
+                            && let Some(sym) = arg_list[0].as_symbol_node()
+                            && let Ok(name) = std::str::from_utf8(sym.unescaped())
+                        {
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: name.to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             } else if is_implicit_association(child, node) {
                 let loc = child.location();
@@ -381,4 +410,18 @@ fn is_trait_within_factory(method_name: &str, factory_node: &ruby_prism::Node<'_
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AssociationStyle, "cops/factorybot/association_style");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(AssociationStyle.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_explicit_to_implicit_style() {
+        crate::testutil::assert_cop_autocorrect(
+            &AssociationStyle,
+            b"factory :article do\n  association :user\nend\n",
+            b"factory :article do\n  user\nend\n",
+        );
+    }
 }
