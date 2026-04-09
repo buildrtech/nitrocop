@@ -26,6 +26,10 @@ impl Cop for SortReverse {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -33,7 +37,7 @@ impl Cop for SortReverse {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // This cop detects `sort { |a, b| b <=> a }` and suggests `.sort.reverse`.
         // Look for a `sort` call with a block that has exactly `b <=> a` (reversed
@@ -55,29 +59,36 @@ impl Cop for SortReverse {
             None => return,
         };
 
-        // Must have exactly 2 block parameters
-        let block_params = match block.parameters() {
-            Some(p) => match p.as_block_parameters_node() {
-                Some(bp) => bp,
-                None => return,
-            },
-            None => return,
-        };
-        let params_inner = match block_params.parameters() {
-            Some(p) => p,
-            None => return,
-        };
-        let requireds: Vec<_> = params_inner.requireds().iter().collect();
-        if requireds.len() != 2 {
+        // Must have exactly 2 block parameters (regular block) or numbered params (_1/_2).
+        let (param_a, param_b) = if let Some(params) = block.parameters() {
+            if let Some(block_params) = params.as_block_parameters_node() {
+                let params_inner = match block_params.parameters() {
+                    Some(p) => p,
+                    None => return,
+                };
+                let requireds: Vec<_> = params_inner.requireds().iter().collect();
+                if requireds.len() != 2 {
+                    return;
+                }
+                let a = match requireds[0].as_required_parameter_node() {
+                    Some(p) => p.name().as_slice().to_vec(),
+                    None => return,
+                };
+                let b = match requireds[1].as_required_parameter_node() {
+                    Some(p) => p.name().as_slice().to_vec(),
+                    None => return,
+                };
+                (a, b)
+            } else if let Some(numbered) = params.as_numbered_parameters_node() {
+                if numbered.maximum() != 2 {
+                    return;
+                }
+                (b"_1".to_vec(), b"_2".to_vec())
+            } else {
+                return;
+            }
+        } else {
             return;
-        }
-        let param_a = match requireds[0].as_required_parameter_node() {
-            Some(p) => p.name().as_slice().to_vec(),
-            None => return,
-        };
-        let param_b = match requireds[1].as_required_parameter_node() {
-            Some(p) => p.name().as_slice().to_vec(),
-            None => return,
         };
 
         // Block body must be a single `b <=> a` expression (reversed order)
@@ -128,12 +139,30 @@ impl Cop for SortReverse {
         if recv_name == param_b && arg_name == param_a {
             let loc = call.message_loc().unwrap_or(call.location());
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Use `sort.reverse` instead of `sort { |a, b| b <=> a }`.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                let method_loc = call.message_loc().unwrap_or(call.location());
+                let dot = call
+                    .call_operator_loc()
+                    .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))
+                    .unwrap_or(".");
+                corr.push(crate::correction::Correction {
+                    start: method_loc.start_offset(),
+                    end: call.location().end_offset(),
+                    replacement: format!("sort{dot}reverse"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -143,4 +172,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SortReverse, "cops/performance/sort_reverse");
+    crate::cop_autocorrect_fixture_tests!(SortReverse, "cops/performance/sort_reverse");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(SortReverse.supports_autocorrect());
+    }
 }

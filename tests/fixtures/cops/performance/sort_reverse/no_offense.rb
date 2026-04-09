@@ -4,3 +4,4 @@
 arr.sort_by { |x| -x }
 arr.reverse
 arr.sort { |a, b| a.name <=> b.name }
+nums.sort { _1 <=> _2 }
