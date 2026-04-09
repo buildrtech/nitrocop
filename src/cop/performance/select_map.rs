@@ -57,6 +57,31 @@ fn find_select_in_block_body<'a>(
 /// select/filter.
 pub struct SelectMap;
 
+fn symbol_block_pass_name(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    let bp = call.block()?.as_block_argument_node()?;
+    let expr = bp.expression()?;
+    let sym = expr.as_symbol_node()?;
+    let name = String::from_utf8_lossy(sym.unescaped()).to_string();
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '!' || c == '?')
+    {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    source
+        .byte_slice(
+            node.location().start_offset(),
+            node.location().end_offset(),
+            "",
+        )
+        .to_string()
+}
+
 impl Cop for SelectMap {
     fn name(&self) -> &'static str {
         "Performance/SelectMap"
@@ -74,6 +99,10 @@ impl Cop for SelectMap {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -81,7 +110,7 @@ impl Cop for SelectMap {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match as_method_chain(node) {
             Some(c) => c,
@@ -152,12 +181,45 @@ impl Cop for SelectMap {
             .message_loc()
             .unwrap_or_else(|| select_call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `filter_map` instead of `{inner_name}.map`."),
-        ));
+        );
+
+        // Conservative autocorrect: direct select/filter + map chain where both
+        // hops are symbol block-pass forms (`select(&:a).map(&:b)`).
+        if inner == b"select" || inner == b"filter" {
+            let outer_call = match node.as_call_node() {
+                Some(c) => c,
+                None => {
+                    diagnostics.push(diagnostic);
+                    return;
+                }
+            };
+            if let Some(pred) = symbol_block_pass_name(&select_call)
+                && let Some(mapper) = symbol_block_pass_name(&outer_call)
+                && let Some(ref mut corr) = corrections
+            {
+                let body = format!("o.{mapper} if o.{pred}");
+                let replacement = if let Some(base) = select_call.receiver() {
+                    format!("{}.filter_map {{ |o| {} }}", node_source(source, &base), body)
+                } else {
+                    format!("filter_map {{ |o| {} }}", body)
+                };
+                corr.push(crate::correction::Correction {
+                    start: select_call.location().start_offset(),
+                    end: outer_call.location().end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -166,4 +228,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SelectMap, "cops/performance/select_map");
+    crate::cop_autocorrect_fixture_tests!(SelectMap, "cops/performance/select_map");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(SelectMap.supports_autocorrect());
+    }
 }
