@@ -1,0 +1,8 @@
+foo.method(:bar).bind_call(obj)
+foo.method(:bar).bind_call(obj, arg1, arg2)
+Foo.method(:something).bind_call(obj)
+umethod.bind_call(obj, foo, bar)
+umethod.bind_call(a)
+umethod.bind_call(a, *p)
+CONSTANT.bind_call(obj)
+bind_call(object, *args, &block)
