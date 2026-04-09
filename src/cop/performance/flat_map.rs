@@ -28,6 +28,10 @@ impl Cop for FlatMap {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -35,7 +39,7 @@ impl Cop for FlatMap {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enabled_for_flatten_without_params =
             config.get_bool("EnabledForFlattenWithoutParams", false);
@@ -56,6 +60,7 @@ impl Cop for FlatMap {
         // Check flatten argument: only flag no-arg flatten (when config allows) or flatten(1).
         // flatten(2), flatten(3), etc. should NOT be flagged.
         let has_args = outer_call.arguments().is_some();
+        let mut autocorrectable = false;
         if has_args {
             // Only flag if the argument is exactly the integer literal 1
             let args = outer_call.arguments().unwrap();
@@ -72,6 +77,7 @@ impl Cop for FlatMap {
             if !is_one {
                 return;
             }
+            autocorrectable = true;
         } else if !enabled_for_flatten_without_params {
             // No args and config says don't flag bare flatten
             return;
@@ -127,12 +133,32 @@ impl Cop for FlatMap {
             .message_loc()
             .unwrap_or(chain.inner_call.location());
         let (line, column) = source.offset_to_line_col(inner_msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `flat_map` instead of `{inner_name}...{flatten_name}`."),
-        ));
+        );
+
+        if autocorrectable && let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: inner_msg_loc.start_offset(),
+                end: inner_msg_loc.end_offset(),
+                replacement: "flat_map".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            corr.push(crate::correction::Correction {
+                start: chain.inner_call.location().end_offset(),
+                end: outer_call.location().end_offset(),
+                replacement: String::new(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -140,6 +166,12 @@ impl Cop for FlatMap {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FlatMap, "cops/performance/flat_map");
+    crate::cop_autocorrect_fixture_tests!(FlatMap, "cops/performance/flat_map");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(FlatMap.supports_autocorrect());
+    }
 
     #[test]
     fn disabled_for_flatten_without_params_skips_bare_flatten() {
