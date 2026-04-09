@@ -66,6 +66,10 @@ impl Cop for MinitestAssertions {
         &[CALL_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -73,7 +77,7 @@ impl Cop for MinitestAssertions {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -99,7 +103,7 @@ impl Cop for MinitestAssertions {
         let negated = is_negated(method);
         let runner = if negated { "not_to" } else { "to" };
 
-        let preferred = match method {
+        let (preferred, autocorrectable) = match method {
             // Two-arg assertions: assert_equal(expected, actual [, msg])
             b"assert_equal" | b"assert_not_equal" | b"refute_equal" => {
                 if arg_list.len() < 2 {
@@ -107,7 +111,10 @@ impl Cop for MinitestAssertions {
                 }
                 let expected = source_text(source, &arg_list[0]);
                 let actual = source_text(source, &arg_list[1]);
-                format!("expect({actual}).{runner} eq({expected})")
+                (
+                    format!("expect({actual}).{runner} eq({expected})"),
+                    arg_list.len() == 2,
+                )
             }
 
             // Two-arg: assert_kind_of(klass, actual [, msg])
@@ -117,7 +124,10 @@ impl Cop for MinitestAssertions {
                 }
                 let expected = source_text(source, &arg_list[0]);
                 let actual = source_text(source, &arg_list[1]);
-                format!("expect({actual}).{runner} be_a_kind_of({expected})")
+                (
+                    format!("expect({actual}).{runner} be_a_kind_of({expected})"),
+                    arg_list.len() == 2,
+                )
             }
 
             // Two-arg: assert_instance_of(klass, actual [, msg])
@@ -127,7 +137,10 @@ impl Cop for MinitestAssertions {
                 }
                 let expected = source_text(source, &arg_list[0]);
                 let actual = source_text(source, &arg_list[1]);
-                format!("expect({actual}).{runner} be_an_instance_of({expected})")
+                (
+                    format!("expect({actual}).{runner} be_an_instance_of({expected})"),
+                    arg_list.len() == 2,
+                )
             }
 
             // Two-arg: assert_includes(collection, member [, msg])
@@ -137,7 +150,10 @@ impl Cop for MinitestAssertions {
                 }
                 let collection = source_text(source, &arg_list[0]);
                 let member = source_text(source, &arg_list[1]);
-                format!("expect({collection}).{runner} include({member})")
+                (
+                    format!("expect({collection}).{runner} include({member})"),
+                    arg_list.len() == 2,
+                )
             }
 
             // assert_in_delta(expected, actual [, delta [, msg]])
@@ -152,7 +168,10 @@ impl Cop for MinitestAssertions {
                 } else {
                     "0.001".to_string()
                 };
-                format!("expect({actual}).{runner} be_within({delta}).of({expected})")
+                (
+                    format!("expect({actual}).{runner} be_within({delta}).of({expected})"),
+                    arg_list.len() <= 3,
+                )
             }
 
             // Two-arg: assert_match(pattern, actual [, msg])
@@ -162,7 +181,10 @@ impl Cop for MinitestAssertions {
                 }
                 let pattern = source_text(source, &arg_list[0]);
                 let actual = source_text(source, &arg_list[1]);
-                format!("expect({actual}).{runner} match({pattern})")
+                (
+                    format!("expect({actual}).{runner} match({pattern})"),
+                    arg_list.len() == 2,
+                )
             }
 
             // One-arg: assert_nil(actual [, msg])
@@ -171,7 +193,7 @@ impl Cop for MinitestAssertions {
                     return;
                 }
                 let actual = source_text(source, &arg_list[0]);
-                format!("expect({actual}).{runner} eq(nil)")
+                (format!("expect({actual}).{runner} eq(nil)"), arg_list.len() == 1)
             }
 
             // One-arg: assert_empty(actual [, msg])
@@ -180,7 +202,7 @@ impl Cop for MinitestAssertions {
                     return;
                 }
                 let actual = source_text(source, &arg_list[0]);
-                format!("expect({actual}).{runner} be_empty")
+                (format!("expect({actual}).{runner} be_empty"), arg_list.len() == 1)
             }
 
             // One-arg: assert_true(actual [, msg])
@@ -189,7 +211,7 @@ impl Cop for MinitestAssertions {
                     return;
                 }
                 let actual = source_text(source, &arg_list[0]);
-                format!("expect({actual}).to be(true)")
+                (format!("expect({actual}).to be(true)"), arg_list.len() == 1)
             }
 
             // One-arg: assert_false(actual [, msg])
@@ -198,7 +220,7 @@ impl Cop for MinitestAssertions {
                     return;
                 }
                 let actual = source_text(source, &arg_list[0]);
-                format!("expect({actual}).to be(false)")
+                (format!("expect({actual}).to be(false)"), arg_list.len() == 1)
             }
 
             // Two-arg: assert_predicate(subject, predicate [, msg])
@@ -218,7 +240,10 @@ impl Cop for MinitestAssertions {
                 }
                 let actual = source_text(source, &arg_list[0]);
                 let be_method = &pred_str[..pred_str.len() - 1]; // strip trailing ?
-                format!("expect({actual}).{runner} be_{be_method}")
+                (
+                    format!("expect({actual}).{runner} be_{be_method}"),
+                    arg_list.len() == 2,
+                )
             }
 
             // One-arg: assert_response(expected [, msg])
@@ -227,7 +252,10 @@ impl Cop for MinitestAssertions {
                     return;
                 }
                 let expected = source_text(source, &arg_list[0]);
-                format!("expect(response).to have_http_status({expected})")
+                (
+                    format!("expect(response).to have_http_status({expected})"),
+                    arg_list.len() == 1,
+                )
             }
 
             _ => return,
@@ -235,7 +263,20 @@ impl Cop for MinitestAssertions {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, format!("Use `{preferred}`.")));
+        let mut diagnostic = self.diagnostic(source, line, column, format!("Use `{preferred}`."));
+
+        if autocorrectable && let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: preferred,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -243,4 +284,30 @@ impl Cop for MinitestAssertions {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MinitestAssertions, "cops/rspecrails/minitest_assertions");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(MinitestAssertions.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_assert_equal() {
+        crate::testutil::assert_cop_autocorrect(
+            &MinitestAssertions,
+            b"assert_equal(a, b)\n",
+            b"expect(b).to eq(a)\n",
+        );
+    }
+
+    #[test]
+    fn does_not_autocorrect_when_failure_message_present() {
+        let (_diags, corrections) = crate::testutil::run_cop_autocorrect(
+            &MinitestAssertions,
+            b"assert_equal(a, b, \"must be equal\")\n",
+        );
+        assert!(
+            corrections.is_empty(),
+            "Expected no corrections for failure-message form"
+        );
+    }
 }
