@@ -32,6 +32,7 @@
 - RSpec/InstanceSpy parity follow-up: extend autocorrect beyond local-variable assignment baseline to symbol-based and dynamically-defined method contexts handled by upstream pattern search.
 - RSpec/ReceiveCounts parity follow-up: validate autocorrect range behavior on parenthesized runner forms and chained matcher wrappers (`to(receive(...).and_return(...)).exactly(1).times`) to ensure full RuboCop replacement parity.
 - RSpec/ExpectChange parity follow-up: verify dynamic receiver safety and argument/chained-call exclusions remain aligned with RuboCop’s unsafe-autocorrect boundaries in both `method_call` and `block` styles.
+- RSpec/PredicateMatcher parity follow-up: extend autocorrect beyond no-arg inflected baseline to argument-bearing predicate calls and explicit-style rewrites while preserving heredoc/uncorrectable matcher guards.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.

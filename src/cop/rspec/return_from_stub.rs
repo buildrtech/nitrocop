@@ -110,6 +110,10 @@ impl Cop for ReturnFromStub {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -117,7 +121,7 @@ impl Cop for ReturnFromStub {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: EnforcedStyle — "and_return" (default) or "block"
         let enforced_style = config.get_str("EnforcedStyle", "and_return");
@@ -139,12 +143,34 @@ impl Cop for ReturnFromStub {
                             if !arg_list.is_empty() && arg_list.iter().all(|a| is_static_value(a)) {
                                 let loc = call.location();
                                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                                diagnostics.push(self.diagnostic(
+                                let mut diagnostic = self.diagnostic(
                                     source,
                                     line,
                                     column,
                                     "Use a block for static values.".to_string(),
-                                ));
+                                );
+
+                                if let Some(ref mut corr) = corrections
+                                    && let Some(recv) = call.receiver()
+                                {
+                                    let recv_loc = recv.location();
+                                    let arg = &arg_list[0];
+                                    let ret = source.byte_slice(
+                                        arg.location().start_offset(),
+                                        arg.location().end_offset(),
+                                        "",
+                                    );
+                                    corr.push(crate::correction::Correction {
+                                        start: recv_loc.end_offset(),
+                                        end: loc.end_offset(),
+                                        replacement: format!(" {{ {ret} }}"),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+
+                                diagnostics.push(diagnostic);
                             }
                         }
                     }
@@ -421,5 +447,31 @@ mod tests {
         let source = b"allow(foo).to receive(:bar) { 42 }\n";
         let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ReturnFromStub.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_block_style_from_and_return() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ReturnFromStub,
+            b"allow(foo).to receive(:bar).and_return(42)\n",
+            b"allow(foo).to receive(:bar) { 42 }\n",
+            config,
+        );
     }
 }
