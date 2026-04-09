@@ -38,6 +38,7 @@
 - RSpec/VerifiedDoubleReference parity follow-up: validate autocorrect behavior for escaped string constants/namespaced strings and maintain safety docs around class-loading side effects.
 - RSpec/ImplicitExpect parity follow-up: verify autocorrect token mapping parity for all runner aliases and preserve offense-range fidelity in nested/parenthesized expectation forms.
 - FactoryBot/SyntaxMethods parity follow-up: validate autocorrect range behavior for namespaced receiver forms and multiline call formatting so prefix removal preserves surrounding layout/comments.
+- FactoryBot/AssociationStyle parity follow-up: extend autocorrect beyond simple `association :name` to RuboCop-style factory/trait option transforms and explicit-style rewrites while preserving strategy/keyword safety guards.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
