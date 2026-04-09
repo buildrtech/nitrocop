@@ -23,6 +23,10 @@ impl Cop for SyntaxMethods {
         FACTORY_BOT_SPEC_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -30,13 +34,14 @@ impl Cop for SyntaxMethods {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = SyntaxMethodsVisitor {
             cop: self,
             source,
             in_example_group: false,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -48,6 +53,7 @@ struct SyntaxMethodsVisitor<'a> {
     source: &'a SourceFile,
     in_example_group: bool,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 /// Check if a call node is an RSpec example group (describe/context/feature/etc.)
@@ -85,12 +91,27 @@ impl<'pr> Visit<'pr> for SyntaxMethodsVisitor<'_> {
                         let recv_loc = recv.location();
                         let (line, column) =
                             self.source.offset_to_line_col(recv_loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             format!("Use `{}` from `FactoryBot::Syntax::Methods`.", method_str),
-                        ));
+                        );
+
+                        if let Some(ref mut corr) = self.corrections
+                            && let Some(selector) = node.message_loc()
+                        {
+                            corr.push(crate::correction::Correction {
+                                start: node.location().start_offset(),
+                                end: selector.start_offset(),
+                                replacement: String::new(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -112,4 +133,18 @@ impl<'pr> Visit<'pr> for SyntaxMethodsVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SyntaxMethods, "cops/factorybot/syntax_methods");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(SyntaxMethods.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_factory_bot_receiver_prefix() {
+        crate::testutil::assert_cop_autocorrect(
+            &SyntaxMethods,
+            b"RSpec.describe Foo do\n  let(:bar) { FactoryBot.create(:bar) }\nend\n",
+            b"RSpec.describe Foo do\n  let(:bar) { create(:bar) }\nend\n",
+        );
+    }
 }
