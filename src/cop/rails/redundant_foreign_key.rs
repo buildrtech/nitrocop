@@ -96,6 +96,10 @@ impl Cop for RedundantForeignKey {
         &[CALL_NODE, STRING_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -103,7 +107,7 @@ impl Cop for RedundantForeignKey {
         parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -236,12 +240,101 @@ impl Cop for RedundantForeignKey {
             let offset = keyword_arg_pair_start_offset(&call, b"foreign_key")
                 .unwrap_or_else(|| node.location().start_offset());
             let (line, column) = source.offset_to_line_col(offset);
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Specifying the default value for `foreign_key` is redundant.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections
+                && let Some(args) = call.arguments()
+            {
+                let arg_list: Vec<_> = args.arguments().iter().collect();
+
+                for (arg_index, arg) in arg_list.iter().enumerate() {
+                    let elements: Vec<_> = if let Some(kw) = arg.as_keyword_hash_node() {
+                        kw.elements().iter().collect()
+                    } else if let Some(hash) = arg.as_hash_node() {
+                        hash.elements().iter().collect()
+                    } else {
+                        continue;
+                    };
+
+                    let target_index = elements.iter().position(|elem| {
+                        elem.as_assoc_node()
+                            .and_then(|assoc| assoc.key().as_symbol_node())
+                            .is_some_and(|sym| sym.unescaped() == b"foreign_key")
+                    });
+
+                    let Some(target_index) = target_index else {
+                        continue;
+                    };
+
+                    // If this hash argument only contains foreign_key, remove the whole argument
+                    // (including comma/spacing), not just the pair, to avoid dangling commas.
+                    let (start, end) = if elements.len() == 1 {
+                        let arg_loc = arg.location();
+                        if arg_index + 1 < arg_list.len() {
+                            (arg_loc.start_offset(), arg_list[arg_index + 1].location().start_offset())
+                        } else if arg_index > 0 {
+                            let prev_end = arg_list[arg_index - 1].location().end_offset();
+                            let mut start = arg_loc.start_offset();
+                            let bytes = source.as_bytes();
+                            let mut i = arg_loc.start_offset();
+                            while i > prev_end {
+                                i -= 1;
+                                if bytes[i] == b',' {
+                                    start = i;
+                                    break;
+                                }
+                            }
+                            (start, arg_loc.end_offset())
+                        } else {
+                            (arg_loc.start_offset(), arg_loc.end_offset())
+                        }
+                    } else {
+                        let target_assoc = elements[target_index]
+                            .as_assoc_node()
+                            .expect("target index should be assoc node");
+                        let target_loc = target_assoc.location();
+
+                        if target_index + 1 < elements.len() {
+                            (
+                                target_loc.start_offset(),
+                                elements[target_index + 1].location().start_offset(),
+                            )
+                        } else {
+                            let prev_end = elements[target_index - 1].location().end_offset();
+                            let mut start = target_loc.start_offset();
+                            let bytes = source.as_bytes();
+                            let mut i = target_loc.start_offset();
+                            while i > prev_end {
+                                i -= 1;
+                                if bytes[i] == b',' {
+                                    start = i;
+                                    break;
+                                }
+                            }
+                            (start, target_loc.end_offset())
+                        }
+                    };
+
+                    if start < end {
+                        corr.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    break;
+                }
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -250,4 +343,10 @@ impl Cop for RedundantForeignKey {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantForeignKey, "cops/rails/redundant_foreign_key");
+    crate::cop_autocorrect_fixture_tests!(RedundantForeignKey, "cops/rails/redundant_foreign_key");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantForeignKey.supports_autocorrect());
+    }
 }
