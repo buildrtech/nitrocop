@@ -23,6 +23,10 @@ impl Cop for AvoidSetupHook {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for AvoidSetupHook {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -59,12 +63,23 @@ impl Cop for AvoidSetupHook {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Use `before` instead of `setup`.".to_string(),
-        ));
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Use `before` instead of `setup`.".to_string());
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: "before".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -72,4 +87,18 @@ impl Cop for AvoidSetupHook {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AvoidSetupHook, "cops/rspecrails/avoid_setup_hook");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(AvoidSetupHook.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_setup_to_before() {
+        crate::testutil::assert_cop_autocorrect(
+            &AvoidSetupHook,
+            b"setup do\n  create_users\nend\n",
+            b"before do\n  create_users\nend\n",
+        );
+    }
 }
