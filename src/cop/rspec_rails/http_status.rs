@@ -160,6 +160,10 @@ impl Cop for HttpStatus {
         &[CALL_NODE, INTEGER_NODE, STRING_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -167,7 +171,7 @@ impl Cop for HttpStatus {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "symbolic");
 
@@ -197,12 +201,39 @@ impl Cop for HttpStatus {
 
         let arg = &arg_list[0];
 
-        let result = match style {
+        let mut result = match style {
             "symbolic" => self.check_symbolic_style(source, &call, arg),
             "numeric" => self.check_numeric_style(source, &call, arg),
             "be_status" => self.check_be_status_style(source, &call, arg),
             _ => Vec::new(),
         };
+
+        // Conservative baseline autocorrect: symbolic style integer code
+        // `have_http_status 200` -> `have_http_status :ok` when a canonical
+        // Rack symbol mapping exists.
+        if style == "symbolic"
+            && let Some(int_node) = arg.as_integer_node()
+        {
+            let raw = std::str::from_utf8(int_node.location().as_slice()).unwrap_or("");
+            if let Ok(code_num) = raw.parse::<i64>()
+                && let Some(sym) = status_code_to_symbol(code_num)
+            {
+                if let Some(ref mut corr) = corrections {
+                    let loc = int_node.location();
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: format!(":{sym}"),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    if let Some(first) = result.first_mut() {
+                        first.corrected = true;
+                    }
+                }
+            }
+        }
+
         diagnostics.extend(result);
     }
 }
@@ -447,6 +478,21 @@ mod tests {
         };
         let source = b"it { is_expected.to have_http_status :error }\n";
         assert_cop_no_offenses_full_with_config(&HttpStatus, source, config);
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(HttpStatus.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_symbolic_integer_status_to_symbol() {
+        let input = b"it { is_expected.to have_http_status 200 }\n";
+        crate::testutil::assert_cop_autocorrect(
+            &HttpStatus,
+            input,
+            b"it { is_expected.to have_http_status :ok }\n",
+        );
     }
 
     #[test]

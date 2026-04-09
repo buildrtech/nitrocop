@@ -13,7 +13,7 @@
 - Rails/RootPathnameMethods parity follow-up: extend autocorrect beyond current `File.join(Rails.root, ...)` baseline to broader RuboCop method-family rewrites (`File.read`, `Dir.glob`, `open`, and argument reshaping cases).
 - Rails/RakeEnvironment parity follow-up: extend autocorrect coverage to more hash-first-arg dependency forms and add fixture-level corrected snapshots for broader RuboCop parity.
 - Rails/RedundantReceiverInWithOptions parity follow-up: extend autocorrect beyond baseline receiver-dot deletion to RuboCop-style block-argument cleanup behavior in nested contexts.
-- Rails/RedundantPresenceValidationOnBelongsTo follow-up: revisit conservative autocorrect after reconciling rails-version-gated matching behavior in autocorrect test harness (current narrow attempt failed to emit corrections).
+- Rails/RedundantPresenceValidationOnBelongsTo parity follow-up: extend autocorrect beyond current exact `validates :assoc, presence: true` removal to multi-key and option-preserving rewrite branches aligned with RuboCop.
 - Rails/StrongParametersExpect parity follow-up: extend autocorrect coverage to dynamic require-key/value patterns while preserving message/range parity and Rails 8+ gating behavior.
 - Rails/TimeZone parity follow-up: extend autocorrect beyond current string-literal `to_time` rewrite toward dangerous `Time.*` call chains with explicit safety gates.
 - Rails/MatchRoute parity follow-up: expand autocorrect beyond selector-only no-`via` rewrites to safely remove/reshape `via:` options in single-method route definitions.
