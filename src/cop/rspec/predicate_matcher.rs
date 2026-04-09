@@ -29,6 +29,10 @@ impl Cop for PredicateMatcher {
         &[CALL_NODE, FALSE_NODE, TRUE_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -36,7 +40,7 @@ impl Cop for PredicateMatcher {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: Strict — when false, also match be(true)/be(false) in addition to be_truthy/be_falsey
         let strict = config.get_bool("Strict", true);
@@ -175,12 +179,44 @@ impl Cop for PredicateMatcher {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Prefer using `{suggested}` matcher over `{pred_str}`."),
-        ));
+        );
+
+        // Conservative inflected-style autocorrect baseline:
+        // only for no-arg/no-block predicate calls.
+        if predicate_call.arguments().is_none() && predicate_call.block().is_none() {
+            if let Some(expected_truthy) = matcher_truthiness(matcher)
+                && let Some(ref mut corr) = corrections
+            {
+                let recv = predicate_call.receiver().unwrap();
+                let recv_text = source.byte_slice(
+                    recv.location().start_offset(),
+                    recv.location().end_offset(),
+                    "",
+                );
+                let runner = if method_name == b"to" {
+                    if expected_truthy { "to" } else { "not_to" }
+                } else if expected_truthy {
+                    "not_to"
+                } else {
+                    "to"
+                };
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!("expect({recv_text}).{runner} {suggested}"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -215,43 +251,58 @@ fn matcher_to_predicate(matcher: &str) -> String {
     }
 }
 
-fn is_boolean_matcher(node: &ruby_prism::Node<'_>, strict: bool) -> bool {
-    let call = match node.as_call_node() {
-        Some(c) => c,
-        None => return false,
-    };
-
+fn matcher_truthiness(node: &ruby_prism::Node<'_>) -> Option<bool> {
+    let call = node.as_call_node()?;
     if call.receiver().is_some() {
-        return false;
+        return None;
     }
 
     let name = call.name().as_slice();
-
-    if matches!(
-        name,
-        b"be_truthy"
-            | b"be_falsey"
-            | b"be_falsy"
-            | b"a_truthy_value"
-            | b"a_falsey_value"
-            | b"a_falsy_value"
-    ) {
-        return true;
+    if matches!(name, b"be_truthy" | b"a_truthy_value") {
+        return Some(true);
+    }
+    if matches!(name, b"be_falsey" | b"be_falsy" | b"a_falsey_value" | b"a_falsy_value") {
+        return Some(false);
     }
 
-    // In non-strict mode, also match be(true)/be(false)/eq(true)/eq(false)/eql(true)/eql(false)/equal(true)/equal(false)
-    if !strict && (name == b"be" || name == b"eq" || name == b"eql" || name == b"equal") {
-        if let Some(args) = call.arguments() {
-            let arg_list: Vec<_> = args.arguments().iter().collect();
-            if arg_list.len() == 1
-                && (arg_list[0].as_true_node().is_some() || arg_list[0].as_false_node().is_some())
-            {
-                return true;
+    if (name == b"be" || name == b"eq" || name == b"eql" || name == b"equal")
+        && let Some(args) = call.arguments()
+    {
+        let arg_list: Vec<_> = args.arguments().iter().collect();
+        if arg_list.len() == 1 {
+            if arg_list[0].as_true_node().is_some() {
+                return Some(true);
+            }
+            if arg_list[0].as_false_node().is_some() {
+                return Some(false);
             }
         }
     }
 
-    false
+    None
+}
+
+fn is_boolean_matcher(node: &ruby_prism::Node<'_>, strict: bool) -> bool {
+    if strict {
+        let call = match node.as_call_node() {
+            Some(c) => c,
+            None => return false,
+        };
+        if call.receiver().is_some() {
+            return false;
+        }
+        matches!(
+            call.name().as_slice(),
+            b"be_truthy"
+                | b"be_falsey"
+                | b"be_falsy"
+                | b"a_truthy_value"
+                | b"a_falsey_value"
+                | b"a_falsy_value"
+        )
+    } else {
+        matcher_truthiness(node).is_some()
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +419,29 @@ mod tests {
             diags.len(),
             1,
             "eql(true) should be flagged in non-strict mode"
+        );
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(PredicateMatcher.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_inflected_truthy_case() {
+        crate::testutil::assert_cop_autocorrect(
+            &PredicateMatcher,
+            b"expect(foo.empty?).to be_truthy\n",
+            b"expect(foo).to be_empty\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_inflected_falsey_case() {
+        crate::testutil::assert_cop_autocorrect(
+            &PredicateMatcher,
+            b"expect(foo.empty?).to be_falsey\n",
+            b"expect(foo).not_to be_empty\n",
         );
     }
 }
