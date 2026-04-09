@@ -9,3 +9,4 @@
 - Performance/MapMethodChain: retry conservative two-hop autocorrect (`base.map(&:a).map(&:b)` -> `base.map { |e| e.a.b }`) by avoiding owned/borrowed `CallNode` traversal pitfalls that caused E0308/E0382 compile failures.
 - Performance/MethodObjectAsBlock: if revisiting autocorrect, replace whole call expression shape instead of only `&method(:sym)` token to avoid invalid/mismatched output in fixture checks.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
+- Performance/OpenStruct parity follow-up: evaluate safer argument-bearing rewrites (`OpenStruct.new(foo: 1)`-style) or keep autocorrect limited to zero-arg constructor cases only.
