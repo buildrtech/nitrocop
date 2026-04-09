@@ -136,11 +136,12 @@ fn collect_symbol_visibility_methods(
 }
 
 /// Collect public def nodes from a statement, including defs inside if/unless blocks.
-/// Appends (method_name_bytes, def_keyword_offset) tuples to `out`.
+/// Appends tuples: (method_name, def_keyword_offset, node_start, node_end, autocorrectable).
 fn collect_public_defs(
     node: &ruby_prism::Node<'_>,
     is_public: bool,
-    out: &mut Vec<(Vec<u8>, usize)>,
+    nested_scope: bool,
+    out: &mut Vec<(Vec<u8>, usize, usize, usize, bool)>,
 ) {
     // Direct def node
     if let Some(def_node) = node.as_def_node() {
@@ -148,6 +149,9 @@ fn collect_public_defs(
             out.push((
                 def_node.name().as_slice().to_vec(),
                 def_node.def_keyword_loc().start_offset(),
+                def_node.location().start_offset(),
+                def_node.location().end_offset(),
+                !nested_scope,
             ));
         }
         // Recurse into def body to find nested defs. This handles syntax-error cases
@@ -157,7 +161,7 @@ fn collect_public_defs(
         if let Some(body) = def_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 for child in stmts.body().iter() {
-                    collect_public_defs(&child, is_public, out);
+                    collect_public_defs(&child, is_public, true, out);
                 }
             }
         }
@@ -168,24 +172,24 @@ fn collect_public_defs(
     if let Some(if_node) = node.as_if_node() {
         if let Some(stmts) = if_node.statements() {
             for child in stmts.body().iter() {
-                collect_public_defs(&child, is_public, out);
+                collect_public_defs(&child, is_public, true, out);
             }
         }
         if let Some(subsequent) = if_node.subsequent() {
-            collect_public_defs(&subsequent, is_public, out);
+            collect_public_defs(&subsequent, is_public, true, out);
         }
         return;
     }
     if let Some(unless_node) = node.as_unless_node() {
         if let Some(stmts) = unless_node.statements() {
             for child in stmts.body().iter() {
-                collect_public_defs(&child, is_public, out);
+                collect_public_defs(&child, is_public, true, out);
             }
         }
         if let Some(else_clause) = unless_node.else_clause() {
             if let Some(else_stmts) = else_clause.statements() {
                 for child in else_stmts.body().iter() {
-                    collect_public_defs(&child, is_public, out);
+                    collect_public_defs(&child, is_public, true, out);
                 }
             }
         }
@@ -197,7 +201,7 @@ fn collect_public_defs(
         if let Some(body) = module_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 for child in stmts.body().iter() {
-                    collect_public_defs(&child, is_public, out);
+                    collect_public_defs(&child, is_public, true, out);
                 }
             }
         }
@@ -221,6 +225,10 @@ impl Cop for ActionOrder {
         &[CLASS_NODE, DEF_NODE, STATEMENTS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -228,7 +236,7 @@ impl Cop for ActionOrder {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Only check ClassNode — RuboCop does not check ModuleNode (controller concerns).
         let body = if let Some(class) = node.as_class_node() {
@@ -256,9 +264,9 @@ impl Cop for ActionOrder {
         // Pre-collect methods made non-public via symbol args (e.g. `private :index, :show`)
         let symbol_non_public = collect_symbol_visibility_methods(&stmts);
 
-        // Collect (method_name, order_index, offset) for public standard actions,
-        // tracking visibility state as we iterate class body statements.
-        let mut actions: Vec<(Vec<u8>, usize, usize)> = Vec::new();
+        // Collect (method_name, order_index, offset, node_start, node_end, autocorrectable)
+        // for public standard actions while tracking visibility state.
+        let mut actions: Vec<(Vec<u8>, usize, usize, usize, usize, bool)> = Vec::new();
         let mut is_public = true;
 
         for stmt in stmts.body().iter() {
@@ -275,15 +283,15 @@ impl Cop for ActionOrder {
 
             // Collect public defs from this statement (handles direct defs and if/unless)
             let mut defs = Vec::new();
-            collect_public_defs(&stmt, is_public, &mut defs);
+            collect_public_defs(&stmt, is_public, false, &mut defs);
 
-            for (name, offset) in defs {
+            for (name, offset, start, end, autocorrectable) in defs {
                 // Skip methods explicitly made non-public via symbol args
                 if symbol_non_public.contains(&name) {
                     continue;
                 }
                 if let Some(idx) = order_list.iter().position(|&a| a == name.as_slice()) {
-                    actions.push((name, idx, offset));
+                    actions.push((name, idx, offset, start, end, autocorrectable));
                 }
             }
         }
@@ -293,9 +301,11 @@ impl Cop for ActionOrder {
         // This prevents over-reporting: when `destroy` appears first, subsequent lower-index
         // actions are only flagged if out of order relative to their immediate predecessor,
         // not relative to the global maximum seen so far.
+        let mut violation_pairs = Vec::new();
+
         for pair in actions.windows(2) {
-            let (prev_name, prev_idx, _) = &pair[0];
-            let (name, idx, offset) = &pair[1];
+            let (prev_name, prev_idx, _, _, _, _) = &pair[0];
+            let (name, idx, offset, _, _, _) = &pair[1];
             if idx < prev_idx {
                 let (line, column) = source.offset_to_line_col(*offset);
                 let name_str = String::from_utf8_lossy(name);
@@ -308,6 +318,37 @@ impl Cop for ActionOrder {
                         "Action `{name_str}` should appear before `{prev_str}` in the controller."
                     ),
                 ));
+                violation_pairs.push((&pair[0], &pair[1]));
+            }
+        }
+
+        // Conservative baseline autocorrect: only swap one simple out-of-order
+        // adjacent action pair when both methods are top-level direct defs.
+        if violation_pairs.len() == 1
+            && let Some(ref mut corr) = corrections
+        {
+            let (prev, current) = violation_pairs[0];
+            let (_, _, _, prev_start, prev_end, prev_autocorrectable) = prev;
+            let (_, _, _, curr_start, curr_end, curr_autocorrectable) = current;
+
+            if *prev_autocorrectable && *curr_autocorrectable && prev_start < curr_start {
+                let prev_src = source.byte_slice(*prev_start, *prev_end, "").to_string();
+                let middle = source
+                    .byte_slice(*prev_end, *curr_start, "")
+                    .to_string();
+                let curr_src = source.byte_slice(*curr_start, *curr_end, "").to_string();
+
+                corr.push(crate::correction::Correction {
+                    start: *prev_start,
+                    end: *curr_end,
+                    replacement: format!("{curr_src}{middle}{prev_src}"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+
+                if let Some(diag) = diagnostics.last_mut() {
+                    diag.corrected = true;
+                }
             }
         }
     }
@@ -317,4 +358,24 @@ impl Cop for ActionOrder {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ActionOrder, "cops/rails/action_order");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ActionOrder.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_adjacent_out_of_order_actions() {
+        let input = b"class UsersController < ApplicationController\n  def create\n  end\n\n  def index\n  end\nend\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&ActionOrder, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(
+            corrected,
+            b"class UsersController < ApplicationController\n  def index\n  end\n\n  def create\n  end\nend\n"
+        );
+    }
 }

@@ -16,6 +16,7 @@
 - Rails/RedundantPresenceValidationOnBelongsTo follow-up: revisit conservative autocorrect after reconciling rails-version-gated matching behavior in autocorrect test harness (current narrow attempt failed to emit corrections).
 - Rails/StrongParametersExpect parity follow-up: extend autocorrect coverage to dynamic require-key/value patterns while preserving message/range parity and Rails 8+ gating behavior.
 - Rails/TimeZone parity follow-up: extend autocorrect beyond current string-literal `to_time` rewrite toward dangerous `Time.*` call chains with explicit safety gates.
+- Rails/MatchRoute parity follow-up: expand autocorrect beyond selector-only no-`via` rewrites to safely remove/reshape `via:` options in single-method route definitions.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
