@@ -29,6 +29,10 @@ impl Cop for ConstantRegexp {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -36,17 +40,21 @@ impl Cop for ConstantRegexp {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ConstantRegexpVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             in_constant_assignment: false,
             in_or_assignment: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(ref mut corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -54,6 +62,7 @@ struct ConstantRegexpVisitor<'a, 'src> {
     cop: &'a ConstantRegexp,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     in_constant_assignment: bool,
     in_or_assignment: bool,
 }
@@ -189,10 +198,20 @@ impl ConstantRegexpVisitor<'_, '_> {
 
         let loc = node.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(
-            self.cop
-                .diagnostic(self.source, line, column, MSG.to_string()),
-        );
+        let mut diagnostic = self
+            .cop
+            .diagnostic(self.source, line, column, MSG.to_string());
+
+        self.corrections.push(crate::correction::Correction {
+            start: loc.end_offset(),
+            end: loc.end_offset(),
+            replacement: "o".to_string(),
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -234,5 +253,12 @@ fn is_const_or_regexp_escape(node: &ruby_prism::Node<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     crate::cop_fixture_tests!(ConstantRegexp, "cops/performance/constant_regexp");
+    crate::cop_autocorrect_fixture_tests!(ConstantRegexp, "cops/performance/constant_regexp");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ConstantRegexp.supports_autocorrect());
+    }
 }
