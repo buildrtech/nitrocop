@@ -28,6 +28,10 @@ impl Cop for SelectMap {
         &[BLOCK_ARGUMENT_NODE, CALL_NODE, STRING_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -35,7 +39,7 @@ impl Cop for SelectMap {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let outer_call = match node.as_call_node() {
             Some(c) => c,
@@ -64,16 +68,47 @@ impl Cop for SelectMap {
 
         // Report at the select method's selector, matching RuboCop behavior
         let (line, column) = source.offset_to_line_col(select_offset);
-        diagnostics.push(self.diagnostic(
+        let column_str = String::from_utf8_lossy(&map_column).to_string();
+        let preferred_method = format!("pluck(:{column_str})");
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!(
                 "Use `pluck(:{}` instead of `select` with `{}`.",
-                String::from_utf8_lossy(&map_column),
+                column_str,
                 String::from_utf8_lossy(outer_method.as_slice()),
             ),
-        ));
+        );
+
+        // Conservative autocorrect: only direct `select(...).map/collect(&:same)`
+        // without intermediate calls in the receiver chain.
+        if let Some(inner_direct) = outer_call.receiver().and_then(|r| r.as_call_node())
+            && inner_direct.name().as_slice() == b"select"
+            && get_single_symbol_or_string_arg(&inner_direct).is_some_and(|arg| arg == map_column)
+            && let Some(ref mut corr) = corrections
+        {
+            let replacement = if let Some(base) = inner_direct.receiver() {
+                let base_src = source.byte_slice(
+                    base.location().start_offset(),
+                    base.location().end_offset(),
+                    "",
+                );
+                format!("{base_src}.{preferred_method}")
+            } else {
+                preferred_method.clone()
+            };
+            corr.push(crate::correction::Correction {
+                start: inner_direct.location().start_offset(),
+                end: outer_call.location().end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -145,4 +180,10 @@ fn get_single_symbol_or_string_arg(call: &ruby_prism::CallNode<'_>) -> Option<Ve
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SelectMap, "cops/rails/select_map");
+    crate::cop_autocorrect_fixture_tests!(SelectMap, "cops/rails/select_map");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(SelectMap.supports_autocorrect());
+    }
 }
