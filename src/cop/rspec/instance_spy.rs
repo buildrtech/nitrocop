@@ -21,6 +21,10 @@ impl Cop for InstanceSpy {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -28,12 +32,13 @@ impl Cop for InstanceSpy {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = InstanceSpyVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -44,6 +49,7 @@ struct InstanceSpyVisitor<'a> {
     cop: &'a InstanceSpy,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> Visit<'pr> for InstanceSpyVisitor<'_> {
@@ -72,13 +78,35 @@ impl InstanceSpyVisitor<'_> {
                 continue;
             }
 
-            let (line, column) = self.source.offset_to_line_col(assignment.offense_offset);
-            self.diagnostics.push(self.cop.diagnostic(
+            let (line, column) = self
+                .source
+                .offset_to_line_col(assignment.instance_double_selector_start);
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Use `instance_spy` when you check your double with `have_received`.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = self.corrections {
+                corr.push(crate::correction::Correction {
+                    start: assignment.instance_double_selector_start,
+                    end: assignment.instance_double_selector_end,
+                    replacement: "instance_spy".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                corr.push(crate::correction::Correction {
+                    start: assignment.as_null_object_dot_start,
+                    end: assignment.as_null_object_selector_end,
+                    replacement: String::new(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            self.diagnostics.push(diagnostic);
         }
     }
 }
@@ -91,17 +119,25 @@ struct ExampleCollector {
 
 struct NullDoubleAssignment {
     var_name: Vec<u8>,
-    offense_offset: usize,
+    instance_double_selector_start: usize,
+    instance_double_selector_end: usize,
+    as_null_object_dot_start: usize,
+    as_null_object_selector_end: usize,
 }
 
 impl<'pr> Visit<'pr> for ExampleCollector {
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
-        if let Some(instance_double_call) =
-            instance_double_call_from_null_double_value(&node.value())
+        if let Some(calls) = instance_double_call_from_null_double_value(&node.value())
+            && let Some(instance_double_selector) = calls.instance_double_call.message_loc()
+            && let Some(as_null_object_dot) = calls.as_null_object_call.call_operator_loc()
+            && let Some(as_null_object_selector) = calls.as_null_object_call.message_loc()
         {
             self.assignments.push(NullDoubleAssignment {
                 var_name: node.name().as_slice().to_vec(),
-                offense_offset: instance_double_call.location().start_offset(),
+                instance_double_selector_start: instance_double_selector.start_offset(),
+                instance_double_selector_end: instance_double_selector.end_offset(),
+                as_null_object_dot_start: as_null_object_dot.start_offset(),
+                as_null_object_selector_end: as_null_object_selector.end_offset(),
             });
         }
 
@@ -117,9 +153,14 @@ impl<'pr> Visit<'pr> for ExampleCollector {
     }
 }
 
+struct NullDoubleCalls<'pr> {
+    instance_double_call: ruby_prism::CallNode<'pr>,
+    as_null_object_call: ruby_prism::CallNode<'pr>,
+}
+
 fn instance_double_call_from_null_double_value<'pr>(
     value: &ruby_prism::Node<'pr>,
-) -> Option<ruby_prism::CallNode<'pr>> {
+) -> Option<NullDoubleCalls<'pr>> {
     let as_null_object = value.as_call_node()?;
     if as_null_object.name().as_slice() != b"as_null_object" {
         return None;
@@ -130,7 +171,10 @@ fn instance_double_call_from_null_double_value<'pr>(
         return None;
     }
 
-    Some(recv_call)
+    Some(NullDoubleCalls {
+        instance_double_call: recv_call,
+        as_null_object_call: as_null_object,
+    })
 }
 
 fn have_received_expected_var(node: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
@@ -171,4 +215,18 @@ fn have_received_expected_var(node: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(InstanceSpy, "cops/rspec/instance_spy");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(InstanceSpy.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_instance_double_null_object_to_instance_spy() {
+        crate::testutil::assert_cop_autocorrect(
+            &InstanceSpy,
+            b"it do\n  foo = instance_double(Foo).as_null_object\n  expect(foo).to have_received(:bar)\nend\n",
+            b"it do\n  foo = instance_spy(Foo)\n  expect(foo).to have_received(:bar)\nend\n",
+        );
+    }
 }
