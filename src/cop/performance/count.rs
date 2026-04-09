@@ -12,6 +12,88 @@ use ruby_prism::Visit;
 /// offsets to ensure the call IS the entire sole statement, not just a prefix of it.
 pub struct Count;
 
+fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    let loc = node.location();
+    source
+        .byte_slice(loc.start_offset(), loc.end_offset(), "")
+        .to_string()
+}
+
+fn block_source_with_optional_negation(
+    source: &SourceFile,
+    block: &ruby_prism::Node<'_>,
+    negate: bool,
+) -> Option<String> {
+    if let Some(block_arg) = block.as_block_argument_node() {
+        if !negate {
+            return Some(node_source(source, block));
+        }
+
+        let expr = block_arg.expression()?;
+        if let Some(sym) = expr.as_symbol_node() {
+            let method = std::str::from_utf8(sym.unescaped()).ok()?;
+            return Some(format!("{{ |element| !element.{method} }}"));
+        }
+
+        let expr_src = node_source(source, &expr);
+        return Some(format!("{{ !{expr_src}.call }}"));
+    }
+
+    let block_node = block.as_block_node()?;
+    let mut block_src = node_source(source, block);
+    if !negate {
+        return Some(block_src);
+    }
+
+    let body = block_node.body()?;
+    let target = if let Some(stmts) = body.as_statements_node() {
+        stmts.body().iter().last().unwrap_or(body)
+    } else {
+        body
+    };
+
+    let block_loc = block.location();
+    let target_loc = target.location();
+    if target_loc.start_offset() < block_loc.start_offset()
+        || target_loc.end_offset() > block_loc.end_offset()
+    {
+        return None;
+    }
+
+    let rel_start = target_loc.start_offset() - block_loc.start_offset();
+    let rel_end = target_loc.end_offset() - block_loc.start_offset();
+    if rel_end > block_src.len() || rel_start > rel_end {
+        return None;
+    }
+
+    let target_src = source.byte_slice(target_loc.start_offset(), target_loc.end_offset(), "");
+    block_src.replace_range(rel_start..rel_end, &format!("!({target_src})"));
+    Some(block_src)
+}
+
+fn build_count_replacement(
+    source: &SourceFile,
+    inner_call: &ruby_prism::CallNode<'_>,
+    selector: &str,
+) -> Option<String> {
+    let receiver = inner_call.receiver()?;
+    let receiver_src = node_source(source, &receiver);
+    let block = inner_call.block()?;
+
+    let negate = selector == "reject";
+    let block_src = block_source_with_optional_negation(source, &block, negate)?;
+
+    if block.as_block_argument_node().is_some() {
+        if negate {
+            Some(format!("{receiver_src}.count {block_src}"))
+        } else {
+            Some(format!("{receiver_src}.count({block_src})"))
+        }
+    } else {
+        Some(format!("{receiver_src}.count {block_src}"))
+    }
+}
+
 impl Cop for Count {
     fn name(&self) -> &'static str {
         "Performance/Count"
@@ -21,6 +103,10 @@ impl Cop for Count {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -28,16 +114,21 @@ impl Cop for Count {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = CountVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
             single_stmt_block_body_range: None,
+            corrections: Vec::new(),
+            autocorrect_enabled: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -45,6 +136,8 @@ struct CountVisitor<'a, 'src> {
     cop: &'a Count,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
+    autocorrect_enabled: bool,
     /// Byte offset range (start, end) of the sole statement in the current block body, if any.
     /// RuboCop skips `select{}.count` when its direct parent is a block node
     /// (`node.parent&.block_type?`). We track the range of the single
@@ -168,12 +261,28 @@ impl CountVisitor<'_, '_> {
             .message_loc()
             .unwrap_or_else(|| inner_call.location());
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             format!("Use `count` instead of `{inner_name}...{outer_name}`."),
-        ));
+        );
+
+        if self.autocorrect_enabled
+            && let Some(replacement) = build_count_replacement(self.source, &inner_call, inner_name)
+        {
+            let outer_loc = call.location();
+            self.corrections.push(crate::correction::Correction {
+                start: outer_loc.start_offset(),
+                end: outer_loc.end_offset(),
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -198,5 +307,12 @@ fn single_statement_range(body: Option<ruby_prism::Node<'_>>) -> Option<(usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     crate::cop_fixture_tests!(Count, "cops/performance/count");
+    crate::cop_autocorrect_fixture_tests!(Count, "cops/performance/count");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Count.supports_autocorrect());
+    }
 }
