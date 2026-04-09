@@ -25,6 +25,10 @@ impl Cop for BindCall {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -32,7 +36,7 @@ impl Cop for BindCall {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Detect: receiver.bind(obj).call(args...)
         // Pattern: (send (send _ :bind $arg) :call $...)
@@ -109,12 +113,32 @@ impl Cop for BindCall {
             None => return,
         };
         let (line, column) = source.offset_to_line_col(bind_msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, msg));
+        let mut diagnostic = self.diagnostic(source, line, column, msg);
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: bind_msg_loc.start_offset(),
+                end: outer_call.location().end_offset(),
+                replacement: format!("bind_call({bind_arg_src}{comma}{call_args_src})"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     crate::cop_fixture_tests!(BindCall, "cops/performance/bind_call");
+    crate::cop_autocorrect_fixture_tests!(BindCall, "cops/performance/bind_call");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(BindCall.supports_autocorrect());
+    }
 }
