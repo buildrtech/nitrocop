@@ -43,6 +43,10 @@ impl Cop for ZipWithoutBlock {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -50,7 +54,7 @@ impl Cop for ZipWithoutBlock {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for CallNode .map or .collect with a block
         let call = match node.as_call_node() {
@@ -175,12 +179,25 @@ impl Cop for ZipWithoutBlock {
         };
 
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `zip` without a block argument instead.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: msg_loc.start_offset(),
+                end: block_node.location().end_offset(),
+                replacement: "zip".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -188,4 +205,11 @@ impl Cop for ZipWithoutBlock {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ZipWithoutBlock, "cops/performance/zip_without_block");
+    crate::cop_autocorrect_fixture_tests!(ZipWithoutBlock, "cops/performance/zip_without_block");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ZipWithoutBlock.supports_autocorrect());
+    }
 }
+
