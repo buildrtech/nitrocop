@@ -32,6 +32,10 @@ impl Cop for HaveHttpStatus {
         &[CALL_NODE, INTEGER_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -39,7 +43,7 @@ impl Cop for HaveHttpStatus {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Pattern: expect(response.status).to be(200)
         // AST: CallNode(receiver=CallNode(expect(CallNode(response.status))), name=to,
@@ -177,14 +181,51 @@ impl Cop for HaveHttpStatus {
             runner_call.location().start_offset() + runner_call.location().as_slice().len();
         let bad_code = source.byte_slice(bad_code_start, bad_code_end, "...");
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!(
                 "Prefer `expect({response_method}).{runner_str} have_http_status({status_str})` over `{bad_code}`."
             ),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            // Replace response.status/code receiver expression with response method.
+            let rs_loc = response_status_call.location();
+            corr.push(crate::correction::Correction {
+                start: rs_loc.start_offset(),
+                end: rs_loc.end_offset(),
+                replacement: response_method.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+
+            // Replace matcher selector (`be`/`eq`/etc) with `have_http_status`.
+            if let Some(sel) = matcher_call.message_loc() {
+                corr.push(crate::correction::Correction {
+                    start: sel.start_offset(),
+                    end: sel.end_offset(),
+                    replacement: "have_http_status".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+
+            // Replace matcher argument with numeric status literal.
+            let status_loc = status_arg.location();
+            corr.push(crate::correction::Correction {
+                start: status_loc.start_offset(),
+                end: status_loc.end_offset(),
+                replacement: status_str.clone(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -192,4 +233,18 @@ impl Cop for HaveHttpStatus {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HaveHttpStatus, "cops/rspecrails/have_http_status");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(HaveHttpStatus.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_expect_response_status_equality() {
+        crate::testutil::assert_cop_autocorrect(
+            &HaveHttpStatus,
+            b"it { expect(response.status).to be(200) }\n",
+            b"it { expect(response).to have_http_status(200) }\n",
+        );
+    }
 }
