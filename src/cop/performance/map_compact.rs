@@ -18,6 +18,10 @@ impl Cop for MapCompact {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for MapCompact {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match as_method_chain(node) {
             Some(c) => c,
@@ -82,12 +86,39 @@ impl Cop for MapCompact {
             None => return,
         };
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `filter_map` instead.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: msg_loc.start_offset(),
+                end: msg_loc.end_offset(),
+                replacement: "filter_map".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+
+            let outer_call = node.as_call_node().unwrap();
+            if let Some(dot_loc) = outer_call.call_operator_loc()
+                && let Some(outer_msg_loc) = outer_call.message_loc()
+            {
+                corr.push(crate::correction::Correction {
+                    start: dot_loc.start_offset(),
+                    end: outer_msg_loc.end_offset(),
+                    replacement: String::new(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+            }
+
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -95,4 +126,10 @@ impl Cop for MapCompact {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MapCompact, "cops/performance/map_compact");
+    crate::cop_autocorrect_fixture_tests!(MapCompact, "cops/performance/map_compact");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(MapCompact.supports_autocorrect());
+    }
 }
