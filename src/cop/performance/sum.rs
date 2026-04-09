@@ -42,6 +42,10 @@ impl Cop for Sum {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -49,7 +53,7 @@ impl Cop for Sum {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let only_sum_or_with_initial_value = config.get_bool("OnlySumOrWithInitialValue", false);
         let call = match node.as_call_node() {
@@ -191,12 +195,23 @@ impl Cop for Sum {
                         None => return,
                     };
                     let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         format!("Use `sum` instead of `{method_str}(:+)`."),
-                    ));
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: msg_loc.start_offset(),
+                            end: call.location().end_offset(),
+                            replacement: "sum".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
             2 => {
@@ -210,7 +225,18 @@ impl Cop for Sum {
                     let suggestion_init = get_suggestion_init(source, call.arguments());
                     let message =
                         format_symbol_message(method_str, &raw_init, &suggestion_init, ":+");
-                    diagnostics.push(self.diagnostic(source, line, column, message));
+                    let mut diagnostic = self.diagnostic(source, line, column, message);
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: msg_loc.start_offset(),
+                            end: call.location().end_offset(),
+                            replacement: format_sum_suggestion(&suggestion_init),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
             _ => {}
@@ -481,6 +507,12 @@ mod tests {
     use crate::testutil::run_cop_full_with_config;
 
     crate::cop_fixture_tests!(Sum, "cops/performance/sum");
+    crate::cop_autocorrect_fixture_tests!(Sum, "cops/performance/sum");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Sum.supports_autocorrect());
+    }
 
     #[test]
     fn only_sum_or_with_initial_value_skips_single_arg() {
