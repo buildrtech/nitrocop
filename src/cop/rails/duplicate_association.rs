@@ -91,6 +91,10 @@ impl Cop for DuplicateAssociation {
         &[CLASS_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -98,7 +102,7 @@ impl Cop for DuplicateAssociation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let class = match node.as_class_node() {
             Some(c) => c,
@@ -142,18 +146,36 @@ impl Cop for DuplicateAssociation {
                 continue;
             }
             let name_str = String::from_utf8_lossy(name);
+            let last_idx = *indices.last().unwrap_or(&indices[0]);
             for &idx in indices {
                 let call = &calls[idx];
                 let loc = call.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     format!(
                         "Association `{name_str}` is defined multiple times. Don't repeat associations."
                     ),
-                ));
+                );
+
+                // Conservative baseline autocorrect: remove non-last duplicates,
+                // leaving the last declaration in place.
+                if idx != last_idx
+                    && let Some(ref mut corr) = corrections
+                {
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
 
@@ -388,4 +410,24 @@ fn extract_sole_class_name(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicateAssociation, "cops/rails/duplicate_association");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DuplicateAssociation.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_duplicate_association_by_removing_first() {
+        let input = b"class User < ApplicationRecord\n  has_many :posts\n  has_many :posts, dependent: :destroy\nend\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&DuplicateAssociation, input);
+        assert_eq!(diags.len(), 2);
+        assert!(diags.iter().any(|d| d.corrected));
+
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(
+            corrected,
+            b"class User < ApplicationRecord\n  \n  has_many :posts, dependent: :destroy\nend\n"
+        );
+    }
 }
