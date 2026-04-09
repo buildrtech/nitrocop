@@ -23,6 +23,10 @@ impl Cop for RedundantMatch {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -30,18 +34,22 @@ impl Cop for RedundantMatch {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         use ruby_prism::Visit;
         let mut visitor = RedundantMatchVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             parent_is_condition: false,
             value_used: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -49,6 +57,7 @@ struct RedundantMatchVisitor<'a> {
     cop: &'a RedundantMatch,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     /// Whether the current node position is a condition of an if/while/until/case
     parent_is_condition: bool,
     /// Whether the result value is used (assignment, argument, return, etc.)
@@ -513,12 +522,43 @@ impl<'a> RedundantMatchVisitor<'a> {
 
         let loc = call.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Use `match?` instead of `match` when `MatchData` is not used.".to_string(),
-        ));
+        );
+
+        if let Some(recv) = call.receiver() {
+            let recv_is_regexp = recv.as_regular_expression_node().is_some()
+                || recv.as_interpolated_regular_expression_node().is_some();
+            let arg_is_regexp = first_arg.as_regular_expression_node().is_some()
+                || first_arg.as_interpolated_regular_expression_node().is_some();
+
+            // Match RuboCop: only autocorrect when either side is a regexp literal.
+            if recv_is_regexp || arg_is_regexp {
+                let recv_src = self.source.byte_slice(
+                    recv.location().start_offset(),
+                    recv.location().end_offset(),
+                    "",
+                );
+                let arg_src = self.source.byte_slice(
+                    first_arg.location().start_offset(),
+                    first_arg.location().end_offset(),
+                    "",
+                );
+                self.corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!("{recv_src} =~ {arg_src}"),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -526,4 +566,10 @@ impl<'a> RedundantMatchVisitor<'a> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantMatch, "cops/performance/redundant_match");
+    crate::cop_autocorrect_fixture_tests!(RedundantMatch, "cops/performance/redundant_match");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantMatch.supports_autocorrect());
+    }
 }
