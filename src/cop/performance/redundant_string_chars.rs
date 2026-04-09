@@ -21,6 +21,83 @@ use crate::parse::source::SourceFile;
 /// need safe navigation.
 pub struct RedundantStringChars;
 
+fn arg_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
+    let loc = node.location();
+    source
+        .byte_slice(loc.start_offset(), loc.end_offset(), "")
+        .to_string()
+}
+
+fn build_replacement(
+    source: &SourceFile,
+    chain: &crate::cop::util::MethodChain<'_>,
+    outer_call: &ruby_prism::CallNode<'_>,
+) -> Option<String> {
+    let receiver = chain.inner_call.receiver()?;
+    let recv_loc = receiver.location();
+    let recv_source = source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+
+    let args: Vec<_> = outer_call
+        .arguments()
+        .map(|a| a.arguments().iter().collect())
+        .unwrap_or_default();
+
+    let suffix = match chain.outer_method {
+        b"first" => {
+            if args.is_empty() {
+                "[0]".to_string()
+            } else {
+                let first = arg_source(source, &args[0]);
+                format!("[0...{first}].chars")
+            }
+        }
+        b"last" => {
+            if !args.is_empty() {
+                return None;
+            }
+            "[-1]".to_string()
+        }
+        b"[]" => {
+            if args.len() > 1 {
+                return None;
+            }
+            if args.is_empty() {
+                return None;
+            }
+            let first = arg_source(source, &args[0]);
+            if first.contains("..") {
+                format!("[{first}].chars")
+            } else {
+                format!("[{first}]")
+            }
+        }
+        b"length" => ".length".to_string(),
+        b"size" => ".size".to_string(),
+        b"empty?" => ".empty?".to_string(),
+        b"take" => {
+            if args.is_empty() {
+                return None;
+            }
+            let first = arg_source(source, &args[0]);
+            format!("[0...{first}].chars")
+        }
+        b"slice" => {
+            if args.is_empty() {
+                return None;
+            }
+            let joined = args
+                .iter()
+                .map(|a| arg_source(source, a))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{joined}].chars")
+        }
+        _ => return None,
+    };
+
+    Some(format!("{recv_source}{suffix}"))
+}
+
 impl Cop for RedundantStringChars {
     fn name(&self) -> &'static str {
         "Performance/RedundantStringChars"
@@ -34,6 +111,10 @@ impl Cop for RedundantStringChars {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -41,7 +122,7 @@ impl Cop for RedundantStringChars {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match as_method_chain(node) {
             Some(c) => c,
@@ -112,7 +193,22 @@ impl Cop for RedundantStringChars {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, message));
+        let mut diagnostic = self.diagnostic(source, line, column, message);
+
+        if let Some(ref mut corr) = corrections
+            && let Some(replacement) = build_replacement(source, &chain, &outer_call)
+        {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -124,4 +220,13 @@ mod tests {
         RedundantStringChars,
         "cops/performance/redundant_string_chars"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        RedundantStringChars,
+        "cops/performance/redundant_string_chars"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantStringChars.supports_autocorrect());
+    }
 }

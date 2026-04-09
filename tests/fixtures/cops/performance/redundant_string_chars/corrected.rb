@@ -1,0 +1,9 @@
+str[0]
+str[0]
+str[-1]
+str.length
+str.size
+str.empty?
+str[0...2].chars
+str[0...2].chars
+str[0..2].chars
