@@ -35,6 +35,7 @@
 - RSpec/PredicateMatcher parity follow-up: extend autocorrect beyond no-arg inflected baseline to argument-bearing predicate calls and explicit-style rewrites while preserving heredoc/uncorrectable matcher guards.
 - RSpec/ReturnFromStub parity follow-up: extend autocorrect beyond block-style `.and_return(static)` suffix conversion to handle hash-argument shape normalization and reciprocal `and_return` style rewrites from static block bodies.
 - RSpec/RedundantAround parity follow-up: verify autocorrect whitespace/comment cleanup behavior (whole-line removal and neighboring blank lines) across nested hooks and receiver-qualified `config.around` forms.
+- RSpec/VerifiedDoubleReference parity follow-up: validate autocorrect behavior for escaped string constants/namespaced strings and maintain safety docs around class-loading side effects.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
