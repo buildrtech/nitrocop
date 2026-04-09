@@ -89,6 +89,10 @@ impl Cop for RedundantEqualityComparisonBlock {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -96,7 +100,7 @@ impl Cop for RedundantEqualityComparisonBlock {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_regexp_match = config.get_bool("AllowRegexpMatch", true);
         let call = match node.as_call_node() {
@@ -182,12 +186,37 @@ impl Cop for RedundantEqualityComparisonBlock {
             if self.check_is_a_pattern(&body_call, param_name) {
                 let loc = call.message_loc().unwrap_or_else(|| call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use `grep` or `===` comparison instead of block with `==`.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corr) = corrections
+                    && let Some(args) = body_call.arguments()
+                    && let Some(class_arg) = args.arguments().iter().next()
+                {
+                    let class_src = source.byte_slice(
+                        class_arg.location().start_offset(),
+                        class_arg.location().end_offset(),
+                        "",
+                    );
+                    let replacement = format!(
+                        "{}({class_src})",
+                        std::str::from_utf8(method_name).unwrap_or("all?")
+                    );
+                    corr.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: block_node.location().end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
             return;
         }
@@ -276,7 +305,33 @@ impl Cop for RedundantEqualityComparisonBlock {
         } else {
             "Use `grep` or `===` comparison instead of block with `==`."
         };
-        diagnostics.push(self.diagnostic(source, line, column, msg.to_string()));
+        let mut diagnostic = self.diagnostic(source, line, column, msg.to_string());
+
+        if let Some(ref mut corr) = corrections {
+            let new_arg = if recv_is_param {
+                source.byte_slice(
+                    arg_nodes[0].location().start_offset(),
+                    arg_nodes[0].location().end_offset(),
+                    "",
+                )
+            } else {
+                source.byte_slice(recv.location().start_offset(), recv.location().end_offset(), "")
+            };
+            let replacement = format!(
+                "{}({new_arg})",
+                std::str::from_utf8(method_name).unwrap_or("all?")
+            );
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: block_node.location().end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -328,6 +383,15 @@ mod tests {
         RedundantEqualityComparisonBlock,
         "cops/performance/redundant_equality_comparison_block"
     );
+    crate::cop_autocorrect_fixture_tests!(
+        RedundantEqualityComparisonBlock,
+        "cops/performance/redundant_equality_comparison_block"
+    );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantEqualityComparisonBlock.supports_autocorrect());
+    }
 
     #[test]
     fn config_allow_regexp_match_false_flags_match() {
