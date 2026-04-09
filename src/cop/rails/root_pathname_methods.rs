@@ -172,6 +172,10 @@ impl Cop for RootPathnameMethods {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -179,7 +183,7 @@ impl Cop for RootPathnameMethods {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -289,12 +293,36 @@ impl Cop for RootPathnameMethods {
             let recv_str = std::str::from_utf8(recv_name.unwrap_or(b"File")).unwrap_or("File");
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("`{rails_label}` is a `Pathname`, so you can use `{rails_label}.{method_str}` instead of `{recv_str}.{method_str}({rails_label}, ...)`.",),
-            ));
+            );
+
+            // Conservative baseline autocorrect: only File.join(Rails.root/public_path, ...)
+            if method_name == b"join"
+                && matches!(recv_name, Some(b"File"))
+                && arg_list.len() >= 2
+                && let Some(ref mut corr) = corrections
+            {
+                let mut rest = Vec::new();
+                for arg in arg_list.iter().skip(1) {
+                    let a = arg.location();
+                    rest.push(source.byte_slice(a.start_offset(), a.end_offset(), ""));
+                }
+                let replacement = format!("{rails_label}.join({})", rest.join(", "));
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
 
         // Check if first arg is Rails.root.join(...) or Rails.public_path.join(...)
@@ -377,4 +405,20 @@ fn rails_root_method_from_node(node: &ruby_prism::Node<'_>) -> Option<&'static s
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RootPathnameMethods, "cops/rails/root_pathname_methods");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RootPathnameMethods.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_file_join_with_rails_root() {
+        let input = b"File.join(Rails.root, \"config\", \"database.yml\")\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&RootPathnameMethods, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"Rails.root.join(\"config\", \"database.yml\")\n");
+    }
 }
