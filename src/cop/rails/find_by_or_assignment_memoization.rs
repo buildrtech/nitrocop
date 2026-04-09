@@ -101,6 +101,10 @@ impl Cop for FindByOrAssignmentMemoization {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -108,7 +112,7 @@ impl Cop for FindByOrAssignmentMemoization {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // First pass: collect ivar names assigned in initialize methods.
         let mut collector = InitializeIvarCollector {
@@ -122,6 +126,7 @@ impl Cop for FindByOrAssignmentMemoization {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             in_if_depth: 0,
             initialize_ivars: &collector.ivar_names,
         };
@@ -134,6 +139,7 @@ struct FindByVisitor<'a> {
     cop: &'a FindByOrAssignmentMemoization,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     in_if_depth: usize,
     /// Ivar names assigned in `initialize` — these are skipped per RuboCop's object shapes check.
     initialize_ivars: &'a [Vec<u8>],
@@ -184,12 +190,35 @@ impl<'pr> Visit<'pr> for FindByVisitor<'_> {
                 {
                     let loc = node.location();
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diagnostic = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
                         "Avoid memoizing `find_by` results with `||=`.".to_string(),
-                    ));
+                    );
+
+                    if let Some(ref mut corr) = self.corrections {
+                        let indent = " ".repeat(column);
+                        let var_name = String::from_utf8_lossy(node.name().as_slice()).to_string();
+                        let find_by_loc = value.location();
+                        let find_by_src = self
+                            .source
+                            .byte_slice(find_by_loc.start_offset(), find_by_loc.end_offset(), "");
+                        let replacement = format!(
+                            "if defined?({var_name})\n{indent}  {var_name}\n{indent}else\n{indent}  {var_name} = {find_by_src}\n{indent}end"
+                        );
+
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    self.diagnostics.push(diagnostic);
                 }
             }
         }
@@ -207,4 +236,25 @@ mod tests {
         FindByOrAssignmentMemoization,
         "cops/rails/find_by_or_assignment_memoization"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(FindByOrAssignmentMemoization.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_find_by_or_assignment_to_defined_guard() {
+        let input = b"@current_user ||= User.find_by(id: session[:user_id])\n";
+        let (diags, corrections) =
+            crate::testutil::run_cop_autocorrect(&FindByOrAssignmentMemoization, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(
+            corrected,
+            b"if defined?(@current_user)\n  @current_user\nelse\n  @current_user = User.find_by(id: session[:user_id])\nend\n"
+        );
+    }
 }

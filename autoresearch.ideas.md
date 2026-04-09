@@ -18,6 +18,7 @@
 - Rails/TimeZone parity follow-up: extend autocorrect beyond current string-literal `to_time` rewrite toward dangerous `Time.*` call chains with explicit safety gates.
 - Rails/MatchRoute parity follow-up: expand autocorrect beyond selector-only no-`via` rewrites to safely remove/reshape `via:` options in single-method route definitions.
 - Rails/ActionOrder parity follow-up: extend autocorrect beyond single adjacent top-level swap to handle multi-offense reorder and comment/conditional-aware movement like RuboCop.
+- Rails/Delegate parity follow-up: extend autocorrect beyond direct no-arg delegations to preserve prefix/options/comments and broader receiver forms (`::Const`, args-forwarding).
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
