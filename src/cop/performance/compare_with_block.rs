@@ -28,6 +28,10 @@ impl Cop for CompareWithBlock {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -35,7 +39,7 @@ impl Cop for CompareWithBlock {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -237,8 +241,28 @@ impl Cop for CompareWithBlock {
             let key_display = std::str::from_utf8(key_a_src).unwrap_or("key");
             let var_a_str = std::str::from_utf8(name_a).unwrap_or("a");
             let var_b_str = std::str::from_utf8(name_b).unwrap_or("b");
-            diagnostics.push(self.diagnostic(source, line, column,
-                format!("Use `{replacement} {{ |a| a[{key_display}] }}` instead of `{method_str} {{ |{var_a_str}, {var_b_str}| {var_a_str}[{key_display}] <=> {var_b_str}[{key_display}] }}`.")));
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                format!(
+                    "Use `{replacement} {{ |a| a[{key_display}] }}` instead of `{method_str} {{ |{var_a_str}, {var_b_str}| {var_a_str}[{key_display}] <=> {var_b_str}[{key_display}] }}`."
+                ),
+            );
+
+            if let Some(ref mut corr) = corrections {
+                let block_end = block_node.location().end_offset();
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: block_end,
+                    replacement: format!("{replacement} {{ |a| a[{key_display}] }}"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         } else {
             // For regular method calls: require zero arguments
             if recv_call.arguments().is_some() || arg_call.arguments().is_some() {
@@ -247,14 +271,26 @@ impl Cop for CompareWithBlock {
             let attr_method = std::str::from_utf8(method_a).unwrap_or("method");
             let var_a_str = std::str::from_utf8(name_a).unwrap_or("a");
             let var_b_str = std::str::from_utf8(name_b).unwrap_or("b");
-            diagnostics.push(
-                self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("Use `{replacement}(&:{attr_method})` instead of `{method_str} {{ |{var_a_str}, {var_b_str}| {var_a_str}.{attr_method} <=> {var_b_str}.{attr_method} }}`.")
-                ),
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                format!("Use `{replacement}(&:{attr_method})` instead of `{method_str} {{ |{var_a_str}, {var_b_str}| {var_a_str}.{attr_method} <=> {var_b_str}.{attr_method} }}`."),
             );
+
+            if let Some(ref mut corr) = corrections {
+                let block_end = block_node.location().end_offset();
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: block_end,
+                    replacement: format!("{replacement}(&:{attr_method})"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -263,6 +299,12 @@ impl Cop for CompareWithBlock {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CompareWithBlock, "cops/performance/compare_with_block");
+    crate::cop_autocorrect_fixture_tests!(CompareWithBlock, "cops/performance/compare_with_block");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(CompareWithBlock.supports_autocorrect());
+    }
 
     #[test]
     fn detects_do_end_block() {
