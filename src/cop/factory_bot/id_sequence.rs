@@ -23,6 +23,10 @@ impl Cop for IdSequence {
         &[CALL_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for IdSequence {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -73,12 +77,40 @@ impl Cop for IdSequence {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not create a sequence for an id attribute".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections {
+            let (line, _) = source.offset_to_line_col(loc.start_offset());
+            let line_start = source.line_start_offset(line);
+            let mut remove_start = loc.start_offset();
+            if source
+                .try_byte_slice(line_start, loc.start_offset())
+                .is_some_and(|s| s.trim().is_empty())
+            {
+                remove_start = line_start;
+            }
+
+            let mut remove_end = loc.end_offset();
+            if source.as_bytes().get(remove_end).copied() == Some(b'\n') {
+                remove_end += 1;
+            }
+
+            corr.push(crate::correction::Correction {
+                start: remove_start,
+                end: remove_end,
+                replacement: String::new(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -86,4 +118,18 @@ impl Cop for IdSequence {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(IdSequence, "cops/factorybot/id_sequence");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(IdSequence.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_id_sequence_line() {
+        crate::testutil::assert_cop_autocorrect(
+            &IdSequence,
+            b"FactoryBot.define do\n  factory :post do\n    sequence :id\n    title { \"x\" }\n  end\nend\n",
+            b"FactoryBot.define do\n  factory :post do\n    title { \"x\" }\n  end\nend\n",
+        );
+    }
 }
