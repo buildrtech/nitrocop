@@ -1,0 +1,6 @@
+str.delete_prefix("foo")
+str.delete_prefix("bar")
+str.delete_prefix("prefix")
+str.delete_prefix!("prefix")
+str.delete_prefix!("prefix")
+something.delete_prefix("prefix")

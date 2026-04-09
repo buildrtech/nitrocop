@@ -110,6 +110,55 @@ fn is_literal_chars(bytes: &[u8]) -> bool {
     true
 }
 
+fn literal_prefix_from_regex(content: &[u8], safe_multiline: bool) -> Option<String> {
+    let suffix = if content.starts_with(b"\\A") {
+        &content[2..]
+    } else if !safe_multiline && content.starts_with(b"^") {
+        &content[1..]
+    } else {
+        return None;
+    };
+
+    if suffix.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut i = 0;
+    while i < suffix.len() {
+        let b = suffix[i];
+        if b == b'\\' {
+            if i + 1 >= suffix.len() {
+                return None;
+            }
+            let next = suffix[i + 1];
+            match next {
+                b'n' | b't' | b'r' | b'f' | b'b' | b'\\' | b'"' | b'\'' => {
+                    out.push('\\');
+                    out.push(next as char);
+                }
+                _ => out.push(next as char),
+            }
+            i += 2;
+        } else {
+            out.push(b as char);
+            i += 1;
+        }
+    }
+
+    Some(out)
+}
+
+fn to_double_quoted_string_literal(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r");
+    format!("\"{escaped}\"")
+}
+
 impl Cop for DeletePrefix {
     fn name(&self) -> &'static str {
         "Performance/DeletePrefix"
@@ -123,6 +172,10 @@ impl Cop for DeletePrefix {
         &[CALL_NODE, REGULAR_EXPRESSION_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -130,7 +183,7 @@ impl Cop for DeletePrefix {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let safe_multiline = config.get_bool("SafeMultiline", true);
         let call = match node.as_call_node() {
@@ -202,12 +255,36 @@ impl Cop for DeletePrefix {
 
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{preferred}` instead of `{original}`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(receiver) = call.receiver()
+            && let Some(prefix) = literal_prefix_from_regex(content, safe_multiline)
+        {
+            let recv_loc = receiver.location();
+            let recv_source = source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+            let op = call
+                .call_operator_loc()
+                .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))
+                .unwrap_or(".");
+            let string_literal = to_double_quoted_string_literal(&prefix);
+            let replacement = format!("{recv_source}{op}{preferred}({string_literal})");
+            corr.push(crate::correction::Correction {
+                start: call.location().start_offset(),
+                end: call.location().end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -215,6 +292,12 @@ impl Cop for DeletePrefix {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DeletePrefix, "cops/performance/delete_prefix");
+    crate::cop_autocorrect_fixture_tests!(DeletePrefix, "cops/performance/delete_prefix");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DeletePrefix.supports_autocorrect());
+    }
 
     #[test]
     fn config_safe_multiline_false_flags_caret() {
