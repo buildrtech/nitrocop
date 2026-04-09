@@ -25,8 +25,6 @@
 - Rails/DuplicateAssociation parity follow-up: align autocorrect with RuboCop's replace-first/remove-rest and add class_name-duplicate correction parity.
 - Rails/DuplicateScope parity follow-up: align autocorrect with RuboCop semantics around replacement/removal ordering and comment-preserving whole-line ranges.
 - RSpecRails/HttpStatus parity follow-up: extend autocorrect beyond symbolic integer baseline to numeric/string and be_status-style rewrites.
-- RSpecRails/HttpStatusNameConsistency parity follow-up: keep mapping table synchronized with upstream Rack status-name changes and extend tests for future alias additions.
-- RSpecRails/NegationBeValid parity follow-up: verify chained matcher edge contexts and keep selector-swap behavior aligned with upstream style handling.
 - RSpecRails/MinitestAssertions parity follow-up: extend autocorrect from no-failure-message baseline to RuboCop-style preservation of optional failure-message arguments (e.g., `expect(...).to(eq(...), msg)`) and expand fixture corrected snapshots across assertion families.
 - RSpecRails/InferredSpecType parity follow-up: extend autocorrect from sole-type-hash baseline to mixed-metadata pair removal (`other: true, type: :model`) with RuboCop-like sibling-range handling that preserves commas/comments.
 - RSpec/InstanceSpy parity follow-up: extend autocorrect beyond local-variable assignment baseline to symbol-based and dynamically-defined method contexts handled by upstream pattern search.
@@ -40,6 +38,9 @@
 - FactoryBot/SyntaxMethods parity follow-up: validate autocorrect range behavior for namespaced receiver forms and multiline call formatting so prefix removal preserves surrounding layout/comments.
 - FactoryBot/AssociationStyle parity follow-up: extend autocorrect beyond simple `association :name` to RuboCop-style factory/trait option transforms and explicit-style rewrites while preserving strategy/keyword safety guards.
 - FactoryBot/FactoryNameStyle parity follow-up: harden symbol/string conversion for escaped/quoted edge names and keep correction output aligned with Ruby symbol inspect semantics.
+- FactoryBot/FactoryClassName parity follow-up: harden correction quoting for edge constant source forms (spacing/comments around `class:` pairs) and ensure full RuboCop parity in mixed option hashes.
+- FactoryBot/IdSequence parity follow-up: verify whole-line removal behavior with trailing comments and multi-line sequence argument formatting to match RuboCop range semantics.
+- FactoryBot/RedundantFactoryOption parity follow-up: extend removal logic to preserve formatting/comments in complex hash layouts and validate parity for nested/multiline option hashes.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.

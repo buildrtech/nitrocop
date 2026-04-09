@@ -12,6 +12,17 @@ use crate::parse::source::SourceFile;
 
 pub struct AttributeDefinedStatically;
 
+fn hash_without_braces(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+    if node.as_hash_node().is_none() {
+        return false;
+    }
+
+    let loc = node.location();
+    source
+        .try_byte_slice(loc.start_offset(), loc.end_offset())
+        .is_some_and(|s| !s.trim_start().starts_with('{'))
+}
+
 fn is_attribute_defining_method(name: &[u8]) -> bool {
     ATTRIBUTE_DEFINING_METHODS.contains(&name)
 }
@@ -97,6 +108,10 @@ impl Cop for AttributeDefinedStatically {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -104,7 +119,7 @@ impl Cop for AttributeDefinedStatically {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Match on CallNode for attribute-defining methods (factory, trait, etc.)
         let outer_call = match node.as_call_node() {
@@ -211,12 +226,60 @@ impl Cop for AttributeDefinedStatically {
 
             let loc = child.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Use a block to declare attribute values.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corr) = corrections {
+                if let Some(args) = call.arguments() {
+                    let arg_list: Vec<_> = args.arguments().iter().collect();
+                    if arg_list.len() == 1 {
+                        let arg = &arg_list[0];
+                        if !hash_without_braces(source, arg) {
+                            if let (Some(open), Some(close)) = (call.opening_loc(), call.closing_loc())
+                            {
+                                corr.push(crate::correction::Correction {
+                                    start: open.start_offset(),
+                                    end: open.end_offset(),
+                                    replacement: " { ".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                corr.push(crate::correction::Correction {
+                                    start: close.start_offset(),
+                                    end: close.end_offset(),
+                                    replacement: " }".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            } else {
+                                let arg_loc = arg.location();
+                                corr.push(crate::correction::Correction {
+                                    start: arg_loc.start_offset(),
+                                    end: arg_loc.start_offset(),
+                                    replacement: "{ ".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                corr.push(crate::correction::Correction {
+                                    start: arg_loc.end_offset(),
+                                    end: arg_loc.end_offset(),
+                                    replacement: " }".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -228,4 +291,18 @@ mod tests {
         AttributeDefinedStatically,
         "cops/factorybot/attribute_defined_statically"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(AttributeDefinedStatically.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_wraps_static_attribute_value_in_block() {
+        crate::testutil::assert_cop_autocorrect(
+            &AttributeDefinedStatically,
+            b"FactoryBot.define do\n  factory :post do\n    title \"Something\"\n  end\nend\n",
+            b"FactoryBot.define do\n  factory :post do\n    title { \"Something\" }\n  end\nend\n",
+        );
+    }
 }
