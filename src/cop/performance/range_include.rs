@@ -23,6 +23,10 @@ impl Cop for RangeInclude {
         &[CALL_NODE, PARENTHESES_NODE, RANGE_NODE, STATEMENTS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -30,7 +34,7 @@ impl Cop for RangeInclude {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -75,12 +79,27 @@ impl Cop for RangeInclude {
         } else {
             "include?"
         };
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `Range#cover?` instead of `Range#{method}`."),
-        ));
+        );
+
+        if let Some(ref mut corr) = corrections
+            && let Some(selector_loc) = call.message_loc()
+        {
+            corr.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: selector_loc.end_offset(),
+                replacement: "cover?".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -88,4 +107,10 @@ impl Cop for RangeInclude {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RangeInclude, "cops/performance/range_include");
+    crate::cop_autocorrect_fixture_tests!(RangeInclude, "cops/performance/range_include");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RangeInclude.supports_autocorrect());
+    }
 }
