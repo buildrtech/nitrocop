@@ -8,6 +8,42 @@ use crate::parse::source::SourceFile;
 
 pub struct RedundantFactoryOption;
 
+fn removal_range_for_factory_option(
+    source: &SourceFile,
+    loc: &ruby_prism::Location<'_>,
+) -> (usize, usize) {
+    let bytes = source.as_bytes();
+    let mut start = loc.start_offset();
+    let mut end = loc.end_offset();
+
+    // Expand over surrounding horizontal whitespace.
+    while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+        start -= 1;
+    }
+    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
+        end += 1;
+    }
+
+    // Prefer removing a left-side comma (`..., factory: :user`).
+    if start > 0 && bytes[start - 1] == b',' {
+        start -= 1;
+        while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+            start -= 1;
+        }
+        return (start, end);
+    }
+
+    // Fallback: remove right-side comma (`factory: :user, ...`).
+    if end < bytes.len() && bytes[end] == b',' {
+        end += 1;
+        while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
+            end += 1;
+        }
+    }
+
+    (start, end)
+}
+
 impl Cop for RedundantFactoryOption {
     fn name(&self) -> &'static str {
         "FactoryBot/RedundantFactoryOption"
@@ -32,6 +68,10 @@ impl Cop for RedundantFactoryOption {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -39,7 +79,7 @@ impl Cop for RedundantFactoryOption {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -116,12 +156,26 @@ impl Cop for RedundantFactoryOption {
                     if name == assoc_name {
                         let loc = pair.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             "Remove redundant `factory` option.".to_string(),
-                        ));
+                        );
+
+                        if let Some(ref mut corr) = corrections {
+                            let (start, end) = removal_range_for_factory_option(source, &loc);
+                            corr.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -136,4 +190,27 @@ mod tests {
         RedundantFactoryOption,
         "cops/factorybot/redundant_factory_option"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RedundantFactoryOption.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_redundant_factory_pair() {
+        crate::testutil::assert_cop_autocorrect(
+            &RedundantFactoryOption,
+            b"association :user, factory: :user\n",
+            b"association :user\n",
+        );
+    }
+
+    #[test]
+    fn autocorrect_removes_first_factory_pair_when_followed_by_other_options() {
+        crate::testutil::assert_cop_autocorrect(
+            &RedundantFactoryOption,
+            b"association :user, factory: :user, strategy: :build\n",
+            b"association :user, strategy: :build\n",
+        );
+    }
 }
