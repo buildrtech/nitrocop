@@ -19,6 +19,10 @@ impl Cop for Detect {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -26,7 +30,7 @@ impl Cop for Detect {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let outer_call = match node.as_call_node() {
             Some(c) => c,
@@ -122,24 +126,45 @@ impl Cop for Detect {
         }
 
         let inner_method_str = std::str::from_utf8(inner_method).unwrap_or("select");
+        let prefer = if is_last { "reverse.detect" } else { "detect" };
         let msg = if is_index {
             let idx = if is_last { -1 } else { 0 };
-            if is_last {
-                format!("Use `reverse.detect` instead of `{inner_method_str}[{idx}]`.")
-            } else {
-                format!("Use `detect` instead of `{inner_method_str}[{idx}]`.")
-            }
-        } else if is_last {
-            format!("Use `reverse.detect` instead of `{inner_method_str}.last`.")
+            format!("Use `{prefer}` instead of `{inner_method_str}[{idx}]`.")
         } else {
-            format!("Use `detect` instead of `{inner_method_str}.first`.")
+            let outer = if is_last { "last" } else { "first" };
+            format!("Use `{prefer}` instead of `{inner_method_str}.{outer}`.")
         };
 
         // Report at the inner call's method name (e.g., `select`), matching RuboCop's
         // `receiver.loc.selector` behavior, not the start of the entire expression.
         let inner_msg_loc = inner_call.message_loc().unwrap_or(inner_call.location());
         let (line, column) = source.offset_to_line_col(inner_msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, msg));
+        let mut diagnostic = self.diagnostic(source, line, column, msg);
+
+        if let Some(ref mut corr) = corrections {
+            let inner_receiver = inner_call.receiver().expect("validated by earlier guards");
+            let recv_loc = inner_receiver.location();
+            let recv_source = source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+            let dot = inner_call
+                .call_operator_loc()
+                .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))
+                .unwrap_or(".");
+            let tail = source.byte_slice(
+                inner_msg_loc.end_offset(),
+                inner_call.location().end_offset(),
+                "",
+            );
+            corr.push(crate::correction::Correction {
+                start: outer_call.location().start_offset(),
+                end: outer_call.location().end_offset(),
+                replacement: format!("{recv_source}{dot}{prefer}{tail}"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -147,4 +172,10 @@ impl Cop for Detect {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Detect, "cops/performance/detect");
+    crate::cop_autocorrect_fixture_tests!(Detect, "cops/performance/detect");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Detect.supports_autocorrect());
+    }
 }
