@@ -9,4 +9,5 @@
 - Performance/MapMethodChain parity follow-up: decide whether to keep conservative two-hop-only autocorrect or extend to stable multi-hop normalization while preserving safe-navigation behavior.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
+- Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
 - Performance/OpenStruct parity follow-up: evaluate safer argument-bearing rewrites (`OpenStruct.new(foo: 1)`-style) or keep autocorrect limited to zero-arg constructor cases only.
