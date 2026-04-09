@@ -290,6 +290,10 @@ impl Cop for FilePath {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -297,7 +301,7 @@ impl Cop for FilePath {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "slashes");
 
@@ -341,7 +345,14 @@ impl Cop for FilePath {
             return;
         }
 
-        self.check_rails_root_join(source, node, &call, style, diagnostics);
+        self.check_rails_root_join(
+            source,
+            node,
+            &call,
+            style,
+            diagnostics,
+            corrections.as_deref_mut(),
+        );
     }
 }
 
@@ -467,6 +478,7 @@ impl FilePath {
         call: &ruby_prism::CallNode<'_>,
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let args = match call.arguments() {
             Some(a) => a,
@@ -516,7 +528,39 @@ impl FilePath {
                 let loc = node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 let msg = self.build_message(style, false);
-                diagnostics.push(self.diagnostic(source, line, column, msg));
+                let mut diagnostic = self.diagnostic(source, line, column, msg);
+
+                if let Some(ref mut corr) = corrections {
+                    let mut segments = Vec::with_capacity(arg_list.len());
+                    for arg in &arg_list {
+                        if let Some(s) = arg.as_string_node() {
+                            segments.push(String::from_utf8_lossy(s.unescaped()).to_string());
+                        }
+                    }
+
+                    if segments.len() == arg_list.len()
+                        && let Some(recv) = call.receiver()
+                    {
+                        let recv_loc = recv.location();
+                        let recv_src = source.byte_slice(
+                            recv_loc.start_offset(),
+                            recv_loc.end_offset(),
+                            "Rails.root",
+                        );
+                        let path = segments.join("/").replace('\\', "\\\\").replace('"', "\\\"");
+                        let replacement = format!("{recv_src}.join(\"{path}\")");
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -742,5 +786,21 @@ mod tests {
             !diags.is_empty(),
             "should flag extension after bare Rails.root in dstr"
         );
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(FilePath.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_rails_root_join_slashes_style() {
+        let input = b"Rails.root.join(\"app\", \"models\")\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&FilePath, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"Rails.root.join(\"app/models\")\n");
     }
 }
