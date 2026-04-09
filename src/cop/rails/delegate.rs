@@ -279,6 +279,10 @@ impl Cop for Delegate {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -286,7 +290,7 @@ impl Cop for Delegate {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforce_for_prefixed = config.get_bool("EnforceForPrefixed", true);
 
@@ -500,12 +504,65 @@ impl Cop for Delegate {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `delegate` to define delegations.".to_string(),
-        ));
+        );
+
+        // Conservative baseline autocorrect: only direct-name delegations with no args.
+        if name_matches_directly && param_names.is_empty() {
+            let to_target = if receiver.as_self_node().is_some() {
+                Some("self".to_string())
+            } else if let Some(recv_call) = receiver.as_call_node() {
+                if recv_call.name().as_slice() == b"class"
+                    && recv_call
+                        .receiver()
+                        .is_some_and(|r| r.as_self_node().is_some())
+                    && recv_call.arguments().is_none()
+                {
+                    Some(":class".to_string())
+                } else if recv_call.receiver().is_none()
+                    && recv_call.arguments().is_none()
+                    && recv_call.block().is_none()
+                {
+                    Some(format!(":{}", String::from_utf8_lossy(recv_call.name().as_slice())))
+                } else {
+                    None
+                }
+            } else if let Some(lv) = receiver.as_local_variable_read_node() {
+                Some(format!(":{}", String::from_utf8_lossy(lv.name().as_slice())))
+            } else if let Some(iv) = receiver.as_instance_variable_read_node() {
+                Some(format!(":{}", String::from_utf8_lossy(iv.name().as_slice())))
+            } else if let Some(cv) = receiver.as_class_variable_read_node() {
+                Some(format!(":{}", String::from_utf8_lossy(cv.name().as_slice())))
+            } else if let Some(gv) = receiver.as_global_variable_read_node() {
+                Some(format!(":{}", String::from_utf8_lossy(gv.name().as_slice())))
+            } else if let Some(cr) = receiver.as_constant_read_node() {
+                Some(format!(":{}", String::from_utf8_lossy(cr.name().as_slice())))
+            } else {
+                None
+            };
+
+            if let Some(target) = to_target
+                && let Some(ref mut corr) = corrections
+            {
+                corr.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!(
+                        "delegate :{}, to: {target}",
+                        String::from_utf8_lossy(call.name().as_slice())
+                    ),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -853,4 +910,21 @@ fn has_module_function_token(code: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Delegate, "cops/rails/delegate");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Delegate.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_direct_delegate() {
+        let input = b"def name\n  client.name\nend\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&Delegate, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"delegate :name, to: :client\n");
+    }
 }
