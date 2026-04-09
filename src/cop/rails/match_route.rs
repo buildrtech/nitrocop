@@ -63,6 +63,10 @@ impl Cop for MatchRoute {
         &[ARRAY_NODE, CALL_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -70,7 +74,7 @@ impl Cop for MatchRoute {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -84,6 +88,7 @@ impl Cop for MatchRoute {
 
         // Check for `via:` option (handles both `via: :get` and `:via => :get` syntax)
         let via_value = keyword_arg_value(&call, b"via");
+        let can_selector_autocorrect = via_value.is_none();
 
         let http_method = match via_value {
             None => {
@@ -157,12 +162,28 @@ impl Cop for MatchRoute {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use `{http_method}` instead of `match` to define a route."),
-        ));
+        );
+
+        if can_selector_autocorrect
+            && let Some(selector) = call.message_loc()
+            && let Some(ref mut corr) = corrections
+        {
+            corr.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: http_method.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -170,4 +191,20 @@ impl Cop for MatchRoute {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MatchRoute, "cops/rails/match_route");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(MatchRoute.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_match_without_via() {
+        let input = b"match ':controller/:action/:id'\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&MatchRoute, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"get ':controller/:action/:id'\n");
+    }
 }
