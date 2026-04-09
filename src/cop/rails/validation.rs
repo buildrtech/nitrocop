@@ -57,6 +57,10 @@ impl Cop for Validation {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -64,7 +68,7 @@ impl Cop for Validation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -92,12 +96,49 @@ impl Cop for Validation {
                 let loc = call.message_loc().unwrap_or(call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 let old_str = String::from_utf8_lossy(old_name);
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Use `validates :attr, {replacement}` instead of `{old_str}`."),
-                ));
+                );
+
+                // Conservative baseline autocorrect:
+                // - replace selector with `validates`
+                // - append `, <type>: true` when there is exactly one attribute arg
+                //   (simple deterministic form like `validates_presence_of :name`)
+                if let Some(ref mut corr) = corrections
+                    && let Some(selector) = call.message_loc()
+                    && arg_list.len() == 1
+                {
+                    let validate_type = if old_name == b"validates_size_of" {
+                        "length"
+                    } else {
+                        std::str::from_utf8(&old_name[b"validates_".len()..old_name.len() - b"_of".len()])
+                            .unwrap_or("presence")
+                    };
+
+                    corr.push(crate::correction::Correction {
+                        start: selector.start_offset(),
+                        end: selector.end_offset(),
+                        replacement: "validates".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+
+                    let first_arg = &arg_list[0];
+                    let arg_loc = first_arg.location();
+                    corr.push(crate::correction::Correction {
+                        start: arg_loc.end_offset(),
+                        end: arg_loc.end_offset(),
+                        replacement: format!(", {validate_type}: true"),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -145,4 +186,21 @@ fn is_frozen_array(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Validation, "cops/rails/validation");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Validation.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_old_style_validation() {
+        let input = b"validates_presence_of :name\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&Validation, input);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].corrected);
+
+        let cs = crate::correction::CorrectionSet::from_vec(corrections);
+        let corrected = cs.apply(input);
+        assert_eq!(corrected, b"validates :name, presence: true\n");
+    }
 }
