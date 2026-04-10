@@ -71,6 +71,7 @@
 - Lint/UselessRuby2Keywords parity follow-up: extend autocorrect beyond inline-`def` form to symbol-reference offenses (`ruby2_keywords :foo`) by locating in-scope static/dynamic method definitions and deleting only safe selector ranges.
 - Lint/RefinementImportMethods parity follow-up: validate selector-rewrite autocorrect layout stability across multiline/indented refine bodies and add config/documentation notes about semantic risk parity with RuboCop’s no-autocorrect stance.
 - Lint/EmptyExpression parity follow-up: extend autocorrect from empty-parentheses baseline to safe empty-interpolation removal (`#{}`) with context guards for percent-literal/token-splitting edge cases.
+- Lint/FloatOutOfRange parity follow-up: validate negative-overflow replacement precedence in chained-call/receiver contexts and add corrected snapshots for underscored exponent literals.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.

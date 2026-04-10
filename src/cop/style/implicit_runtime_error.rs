@@ -14,6 +14,10 @@ impl Cop for ImplicitRuntimeError {
         false
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
@@ -25,7 +29,7 @@ impl Cop for ImplicitRuntimeError {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -64,7 +68,7 @@ impl Cop for ImplicitRuntimeError {
             let method_str = std::str::from_utf8(method_bytes).unwrap_or("raise");
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
@@ -72,7 +76,21 @@ impl Cop for ImplicitRuntimeError {
                     "Use `{}` with an explicit exception class and message, rather than just a message.",
                     method_str
                 ),
-            ));
+            );
+
+            if let Some(corrections) = corrections {
+                let first_src = std::str::from_utf8(first_arg.location().as_slice()).unwrap_or("''");
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: format!("{method_str} RuntimeError, {first_src}"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -81,4 +99,18 @@ impl Cop for ImplicitRuntimeError {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ImplicitRuntimeError, "cops/style/implicit_runtime_error");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ImplicitRuntimeError.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_adds_runtime_error_class() {
+        crate::testutil::assert_cop_autocorrect(
+            &ImplicitRuntimeError,
+            b"raise 'message'\n",
+            b"raise RuntimeError, 'message'\n",
+        );
+    }
 }
