@@ -21,6 +21,10 @@ impl Cop for DuplicateCaseCondition {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CASE_NODE, WHEN_NODE]
     }
@@ -32,7 +36,7 @@ impl Cop for DuplicateCaseCondition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let case_node = match node.as_case_node() {
             Some(n) => n,
@@ -46,16 +50,54 @@ impl Cop for DuplicateCaseCondition {
                 Some(w) => w,
                 None => continue,
             };
-            for condition in when_node.conditions().iter() {
+            let when_conditions: Vec<_> = when_node.conditions().iter().collect();
+            for (idx, condition) in when_conditions.iter().enumerate() {
                 let loc = condition.location();
-                if !seen.insert(condition_key(&condition)) {
+                if !seen.insert(condition_key(condition)) {
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Duplicate `when` condition detected.".to_string(),
-                    ));
+                    );
+
+                    // Conservative baseline autocorrect: only remove duplicate
+                    // conditions inside multi-condition `when` lists.
+                    if when_conditions.len() > 1
+                        && let Some(corrections) = corrections.as_deref_mut()
+                    {
+                        let bytes = source.as_bytes();
+                        let mut start = loc.start_offset();
+                        let mut end = loc.end_offset();
+
+                        if idx + 1 < when_conditions.len() {
+                            end = when_conditions[idx + 1].location().start_offset();
+                        } else {
+                            while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+                                start -= 1;
+                            }
+                            if start > 0 && bytes[start - 1] == b',' {
+                                start -= 1;
+                                while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+                                    start -= 1;
+                                }
+                            }
+                        }
+
+                        if start < end {
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -88,4 +130,18 @@ fn condition_key(condition: &ruby_prism::Node<'_>) -> Vec<u8> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicateCaseCondition, "cops/lint/duplicate_case_condition");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DuplicateCaseCondition.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_duplicate_condition_within_same_when_list() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicateCaseCondition,
+            b"case token\nwhen :a, :b, :a\n  action\nend\n",
+            b"case token\nwhen :a, :b\n  action\nend\n",
+        );
+    }
 }
