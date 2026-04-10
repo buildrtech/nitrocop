@@ -11,6 +11,10 @@ impl Cop for MissingExpectationTargetMethod {
         "RSpec/MissingExpectationTargetMethod"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -30,7 +34,7 @@ impl Cop for MissingExpectationTargetMethod {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for expect(x).something or is_expected.something
         // where something is not .to / .not_to / .to_not
@@ -65,7 +69,7 @@ impl Cop for MissingExpectationTargetMethod {
         }
 
         let loc = call.message_loc();
-        let (line, column) = match loc {
+        let (line, column) = match loc.as_ref() {
             Some(l) => source.offset_to_line_col(l.start_offset()),
             None => {
                 let loc = call.location();
@@ -73,12 +77,27 @@ impl Cop for MissingExpectationTargetMethod {
             }
         };
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `.to`, `.not_to` or `.to_not` to set an expectation.".to_string(),
-        ));
+        );
+
+        if let Some(selector_loc) = loc
+            && let Some(corrections) = corrections
+        {
+            corrections.push(crate::correction::Correction {
+                start: selector_loc.start_offset(),
+                end: selector_loc.end_offset(),
+                replacement: "to".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -86,6 +105,10 @@ impl Cop for MissingExpectationTargetMethod {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        MissingExpectationTargetMethod,
+        "cops/rspec/missing_expectation_target_method"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         MissingExpectationTargetMethod,
         "cops/rspec/missing_expectation_target_method"
     );
