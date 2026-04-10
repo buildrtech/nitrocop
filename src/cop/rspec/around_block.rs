@@ -52,6 +52,10 @@ impl Cop for AroundBlock {
         "RSpec/AroundBlock"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -85,7 +89,7 @@ impl Cop for AroundBlock {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -137,12 +141,23 @@ impl Cop for AroundBlock {
                 }
                 let loc = node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Test object should be passed to around block.".to_string(),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "around do |example|\n  example.run\nend".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
             Some(name) => {
                 // Has a block parameter — check if it's used correctly anywhere in the body.
@@ -161,14 +176,27 @@ impl Cop for AroundBlock {
                                 let (line, column) =
                                     source.offset_to_line_col(param_loc.start_offset());
                                 let name_str = std::str::from_utf8(&name).unwrap_or("example");
-                                diagnostics.push(self.diagnostic(
+                                let mut diagnostic = self.diagnostic(
                                     source,
                                     line,
                                     column,
                                     format!(
                                         "You should call `{name_str}.call` or `{name_str}.run`."
                                     ),
-                                ));
+                                );
+                                let call_loc = node.location();
+                                if let Some(corrections) = corrections.as_deref_mut() {
+                                    corrections.push(crate::correction::Correction {
+                                        start: call_loc.start_offset(),
+                                        end: call_loc.end_offset(),
+                                        replacement: "around do |example|\n  example.run\nend"
+                                            .to_string(),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                                diagnostics.push(diagnostic);
                             }
                         }
                     }
@@ -396,4 +424,5 @@ fn is_param_ref(node: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AroundBlock, "cops/rspec/around_block");
+    crate::cop_autocorrect_fixture_tests!(AroundBlock, "cops/rspec/around_block");
 }
