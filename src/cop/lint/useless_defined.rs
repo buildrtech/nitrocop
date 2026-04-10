@@ -30,6 +30,10 @@ impl Cop for UselessDefined {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             DEFINED_NODE,
@@ -47,7 +51,7 @@ impl Cop for UselessDefined {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let defined_node = match node.as_defined_node() {
             Some(n) => n,
@@ -70,7 +74,7 @@ impl Cop for UselessDefined {
 
         let loc = defined_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
@@ -78,7 +82,20 @@ impl Cop for UselessDefined {
                 "Calling `defined?` with a {} argument will always return a truthy value.",
                 type_name
             ),
-        ));
+        );
+
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "\"expression\"".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -86,4 +103,18 @@ impl Cop for UselessDefined {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UselessDefined, "cops/lint/useless_defined");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(UselessDefined.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_replaces_defined_string_call() {
+        crate::testutil::assert_cop_autocorrect(
+            &UselessDefined,
+            b"defined?('FooBar')\n",
+            b"\"expression\"\n",
+        );
+    }
 }
