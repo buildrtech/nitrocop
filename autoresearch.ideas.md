@@ -50,6 +50,8 @@
 - RSpec/EmptyLineAfterFinalLet parity follow-up: validate insertion behavior around trailing comments and `rubocop:enable` directives to match RuboCop empty-line separation autocorrect exactly.
 - RSpec/EmptyLineAfterHook parity follow-up: validate insertion behavior for `AllowConsecutiveOneLiners: false` and nested one-liner hook chains to ensure full RuboCop separation parity.
 - RSpec/EmptyLineAfterSubject parity follow-up: validate insertion behavior within shared example trees and around heredoc+directive comment combinations for full EmptyLineSeparation parity.
+- RSpec/EmptyLineAfterExampleGroup parity follow-up: validate insertion behavior for single-line block forms, receiver-qualified `RSpec.*` groups, and postfix conditional wrappers to match RuboCop EmptyLineSeparation autocorrect boundaries.
+- RSpec/EmptyLineAfterExample baseline opportunity: mirror sibling separation cops with conservative newline insertion autocorrect for deterministic missing-separator offenses.
 - FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` should remain diagnostic-only (no upstream AutoCorrector) or get an explicit nitrocop-only unsafe autocorrect mode.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.

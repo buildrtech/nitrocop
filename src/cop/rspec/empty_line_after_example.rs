@@ -99,6 +99,10 @@ impl Cop for EmptyLineAfterExample {
         &[PROGRAM_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -106,7 +110,7 @@ impl Cop for EmptyLineAfterExample {
         parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match node.as_program_node() {
             Some(p) => p,
@@ -124,6 +128,7 @@ impl Cop for EmptyLineAfterExample {
             source,
             cop: self,
             diagnostics,
+            corrections,
             comment_lines: &comment_lines,
             enable_directive_lines: &enable_directive_lines,
             allow_consecutive,
@@ -136,6 +141,7 @@ struct ExampleSeparationVisitor<'a> {
     source: &'a SourceFile,
     cop: &'a EmptyLineAfterExample,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     comment_lines: &'a HashSet<usize>,
     enable_directive_lines: &'a HashSet<usize>,
     allow_consecutive: bool,
@@ -180,12 +186,26 @@ impl<'a> ExampleSeparationVisitor<'a> {
             .unwrap_or(0);
 
         let method_name = std::str::from_utf8(example_call.name().as_slice()).unwrap_or("it");
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             report_line,
             report_col,
             format!("Add an empty line after `{method_name}`."),
-        ));
+        );
+
+        if let Some(ref mut corrections) = self.corrections {
+            let insert_at = self.source.line_start_offset(report_line + 1);
+            corrections.push(crate::correction::Correction {
+                start: insert_at,
+                end: insert_at,
+                replacement: "\n".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -441,4 +461,18 @@ fn find_max_heredoc_end_offset(source: &SourceFile, node: &ruby_prism::Node<'_>)
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyLineAfterExample, "cops/rspec/empty_line_after_example");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyLineAfterExample.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_blank_line_after_example() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyLineAfterExample,
+            b"RSpec.describe Foo do\n  it 'does this' do\n  end\n  it 'does that' do\n  end\nend\n",
+            b"RSpec.describe Foo do\n  it 'does this' do\n  end\n\n  it 'does that' do\n  end\nend\n",
+        );
+    }
 }
