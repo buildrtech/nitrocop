@@ -77,6 +77,7 @@
 - Lint/RequireParentheses parity follow-up: tighten autocorrect range parity for ternary-condition-only offense spans and verify safe handling of receiver-qualified/safe-navigation call forms.
 - Style/ExponentialNotation parity follow-up: extend autocorrect beyond scientific-style baseline to engineering/integral styles and add edge-case coverage for signed mantissas and underscore-separated digits.
 - Lint/UriEscapeUnescape parity follow-up: expand autocorrect beyond escape/unescape one-arg baseline to selected safe encode/decode forms with explicit replacement policy and fixture coverage for behavior-sensitive URL cases.
+- Lint/UselessDefined parity follow-up: validate replacement fidelity for interpolated string/symbol offense forms and consider source-style-preserving replacement choice where projects prefer single-quoted literals.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
