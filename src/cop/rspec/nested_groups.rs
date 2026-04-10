@@ -55,6 +55,10 @@ impl Cop for NestedGroups {
         "RSpec/NestedGroups"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -74,7 +78,7 @@ impl Cop for NestedGroups {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match node.as_program_node() {
             Some(p) => p,
@@ -89,14 +93,29 @@ impl Cop for NestedGroups {
         // - For a single top-level statement: unwraps module/class/begin
         // - For multiple top-level statements: checks direct children only
         let stmts: Vec<_> = program.statements().body().iter().collect();
+        let mut corrections = corrections;
         if stmts.len() == 1 {
             // Single top-level statement: unwrap module/class wrappers
-            self.check_top_level_node(source, &stmts[0], max, &allowed_groups, diagnostics);
+            self.check_top_level_node(
+                source,
+                &stmts[0],
+                max,
+                &allowed_groups,
+                diagnostics,
+                corrections.as_deref_mut(),
+            );
         } else {
             // Multiple top-level statements (e.g., require + module):
             // only check direct children for spec groups, no unwrapping
             for stmt in &stmts {
-                self.check_direct_spec_group(source, stmt, max, &allowed_groups, diagnostics);
+                self.check_direct_spec_group(
+                    source,
+                    stmt,
+                    max,
+                    &allowed_groups,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
             }
         }
     }
@@ -113,13 +132,14 @@ impl NestedGroups {
         max: usize,
         allowed_groups: &[String],
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Only check if this node is a spec group call — no module/class unwrapping
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
         };
-        self.process_spec_group_call(source, &call, max, allowed_groups, diagnostics);
+        self.process_spec_group_call(source, &call, max, allowed_groups, diagnostics, corrections);
     }
 
     /// Check a top-level AST node for spec groups. Recurses into
@@ -132,13 +152,22 @@ impl NestedGroups {
         max: usize,
         allowed_groups: &[String],
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Recurse into module/class wrappers (RuboCop's top_level_nodes)
         if let Some(module_node) = node.as_module_node() {
             if let Some(body) = module_node.body() {
                 if let Some(stmts) = body.as_statements_node() {
                     for stmt in stmts.body().iter() {
-                        self.check_top_level_node(source, &stmt, max, allowed_groups, diagnostics);
+                        self.check_top_level_node(
+                            source,
+                            &stmt,
+                            max,
+                            allowed_groups,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                        );
                     }
                 }
             }
@@ -148,7 +177,14 @@ impl NestedGroups {
             if let Some(body) = class_node.body() {
                 if let Some(stmts) = body.as_statements_node() {
                     for stmt in stmts.body().iter() {
-                        self.check_top_level_node(source, &stmt, max, allowed_groups, diagnostics);
+                        self.check_top_level_node(
+                            source,
+                            &stmt,
+                            max,
+                            allowed_groups,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                        );
                     }
                 }
             }
@@ -160,7 +196,7 @@ impl NestedGroups {
             Some(c) => c,
             None => return,
         };
-        self.process_spec_group_call(source, &call, max, allowed_groups, diagnostics);
+        self.process_spec_group_call(source, &call, max, allowed_groups, diagnostics, corrections);
     }
 
     /// Process a call node that may be a spec group (describe, shared_examples, etc.)
@@ -172,6 +208,7 @@ impl NestedGroups {
         max: usize,
         allowed_groups: &[String],
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let method_name = call.name().as_slice();
 
@@ -222,6 +259,7 @@ impl NestedGroups {
                 diagnostics,
                 cop: self,
                 allowed_groups,
+                corrections,
             };
             visitor.walk_nested_groups(&body);
         }
@@ -235,6 +273,7 @@ struct NestingVisitor<'a> {
     diagnostics: &'a mut Vec<Diagnostic>,
     cop: &'a NestedGroups,
     allowed_groups: &'a [String],
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl NestingVisitor<'_> {
@@ -297,7 +336,7 @@ impl NestingVisitor<'_> {
                 if next_depth > self.max {
                     let loc = call.location();
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diagnostic = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
@@ -305,7 +344,23 @@ impl NestingVisitor<'_> {
                             "Maximum example group nesting exceeded [{next_depth}/{}].",
                             self.max
                         ),
-                    ));
+                    );
+                    if let Some(corrections) = self.corrections.as_deref_mut() {
+                        let (start, end) = if let Some(msg_loc) = call.message_loc() {
+                            (msg_loc.start_offset(), msg_loc.end_offset())
+                        } else {
+                            (loc.start_offset(), loc.end_offset())
+                        };
+                        corrections.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: "skip".to_string(),
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    self.diagnostics.push(diagnostic);
                 }
             }
         }
@@ -325,6 +380,15 @@ impl NestingVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NestedGroups, "cops/rspec/nested_groups");
+
+    #[test]
+    fn autocorrect_rewrites_excess_nested_group_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &NestedGroups,
+            b"describe Foo do\n  context 'a' do\n    context 'b' do\n      context 'c' do\n        it { expect(true).to eq(true) }\n      end\n    end\n  end\nend\n",
+            b"describe Foo do\n  context 'a' do\n    context 'b' do\n      skip 'c' do\n        it { expect(true).to eq(true) }\n      end\n    end\n  end\nend\n",
+        );
+    }
 
     #[test]
     fn allowed_groups_skips_matching() {
