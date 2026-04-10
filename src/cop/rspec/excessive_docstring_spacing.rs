@@ -33,6 +33,10 @@ impl Cop for ExcessiveDocstringSpacing {
         &[CALL_NODE, INTERPOLATED_STRING_NODE, STRING_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -40,7 +44,7 @@ impl Cop for ExcessiveDocstringSpacing {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -192,13 +196,47 @@ impl Cop for ExcessiveDocstringSpacing {
 
         let loc = first_arg.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Excessive whitespace.".to_string(),
-        ));
+        let mut diagnostic = self.diagnostic(source, line, column, "Excessive whitespace.".to_string());
+
+        // Conservative baseline: autocorrect plain string descriptions only.
+        if let Some(s) = first_arg.as_string_node() {
+            let corrected = strip_excessive_whitespace(content_str);
+            if corrected != content_str {
+                if let Some(corrections) = &mut corrections {
+                    let content_loc = s.content_loc();
+                    corrections.push(crate::correction::Correction {
+                        start: content_loc.start_offset(),
+                        end: content_loc.end_offset(),
+                        replacement: corrected,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
+}
+
+fn strip_excessive_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_blank_run = false;
+
+    for ch in text.chars() {
+        if ch == ' ' || ch == '\t' {
+            if !in_blank_run {
+                out.push(' ');
+                in_blank_run = true;
+            }
+        } else {
+            out.push(ch);
+            in_blank_run = false;
+        }
+    }
+
+    out.trim_matches([' ', '\t']).to_string()
 }
 
 #[cfg(test)]
@@ -208,4 +246,18 @@ mod tests {
         ExcessiveDocstringSpacing,
         "cops/rspec/excessive_docstring_spacing"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ExcessiveDocstringSpacing.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_strips_and_squeezes_spacing_in_string_descriptions() {
+        crate::testutil::assert_cop_autocorrect(
+            &ExcessiveDocstringSpacing,
+            b"it '  has  excessive   spacing  ' do\nend\n",
+            b"it 'has excessive spacing' do\nend\n",
+        );
+    }
 }
