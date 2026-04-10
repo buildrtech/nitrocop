@@ -32,6 +32,10 @@ impl Cop for MessageSpies {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -39,7 +43,7 @@ impl Cop for MessageSpies {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: EnforcedStyle — "have_received" (default) or "receive"
         let enforced_style = config.get_str("EnforcedStyle", "have_received");
@@ -89,15 +93,34 @@ impl Cop for MessageSpies {
             find_matcher_calls(&arg, target_name, &mut found);
         }
 
-        let msg = if enforced_style == "receive" {
-            "Prefer `receive` for setting message expectations."
+        let (msg, replacement) = if enforced_style == "receive" {
+            (
+                "Prefer `receive` for setting message expectations.",
+                "receive",
+            )
         } else {
-            "Prefer `have_received` for setting message expectations. Setup the object as a spy using `allow` or `instance_spy`."
+            (
+                "Prefer `have_received` for setting message expectations. Setup the object as a spy using `allow` or `instance_spy`.",
+                "have_received",
+            )
         };
 
-        for (start_offset, _end_offset) in found {
+        for (start_offset, end_offset) in found {
             let (line, column) = source.offset_to_line_col(start_offset);
-            diagnostics.push(self.diagnostic(source, line, column, msg.to_string()));
+            let mut diagnostic = self.diagnostic(source, line, column, msg.to_string());
+
+            if let Some(ref mut corrs) = corrections {
+                corrs.push(crate::correction::Correction {
+                    start: start_offset,
+                    end: end_offset,
+                    replacement: replacement.to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -113,9 +136,11 @@ fn find_matcher_calls(
 ) {
     if let Some(call) = node.as_call_node() {
         // Check if this is a bare `receive(...)` or `have_received(...)` call
-        if call.name().as_slice() == target_name && call.receiver().is_none() {
-            let loc = call.location();
-            out.push((loc.start_offset(), loc.end_offset()));
+        if call.name().as_slice() == target_name
+            && call.receiver().is_none()
+            && let Some(selector) = call.message_loc()
+        {
+            out.push((selector.start_offset(), selector.end_offset()));
         }
         // Recurse into receiver
         if let Some(recv) = call.receiver() {
@@ -144,6 +169,7 @@ fn find_matcher_calls(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MessageSpies, "cops/rspec/message_spies");
+    crate::cop_autocorrect_fixture_tests!(MessageSpies, "cops/rspec/message_spies");
 
     #[test]
     fn compound_receive_produces_two_offenses() {
@@ -177,5 +203,27 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&MessageSpies, source, config);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("receive"));
+    }
+
+    #[test]
+    fn receive_style_autocorrects_have_received_to_receive() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("receive".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &MessageSpies,
+            b"expect(foo).to have_received(:bar)\n",
+            b"expect(foo).to receive(:bar)\n",
+            config,
+        );
     }
 }
