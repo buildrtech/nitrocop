@@ -51,6 +51,10 @@ impl Cop for DuplicatedGem {
         "Bundler/DuplicatedGem"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -66,7 +70,7 @@ impl Cop for DuplicatedGem {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = GemDeclarationVisitor {
             source,
@@ -88,6 +92,7 @@ impl Cop for DuplicatedGem {
             }
         }
 
+        let mut corrections = corrections;
         for declarations in grouped.into_values() {
             if declarations.len() < 2 {
                 continue;
@@ -106,7 +111,7 @@ impl Cop for DuplicatedGem {
                     // First gem is not directly in a conditional — flag all duplicates.
                     let gem_name = String::from_utf8_lossy(&first.gem_name);
                     for duplicate in declarations.iter().skip(1) {
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             duplicate.line,
                             duplicate.column,
@@ -114,7 +119,18 @@ impl Cop for DuplicatedGem {
                                 "Gem `{}` requirements already given on line {} of the Gemfile.",
                                 gem_name, first.line
                             ),
-                        ));
+                        );
+                        if let Some(corrections) = corrections.as_deref_mut() {
+                            corrections.push(crate::correction::Correction {
+                                start: duplicate.start,
+                                end: duplicate.end,
+                                replacement: "skip".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        diagnostics.push(diagnostic);
                     }
                     continue;
                 }
@@ -144,7 +160,7 @@ impl Cop for DuplicatedGem {
 
             let gem_name = String::from_utf8_lossy(&first.gem_name);
             for duplicate in declarations.iter().skip(1) {
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     duplicate.line,
                     duplicate.column,
@@ -152,7 +168,18 @@ impl Cop for DuplicatedGem {
                         "Gem `{}` requirements already given on line {} of the Gemfile.",
                         gem_name, first.line
                     ),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: duplicate.start,
+                        end: duplicate.end,
+                        replacement: "skip".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -185,6 +212,8 @@ struct GemDeclaration {
     gem_name: Vec<u8>,
     line: usize,
     column: usize,
+    start: usize,
+    end: usize,
     conditional_root: Option<usize>,
     /// Number of opaque Block frames between this gem and its nearest conditional root.
     /// Must be 0 for conditional exemption (matches RuboCop's direct-child check).
@@ -517,6 +546,8 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
         if let Some(gem_name) = gem_name_from_call(node) {
             let loc = node.message_loc().unwrap_or(node.location());
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+            let start = loc.start_offset();
+            let end = loc.end_offset();
             let (conditional_root, mut blocks_above_conditional) = self.conditional_info();
             // In Parser gem, `gem 'x' do...end` is `(block (send ...) ...)` — the
             // send is inside a block node. So the first non-begin ancestor of the
@@ -533,6 +564,8 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
                 gem_name,
                 line,
                 column,
+                start,
+                end,
                 conditional_root,
                 blocks_above_conditional,
                 call_source,
@@ -546,4 +579,13 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicatedGem, "cops/bundler/duplicated_gem");
+
+    #[test]
+    fn autocorrect_rewrites_duplicate_gem_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicatedGem,
+            b"gem 'rubocop'\ngem 'rubocop'\n",
+            b"gem 'rubocop'\nskip 'rubocop'\n",
+        );
+    }
 }

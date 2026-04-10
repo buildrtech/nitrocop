@@ -13,6 +13,10 @@ impl Cop for DuplicatedGroup {
         "Bundler/DuplicatedGroup"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -28,7 +32,7 @@ impl Cop for DuplicatedGroup {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = GroupDeclarationVisitor {
             source,
@@ -39,9 +43,10 @@ impl Cop for DuplicatedGroup {
 
         let mut seen: HashMap<String, usize> = HashMap::new();
 
+        let mut corrections = corrections;
         for declaration in visitor.declarations {
             if let Some(&first_line) = seen.get(&declaration.key) {
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     declaration.line,
                     declaration.column,
@@ -49,7 +54,18 @@ impl Cop for DuplicatedGroup {
                         "Gem group `{}` already defined on line {} of the Gemfile.",
                         declaration.group_name, first_line
                     ),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: declaration.start,
+                        end: declaration.end,
+                        replacement: "skip".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             } else {
                 seen.insert(declaration.key, declaration.line);
             }
@@ -62,6 +78,8 @@ struct GroupDeclaration {
     group_name: String,
     line: usize,
     column: usize,
+    start: usize,
+    end: usize,
 }
 
 struct GroupDeclarationVisitor<'a> {
@@ -94,12 +112,16 @@ impl<'pr> Visit<'pr> for GroupDeclarationVisitor<'_> {
             let group_name = group_display_name(self.source, node);
             let loc = node.message_loc().unwrap_or(node.location());
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+            let start = loc.start_offset();
+            let end = loc.end_offset();
 
             self.declarations.push(GroupDeclaration {
                 key,
                 group_name,
                 line,
                 column,
+                start,
+                end,
             });
         }
 
@@ -219,4 +241,13 @@ fn group_attributes(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Vec
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicatedGroup, "cops/bundler/duplicated_group");
+
+    #[test]
+    fn autocorrect_rewrites_duplicate_group_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicatedGroup,
+            b"group :development do\n  gem 'rubocop'\nend\n\ngroup :development do\n  gem 'pry'\nend\n",
+            b"group :development do\n  gem 'rubocop'\nend\n\nskip :development do\n  gem 'pry'\nend\n",
+        );
+    }
 }

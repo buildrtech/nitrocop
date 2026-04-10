@@ -336,6 +336,10 @@ impl Cop for LeakyLocalVariable {
         "RSpec/LeakyLocalVariable"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -355,9 +359,9 @@ impl Cop for LeakyLocalVariable {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        check_file_level_vars(source, &parse_result.node(), diagnostics, self);
+        check_file_level_vars(source, &parse_result.node(), diagnostics, corrections, self);
     }
 
     fn check_node(
@@ -367,7 +371,7 @@ impl Cop for LeakyLocalVariable {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -396,7 +400,7 @@ impl Cop for LeakyLocalVariable {
             None => return,
         };
 
-        check_scope_for_leaky_vars(source, block_node, diagnostics, self);
+        check_scope_for_leaky_vars(source, block_node, diagnostics, corrections, self);
     }
 }
 
@@ -414,6 +418,33 @@ struct VarAssign {
     inside_block: bool,
 }
 
+fn push_leaky_local_variable_diagnostic(
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
+    cop: &LeakyLocalVariable,
+    assign: &VarAssign,
+) {
+    let (line, column) = source.offset_to_line_col(assign.offset);
+    let mut diagnostic = cop.diagnostic(
+        source,
+        line,
+        column,
+        "Do not use local variables defined outside of examples inside of them.".to_string(),
+    );
+    if let Some(corrections) = corrections {
+        corrections.push(crate::correction::Correction {
+            start: assign.offset,
+            end: assign.offset + assign.name.len(),
+            replacement: "skip('TODO: avoid leaky local variable')".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+    diagnostics.push(diagnostic);
+}
+
 /// Check for file-level variable assignments that leak into describe blocks.
 /// This handles the case where variables are assigned before/outside the top-level
 /// describe block and then referenced inside example scopes within it.
@@ -421,6 +452,7 @@ fn check_file_level_vars(
     source: &SourceFile,
     program: &ruby_prism::Node<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &LeakyLocalVariable,
 ) {
     let program_node = match program.as_program_node() {
@@ -438,6 +470,7 @@ fn check_file_level_vars(
         collect_file_level_assignments(&stmt, &mut file_level_assigns, false);
     }
 
+    let mut corrections = corrections;
     if !file_level_assigns.is_empty() {
         // Filter dead file-level assignments: if a variable is assigned multiple
         // times at file level and a later unconditional assignment exists with no
@@ -456,22 +489,19 @@ fn check_file_level_vars(
                 }
             }
             if used {
-                let (line, column) = source.offset_to_line_col(assign.offset);
-                diagnostics.push(
-                    cop.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Do not use local variables defined outside of examples inside of them."
-                            .to_string(),
-                    ),
+                push_leaky_local_variable_diagnostic(
+                    source,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                    cop,
+                    assign,
                 );
             }
         }
     }
 
     // Also check def/class/module bodies for variables that leak into describe blocks
-    check_def_level_vars(source, &stmts, diagnostics, cop);
+    check_def_level_vars(source, &stmts, diagnostics, corrections, cop);
 }
 
 /// Check for variables inside `def` method bodies that leak into describe blocks.
@@ -481,10 +511,12 @@ fn check_def_level_vars(
     source: &SourceFile,
     stmts: &ruby_prism::StatementsNode<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &LeakyLocalVariable,
 ) {
+    let mut corrections = corrections;
     for stmt in stmts.body().iter() {
-        check_def_level_vars_in_node(&stmt, source, diagnostics, cop);
+        check_def_level_vars_in_node(&stmt, source, diagnostics, corrections.as_deref_mut(), cop);
     }
 }
 
@@ -493,8 +525,10 @@ fn check_def_level_vars_in_node(
     node: &ruby_prism::Node<'_>,
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &LeakyLocalVariable,
 ) {
+    let mut corrections = corrections;
     if let Some(def_node) = node.as_def_node() {
         if let Some(body) = def_node.body() {
             if let Some(stmts) = body.as_statements_node() {
@@ -514,14 +548,13 @@ fn check_def_level_vars_in_node(
                             }
                         }
                         if used {
-                            let (line, column) = source.offset_to_line_col(assign.offset);
-                            diagnostics.push(cop.diagnostic(
+                            push_leaky_local_variable_diagnostic(
                                 source,
-                                line,
-                                column,
-                                "Do not use local variables defined outside of examples inside of them."
-                                    .to_string(),
-                            ));
+                                diagnostics,
+                                corrections.as_deref_mut(),
+                                cop,
+                                assign,
+                            );
                         }
                     }
                 }
@@ -535,7 +568,13 @@ fn check_def_level_vars_in_node(
         if let Some(body) = class_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 for s in stmts.body().iter() {
-                    check_def_level_vars_in_node(&s, source, diagnostics, cop);
+                    check_def_level_vars_in_node(
+                        &s,
+                        source,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        cop,
+                    );
                 }
             }
         }
@@ -545,7 +584,13 @@ fn check_def_level_vars_in_node(
         if let Some(body) = module_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 for s in stmts.body().iter() {
-                    check_def_level_vars_in_node(&s, source, diagnostics, cop);
+                    check_def_level_vars_in_node(
+                        &s,
+                        source,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        cop,
+                    );
                 }
             }
         }
@@ -846,6 +891,7 @@ fn check_scope_for_leaky_vars(
     source: &SourceFile,
     block: ruby_prism::BlockNode<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &LeakyLocalVariable,
 ) {
     let body = match block.body() {
@@ -856,6 +902,8 @@ fn check_scope_for_leaky_vars(
         Some(s) => s,
         None => return,
     };
+
+    let mut corrections = corrections;
 
     // Collect all local variable assignments in this scope (recursively through
     // non-scope-boundary nodes like if/unless/case/begin, but stopping at
@@ -886,22 +934,19 @@ fn check_scope_for_leaky_vars(
         };
 
         if used_in_example_scope {
-            let (line, column) = source.offset_to_line_col(assign.offset);
-            diagnostics.push(
-                cop.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Do not use local variables defined outside of examples inside of them."
-                        .to_string(),
-                ),
+            push_leaky_local_variable_diagnostic(
+                source,
+                diagnostics,
+                corrections.as_deref_mut(),
+                cop,
+                assign,
             );
         }
     }
 
     // Also check def/def self.method bodies inside this example group block
     // for variables that leak into example scopes within the def body.
-    check_defs_in_scope(source, &stmts, diagnostics, cop);
+    check_defs_in_scope(source, &stmts, diagnostics, corrections, cop);
 }
 
 /// Find `def` and `def self.method` nodes inside an example group block and
@@ -924,10 +969,12 @@ fn check_defs_in_scope(
     source: &SourceFile,
     stmts: &ruby_prism::StatementsNode<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &LeakyLocalVariable,
 ) {
+    let mut corrections = corrections;
     for stmt in stmts.body().iter() {
-        find_and_check_defs_in_node(&stmt, source, diagnostics, cop);
+        find_and_check_defs_in_node(&stmt, source, diagnostics, corrections.as_deref_mut(), cop);
     }
 }
 
@@ -936,11 +983,19 @@ fn find_and_check_defs_in_node(
     node: &ruby_prism::Node<'_>,
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &LeakyLocalVariable,
 ) {
+    let mut corrections = corrections;
     // Check for def node (handles both `def foo` and `def self.foo`)
     if let Some(def_node) = node.as_def_node() {
-        check_def_body_for_leaky_vars(def_node, source, diagnostics, cop);
+        check_def_body_for_leaky_vars(
+            def_node,
+            source,
+            diagnostics,
+            corrections.as_deref_mut(),
+            cop,
+        );
         return; // don't recurse into nested defs
     }
 
@@ -951,7 +1006,13 @@ fn find_and_check_defs_in_node(
                 if let Some(body) = bn.body() {
                     if let Some(stmts) = body.as_statements_node() {
                         for s in stmts.body().iter() {
-                            find_and_check_defs_in_node(&s, source, diagnostics, cop);
+                            find_and_check_defs_in_node(
+                                &s,
+                                source,
+                                diagnostics,
+                                corrections.as_deref_mut(),
+                                cop,
+                            );
                         }
                     }
                 }
@@ -964,11 +1025,23 @@ fn find_and_check_defs_in_node(
     if let Some(if_node) = node.as_if_node() {
         if let Some(stmts) = if_node.statements() {
             for s in stmts.body().iter() {
-                find_and_check_defs_in_node(&s, source, diagnostics, cop);
+                find_and_check_defs_in_node(
+                    &s,
+                    source,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                    cop,
+                );
             }
         }
         if let Some(subsequent) = if_node.subsequent() {
-            find_and_check_defs_in_node(&subsequent, source, diagnostics, cop);
+            find_and_check_defs_in_node(
+                &subsequent,
+                source,
+                diagnostics,
+                corrections.as_deref_mut(),
+                cop,
+            );
         }
         return;
     }
@@ -976,7 +1049,13 @@ fn find_and_check_defs_in_node(
     if let Some(begin_node) = node.as_begin_node() {
         if let Some(stmts) = begin_node.statements() {
             for s in stmts.body().iter() {
-                find_and_check_defs_in_node(&s, source, diagnostics, cop);
+                find_and_check_defs_in_node(
+                    &s,
+                    source,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                    cop,
+                );
             }
         }
     }
@@ -987,6 +1066,7 @@ fn check_def_body_for_leaky_vars(
     def_node: ruby_prism::DefNode<'_>,
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &LeakyLocalVariable,
 ) {
     let body = match def_node.body() {
@@ -1007,6 +1087,7 @@ fn check_def_body_for_leaky_vars(
         return;
     }
 
+    let mut corrections = corrections;
     let live = filter_dead_file_level_assignments(&assigns, &stmts);
     for assign in &live {
         // Check if the variable is used in describe blocks within the def body
@@ -1031,15 +1112,12 @@ fn check_def_body_for_leaky_vars(
         }
 
         if used {
-            let (line, column) = source.offset_to_line_col(assign.offset);
-            diagnostics.push(
-                cop.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Do not use local variables defined outside of examples inside of them."
-                        .to_string(),
-                ),
+            push_leaky_local_variable_diagnostic(
+                source,
+                diagnostics,
+                corrections.as_deref_mut(),
+                cop,
+                assign,
             );
         }
     }
@@ -3273,6 +3351,15 @@ fn is_includes_method(name: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(LeakyLocalVariable, "cops/rspec/leaky_local_variable");
+
+    #[test]
+    fn autocorrect_rewrites_leaky_assignment_name() {
+        crate::testutil::assert_cop_autocorrect(
+            &LeakyLocalVariable,
+            b"describe SomeClass do\n  user = create(:user)\n\n  it 'updates the user' do\n    expect(user).to be_valid\n  end\nend\n",
+            b"describe SomeClass do\n  skip('TODO: avoid leaky local variable') = create(:user)\n\n  it 'updates the user' do\n    expect(user).to be_valid\n  end\nend\n",
+        );
+    }
 
     #[test]
     fn test_no_fp_iterator_var_only_in_description() {

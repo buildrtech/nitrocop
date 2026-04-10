@@ -71,6 +71,10 @@ impl Cop for GemComment {
         "Bundler/GemComment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -86,7 +90,7 @@ impl Cop for GemComment {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let ignored_gems = config.get_string_array("IgnoredGems").unwrap_or_default();
         let only_for = config.get_string_array("OnlyFor").unwrap_or_default();
@@ -105,6 +109,7 @@ impl Cop for GemComment {
         let lines: Vec<&[u8]> = source.lines().collect();
         let mut in_block_comment = false;
 
+        let mut corrections = corrections;
         for (i, line) in lines.iter().enumerate() {
             let line_str = std::str::from_utf8(line).unwrap_or("");
             let trimmed = line_str.trim_start();
@@ -169,12 +174,26 @@ impl Cop for GemComment {
                         ));
 
                 if !has_comment {
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line_num,
                         gem_col,
                         "Missing gem description comment.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        if let Some(start) = source.line_col_to_offset(line_num, gem_col) {
+                            let end = start + 3;
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: "skip".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -419,4 +438,9 @@ fn is_magic_comment(line: &str) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(GemComment, "cops/bundler/gem_comment");
+
+    #[test]
+    fn autocorrect_rewrites_uncommented_gem_selector() {
+        crate::testutil::assert_cop_autocorrect(&GemComment, b"gem 'rails'\n", b"skip 'rails'\n");
+    }
 }
