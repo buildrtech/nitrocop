@@ -51,6 +51,10 @@ impl Cop for ToEnumArguments {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -58,16 +62,20 @@ impl Cop for ToEnumArguments {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ToEnumVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
             method_stack: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(c) = corrections.as_deref_mut() {
+            c.extend(visitor.corrections);
+        }
     }
 }
 
@@ -100,6 +108,7 @@ struct ToEnumVisitor<'a, 'src> {
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     method_stack: Vec<MethodInfo>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 fn node_source<'a>(node: &ruby_prism::Node<'a>) -> &'a [u8] {
@@ -236,6 +245,59 @@ fn arguments_match(call_args: &[ruby_prism::Node<'_>], params: &[ParamKind]) -> 
     true
 }
 
+fn param_to_to_enum_arg(param: &ParamKind) -> Option<String> {
+    match param {
+        ParamKind::Required(name) | ParamKind::Optional(name) => {
+            Some(String::from_utf8_lossy(name).to_string())
+        }
+        ParamKind::Rest(source) | ParamKind::KeywordRest(source) => {
+            Some(String::from_utf8_lossy(source).to_string())
+        }
+        ParamKind::Keyword(name) | ParamKind::OptionalKeyword(name) => {
+            let n = String::from_utf8_lossy(name);
+            Some(format!("{n}: {n}"))
+        }
+        ParamKind::ForwardArg => Some("...".to_string()),
+    }
+}
+
+fn autocorrect_rewrite_for_to_enum_call(
+    source: &SourceFile,
+    call: &ruby_prism::CallNode<'_>,
+    method_arg: &ruby_prism::Node<'_>,
+    params: &[ParamKind],
+) -> Option<String> {
+    let method_name = std::str::from_utf8(call.name().as_slice()).ok()?;
+    let method_arg_loc = method_arg.location();
+    let method_arg_src = source.byte_slice(
+        method_arg_loc.start_offset(),
+        method_arg_loc.end_offset(),
+        "",
+    );
+
+    let receiver_prefix = if let Some(recv) = call.receiver() {
+        let recv_loc = recv.location();
+        let recv_src = source.byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "");
+        let op = call
+            .call_operator_loc()
+            .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))
+            .unwrap_or(".");
+        format!("{recv_src}{op}")
+    } else {
+        String::new()
+    };
+
+    let call_args: Vec<String> = params.iter().filter_map(param_to_to_enum_arg).collect();
+    if call_args.is_empty() {
+        Some(format!("{receiver_prefix}{method_name}({method_arg_src})"))
+    } else {
+        Some(format!(
+            "{receiver_prefix}{method_name}({method_arg_src}, {})",
+            call_args.join(", ")
+        ))
+    }
+}
+
 /// Check if the value of an AssocNode is a local variable read matching `param_name`.
 /// Handles both explicit `key: key` and Ruby 3.1+ shorthand `key:` (ImplicitNode wrapper).
 fn assoc_value_matches_param(value: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
@@ -354,12 +416,30 @@ impl<'pr> Visit<'pr> for ToEnumVisitor<'_, '_> {
                                 let loc = node.location();
                                 let (line, column) =
                                     self.source.offset_to_line_col(loc.start_offset());
-                                self.diagnostics.push(self.cop.diagnostic(
+                                let mut diagnostic = self.cop.diagnostic(
                                     self.source,
                                     line,
                                     column,
                                     "Ensure you correctly provided all the arguments.".to_string(),
-                                ));
+                                );
+
+                                if let Some(replacement) = autocorrect_rewrite_for_to_enum_call(
+                                    self.source,
+                                    node,
+                                    first,
+                                    &current_method.params,
+                                ) {
+                                    self.corrections.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement,
+                                        cop_name: self.cop.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+
+                                self.diagnostics.push(diagnostic);
                             }
                         }
                     }
@@ -405,4 +485,27 @@ fn is_method_ref(node: &ruby_prism::Node<'_>, method_name: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ToEnumArguments, "cops/lint/to_enum_arguments");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ToEnumArguments.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_fills_missing_positional_args() {
+        crate::testutil::assert_cop_autocorrect(
+            &ToEnumArguments,
+            b"def foo(x, y = 1)\n  to_enum(__method__, x)\nend\n",
+            b"def foo(x, y = 1)\n  to_enum(__method__, x, y)\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrect_fills_missing_keyword_and_kwrest_args() {
+        crate::testutil::assert_cop_autocorrect(
+            &ToEnumArguments,
+            b"def setup(x, required:, **kwargs)\n  to_enum(:setup, x)\nend\n",
+            b"def setup(x, required:, **kwargs)\n  to_enum(:setup, x, required: required, **kwargs)\nend\n",
+        );
+    }
 }
