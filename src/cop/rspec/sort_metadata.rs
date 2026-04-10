@@ -43,6 +43,10 @@ impl Cop for SortMetadata {
         &[ASSOC_NODE, CALL_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -50,7 +54,7 @@ impl Cop for SortMetadata {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -98,60 +102,97 @@ impl Cop for SortMetadata {
             &all_args[..]
         };
 
-        // Collect trailing symbol arguments (metadata)
-        // Find the first symbol argument after the description
-        let mut symbol_names: Vec<(String, usize)> = Vec::new(); // (name, start_offset)
-        let mut first_symbol_offset: Option<usize> = None;
-
-        // Also collect keyword hash keys
-        let mut hash_keys: Vec<(String, usize)> = Vec::new();
+        // Collect trailing symbol arguments (metadata) and keyword-hash pairs.
+        // tuple: (sort_key_lower, start_offset, end_offset, source_text)
+        let mut symbols: Vec<(String, usize, usize, String)> = Vec::new();
+        let mut pairs: Vec<(String, usize, usize, String)> = Vec::new();
 
         for arg in arg_list.iter() {
             if let Some(sym) = arg.as_symbol_node() {
                 let name = std::str::from_utf8(sym.unescaped())
                     .unwrap_or("")
-                    .to_string();
-                let offset = sym.location().start_offset();
-                if first_symbol_offset.is_none() {
-                    first_symbol_offset = Some(offset);
-                }
-                symbol_names.push((name, offset));
+                    .to_ascii_lowercase();
+                let loc = sym.location();
+                let src = String::from_utf8_lossy(
+                    &source.as_bytes()[loc.start_offset()..loc.end_offset()],
+                )
+                .to_string();
+                symbols.push((name, loc.start_offset(), loc.end_offset(), src));
             } else if let Some(kw) = arg.as_keyword_hash_node() {
                 for elem in kw.elements().iter() {
                     if let Some(assoc) = elem.as_assoc_node() {
                         if let Some(key_sym) = assoc.key().as_symbol_node() {
                             let name = std::str::from_utf8(key_sym.unescaped())
                                 .unwrap_or("")
-                                .to_string();
-                            let offset = elem.location().start_offset();
-                            hash_keys.push((name, offset));
+                                .to_ascii_lowercase();
+                            let loc = elem.location();
+                            let src = String::from_utf8_lossy(
+                                &source.as_bytes()[loc.start_offset()..loc.end_offset()],
+                            )
+                            .to_string();
+                            pairs.push((name, loc.start_offset(), loc.end_offset(), src));
                         }
                     }
                 }
             }
         }
 
-        // Check if symbols are sorted
-        let symbols_sorted = symbol_names.windows(2).all(|w| w[0].0 <= w[1].0);
+        let symbols_sorted = symbols.windows(2).all(|w| w[0].0 <= w[1].0);
+        let pairs_sorted = pairs.windows(2).all(|w| w[0].0 <= w[1].0);
 
-        // Check if hash keys are sorted
-        let hash_sorted = hash_keys.windows(2).all(|w| w[0].0 <= w[1].0);
-
-        if !symbols_sorted || !hash_sorted {
-            // Flag from first metadata to last
-            let flag_offset = if !symbols_sorted {
-                first_symbol_offset.unwrap_or(0)
-            } else {
-                hash_keys.first().map(|(_, o)| *o).unwrap_or(0)
+        if !symbols_sorted || !pairs_sorted {
+            let flag_offset = symbols
+                .iter()
+                .map(|(_, s, _, _)| *s)
+                .chain(pairs.iter().map(|(_, s, _, _)| *s))
+                .min();
+            let Some(flag_offset) = flag_offset else {
+                return;
             };
 
             let (line, column) = source.offset_to_line_col(flag_offset);
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Sort metadata alphabetically.".to_string(),
-            ));
+            );
+
+            if let Some(corrections) = &mut corrections {
+                let start = symbols
+                    .iter()
+                    .map(|(_, s, _, _)| *s)
+                    .chain(pairs.iter().map(|(_, s, _, _)| *s))
+                    .min();
+                let end = symbols
+                    .iter()
+                    .map(|(_, _, e, _)| *e)
+                    .chain(pairs.iter().map(|(_, _, e, _)| *e))
+                    .max();
+
+                if let (Some(start), Some(end)) = (start, end) {
+                    symbols.sort_by(|a, b| a.0.cmp(&b.0));
+                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+                    let replacement = symbols
+                        .into_iter()
+                        .chain(pairs)
+                        .map(|(_, _, _, src)| src)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+
+                    corrections.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -160,4 +201,18 @@ impl Cop for SortMetadata {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SortMetadata, "cops/rspec/sort_metadata");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(SortMetadata.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_sorts_symbol_and_hash_metadata() {
+        crate::testutil::assert_cop_autocorrect(
+            &SortMetadata,
+            b"it 'Something', :b, :a, foo: 'bar', baz: true do\nend\n",
+            b"it 'Something', :a, :b, baz: true, foo: 'bar' do\nend\n",
+        );
+    }
 }
