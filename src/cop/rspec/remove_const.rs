@@ -11,6 +11,10 @@ impl Cop for RemoveConst {
         "RSpec/RemoveConst"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -30,7 +34,7 @@ impl Cop for RemoveConst {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for .send(:remove_const, ...) or .__send__(:remove_const, ...)
         let call = match node.as_call_node() {
@@ -71,12 +75,23 @@ impl Cop for RemoveConst {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not use remove_const in specs. Consider using e.g. `stub_const`.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "skip('TODO: replace remove_const with stub_const')".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -84,4 +99,5 @@ impl Cop for RemoveConst {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RemoveConst, "cops/rspec/remove_const");
+    crate::cop_autocorrect_fixture_tests!(RemoveConst, "cops/rspec/remove_const");
 }
