@@ -34,6 +34,10 @@ impl Cop for FactoryAssociationWithStrategy {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -41,7 +45,7 @@ impl Cop for FactoryAssociationWithStrategy {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Match on CallNode for `factory` or `trait`
         let outer_call = match node.as_call_node() {
@@ -78,6 +82,7 @@ impl Cop for FactoryAssociationWithStrategy {
             source,
             cop_name: self.name(),
             diagnostics: Vec::new(),
+            corrections,
         };
         finder.visit(&body);
 
@@ -85,13 +90,14 @@ impl Cop for FactoryAssociationWithStrategy {
     }
 }
 
-struct StrategyFinder<'s> {
+struct StrategyFinder<'s, 'c> {
     source: &'s SourceFile,
     cop_name: &'static str,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'c mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for StrategyFinder<'_> {
+impl<'pr> Visit<'pr> for StrategyFinder<'_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Check for attribute blocks: `name { strategy(:factory) }`
         // The call must be a bare method (no receiver = attribute name)
@@ -142,7 +148,7 @@ impl<'pr> Visit<'pr> for StrategyFinder<'_> {
                                             let loc = inner_call.location();
                                             let (line, column) =
                                                 self.source.offset_to_line_col(loc.start_offset());
-                                            self.diagnostics.push(Diagnostic {
+                                            let mut diagnostic = Diagnostic {
                                                 path: self.source.path_str().to_string(),
                                                 location: crate::diagnostic::Location {
                                                     line,
@@ -151,9 +157,40 @@ impl<'pr> Visit<'pr> for StrategyFinder<'_> {
                                                 severity: Severity::Convention,
                                                 cop_name: self.cop_name.to_string(),
                                                 message: "Use an implicit, explicit or inline definition instead of hard coding a strategy for setting association within factory.".to_string(),
-
                                                 corrected: false,
-                                            });
+                                            };
+
+                                            if let Some(ref mut corrections) = self.corrections {
+                                                if let Some(args) = inner_call.arguments() {
+                                                    let arg_list: Vec<_> = args.arguments().iter().collect();
+                                                    if arg_list.len() == 1 {
+                                                        if arg_list[0].as_symbol_node().is_some()
+                                                            || arg_list[0].as_string_node().is_some()
+                                                        {
+                                                            let arg_src = self.source.byte_slice(
+                                                                arg_list[0].location().start_offset(),
+                                                                arg_list[0].location().end_offset(),
+                                                                "",
+                                                            );
+                                                            let replacement = if inner_call.opening_loc().is_some() {
+                                                                format!("association({arg_src})")
+                                                            } else {
+                                                                format!("association {arg_src}")
+                                                            };
+                                                            corrections.push(crate::correction::Correction {
+                                                                start: loc.start_offset(),
+                                                                end: loc.end_offset(),
+                                                                replacement,
+                                                                cop_name: self.cop_name,
+                                                                cop_index: 0,
+                                                            });
+                                                            diagnostic.corrected = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            self.diagnostics.push(diagnostic);
                                         }
                                     }
                                 }
@@ -176,4 +213,18 @@ mod tests {
         FactoryAssociationWithStrategy,
         "cops/factorybot/factory_association_with_strategy"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(FactoryAssociationWithStrategy.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_hardcoded_strategy_call_to_association() {
+        crate::testutil::assert_cop_autocorrect(
+            &FactoryAssociationWithStrategy,
+            b"factory :foo do\n  profile { create(:profile) }\nend\n",
+            b"factory :foo do\n  profile { association(:profile) }\nend\n",
+        );
+    }
 }

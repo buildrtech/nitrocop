@@ -44,6 +44,7 @@
 - FactoryBot/AttributeDefinedStatically parity follow-up: add RuboCop-style bare-hash wrapping autocorrect (`attr key: val` -> `attr { { key: val } }`) and broaden coverage for multiline/block-preserving forms.
 - FactoryBot/ConsistentParenthesesStyle parity follow-up: validate multiline/line-break-preserving autocorrect formatting across complex argument layouts and explicit receiver calls (`FactoryBot.create`) to match RuboCop output stability.
 - FactoryBot/CreateList parity follow-up: extend autocorrect beyond n_times baseline to RuboCop parity for array-literal and create_list-style conversions, including block-preserving rewrites.
+- RSpec/EmptyExampleGroup parity follow-up: verify whole-line removal whitespace/comment cleanup against RuboCop for nested empty groups and adjacent blank-line normalization.
 - FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` and `FactoryAssociationWithStrategy` should remain diagnostic-only (no upstream AutoCorrector) or get explicit nitrocop-only unsafe autocorrect modes.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
