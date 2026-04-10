@@ -14,6 +14,10 @@ impl Cop for UndescriptiveLiteralsDescription {
         "RSpec/UndescriptiveLiteralsDescription"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -40,7 +44,7 @@ impl Cop for UndescriptiveLiteralsDescription {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -95,12 +99,25 @@ impl Cop for UndescriptiveLiteralsDescription {
 
         let loc = first_arg.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Description should be descriptive.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "'TODO: description'".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -108,6 +125,10 @@ impl Cop for UndescriptiveLiteralsDescription {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        UndescriptiveLiteralsDescription,
+        "cops/rspec/undescriptive_literals_description"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         UndescriptiveLiteralsDescription,
         "cops/rspec/undescriptive_literals_description"
     );
