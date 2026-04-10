@@ -15,6 +15,10 @@ impl Cop for Be {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_include(&self) -> &'static [&'static str] {
         RSPEC_DEFAULT_INCLUDE
     }
@@ -30,7 +34,7 @@ impl Cop for Be {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for `expect(...).to be` / `expect(...).not_to be` / `expect(...).to_not be`
         // The `be` is a CallNode with receiver being another CallNode (`.to`/`.not_to`/`.to_not`)
@@ -82,12 +86,27 @@ impl Cop for Be {
 
         let loc = be_call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Don't use `be` without an argument.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = corrections
+            && let Some(selector) = be_call.message_loc()
+        {
+            corrections.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: "be_truthy".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -95,4 +114,18 @@ impl Cop for Be {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Be, "cops/rspec/be");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Be.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_rewrites_be_to_be_truthy() {
+        crate::testutil::assert_cop_autocorrect(
+            &Be,
+            b"it { expect(foo).to be }\n",
+            b"it { expect(foo).to be_truthy }\n",
+        );
+    }
 }
