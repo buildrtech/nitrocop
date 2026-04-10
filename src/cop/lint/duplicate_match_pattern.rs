@@ -17,6 +17,10 @@ impl Cop for DuplicateMatchPattern {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -24,15 +28,19 @@ impl Cop for DuplicateMatchPattern {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = MatchVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(c) = corrections {
+            c.extend(visitor.corrections);
+        }
     }
 }
 
@@ -40,6 +48,7 @@ struct MatchVisitor<'a, 'src> {
     cop: &'a DuplicateMatchPattern,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
 }
 
 impl<'pr> Visit<'pr> for MatchVisitor<'_, '_> {
@@ -56,12 +65,27 @@ impl<'pr> Visit<'pr> for MatchVisitor<'_, '_> {
                 if !seen.insert(key) {
                     let loc = pattern.location();
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diagnostic = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
                         "Duplicate `in` pattern detected.".to_string(),
-                    ));
+                    );
+
+                    let mut start = in_node.location().start_offset();
+                    if start > 0 && self.source.as_bytes()[start - 1] == b'\n' {
+                        start -= 1;
+                    }
+                    self.corrections.push(crate::correction::Correction {
+                        start,
+                        end: in_node.location().end_offset(),
+                        replacement: String::new(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+
+                    self.diagnostics.push(diagnostic);
                 }
             }
         }
@@ -74,4 +98,18 @@ impl<'pr> Visit<'pr> for MatchVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicateMatchPattern, "cops/lint/duplicate_match_pattern");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DuplicateMatchPattern.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_duplicate_in_branch() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicateMatchPattern,
+            b"case x\nin 'first'\n  do_something\nin 'first'\n  do_something_else\nend\n",
+            b"case x\nin 'first'\n  do_something\nend\n",
+        );
+    }
 }
