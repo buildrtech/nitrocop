@@ -22,6 +22,10 @@ impl Cop for ExpectOutput {
         "RSpec/ExpectOutput"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -41,7 +45,7 @@ impl Cop for ExpectOutput {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match node.as_program_node() {
             Some(p) => p,
@@ -51,6 +55,7 @@ impl Cop for ExpectOutput {
         let mut visitor = ExpectOutputVisitor {
             source,
             diagnostics: Vec::new(),
+            corrections,
             in_example_scope: false,
         };
         visitor.visit(&program.as_node());
@@ -61,6 +66,7 @@ impl Cop for ExpectOutput {
 struct ExpectOutputVisitor<'a> {
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     in_example_scope: bool,
 }
 
@@ -81,6 +87,17 @@ impl<'pr> Visit<'pr> for ExpectOutputVisitor<'_> {
             if let Some(stream) = stream {
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                let mut corrected = false;
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "skip('TODO: use output matcher')".to_string(),
+                        cop_name: "RSpec/ExpectOutput",
+                        cop_index: 0,
+                    });
+                    corrected = true;
+                }
                 self.diagnostics.push(Diagnostic {
                     path: self.source.path_str().to_string(),
                     location: crate::diagnostic::Location { line, column },
@@ -89,7 +106,7 @@ impl<'pr> Visit<'pr> for ExpectOutputVisitor<'_> {
                     message: format!(
                         "Use `expect {{ ... }}.to output(...).to_{stream}` instead of mutating ${stream}."
                     ),
-                    corrected: false,
+                    corrected,
                 });
             }
         }
@@ -98,57 +115,52 @@ impl<'pr> Visit<'pr> for ExpectOutputVisitor<'_> {
 
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
         if self.in_example_scope {
+            let report = |stream: &str,
+                          loc: ruby_prism::Location<'_>,
+                          this: &mut ExpectOutputVisitor<'_>| {
+                let (line, column) = this.source.offset_to_line_col(loc.start_offset());
+                let mut corrected = false;
+                if let Some(corrections) = this.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "skip('TODO: use output matcher')".to_string(),
+                        cop_name: "RSpec/ExpectOutput",
+                        cop_index: 0,
+                    });
+                    corrected = true;
+                }
+                this.diagnostics.push(Diagnostic {
+                    path: this.source.path_str().to_string(),
+                    location: crate::diagnostic::Location { line, column },
+                    severity: Severity::Convention,
+                    cop_name: "RSpec/ExpectOutput".to_string(),
+                    message: format!(
+                        "Use `expect {{ ... }}.to output(...).to_{stream}` instead of mutating ${stream}."
+                    ),
+                    corrected,
+                });
+            };
+
             for target in node.lefts().iter() {
                 if let Some(gt) = target.as_global_variable_target_node() {
                     let name = gt.name().as_slice();
-                    let stream = if name == b"$stdout" {
-                        Some("stdout")
+                    if name == b"$stdout" {
+                        report("stdout", node.location(), self);
                     } else if name == b"$stderr" {
-                        Some("stderr")
-                    } else {
-                        None
-                    };
-                    if let Some(stream) = stream {
-                        let loc = node.location();
-                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(Diagnostic {
-                            path: self.source.path_str().to_string(),
-                            location: crate::diagnostic::Location { line, column },
-                            severity: Severity::Convention,
-                            cop_name: "RSpec/ExpectOutput".to_string(),
-                            message: format!(
-                                "Use `expect {{ ... }}.to output(...).to_{stream}` instead of mutating ${stream}."
-                            ),
-                            corrected: false,
-                        });
+                        report("stderr", node.location(), self);
                     }
                 }
             }
-            // Also check rest target (splat position)
-            if let Some(rest) = node.rest() {
-                if let Some(gt) = rest.as_global_variable_target_node() {
-                    let name = gt.name().as_slice();
-                    let stream = if name == b"$stdout" {
-                        Some("stdout")
-                    } else if name == b"$stderr" {
-                        Some("stderr")
-                    } else {
-                        None
-                    };
-                    if let Some(stream) = stream {
-                        let loc = node.location();
-                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(Diagnostic {
-                            path: self.source.path_str().to_string(),
-                            location: crate::diagnostic::Location { line, column },
-                            severity: Severity::Convention,
-                            cop_name: "RSpec/ExpectOutput".to_string(),
-                            message: format!(
-                                "Use `expect {{ ... }}.to output(...).to_{stream}` instead of mutating ${stream}."
-                            ),
-                            corrected: false,
-                        });
-                    }
+
+            if let Some(rest) = node.rest()
+                && let Some(gt) = rest.as_global_variable_target_node()
+            {
+                let name = gt.name().as_slice();
+                if name == b"$stdout" {
+                    report("stdout", node.location(), self);
+                } else if name == b"$stderr" {
+                    report("stderr", node.location(), self);
                 }
             }
         }
@@ -213,4 +225,5 @@ fn is_per_example_hook(call: &ruby_prism::CallNode<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ExpectOutput, "cops/rspec/expect_output");
+    crate::cop_autocorrect_fixture_tests!(ExpectOutput, "cops/rspec/expect_output");
 }
