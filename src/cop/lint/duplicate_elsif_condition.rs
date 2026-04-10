@@ -87,7 +87,9 @@ impl Cop for DuplicateElsifCondition {
                     // it is the final elsif branch (no trailing elsif/else) and the
                     // predicate is a side-effect-free variable/constant/literal read.
                     if let Some(corrections) = corrections.as_deref_mut() {
-                        if elsif.subsequent().is_none() && predicate_autocorrect_safe(&elsif.predicate()) {
+                        if elsif.subsequent().is_none()
+                            && predicate_autocorrect_safe(&elsif.predicate())
+                        {
                             let mut start = elsif.location().start_offset();
                             if start > 0 && source.as_bytes()[start - 1] == b'\n' {
                                 start -= 1;

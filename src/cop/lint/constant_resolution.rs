@@ -326,11 +326,7 @@ mod tests {
 
     #[test]
     fn autocorrect_prefixes_unqualified_constant() {
-        crate::testutil::assert_cop_autocorrect(
-            &ConstantResolution,
-            b"User\n",
-            b"::User\n",
-        );
+        crate::testutil::assert_cop_autocorrect(&ConstantResolution, b"User\n", b"::User\n");
     }
 
     #[test]

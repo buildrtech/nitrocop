@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
 use crate::cop::node_type::{ASSOC_NODE, HASH_NODE, KEYWORD_HASH_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use std::collections::{HashMap, HashSet};
 
 /// Returns true if a method name is a known comparison/multiplication operator that
 /// preserves literal-ness. Must match RuboCop's `LITERAL_RECURSIVE_METHODS`
@@ -214,7 +214,10 @@ fn pair_removal_range(
     let pair_loc = elements[idx].location();
 
     if idx + 1 < elements.len() {
-        return (pair_loc.start_offset(), elements[idx + 1].location().start_offset());
+        return (
+            pair_loc.start_offset(),
+            elements[idx + 1].location().start_offset(),
+        );
     }
 
     if idx > 0 {

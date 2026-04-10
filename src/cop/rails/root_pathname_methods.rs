@@ -414,11 +414,15 @@ mod tests {
     #[test]
     fn autocorrects_file_join_with_rails_root() {
         let input = b"File.join(Rails.root, \"config\", \"database.yml\")\n";
-        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&RootPathnameMethods, input);
+        let (diags, corrections) =
+            crate::testutil::run_cop_autocorrect(&RootPathnameMethods, input);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].corrected);
         let cs = crate::correction::CorrectionSet::from_vec(corrections);
         let corrected = cs.apply(input);
-        assert_eq!(corrected, b"Rails.root.join(\"config\", \"database.yml\")\n");
+        assert_eq!(
+            corrected,
+            b"Rails.root.join(\"config\", \"database.yml\")\n"
+        );
     }
 }

@@ -385,7 +385,12 @@ fn add_reason_offense(
 ) {
     let loc = call.location();
     let (line, column) = source.offset_to_line_col(loc.start_offset());
-    let mut diagnostic = cop.diagnostic(source, line, column, format!("Give the reason for {label}."));
+    let mut diagnostic = cop.diagnostic(
+        source,
+        line,
+        column,
+        format!("Give the reason for {label}."),
+    );
 
     // Conservative baseline autocorrect: only for receiverless no-arg pending/skip
     // style calls. Insert a placeholder reason argument.
@@ -412,7 +417,10 @@ fn add_reason_offense(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(PendingWithoutReason, "cops/rspec/pending_without_reason");
-    crate::cop_autocorrect_fixture_tests!(PendingWithoutReason, "cops/rspec/pending_without_reason");
+    crate::cop_autocorrect_fixture_tests!(
+        PendingWithoutReason,
+        "cops/rspec/pending_without_reason"
+    );
 
     /// RuboCop does not flag `RSpec.xdescribe` when it is the sole top-level
     /// statement (Parser-gem `parent_node` returns nil → `on_send` returns early).

@@ -130,7 +130,8 @@ impl Cop for TravelAround {
                     .and_then(|b| b.as_block_argument_node())
                     .is_some()
             {
-                let method = std::str::from_utf8(travel_call.name().as_slice()).unwrap_or("freeze_time");
+                let method =
+                    std::str::from_utf8(travel_call.name().as_slice()).unwrap_or("freeze_time");
                 corr.push(crate::correction::Correction {
                     start: call.location().start_offset(),
                     end: block_node.location().end_offset(),

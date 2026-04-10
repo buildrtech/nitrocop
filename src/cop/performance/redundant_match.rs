@@ -533,7 +533,9 @@ impl<'a> RedundantMatchVisitor<'a> {
             let recv_is_regexp = recv.as_regular_expression_node().is_some()
                 || recv.as_interpolated_regular_expression_node().is_some();
             let arg_is_regexp = first_arg.as_regular_expression_node().is_some()
-                || first_arg.as_interpolated_regular_expression_node().is_some();
+                || first_arg
+                    .as_interpolated_regular_expression_node()
+                    .is_some();
 
             // Match RuboCop: only autocorrect when either side is a regexp literal.
             if recv_is_regexp || arg_is_regexp {

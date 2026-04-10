@@ -362,7 +362,10 @@ fn block_params_include(block: &ruby_prism::BlockNode<'_>, name: &[u8]) -> bool 
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RedundantBlockCall, "cops/performance/redundant_block_call");
-    crate::cop_autocorrect_fixture_tests!(RedundantBlockCall, "cops/performance/redundant_block_call");
+    crate::cop_autocorrect_fixture_tests!(
+        RedundantBlockCall,
+        "cops/performance/redundant_block_call"
+    );
 
     #[test]
     fn supports_autocorrect() {

@@ -69,7 +69,10 @@ impl<'pr> Visit<'pr> for R2KVisitor<'_, '_, '_> {
                             self.source,
                             line,
                             column,
-                            format!("`ruby2_keywords` is unnecessary for method `{}`.", method_name),
+                            format!(
+                                "`ruby2_keywords` is unnecessary for method `{}`.",
+                                method_name
+                            ),
                         );
 
                         if let Some(corrections) = &mut self.corrections {

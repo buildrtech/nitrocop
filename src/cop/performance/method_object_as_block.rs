@@ -109,7 +109,12 @@ fn replacement_for_call(
             .call_operator_loc()
             .map(|l| l.as_slice())
             .unwrap_or(b".");
-        format!("{}{}{}", node_source(source, &recv), String::from_utf8_lossy(op), call_name)
+        format!(
+            "{}{}{}",
+            node_source(source, &recv),
+            String::from_utf8_lossy(op),
+            call_name
+        )
     } else {
         call_name
     };

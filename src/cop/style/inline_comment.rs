@@ -69,8 +69,12 @@ impl Cop for InlineComment {
             }
 
             let (line, col) = source.offset_to_line_col(start);
-            let mut diagnostic =
-                self.diagnostic(source, line, col, "Avoid trailing inline comments.".to_string());
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                col,
+                "Avoid trailing inline comments.".to_string(),
+            );
 
             if let Some(corrections) = corrections.as_deref_mut()
                 && let Some(code_text) = source.try_byte_slice(line_start, start)

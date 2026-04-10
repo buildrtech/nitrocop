@@ -155,7 +155,12 @@ impl MetadataStyle {
             // Flag `key: true` keyword args — should be `:key` symbol style
             let mut corrections = corrections;
             for arg in metadata_args {
-                self.check_hash_like_for_symbol_style(source, arg, diagnostics, corrections.as_deref_mut());
+                self.check_hash_like_for_symbol_style(
+                    source,
+                    arg,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
             }
         } else if style == "hash" {
             // Flag `:key` symbol args — should be `key: true` hash style
@@ -295,7 +300,14 @@ impl MetadataStyle {
         };
 
         let style = config.get_str("EnforcedStyle", "symbol");
-        self.walk_for_config_hooks(source, &body, param_name.as_slice(), style, diagnostics, corrections);
+        self.walk_for_config_hooks(
+            source,
+            &body,
+            param_name.as_slice(),
+            style,
+            diagnostics,
+            corrections,
+        );
     }
 
     /// Walk statements looking for hook calls on the config variable.
@@ -312,10 +324,24 @@ impl MetadataStyle {
         let mut corrections = corrections;
         if let Some(stmts) = node.as_statements_node() {
             for stmt in stmts.body().iter() {
-                self.walk_for_config_hooks_single(source, &stmt, param_name, style, diagnostics, corrections.as_deref_mut());
+                self.walk_for_config_hooks_single(
+                    source,
+                    &stmt,
+                    param_name,
+                    style,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
             }
         } else {
-            self.walk_for_config_hooks_single(source, node, param_name, style, diagnostics, corrections);
+            self.walk_for_config_hooks_single(
+                source,
+                node,
+                param_name,
+                style,
+                diagnostics,
+                corrections,
+            );
         }
     }
 
@@ -337,25 +363,60 @@ impl MetadataStyle {
         // Recurse into if/unless branches (diagnostic-only in these nested paths for baseline)
         if let Some(if_node) = node.as_if_node() {
             if let Some(stmts) = if_node.statements() {
-                self.walk_for_config_hooks(source, &stmts.as_node(), param_name, style, diagnostics, None);
+                self.walk_for_config_hooks(
+                    source,
+                    &stmts.as_node(),
+                    param_name,
+                    style,
+                    diagnostics,
+                    None,
+                );
             }
             if let Some(subsequent) = if_node.subsequent() {
-                self.walk_for_config_hooks(source, &subsequent, param_name, style, diagnostics, None);
+                self.walk_for_config_hooks(
+                    source,
+                    &subsequent,
+                    param_name,
+                    style,
+                    diagnostics,
+                    None,
+                );
             }
             return;
         }
         if let Some(unless_node) = node.as_unless_node() {
             if let Some(stmts) = unless_node.statements() {
-                self.walk_for_config_hooks(source, &stmts.as_node(), param_name, style, diagnostics, None);
+                self.walk_for_config_hooks(
+                    source,
+                    &stmts.as_node(),
+                    param_name,
+                    style,
+                    diagnostics,
+                    None,
+                );
             }
             if let Some(else_clause) = unless_node.else_clause() {
-                self.walk_for_config_hooks(source, &else_clause.as_node(), param_name, style, diagnostics, None);
+                self.walk_for_config_hooks(
+                    source,
+                    &else_clause.as_node(),
+                    param_name,
+                    style,
+                    diagnostics,
+                    None,
+                );
             }
             return;
         }
         if let Some(else_node) = node.as_else_node() {
             if let Some(stmts) = else_node.statements() {
-                self.walk_for_config_hooks(source, &stmts.as_node(), param_name, style, diagnostics, None);
+                self.walk_for_config_hooks(
+                    source,
+                    &stmts.as_node(),
+                    param_name,
+                    style,
+                    diagnostics,
+                    None,
+                );
             }
         }
     }

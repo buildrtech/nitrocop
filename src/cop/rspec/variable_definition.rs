@@ -144,9 +144,7 @@ impl VariableDefinitionChecker<'_> {
             if is_simple_symbol_name(unescaped) {
                 return Some(format!(":{unescaped}"));
             }
-            let escaped = unescaped
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
+            let escaped = unescaped.replace('\\', "\\\\").replace('"', "\\\"");
             return Some(format!(":\"{escaped}\""));
         }
 
@@ -193,7 +191,9 @@ impl VariableDefinitionChecker<'_> {
                     "Use symbols for variable names."
                 };
 
-                let mut diagnostic = self.cop.diagnostic(self.source, line, column, msg.to_string());
+                let mut diagnostic =
+                    self.cop
+                        .diagnostic(self.source, line, column, msg.to_string());
                 if let Some(replacement) = self.autocorrect_replacement(&arg) {
                     self.corrections.push(Correction {
                         start: loc.start_offset(),

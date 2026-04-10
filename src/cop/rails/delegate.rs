@@ -527,20 +527,38 @@ impl Cop for Delegate {
                     && recv_call.arguments().is_none()
                     && recv_call.block().is_none()
                 {
-                    Some(format!(":{}", String::from_utf8_lossy(recv_call.name().as_slice())))
+                    Some(format!(
+                        ":{}",
+                        String::from_utf8_lossy(recv_call.name().as_slice())
+                    ))
                 } else {
                     None
                 }
             } else if let Some(lv) = receiver.as_local_variable_read_node() {
-                Some(format!(":{}", String::from_utf8_lossy(lv.name().as_slice())))
+                Some(format!(
+                    ":{}",
+                    String::from_utf8_lossy(lv.name().as_slice())
+                ))
             } else if let Some(iv) = receiver.as_instance_variable_read_node() {
-                Some(format!(":{}", String::from_utf8_lossy(iv.name().as_slice())))
+                Some(format!(
+                    ":{}",
+                    String::from_utf8_lossy(iv.name().as_slice())
+                ))
             } else if let Some(cv) = receiver.as_class_variable_read_node() {
-                Some(format!(":{}", String::from_utf8_lossy(cv.name().as_slice())))
+                Some(format!(
+                    ":{}",
+                    String::from_utf8_lossy(cv.name().as_slice())
+                ))
             } else if let Some(gv) = receiver.as_global_variable_read_node() {
-                Some(format!(":{}", String::from_utf8_lossy(gv.name().as_slice())))
+                Some(format!(
+                    ":{}",
+                    String::from_utf8_lossy(gv.name().as_slice())
+                ))
             } else if let Some(cr) = receiver.as_constant_read_node() {
-                Some(format!(":{}", String::from_utf8_lossy(cr.name().as_slice())))
+                Some(format!(
+                    ":{}",
+                    String::from_utf8_lossy(cr.name().as_slice())
+                ))
             } else {
                 None
             };

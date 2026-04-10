@@ -204,7 +204,11 @@ impl Cop for SelectMap {
             {
                 let body = format!("o.{mapper} if o.{pred}");
                 let replacement = if let Some(base) = select_call.receiver() {
-                    format!("{}.filter_map {{ |o| {} }}", node_source(source, &base), body)
+                    format!(
+                        "{}.filter_map {{ |o| {} }}",
+                        node_source(source, &base),
+                        body
+                    )
                 } else {
                     format!("filter_map {{ |o| {} }}", body)
                 };

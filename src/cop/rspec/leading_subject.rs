@@ -184,7 +184,12 @@ impl LeadingSubject {
         let mut corrections = corrections;
         for stmt in stmts.body().iter() {
             if stmt.as_if_node().is_some() || stmt.as_unless_node().is_some() {
-                self.recurse_into_conditional(source, &stmt, diagnostics, corrections.as_deref_mut());
+                self.recurse_into_conditional(
+                    source,
+                    &stmt,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
                 continue;
             }
 
@@ -196,13 +201,23 @@ impl LeadingSubject {
                         .is_some_and(|n| n == b"RSpec")
                         && is_rspec_example_group(name);
                     if is_rspec_group {
-                        self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
+                        self.check_block_body(
+                            source,
+                            &stmt,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                        );
                         if first_relevant_name.is_none() {
                             first_relevant_name = Some(name);
                             first_relevant_insert_at = first_statement_insert_at(source, &stmt);
                         }
                     } else if c.block().is_some() {
-                        self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
+                        self.check_block_body(
+                            source,
+                            &stmt,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                        );
                     }
                     continue;
                 }
@@ -225,7 +240,8 @@ impl LeadingSubject {
                             && let Some((remove_start, remove_end, moved_text)) =
                                 movable_statement_text(source, &stmt)
                             && insert_at <= remove_start
-                            && let Some(between_text) = source.try_byte_slice(insert_at, remove_start)
+                            && let Some(between_text) =
+                                source.try_byte_slice(insert_at, remove_start)
                         {
                             corrections.push(crate::correction::Correction {
                                 start: insert_at,
@@ -260,7 +276,12 @@ impl LeadingSubject {
                             .any(|a| a.as_block_argument_node().is_some())
                     });
                     if has_block {
-                        self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
+                        self.check_block_body(
+                            source,
+                            &stmt,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                        );
                     }
                     if (has_block || has_block_pass) && first_relevant_name.is_none() {
                         first_relevant_name = Some(name);
@@ -268,7 +289,12 @@ impl LeadingSubject {
                     }
                 } else if is_rspec_hook(name) || is_rspec_example(name) {
                     if c.block().is_some() {
-                        self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
+                        self.check_block_body(
+                            source,
+                            &stmt,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                        );
                         if first_relevant_name.is_none() {
                             first_relevant_name = Some(name);
                             first_relevant_insert_at = first_statement_insert_at(source, &stmt);
@@ -291,18 +317,33 @@ impl LeadingSubject {
         let mut corrections = corrections;
         if let Some(if_node) = node.as_if_node() {
             if let Some(stmts) = if_node.statements() {
-                self.recurse_conditional_stmts(source, &stmts, diagnostics, corrections.as_deref_mut());
+                self.recurse_conditional_stmts(
+                    source,
+                    &stmts,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
             }
             if let Some(subsequent) = if_node.subsequent() {
                 self.recurse_into_conditional(source, &subsequent, diagnostics, corrections);
             }
         } else if let Some(unless_node) = node.as_unless_node() {
             if let Some(stmts) = unless_node.statements() {
-                self.recurse_conditional_stmts(source, &stmts, diagnostics, corrections.as_deref_mut());
+                self.recurse_conditional_stmts(
+                    source,
+                    &stmts,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
             }
             if let Some(else_clause) = unless_node.else_clause() {
                 if let Some(stmts) = else_clause.statements() {
-                    self.recurse_conditional_stmts(source, &stmts, diagnostics, corrections.as_deref_mut());
+                    self.recurse_conditional_stmts(
+                        source,
+                        &stmts,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                    );
                 }
             }
         } else if let Some(else_node) = node.as_else_node() {
@@ -322,7 +363,12 @@ impl LeadingSubject {
         let mut corrections = corrections;
         for stmt in stmts.body().iter() {
             if stmt.as_if_node().is_some() || stmt.as_unless_node().is_some() {
-                self.recurse_into_conditional(source, &stmt, diagnostics, corrections.as_deref_mut());
+                self.recurse_into_conditional(
+                    source,
+                    &stmt,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
             } else if let Some(c) = stmt.as_call_node() {
                 if c.block().is_some() {
                     self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());

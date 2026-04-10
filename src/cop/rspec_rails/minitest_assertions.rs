@@ -193,7 +193,10 @@ impl Cop for MinitestAssertions {
                     return;
                 }
                 let actual = source_text(source, &arg_list[0]);
-                (format!("expect({actual}).{runner} eq(nil)"), arg_list.len() == 1)
+                (
+                    format!("expect({actual}).{runner} eq(nil)"),
+                    arg_list.len() == 1,
+                )
             }
 
             // One-arg: assert_empty(actual [, msg])
@@ -202,7 +205,10 @@ impl Cop for MinitestAssertions {
                     return;
                 }
                 let actual = source_text(source, &arg_list[0]);
-                (format!("expect({actual}).{runner} be_empty"), arg_list.len() == 1)
+                (
+                    format!("expect({actual}).{runner} be_empty"),
+                    arg_list.len() == 1,
+                )
             }
 
             // One-arg: assert_true(actual [, msg])
@@ -220,7 +226,10 @@ impl Cop for MinitestAssertions {
                     return;
                 }
                 let actual = source_text(source, &arg_list[0]);
-                (format!("expect({actual}).to be(false)"), arg_list.len() == 1)
+                (
+                    format!("expect({actual}).to be(false)"),
+                    arg_list.len() == 1,
+                )
             }
 
             // Two-arg: assert_predicate(subject, predicate [, msg])

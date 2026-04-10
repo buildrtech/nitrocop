@@ -547,7 +547,10 @@ impl FilePath {
                             recv_loc.end_offset(),
                             "Rails.root",
                         );
-                        let path = segments.join("/").replace('\\', "\\\\").replace('"', "\\\"");
+                        let path = segments
+                            .join("/")
+                            .replace('\\', "\\\\")
+                            .replace('"', "\\\"");
                         let replacement = format!("{recv_src}.join(\"{path}\")");
                         corr.push(crate::correction::Correction {
                             start: loc.start_offset(),

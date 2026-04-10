@@ -64,6 +64,10 @@ impl Cop for ContextWording {
         "RSpec/ContextWording"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -89,7 +93,7 @@ impl Cop for ContextWording {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -205,7 +209,7 @@ impl Cop for ContextWording {
         let prefix_display: Vec<String> = prefixes.iter().map(|p| format!("/^{p}\\b/")).collect();
         let loc = arg_list[0].location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
@@ -213,7 +217,28 @@ impl Cop for ContextWording {
                 "Context description should match {}.",
                 prefix_display.join(", ")
             ),
-        ));
+        );
+
+        // Conservative baseline autocorrect: insert `when ` right after the opening
+        // delimiter for quote/backtick string literals.
+        if let Some(corrections) = corrections {
+            let bytes = source.as_bytes();
+            if loc.start_offset() < bytes.len() {
+                let delimiter = bytes[loc.start_offset()];
+                if delimiter == b'\'' || delimiter == b'"' || delimiter == b'`' {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset() + 1,
+                        end: loc.start_offset() + 1,
+                        replacement: "when ".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -250,6 +275,7 @@ fn extract_interp_leading_text(interp: &ruby_prism::InterpolatedStringNode<'_>) 
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ContextWording, "cops/rspec/context_wording");
+    crate::cop_autocorrect_fixture_tests!(ContextWording, "cops/rspec/context_wording");
 
     #[test]
     fn allowed_patterns_skips_matching_description() {

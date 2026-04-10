@@ -63,10 +63,15 @@ impl Cop for EmptyFile {
             });
 
             if !has_code {
-                let mut diagnostic = self.diagnostic(source, 1, 0, "Empty file detected.".to_string());
+                let mut diagnostic =
+                    self.diagnostic(source, 1, 0, "Empty file detected.".to_string());
                 if let Some(corrections) = corrections.as_deref_mut() {
                     let insert_at = src.len();
-                    let prefix = if src.last().is_some_and(|b| *b == b'\n') { "" } else { "\n" };
+                    let prefix = if src.last().is_some_and(|b| *b == b'\n') {
+                        ""
+                    } else {
+                        "\n"
+                    };
                     corrections.push(crate::correction::Correction {
                         start: insert_at,
                         end: insert_at,

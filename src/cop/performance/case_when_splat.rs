@@ -38,7 +38,11 @@ fn reorder_when_conditions_inline(
 
     for cond in &conditions {
         let src = source
-            .byte_slice(cond.location().start_offset(), cond.location().end_offset(), "")
+            .byte_slice(
+                cond.location().start_offset(),
+                cond.location().end_offset(),
+                "",
+            )
             .to_string();
         original.push(src.clone());
         if cond.as_splat_node().is_some() {
@@ -152,7 +156,8 @@ impl Cop for CaseWhenSplat {
                 .iter()
                 .filter_map(|w| w.as_when_node())
                 .find(|w| w.location().start_offset() == when_start)
-                && let Some((start, end, replacement)) = reorder_when_conditions_inline(source, &when_node)
+                && let Some((start, end, replacement)) =
+                    reorder_when_conditions_inline(source, &when_node)
                 && let Some(ref mut corr) = corrections
             {
                 corr.push(crate::correction::Correction {

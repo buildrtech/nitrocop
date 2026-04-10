@@ -276,7 +276,10 @@ impl Cop for RedundantForeignKey {
                     let (start, end) = if elements.len() == 1 {
                         let arg_loc = arg.location();
                         if arg_index + 1 < arg_list.len() {
-                            (arg_loc.start_offset(), arg_list[arg_index + 1].location().start_offset())
+                            (
+                                arg_loc.start_offset(),
+                                arg_list[arg_index + 1].location().start_offset(),
+                            )
                         } else if arg_index > 0 {
                             let prev_end = arg_list[arg_index - 1].location().end_offset();
                             let mut start = arg_loc.start_offset();

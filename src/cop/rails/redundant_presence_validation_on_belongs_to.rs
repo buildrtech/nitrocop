@@ -131,7 +131,8 @@ impl Cop for RedundantPresenceValidationOnBelongsTo {
                                     let key = assoc.key().as_symbol_node()?;
                                     let val = assoc.value();
                                     Some(
-                                        key.unescaped() == b"presence" && val.as_true_node().is_some(),
+                                        key.unescaped() == b"presence"
+                                            && val.as_true_node().is_some(),
                                     )
                                 })
                             })
@@ -261,8 +262,7 @@ mod tests {
     #[test]
     fn autocorrects_simple_single_symbol_presence_validation() {
         let input = b"class Post < ApplicationRecord\n  belongs_to :user\n  validates :user, presence: true\nend\n";
-        let expected =
-            b"class Post < ApplicationRecord\n  belongs_to :user\n  \nend\n";
+        let expected = b"class Post < ApplicationRecord\n  belongs_to :user\n  \nend\n";
         crate::testutil::assert_cop_autocorrect_with_config(
             &RedundantPresenceValidationOnBelongsTo,
             input,

@@ -102,7 +102,12 @@ impl Cop for ClassVars {
 
         // Check parallel assignment targets: @@foo, @@bar = value
         if let Some(multi_write) = node.as_multi_write_node() {
-            self.check_multi_write_targets(source, multi_write, diagnostics, corrections.as_deref_mut());
+            self.check_multi_write_targets(
+                source,
+                multi_write,
+                diagnostics,
+                corrections.as_deref_mut(),
+            );
             return;
         }
 

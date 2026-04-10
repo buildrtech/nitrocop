@@ -306,7 +306,8 @@ impl CreateList {
 
         let msg_loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        let mut diagnostic = self.diagnostic(source, line, column, format!("Prefer {}.times.map.", count));
+        let mut diagnostic =
+            self.diagnostic(source, line, column, format!("Prefer {}.times.map.", count));
 
         if call.block().is_none() {
             if let Some(corrections) = corrections {
@@ -315,17 +316,23 @@ impl CreateList {
                     arg_list[1].location().end_offset(),
                     "",
                 );
-                let mut create_args: Vec<String> = vec![source
-                    .byte_slice(
-                        arg_list[0].location().start_offset(),
-                        arg_list[0].location().end_offset(),
-                        "",
-                    )
-                    .to_string()];
+                let mut create_args: Vec<String> = vec![
+                    source
+                        .byte_slice(
+                            arg_list[0].location().start_offset(),
+                            arg_list[0].location().end_offset(),
+                            "",
+                        )
+                        .to_string(),
+                ];
                 for arg in arg_list.iter().skip(2) {
                     create_args.push(
                         source
-                            .byte_slice(arg.location().start_offset(), arg.location().end_offset(), "")
+                            .byte_slice(
+                                arg.location().start_offset(),
+                                arg.location().end_offset(),
+                                "",
+                            )
                             .to_string(),
                     );
                 }
@@ -333,7 +340,11 @@ impl CreateList {
                 let receiver_prefix = call.receiver().map_or(String::new(), |recv| {
                     format!(
                         "{}.",
-                        source.byte_slice(recv.location().start_offset(), recv.location().end_offset(), "")
+                        source.byte_slice(
+                            recv.location().start_offset(),
+                            recv.location().end_offset(),
+                            ""
+                        )
                     )
                 });
                 let create_call = if call.opening_loc().is_some() {

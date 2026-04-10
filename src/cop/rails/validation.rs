@@ -114,8 +114,10 @@ impl Cop for Validation {
                     let validate_type = if old_name == b"validates_size_of" {
                         "length"
                     } else {
-                        std::str::from_utf8(&old_name[b"validates_".len()..old_name.len() - b"_of".len()])
-                            .unwrap_or("presence")
+                        std::str::from_utf8(
+                            &old_name[b"validates_".len()..old_name.len() - b"_of".len()],
+                        )
+                        .unwrap_or("presence")
                     };
 
                     corr.push(crate::correction::Correction {

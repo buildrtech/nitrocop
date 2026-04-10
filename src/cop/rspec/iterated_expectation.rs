@@ -159,10 +159,12 @@ impl Cop for IteratedExpectation {
 
             if let (Some(to_call), Some(corrections), Some(block_raw)) =
                 (single_to_call, corrections, call.block())
-                && let Some(matcher) = to_call.arguments().and_then(|a| a.arguments().iter().next())
+                && let Some(matcher) = to_call
+                    .arguments()
+                    .and_then(|a| a.arguments().iter().next())
                 && !matcher_uses_param(&matcher, &param_name)
-                && let Some(collection_text) =
-                    source.try_byte_slice(recv.location().start_offset(), recv.location().end_offset())
+                && let Some(collection_text) = source
+                    .try_byte_slice(recv.location().start_offset(), recv.location().end_offset())
                 && let Some(matcher_text) = source.try_byte_slice(
                     matcher.location().start_offset(),
                     matcher.location().end_offset(),
@@ -248,7 +250,10 @@ fn matcher_uses_param(node: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
     }
 
     impl<'pr> Visit<'pr> for ParamUseVisitor<'_> {
-        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        fn visit_local_variable_read_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableReadNode<'pr>,
+        ) {
             if node.name().as_slice() == self.target {
                 self.found = true;
             }
@@ -300,7 +305,8 @@ mod tests {
     #[test]
     fn does_not_autocorrect_when_matcher_uses_block_param() {
         let input = b"users.each { |user| expect(user).to have_attributes(id: user.id) }\n";
-        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&IteratedExpectation, input);
+        let (diags, corrections) =
+            crate::testutil::run_cop_autocorrect(&IteratedExpectation, input);
         assert_eq!(diags.len(), 1);
         assert!(!diags[0].corrected);
         assert!(corrections.is_empty());

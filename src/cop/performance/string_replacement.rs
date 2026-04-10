@@ -189,8 +189,11 @@ impl Cop for StringReplacement {
             };
 
             let replacement = if let Some(recv) = call.receiver() {
-                let recv_src =
-                    source.byte_slice(recv.location().start_offset(), recv.location().end_offset(), "");
+                let recv_src = source.byte_slice(
+                    recv.location().start_offset(),
+                    recv.location().end_offset(),
+                    "",
+                );
                 let op = call
                     .call_operator_loc()
                     .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))

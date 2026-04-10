@@ -315,7 +315,11 @@ impl Cop for RedundantEqualityComparisonBlock {
                     "",
                 )
             } else {
-                source.byte_slice(recv.location().start_offset(), recv.location().end_offset(), "")
+                source.byte_slice(
+                    recv.location().start_offset(),
+                    recv.location().end_offset(),
+                    "",
+                )
             };
             let replacement = format!(
                 "{}({new_arg})",

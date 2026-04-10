@@ -226,7 +226,10 @@ impl<'a> ReceiveMessagesVisitor<'a> {
                             cop_index: 0,
                         });
 
-                        for s in correction_candidates.iter().filter(|s| s.offset != anchor.offset) {
+                        for s in correction_candidates
+                            .iter()
+                            .filter(|s| s.offset != anchor.offset)
+                        {
                             let (line, _) = self.source.offset_to_line_col(s.stmt_start);
                             let line_start = self.source.line_start_offset(line);
                             let mut start = s.stmt_start;
@@ -352,11 +355,12 @@ fn extract_allow_receive_info(
     let return_arg = &and_return_arg_list[0];
     let return_loc = return_arg.location();
     let raw_return = source.byte_slice(return_loc.start_offset(), return_loc.end_offset(), "");
-    let return_src = if return_arg.as_hash_node().is_some() && !raw_return.trim_start().starts_with('{') {
-        format!("{{ {} }}", raw_return)
-    } else {
-        raw_return.to_string()
-    };
+    let return_src =
+        if return_arg.as_hash_node().is_some() && !raw_return.trim_start().starts_with('{') {
+            format!("{{ {} }}", raw_return)
+        } else {
+            raw_return.to_string()
+        };
 
     let (line, _) = source.offset_to_line_col(stmt_loc.start_offset());
 

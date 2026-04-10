@@ -110,7 +110,8 @@ impl Cop for RequireParentheses {
                             .to_string(),
                     );
                     if let Some(corrections) = corrections.as_deref_mut()
-                        && let Some(correction) = build_parenthesized_call_rewrite(source, &call, self.name())
+                        && let Some(correction) =
+                            build_parenthesized_call_rewrite(source, &call, self.name())
                     {
                         corrections.push(correction);
                         diagnostic.corrected = true;
@@ -142,7 +143,8 @@ impl Cop for RequireParentheses {
                     .to_string(),
             );
             if let Some(corrections) = corrections.as_deref_mut()
-                && let Some(correction) = build_parenthesized_call_rewrite(source, &call, self.name())
+                && let Some(correction) =
+                    build_parenthesized_call_rewrite(source, &call, self.name())
             {
                 corrections.push(correction);
                 diagnostic.corrected = true;

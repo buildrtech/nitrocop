@@ -214,7 +214,8 @@ impl Cop for EmptyBlock {
         };
 
         let (line, column) = source.offset_to_line_col(diagnostic_offset);
-        let mut diagnostic = self.diagnostic(source, line, column, "Empty block detected.".to_string());
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Empty block detected.".to_string());
 
         // Conservative baseline autocorrect: only rewrite truly empty blocks with no comments
         // in the block range by inserting a `nil` expression between block delimiters.
@@ -263,6 +264,10 @@ mod tests {
 
     #[test]
     fn autocorrect_inserts_nil_for_empty_brace_block() {
-        crate::testutil::assert_cop_autocorrect(&EmptyBlock, b"items.each { |x| }\n", b"items.each { |x| nil }\n");
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyBlock,
+            b"items.each { |x| }\n",
+            b"items.each { |x| nil }\n",
+        );
     }
 }

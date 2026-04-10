@@ -197,11 +197,8 @@ impl Cop for Squeeze {
         if let Some(ref mut corr) = corrections {
             let receiver = call.receiver().unwrap();
             let receiver_loc = receiver.location();
-            let receiver_source = source.byte_slice(
-                receiver_loc.start_offset(),
-                receiver_loc.end_offset(),
-                "",
-            );
+            let receiver_source =
+                source.byte_slice(receiver_loc.start_offset(), receiver_loc.end_offset(), "");
             let dot = call
                 .call_operator_loc()
                 .map(|op| source.byte_slice(op.start_offset(), op.end_offset(), "."))

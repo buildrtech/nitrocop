@@ -169,8 +169,12 @@ impl Cop for ImplicitSubject {
 
         // "disallow" style: flag all implicit subject usage (except `its` handled above)
         if enforced_style == "disallow" {
-            let mut diagnostic =
-                self.diagnostic(source, line, column, "Don't use implicit subject.".to_string());
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                "Don't use implicit subject.".to_string(),
+            );
             apply_autocorrect(self, &call, corrections, &mut diagnostic);
             diagnostics.push(diagnostic);
             return;
@@ -213,8 +217,12 @@ impl Cop for ImplicitSubject {
         }
 
         // This is used in a context that should be flagged
-        let mut diagnostic =
-            self.diagnostic(source, line, column, "Don't use implicit subject.".to_string());
+        let mut diagnostic = self.diagnostic(
+            source,
+            line,
+            column,
+            "Don't use implicit subject.".to_string(),
+        );
         apply_autocorrect(self, &call, corrections, &mut diagnostic);
         diagnostics.push(diagnostic);
     }

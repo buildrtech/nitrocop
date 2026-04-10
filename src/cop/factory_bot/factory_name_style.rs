@@ -12,9 +12,7 @@ fn symbol_literal_from_string(value: &str) -> String {
             .chars()
             .next()
             .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-        && value
-            .chars()
-            .all(|c| c == '_' || c.is_ascii_alphanumeric());
+        && value.chars().all(|c| c == '_' || c.is_ascii_alphanumeric());
 
     if is_plain {
         format!(":{value}")
@@ -138,7 +136,10 @@ impl Cop for FactoryNameStyle {
                     corr.push(crate::correction::Correction {
                         start: loc.start_offset(),
                         end: loc.end_offset(),
-                        replacement: format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")),
+                        replacement: format!(
+                            "\"{}\"",
+                            value.replace('\\', "\\\\").replace('"', "\\\"")
+                        ),
                         cop_name: self.name(),
                         cop_index: 0,
                     });

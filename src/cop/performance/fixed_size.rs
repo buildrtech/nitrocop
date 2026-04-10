@@ -140,7 +140,9 @@ impl FixedSizeVisitor<'_, '_> {
 
         let loc = call.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        let mut diagnostic = self.cop.diagnostic(self.source, line, column, MSG.to_string());
+        let mut diagnostic = self
+            .cop
+            .diagnostic(self.source, line, column, MSG.to_string());
 
         if let Some(size_literal) = fixed_size_literal(&recv, method_name, call.arguments()) {
             self.corrections.push(crate::correction::Correction {

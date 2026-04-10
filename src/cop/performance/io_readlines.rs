@@ -293,4 +293,3 @@ mod tests {
         assert!(IoReadlines.supports_autocorrect());
     }
 }
-

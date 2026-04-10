@@ -72,24 +72,25 @@ impl Cop for VerifiedDoubles {
         }
 
         // Check arguments for name
-        let (has_name_arg, is_symbolic, first_arg_is_autocorrectable) = if let Some(args) = call.arguments() {
-            let arg_list: Vec<_> = args.arguments().iter().collect();
-            if arg_list.is_empty()
-                || arg_list[0].as_keyword_hash_node().is_some()
-                || arg_list[0].as_hash_node().is_some()
-            {
-                (false, false, false)
+        let (has_name_arg, is_symbolic, first_arg_is_autocorrectable) =
+            if let Some(args) = call.arguments() {
+                let arg_list: Vec<_> = args.arguments().iter().collect();
+                if arg_list.is_empty()
+                    || arg_list[0].as_keyword_hash_node().is_some()
+                    || arg_list[0].as_hash_node().is_some()
+                {
+                    (false, false, false)
+                } else {
+                    let first = &arg_list[0];
+                    let sym = first.as_symbol_node().is_some();
+                    let autocorrectable = first.as_string_node().is_some()
+                        || first.as_constant_read_node().is_some()
+                        || first.as_constant_path_node().is_some();
+                    (true, sym, autocorrectable)
+                }
             } else {
-                let first = &arg_list[0];
-                let sym = first.as_symbol_node().is_some();
-                let autocorrectable = first.as_string_node().is_some()
-                    || first.as_constant_read_node().is_some()
-                    || first.as_constant_path_node().is_some();
-                (true, sym, autocorrectable)
-            }
-        } else {
-            (false, false, false)
-        };
+                (false, false, false)
+            };
 
         // IgnoreNameless: skip doubles without a name argument
         if ignore_nameless && !has_name_arg {

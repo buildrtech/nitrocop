@@ -78,7 +78,12 @@ impl Cop for DescribeSymbol {
             .expect("checked symbol argument above");
         let loc = symbol.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diagnostic = self.diagnostic(source, line, column, "Avoid describing symbols.".to_string());
+        let mut diagnostic = self.diagnostic(
+            source,
+            line,
+            column,
+            "Avoid describing symbols.".to_string(),
+        );
 
         if let Some(corrections) = corrections.as_deref_mut() {
             let symbol_name = std::str::from_utf8(symbol.unescaped()).unwrap_or("");

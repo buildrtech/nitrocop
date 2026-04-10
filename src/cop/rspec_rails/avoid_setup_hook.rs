@@ -63,8 +63,12 @@ impl Cop for AvoidSetupHook {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diagnostic =
-            self.diagnostic(source, line, column, "Use `before` instead of `setup`.".to_string());
+        let mut diagnostic = self.diagnostic(
+            source,
+            line,
+            column,
+            "Use `before` instead of `setup`.".to_string(),
+        );
 
         if let Some(ref mut corr) = corrections
             && let Some(selector) = call.message_loc()

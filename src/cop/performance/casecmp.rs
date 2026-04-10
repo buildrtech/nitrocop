@@ -67,7 +67,8 @@ fn build_casecmp_replacement(
     negated: bool,
 ) -> String {
     let variable_loc = variable.location();
-    let variable_source = source.byte_slice(variable_loc.start_offset(), variable_loc.end_offset(), "");
+    let variable_source =
+        source.byte_slice(variable_loc.start_offset(), variable_loc.end_offset(), "");
     let arg_loc = arg.location();
     let arg_source = source.byte_slice(arg_loc.start_offset(), arg_loc.end_offset(), "");
 
@@ -216,7 +217,9 @@ impl Cop for Casecmp {
                     Some(v) => v,
                     None => return,
                 };
-                replacement = Some(build_casecmp_replacement(source, &variable, &args[0], false));
+                replacement = Some(build_casecmp_replacement(
+                    source, &variable, &args[0], false,
+                ));
             }
         }
 

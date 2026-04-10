@@ -239,7 +239,8 @@ impl Cop for AttributeDefinedStatically {
                     if arg_list.len() == 1 {
                         let arg = &arg_list[0];
                         if !hash_without_braces(source, arg) {
-                            if let (Some(open), Some(close)) = (call.opening_loc(), call.closing_loc())
+                            if let (Some(open), Some(close)) =
+                                (call.opening_loc(), call.closing_loc())
                             {
                                 corr.push(crate::correction::Correction {
                                     start: open.start_offset(),

@@ -113,8 +113,7 @@ impl Cop for PluckInWhere {
                     )
                 } else {
                     (
-                        "Use `select` instead of `pluck` within `where` query method."
-                            .to_string(),
+                        "Use `select` instead of `pluck` within `where` query method.".to_string(),
                         "select",
                     )
                 };

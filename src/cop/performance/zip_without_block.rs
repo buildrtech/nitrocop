@@ -212,4 +212,3 @@ mod tests {
         assert!(ZipWithoutBlock.supports_autocorrect());
     }
 }
-

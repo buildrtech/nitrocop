@@ -89,7 +89,6 @@ struct RefineVisitor<'a, 'src, 'corr> {
 }
 
 impl<'pr> Visit<'pr> for RefineVisitor<'_, '_, '_> {
-
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method_name = node.name().as_slice();
 

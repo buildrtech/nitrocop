@@ -94,7 +94,9 @@ impl Cop for EnsureReturn {
                 "Do not return from an `ensure` block.".to_string(),
             );
 
-            if ret.has_args && let Some(ref mut corrs) = corrections {
+            if ret.has_args
+                && let Some(ref mut corrs) = corrections
+            {
                 let mut end = ret.start_offset.saturating_add(6); // "return"
                 if source
                     .as_bytes()

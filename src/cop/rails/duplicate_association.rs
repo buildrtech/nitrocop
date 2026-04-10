@@ -419,7 +419,8 @@ mod tests {
     #[test]
     fn autocorrects_simple_duplicate_association_by_removing_first() {
         let input = b"class User < ApplicationRecord\n  has_many :posts\n  has_many :posts, dependent: :destroy\nend\n";
-        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&DuplicateAssociation, input);
+        let (diags, corrections) =
+            crate::testutil::run_cop_autocorrect(&DuplicateAssociation, input);
         assert_eq!(diags.len(), 2);
         assert!(diags.iter().any(|d| d.corrected));
 

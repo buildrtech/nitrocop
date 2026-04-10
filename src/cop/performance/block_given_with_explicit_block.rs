@@ -135,7 +135,13 @@ impl Cop for BlockGivenWithExplicitBlock {
 
         for loc in finder.locations {
             let (line, column) = source.offset_to_line_col(loc.start);
-            let mut diagnostic = self.diagnostic(source, line, column, "Check `block` instead of using `block_given?` with explicit `&block` parameter.".to_string());
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                "Check `block` instead of using `block_given?` with explicit `&block` parameter."
+                    .to_string(),
+            );
             if let Some(ref mut corr) = corrections {
                 corr.push(crate::correction::Correction {
                     start: loc.start,

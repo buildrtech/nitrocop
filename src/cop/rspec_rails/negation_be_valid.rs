@@ -102,8 +102,12 @@ impl Cop for NegationBeValid {
                 if is_to && matcher_name == b"be_invalid" {
                     let runner_loc = runner_call.message_loc().unwrap_or(runner_call.location());
                     let (line, column) = source.offset_to_line_col(runner_loc.start_offset());
-                    let mut diagnostic =
-                        self.diagnostic(source, line, column, "Use `expect(...).not_to be_valid`.".to_string());
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use `expect(...).not_to be_valid`.".to_string(),
+                    );
 
                     if let Some(ref mut corr) = corrections {
                         if let Some(sel) = runner_call.message_loc() {
@@ -135,8 +139,12 @@ impl Cop for NegationBeValid {
                 if is_not_to && matcher_name == b"be_valid" {
                     let runner_loc = runner_call.message_loc().unwrap_or(runner_call.location());
                     let (line, column) = source.offset_to_line_col(runner_loc.start_offset());
-                    let mut diagnostic =
-                        self.diagnostic(source, line, column, "Use `expect(...).to be_invalid`.".to_string());
+                    let mut diagnostic = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use `expect(...).to be_invalid`.".to_string(),
+                    );
 
                     if let Some(ref mut corr) = corrections {
                         if let Some(sel) = runner_call.message_loc() {

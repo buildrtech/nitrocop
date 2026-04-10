@@ -79,7 +79,8 @@ impl Cop for ImplicitRuntimeError {
             );
 
             if let Some(corrections) = corrections {
-                let first_src = std::str::from_utf8(first_arg.location().as_slice()).unwrap_or("''");
+                let first_src =
+                    std::str::from_utf8(first_arg.location().as_slice()).unwrap_or("''");
                 corrections.push(crate::correction::Correction {
                     start: loc.start_offset(),
                     end: loc.end_offset(),

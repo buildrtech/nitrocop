@@ -115,8 +115,10 @@ impl Cop for UriEscapeUnescape {
             && let Some(args) = call.arguments()
             && args.arguments().len() == 1
             && let Some(first) = args.arguments().iter().next()
-            && let Some(arg_src) = source
-                .try_byte_slice(first.location().start_offset(), first.location().end_offset())
+            && let Some(arg_src) = source.try_byte_slice(
+                first.location().start_offset(),
+                first.location().end_offset(),
+            )
         {
             let replacement_method = if method_name == b"escape" {
                 "CGI.escape"

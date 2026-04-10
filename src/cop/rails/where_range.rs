@@ -6,11 +6,26 @@ use crate::parse::source::SourceFile;
 pub struct WhereRange;
 
 enum SqlPattern {
-    GteAnon { column: String },
-    LteAnon { column: String, op: String },
-    RangeAnon { column: String, op: String },
-    GteNamed { column: String, key: String },
-    LteNamed { column: String, op: String, key: String },
+    GteAnon {
+        column: String,
+    },
+    LteAnon {
+        column: String,
+        op: String,
+    },
+    RangeAnon {
+        column: String,
+        op: String,
+    },
+    GteNamed {
+        column: String,
+        key: String,
+    },
+    LteNamed {
+        column: String,
+        op: String,
+        key: String,
+    },
     RangeNamed {
         column: String,
         low_key: String,
@@ -269,11 +284,7 @@ fn is_column_identifier(s: &str) -> bool {
 }
 
 fn range_operator(op: &str) -> &'static str {
-    if op == "<" {
-        "..."
-    } else {
-        ".."
-    }
+    if op == "<" { "..." } else { ".." }
 }
 
 fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
@@ -295,7 +306,11 @@ fn build_range_value(
         }
         SqlPattern::LteAnon { op, .. } => {
             let rhs = value_nodes.first()?;
-            Some(format!("{}{}", range_operator(op), node_source(source, rhs)))
+            Some(format!(
+                "{}{}",
+                range_operator(op),
+                node_source(source, rhs)
+            ))
         }
         SqlPattern::RangeAnon { op, .. } => {
             if value_nodes.len() < 2 {

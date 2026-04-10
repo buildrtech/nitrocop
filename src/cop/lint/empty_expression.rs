@@ -63,7 +63,7 @@ impl Cop for EmptyExpression {
 
                 diagnostics.push(diagnostic);
             }
-            
+
             return;
         }
 

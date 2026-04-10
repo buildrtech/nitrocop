@@ -261,7 +261,10 @@ fn matcher_truthiness(node: &ruby_prism::Node<'_>) -> Option<bool> {
     if matches!(name, b"be_truthy" | b"a_truthy_value") {
         return Some(true);
     }
-    if matches!(name, b"be_falsey" | b"be_falsy" | b"a_falsey_value" | b"a_falsy_value") {
+    if matches!(
+        name,
+        b"be_falsey" | b"be_falsy" | b"a_falsey_value" | b"a_falsy_value"
+    ) {
         return Some(false);
     }
 

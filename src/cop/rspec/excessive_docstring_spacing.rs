@@ -196,7 +196,8 @@ impl Cop for ExcessiveDocstringSpacing {
 
         let loc = first_arg.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diagnostic = self.diagnostic(source, line, column, "Excessive whitespace.".to_string());
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Excessive whitespace.".to_string());
 
         // Conservative baseline: autocorrect plain string descriptions only.
         if let Some(s) = first_arg.as_string_node() {

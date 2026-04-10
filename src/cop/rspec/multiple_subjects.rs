@@ -161,7 +161,9 @@ impl MultipleSubjects {
                 let loc = call.location();
                 let (line, col) = source.offset_to_line_col(loc.start_offset());
                 let method_name = call.name().as_slice().to_vec();
-                let has_args = call.arguments().is_some_and(|a| a.arguments().iter().next().is_some());
+                let has_args = call
+                    .arguments()
+                    .is_some_and(|a| a.arguments().iter().next().is_some());
                 let (selector_start, selector_end) = if let Some(selector) = call.message_loc() {
                     (Some(selector.start_offset()), Some(selector.end_offset()))
                 } else {

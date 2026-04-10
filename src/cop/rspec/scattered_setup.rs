@@ -398,7 +398,8 @@ impl Cop for ScatteredSetup {
                         && let (Some(first_body_end), Some(body_start), Some(body_end)) =
                             (first.body_end, hook.body_start, hook.body_end)
                         && let Some(body_text) = source.try_byte_slice(body_start, body_end)
-                        && let Some((remove_start, remove_end)) = whole_line_range(source, hook.start, hook.end)
+                        && let Some((remove_start, remove_end)) =
+                            whole_line_range(source, hook.start, hook.end)
                     {
                         corrections.push(crate::correction::Correction {
                             start: first_body_end,

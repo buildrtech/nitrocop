@@ -244,7 +244,11 @@ impl DoubleStartEndWith {
                 }
             }
             let combined_args = arg_sources.join(", ");
-            let bang = if node.as_and_node().is_some() { "!" } else { "" };
+            let bang = if node.as_and_node().is_some() {
+                "!"
+            } else {
+                ""
+            };
 
             corr.push(crate::correction::Correction {
                 start: loc.start_offset(),

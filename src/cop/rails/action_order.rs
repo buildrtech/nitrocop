@@ -333,9 +333,7 @@ impl Cop for ActionOrder {
 
             if *prev_autocorrectable && *curr_autocorrectable && prev_start < curr_start {
                 let prev_src = source.byte_slice(*prev_start, *prev_end, "").to_string();
-                let middle = source
-                    .byte_slice(*prev_end, *curr_start, "")
-                    .to_string();
+                let middle = source.byte_slice(*prev_end, *curr_start, "").to_string();
                 let curr_src = source.byte_slice(*curr_start, *curr_end, "").to_string();
 
                 corr.push(crate::correction::Correction {

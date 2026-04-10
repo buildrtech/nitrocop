@@ -51,7 +51,13 @@ impl Cop for EmptyClass {
                 let loc = class_node.location();
                 let (sl, _) = source.offset_to_line_col(loc.start_offset());
                 let (el, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
-                (empty, class_node.class_keyword_loc(), class_node.end_keyword_loc(), sl, el)
+                (
+                    empty,
+                    class_node.class_keyword_loc(),
+                    class_node.end_keyword_loc(),
+                    sl,
+                    el,
+                )
             } else if let Some(sclass) = node.as_singleton_class_node() {
                 let empty = match sclass.body() {
                     None => true,
@@ -66,7 +72,13 @@ impl Cop for EmptyClass {
                 let loc = sclass.location();
                 let (sl, _) = source.offset_to_line_col(loc.start_offset());
                 let (el, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
-                (empty, sclass.class_keyword_loc(), sclass.end_keyword_loc(), sl, el)
+                (
+                    empty,
+                    sclass.class_keyword_loc(),
+                    sclass.end_keyword_loc(),
+                    sl,
+                    el,
+                )
             } else {
                 return;
             };
@@ -94,12 +106,8 @@ impl Cop for EmptyClass {
         }
 
         let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
-        let mut diagnostic = self.diagnostic(
-            source,
-            line,
-            column,
-            "Empty class detected.".to_string(),
-        );
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Empty class detected.".to_string());
 
         if let Some(corrections) = corrections.as_deref_mut() {
             let indent = " ".repeat(column + 2);

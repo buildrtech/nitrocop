@@ -121,7 +121,9 @@ impl<'pr> Visit<'pr> for VoidContextVisitor<'_, '_> {
         let method_name = format_method_name(name);
 
         // Found void context method, look for return nodes with values
-        let mut finder = ReturnWithValueFinder { returns: Vec::new() };
+        let mut finder = ReturnWithValueFinder {
+            returns: Vec::new(),
+        };
         if let Some(body) = node.body() {
             finder.visit(&body);
         }

@@ -201,9 +201,11 @@ impl<'pr> Visit<'pr> for FindByVisitor<'_> {
                         let indent = " ".repeat(column);
                         let var_name = String::from_utf8_lossy(node.name().as_slice()).to_string();
                         let find_by_loc = value.location();
-                        let find_by_src = self
-                            .source
-                            .byte_slice(find_by_loc.start_offset(), find_by_loc.end_offset(), "");
+                        let find_by_src = self.source.byte_slice(
+                            find_by_loc.start_offset(),
+                            find_by_loc.end_offset(),
+                            "",
+                        );
                         let replacement = format!(
                             "if defined?({var_name})\n{indent}  {var_name}\n{indent}else\n{indent}  {var_name} = {find_by_src}\n{indent}end"
                         );

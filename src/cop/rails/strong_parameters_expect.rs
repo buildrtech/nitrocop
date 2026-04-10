@@ -54,7 +54,10 @@ fn autocorrect_replacement(
             permit_srcs.push(node_source(source, &arg));
         }
 
-        return Some(format!("params.expect({key}: [{}])", permit_srcs.join(", ")));
+        return Some(format!(
+            "params.expect({key}: [{}])",
+            permit_srcs.join(", ")
+        ));
     }
 
     if is_permit_require {
@@ -179,7 +182,8 @@ impl Cop for StrongParametersExpect {
 
         if let Some(ref mut corr) = corrections
             && let Some(call_node) = node.as_call_node()
-            && let Some(replacement) = autocorrect_replacement(source, &call_node, is_require_permit, is_permit_require)
+            && let Some(replacement) =
+                autocorrect_replacement(source, &call_node, is_require_permit, is_permit_require)
         {
             let loc = call_node.location();
             corr.push(crate::correction::Correction {

@@ -211,11 +211,8 @@ impl Cop for RakeEnvironment {
             let replacement = if arg_list.len() > 1 && arg_list[1].as_array_node().is_some() {
                 let second = &arg_list[1];
                 let second_loc = second.location();
-                let second_src = source.byte_slice(
-                    second_loc.start_offset(),
-                    second_loc.end_offset(),
-                    "[]",
-                );
+                let second_src =
+                    source.byte_slice(second_loc.start_offset(), second_loc.end_offset(), "[]");
                 Some((
                     second_loc.start_offset(),
                     second_loc.end_offset(),

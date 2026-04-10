@@ -45,8 +45,12 @@ impl SelfAssignment {
         replacement: String,
     ) {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let mut diagnostic =
-            self.diagnostic(source, line, column, "Self-assignment detected.".to_string());
+        let mut diagnostic = self.diagnostic(
+            source,
+            line,
+            column,
+            "Self-assignment detected.".to_string(),
+        );
 
         if let Some(corrections) = corrections {
             corrections.push(crate::correction::Correction {

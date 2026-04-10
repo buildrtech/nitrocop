@@ -41,7 +41,9 @@ fn parse_ruby_int_literal(src: &str) -> Option<i64> {
     if let Some(oct) = stripped.strip_prefix("0o").or(stripped.strip_prefix("0O")) {
         return i64::from_str_radix(oct, 8).ok();
     }
-    if stripped.starts_with('0') && stripped.len() > 1 && stripped.chars().all(|c| c.is_ascii_digit())
+    if stripped.starts_with('0')
+        && stripped.len() > 1
+        && stripped.chars().all(|c| c.is_ascii_digit())
     {
         // Legacy octal like 077
         return i64::from_str_radix(&stripped[1..], 8).ok();

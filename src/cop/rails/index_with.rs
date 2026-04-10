@@ -112,7 +112,10 @@ fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
         .to_string()
 }
 
-fn index_with_parts(block_node: &ruby_prism::BlockNode<'_>, source: &SourceFile) -> Option<(String, String)> {
+fn index_with_parts(
+    block_node: &ruby_prism::BlockNode<'_>,
+    source: &SourceFile,
+) -> Option<(String, String)> {
     let params = block_node.parameters()?.as_block_parameters_node()?;
     let param_list = params.parameters()?;
     let requireds: Vec<_> = param_list.requireds().iter().collect();
@@ -345,13 +348,15 @@ impl Cop for IndexWith {
                                     "Use `index_with` instead of `map { ... }.to_h`.".to_string(),
                                 );
 
-                                if let Some((param, value_src)) = index_with_parts(&block_node, source)
+                                if let Some((param, value_src)) =
+                                    index_with_parts(&block_node, source)
                                     && let Some(base) = chain.inner_call.receiver()
                                     && let Some(ref mut corr) = corrections
                                 {
                                     let base_src = node_source(source, &base);
-                                    let replacement =
-                                        format!("{base_src}.index_with {{ |{param}| {value_src} }}");
+                                    let replacement = format!(
+                                        "{base_src}.index_with {{ |{param}| {value_src} }}"
+                                    );
                                     corr.push(crate::correction::Correction {
                                         start: loc.start_offset(),
                                         end: loc.end_offset(),
@@ -428,7 +433,8 @@ impl Cop for IndexWith {
                             "Use `index_with` instead of `each_with_object`.".to_string(),
                         );
 
-                        if let Some((param, value_src)) = each_with_object_parts(&block_node, source)
+                        if let Some((param, value_src)) =
+                            each_with_object_parts(&block_node, source)
                             && let Some(base) = call.receiver()
                             && let Some(ref mut corr) = corrections
                         {

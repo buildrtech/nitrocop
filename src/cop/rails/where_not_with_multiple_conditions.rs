@@ -125,21 +125,26 @@ impl Cop for WhereNotWithMultipleConditions {
         if let Some(corrections) = corrections.as_deref_mut()
             && let Some(receiver) = call.receiver()
         {
-            let direct_pairs: Vec<ruby_prism::Node<'_>> = if let Some(hash) = arg_list[0].as_hash_node() {
-                hash.elements().iter().filter(|n| n.as_assoc_node().is_some()).collect()
-            } else if let Some(kw_hash) = arg_list[0].as_keyword_hash_node() {
-                kw_hash.elements().iter().filter(|n| n.as_assoc_node().is_some()).collect()
-            } else {
-                Vec::new()
-            };
+            let direct_pairs: Vec<ruby_prism::Node<'_>> =
+                if let Some(hash) = arg_list[0].as_hash_node() {
+                    hash.elements()
+                        .iter()
+                        .filter(|n| n.as_assoc_node().is_some())
+                        .collect()
+                } else if let Some(kw_hash) = arg_list[0].as_keyword_hash_node() {
+                    kw_hash
+                        .elements()
+                        .iter()
+                        .filter(|n| n.as_assoc_node().is_some())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
             if direct_pairs.len() >= 2 {
                 let receiver_loc = receiver.location();
-                let receiver_source = source.byte_slice(
-                    receiver_loc.start_offset(),
-                    receiver_loc.end_offset(),
-                    "",
-                );
+                let receiver_source =
+                    source.byte_slice(receiver_loc.start_offset(), receiver_loc.end_offset(), "");
 
                 let mut pair_sources = Vec::with_capacity(direct_pairs.len());
                 for pair in direct_pairs {
@@ -196,10 +201,8 @@ mod tests {
     #[test]
     fn nested_hash_offense_remains_uncorrected_in_baseline() {
         let input = b"User.joins(:posts).where.not(posts: { trashed: true, title: 'Rails' })\n";
-        let (diags, corrections) = crate::testutil::run_cop_autocorrect(
-            &WhereNotWithMultipleConditions,
-            input,
-        );
+        let (diags, corrections) =
+            crate::testutil::run_cop_autocorrect(&WhereNotWithMultipleConditions, input);
         assert_eq!(diags.len(), 1);
         assert!(!diags[0].corrected);
         assert!(corrections.is_empty());

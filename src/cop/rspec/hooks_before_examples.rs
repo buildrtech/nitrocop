@@ -124,7 +124,8 @@ impl Cop for HooksBeforeExamples {
                             && let Some((remove_start, remove_end, moved_text)) =
                                 movable_statement_text(source, &stmt)
                             && insert_at <= remove_start
-                            && let Some(between_text) = source.try_byte_slice(insert_at, remove_start)
+                            && let Some(between_text) =
+                                source.try_byte_slice(insert_at, remove_start)
                         {
                             corrections.push(crate::correction::Correction {
                                 start: insert_at,

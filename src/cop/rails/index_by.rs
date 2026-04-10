@@ -216,7 +216,10 @@ fn node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> String {
         .to_string()
 }
 
-fn index_by_parts(block_node: &ruby_prism::BlockNode<'_>, source: &SourceFile) -> Option<(String, String)> {
+fn index_by_parts(
+    block_node: &ruby_prism::BlockNode<'_>,
+    source: &SourceFile,
+) -> Option<(String, String)> {
     let params = block_node.parameters()?.as_block_parameters_node()?;
     let param_list = params.parameters()?;
     let requireds: Vec<_> = param_list.requireds().iter().collect();
@@ -448,7 +451,8 @@ impl Cop for IndexBy {
                                 );
 
                                 if is_index_by_block(&block_node)
-                                    && let Some((param, key_src)) = index_by_parts(&block_node, source)
+                                    && let Some((param, key_src)) =
+                                        index_by_parts(&block_node, source)
                                     && let Some(base) = chain.inner_call.receiver()
                                     && let Some(ref mut corr) = corrections
                                 {
@@ -535,7 +539,8 @@ impl Cop for IndexBy {
                             "Use `index_by` instead of `each_with_object`.".to_string(),
                         );
 
-                        if let Some((param, key_src)) = each_with_object_index_parts(&block_node, source)
+                        if let Some((param, key_src)) =
+                            each_with_object_index_parts(&block_node, source)
                             && let Some(base) = call.receiver()
                             && let Some(ref mut corr) = corrections
                         {
