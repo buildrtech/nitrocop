@@ -50,6 +50,7 @@ struct ExampleEntry {
     signature: Vec<u8>,
     line: usize,
     column: usize,
+    arg_range: Option<(usize, usize)>,
 }
 
 struct ExampleCollector<'a> {
@@ -90,11 +91,19 @@ impl<'pr> Visit<'pr> for ExampleCollector<'_> {
             if let Some(signature) = signature {
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                let arg_range = node
+                    .arguments()
+                    .and_then(|args| args.arguments().iter().next())
+                    .map(|arg| {
+                        let loc = arg.location();
+                        (loc.start_offset(), loc.end_offset())
+                    });
                 self.examples.push(ExampleEntry {
                     is_its,
                     signature,
                     line,
                     column,
+                    arg_range,
                 });
             }
             return;
@@ -107,6 +116,10 @@ impl<'pr> Visit<'pr> for ExampleCollector<'_> {
 impl Cop for RepeatedDescription {
     fn name(&self) -> &'static str {
         "RSpec/RepeatedDescription"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_severity(&self) -> Severity {
@@ -128,7 +141,7 @@ impl Cop for RepeatedDescription {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -156,9 +169,9 @@ impl Cop for RepeatedDescription {
         collector.visit(&body);
 
         #[allow(clippy::type_complexity)] // internal collection used only in this function
-        let mut repeated_desc: HashMap<Vec<u8>, Vec<(usize, usize)>> = HashMap::new();
+        let mut repeated_desc: HashMap<Vec<u8>, Vec<&ExampleEntry>> = HashMap::new();
         #[allow(clippy::type_complexity)] // internal collection used only in this function
-        let mut repeated_its: HashMap<Vec<u8>, Vec<(usize, usize)>> = HashMap::new();
+        let mut repeated_its: HashMap<Vec<u8>, Vec<&ExampleEntry>> = HashMap::new();
 
         for example in &collector.examples {
             if example.signature.is_empty() {
@@ -168,26 +181,40 @@ impl Cop for RepeatedDescription {
                 repeated_its
                     .entry(example.signature.clone())
                     .or_default()
-                    .push((example.line, example.column));
+                    .push(example);
             } else {
                 repeated_desc
                     .entry(example.signature.clone())
                     .or_default()
-                    .push((example.line, example.column));
+                    .push(example);
             }
         }
 
+        let mut corrections = corrections;
         for locs in repeated_desc.values().chain(repeated_its.values()) {
             if locs.len() <= 1 {
                 continue;
             }
-            for &(line, column) in locs {
-                diagnostics.push(self.diagnostic(
+            for example in locs {
+                let mut diagnostic = self.diagnostic(
                     source,
-                    line,
-                    column,
+                    example.line,
+                    example.column,
                     "Don't repeat descriptions within an example group.".to_string(),
-                ));
+                );
+                if let Some((start, end)) = example.arg_range
+                    && let Some(corrections) = corrections.as_deref_mut()
+                {
+                    corrections.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement: "'TODO: unique description'".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -282,4 +309,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(RepeatedDescription, "cops/rspec/repeated_description");
+    crate::cop_autocorrect_fixture_tests!(RepeatedDescription, "cops/rspec/repeated_description");
 }
