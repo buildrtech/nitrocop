@@ -57,6 +57,7 @@
 - RSpec/ExcessiveDocstringSpacing parity follow-up: extend autocorrect from plain string literals to RuboCop-style dstr handling while preserving interpolation fidelity and heredoc/invalid-UTF8 safety guards.
 - RSpec/ExampleWording parity follow-up: extend autocorrect beyond `it ` prefix removal to RuboCop-style should/will wording rewrites with CustomTransform/IgnoredWords handling and safe dstr coverage.
 - RSpec/SortMetadata parity follow-up: align autocorrect with RuboCop trailing-symbol extraction in ambiguous last-arg cases and validate stable range replacement around mixed metadata/keyword-arg layouts.
+- RSpec/MetadataStyle parity follow-up: extend autocorrect beyond symbol-style `key: true` keyword-hash baseline to explicit-hash metadata and hash-style (`EnforcedStyle: hash`) conversion cases with ambiguity guards.
 - FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` should remain diagnostic-only (no upstream AutoCorrector) or get an explicit nitrocop-only unsafe autocorrect mode.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.

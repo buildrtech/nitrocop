@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::cop::util::RSPEC_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
+use crate::correction::Correction;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
@@ -51,6 +52,10 @@ impl Cop for VariableDefinition {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -58,7 +63,7 @@ impl Cop for VariableDefinition {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "symbols");
 
@@ -75,9 +80,13 @@ impl Cop for VariableDefinition {
             top_level_offsets: &top_level_offsets,
             enforced_style,
             diags: Vec::new(),
+            corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diags);
+        if let Some(corrections) = corrections {
+            corrections.extend(visitor.corrections);
+        }
     }
 }
 
@@ -88,6 +97,7 @@ struct VariableDefinitionChecker<'a> {
     top_level_offsets: &'a HashSet<usize>,
     enforced_style: &'a str,
     diags: Vec<Diagnostic>,
+    corrections: Vec<Correction>,
 }
 
 impl<'pr> Visit<'pr> for VariableDefinitionChecker<'_> {
@@ -113,6 +123,36 @@ impl<'pr> Visit<'pr> for VariableDefinitionChecker<'_> {
 }
 
 impl VariableDefinitionChecker<'_> {
+    fn autocorrect_replacement(&self, arg: &ruby_prism::Node<'_>) -> Option<String> {
+        if self.enforced_style == "strings" {
+            if let Some(sym) = arg.as_symbol_node() {
+                let name = std::str::from_utf8(sym.unescaped()).ok()?;
+                return Some(format!("\"{name}\""));
+            }
+            if arg.as_interpolated_symbol_node().is_some() {
+                let loc = arg.location();
+                let text = self
+                    .source
+                    .try_byte_slice(loc.start_offset() + 1, loc.end_offset())?;
+                return Some(text.to_string());
+            }
+            return None;
+        }
+
+        if let Some(str_node) = arg.as_string_node() {
+            let unescaped = std::str::from_utf8(str_node.unescaped()).ok()?;
+            if is_simple_symbol_name(unescaped) {
+                return Some(format!(":{unescaped}"));
+            }
+            let escaped = unescaped
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            return Some(format!(":\"{escaped}\""));
+        }
+
+        None
+    }
+
     fn check_variable_definition(&mut self, call: &ruby_prism::CallNode<'_>) {
         if call.receiver().is_some() {
             return;
@@ -152,10 +192,19 @@ impl VariableDefinitionChecker<'_> {
                 } else {
                     "Use symbols for variable names."
                 };
-                self.diags.push(
-                    self.cop
-                        .diagnostic(self.source, line, column, msg.to_string()),
-                );
+
+                let mut diagnostic = self.cop.diagnostic(self.source, line, column, msg.to_string());
+                if let Some(replacement) = self.autocorrect_replacement(&arg) {
+                    self.corrections.push(Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement,
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diags.push(diagnostic);
             }
             break;
         }
@@ -244,10 +293,26 @@ fn is_rspec_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
     false
 }
 
+fn is_simple_symbol_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(VariableDefinition, "cops/rspec/variable_definition");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(VariableDefinition.supports_autocorrect());
+    }
 
     #[test]
     fn strings_style_flags_symbol_names() {
@@ -353,6 +418,36 @@ mod tests {
             diags.len(),
             1,
             "subject in Mail.new inside example group should be flagged"
+        );
+    }
+
+    #[test]
+    fn autocorrects_string_names_to_symbols() {
+        crate::testutil::assert_cop_autocorrect(
+            &VariableDefinition,
+            b"RSpec.describe Foo do\n  let('user_name') { 'Adam' }\nend\n",
+            b"RSpec.describe Foo do\n  let(:user_name) { 'Adam' }\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_symbol_names_to_strings_for_strings_style() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("strings".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &VariableDefinition,
+            b"RSpec.describe Foo do\n  let(:user_name) { 'Adam' }\nend\n",
+            b"RSpec.describe Foo do\n  let(\"user_name\") { 'Adam' }\nend\n",
+            config,
         );
     }
 }
