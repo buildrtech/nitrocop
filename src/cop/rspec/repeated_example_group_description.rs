@@ -35,6 +35,10 @@ impl Cop for RepeatedExampleGroupDescription {
         "RSpec/RepeatedExampleGroupDescription"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -54,7 +58,7 @@ impl Cop for RepeatedExampleGroupDescription {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle ProgramNode (top-level) and StatementsNode (module/class/block bodies).
         // ProgramNode is needed because Prism may not visit the top-level StatementsNode
@@ -74,7 +78,8 @@ impl Cop for RepeatedExampleGroupDescription {
         }
 
         #[allow(clippy::type_complexity)] // internal collection used only in this function
-        let mut desc_map: HashMap<Vec<u8>, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
+        let mut desc_map: HashMap<Vec<u8>, Vec<(usize, usize, Vec<u8>, usize, usize)>> =
+            HashMap::new();
 
         for stmt in &stmts {
             let call = match extract_example_group_call(stmt) {
@@ -102,20 +107,33 @@ impl Cop for RepeatedExampleGroupDescription {
 
             let loc = call.location();
             let (line, col) = source.offset_to_line_col(loc.start_offset());
-            desc_map
-                .entry(desc_sig)
-                .or_default()
-                .push((line, col, name.to_vec()));
+            let first_arg = call
+                .arguments()
+                .and_then(|a| a.arguments().iter().next())
+                .map(|arg| arg.location());
+            let (arg_start, arg_end) = if let Some(arg_loc) = first_arg {
+                (arg_loc.start_offset(), arg_loc.end_offset())
+            } else {
+                (loc.start_offset(), loc.end_offset())
+            };
+            desc_map.entry(desc_sig).or_default().push((
+                line,
+                col,
+                name.to_vec(),
+                arg_start,
+                arg_end,
+            ));
         }
 
+        let mut corrections = corrections;
         for locs in desc_map.values() {
             if locs.len() > 1 {
-                for (idx, (line, col, group_name)) in locs.iter().enumerate() {
+                for (idx, (line, col, group_name, start, end)) in locs.iter().enumerate() {
                     let other_lines: Vec<String> = locs
                         .iter()
                         .enumerate()
                         .filter(|(i, _)| *i != idx)
-                        .map(|(_, (l, _, _))| l.to_string())
+                        .map(|(_, (l, _, _, _, _))| l.to_string())
                         .collect();
                     let group_type = std::str::from_utf8(group_name).unwrap_or("describe");
                     let display_type = group_type
@@ -127,7 +145,18 @@ impl Cop for RepeatedExampleGroupDescription {
                         display_type,
                         other_lines.join(", ")
                     );
-                    diagnostics.push(self.diagnostic(source, *line, *col, msg));
+                    let mut diagnostic = self.diagnostic(source, *line, *col, msg);
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        corrections.push(crate::correction::Correction {
+                            start: *start,
+                            end: *end,
+                            replacement: "'TODO: unique group description'".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -250,6 +279,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        RepeatedExampleGroupDescription,
+        "cops/rspec/repeated_example_group_description"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RepeatedExampleGroupDescription,
         "cops/rspec/repeated_example_group_description"
     );
