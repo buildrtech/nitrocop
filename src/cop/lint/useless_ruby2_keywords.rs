@@ -18,6 +18,10 @@ impl Cop for UselessRuby2Keywords {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -25,25 +29,27 @@ impl Cop for UselessRuby2Keywords {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = R2KVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct R2KVisitor<'a, 'src> {
+struct R2KVisitor<'a, 'src, 'corr> {
     cop: &'a UselessRuby2Keywords,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for R2KVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for R2KVisitor<'_, '_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if node.name().as_slice() == b"ruby2_keywords" && node.receiver().is_none() {
             if let Some(args) = node.arguments() {
@@ -52,23 +58,36 @@ impl<'pr> Visit<'pr> for R2KVisitor<'_, '_> {
                     let first_arg = &arg_list[0];
 
                     // Case 1: ruby2_keywords def foo(*args); end
-                    if let Some(def_node) = first_arg.as_def_node() {
-                        if !allowed_arguments(&def_node) {
-                            let method_name = std::str::from_utf8(def_node.name().as_slice())
-                                .unwrap_or("unknown");
-                            let msg_loc = node.message_loc().unwrap_or(node.location());
-                            let (line, column) =
-                                self.source.offset_to_line_col(msg_loc.start_offset());
-                            self.diagnostics.push(self.cop.diagnostic(
-                                self.source,
-                                line,
-                                column,
-                                format!(
-                                    "`ruby2_keywords` is unnecessary for method `{}`.",
-                                    method_name
-                                ),
-                            ));
+                    if let Some(def_node) = first_arg.as_def_node()
+                        && !allowed_arguments(&def_node)
+                    {
+                        let method_name =
+                            std::str::from_utf8(def_node.name().as_slice()).unwrap_or("unknown");
+                        let msg_loc = node.message_loc().unwrap_or(node.location());
+                        let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
+                        let mut diagnostic = self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            format!("`ruby2_keywords` is unnecessary for method `{}`.", method_name),
+                        );
+
+                        if let Some(corrections) = &mut self.corrections {
+                            let remove_start = node.location().start_offset();
+                            let remove_end = def_node.location().start_offset();
+                            if remove_start < remove_end {
+                                corrections.push(crate::correction::Correction {
+                                    start: remove_start,
+                                    end: remove_end,
+                                    replacement: String::new(),
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
                         }
+
+                        self.diagnostics.push(diagnostic);
                     }
 
                     // Case 2: ruby2_keywords :foo (symbol reference)
@@ -111,4 +130,18 @@ fn allowed_arguments(def_node: &ruby_prism::DefNode<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UselessRuby2Keywords, "cops/lint/useless_ruby2_keywords");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(UselessRuby2Keywords.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_ruby2_keywords_prefix_for_inline_def() {
+        crate::testutil::assert_cop_autocorrect(
+            &UselessRuby2Keywords,
+            b"ruby2_keywords def foo(arg); end\n",
+            b"def foo(arg); end\n",
+        );
+    }
 }
