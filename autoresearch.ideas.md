@@ -61,6 +61,7 @@
 - RSpec/VariableDefinition parity follow-up: harden symbol/string autocorrect escaping parity for complex quoting/backslash edge cases to mirror RuboCop `inspect` output exactly.
 - RSpec/ImplicitSubject parity follow-up: add require_implicit-style explicit-subject rewrites (`expect(subject)` -> `is_expected`) and verify selector-replacement parity across chained/parenthesized matcher forms.
 - RSpec/MultipleSubjects parity follow-up: harden overwritten unnamed-subject removal to whole-line/comment-preserving cleanup parity (especially multiline `subject do ... end` blocks in conditionals).
+- RSpec/IteratedExpectation parity follow-up: expand autocorrect beyond single-expectation baseline to RuboCop parity for numblock cases and broader matcher/body shapes while preserving block-param-usage safety checks.
 - FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` should remain diagnostic-only (no upstream AutoCorrector) or get an explicit nitrocop-only unsafe autocorrect mode.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
