@@ -47,6 +47,10 @@ impl Cop for RefinementImportMethods {
         false
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -54,7 +58,7 @@ impl Cop for RefinementImportMethods {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // RuboCop: minimum_target_ruby_version 3.1
         let ruby_version = config
@@ -70,19 +74,22 @@ impl Cop for RefinementImportMethods {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct RefineVisitor<'a, 'src> {
+struct RefineVisitor<'a, 'src, 'corr> {
     cop: &'a RefinementImportMethods,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for RefineVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for RefineVisitor<'_, '_, '_> {
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method_name = node.name().as_slice();
 
@@ -103,7 +110,7 @@ impl<'pr> Visit<'pr> for RefineVisitor<'_, '_> {
     }
 }
 
-impl RefineVisitor<'_, '_> {
+impl RefineVisitor<'_, '_, '_> {
     fn check_refine_body(&mut self, body: &ruby_prism::Node<'_>) {
         let maybe_call = if let Some(call) = body.as_call_node() {
             Some(call)
@@ -129,7 +136,7 @@ impl RefineVisitor<'_, '_> {
                 } else {
                     "prepend"
                 };
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
@@ -137,7 +144,21 @@ impl RefineVisitor<'_, '_> {
                         "Use `import_methods` instead of `{}` because it is deprecated in Ruby 3.1.",
                         method_str
                     ),
-                ));
+                );
+
+                if let Some(corrections) = &mut self.corrections {
+                    let selector_loc = call.message_loc().unwrap_or(call.location());
+                    corrections.push(crate::correction::Correction {
+                        start: selector_loc.start_offset(),
+                        end: selector_loc.end_offset(),
+                        replacement: "import_methods".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                self.diagnostics.push(diagnostic);
             }
         }
     }
@@ -190,6 +211,21 @@ mod tests {
             &RefinementImportMethods,
             b"refine Foo do\n  include Bar\nend\n",
             config,
+        );
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RefinementImportMethods.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_include_to_import_methods() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &RefinementImportMethods,
+            b"refine Foo do\n  include Bar\nend\n",
+            b"refine Foo do\n  import_methods Bar\nend\n",
+            ruby31_config(),
         );
     }
 }
