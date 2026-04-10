@@ -62,6 +62,10 @@ impl Cop for ScatteredLet {
         &[BLOCK_NODE, CALL_NODE, STATEMENTS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -69,7 +73,7 @@ impl Cop for ScatteredLet {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -118,7 +122,10 @@ impl Cop for ScatteredLet {
         // Track if we've seen a non-let statement after the initial let block
         let mut seen_non_let = false;
         let mut in_let_group = false;
+        let mut first_let_insert_after: Option<usize> = None;
+        let mut corrected_one = false;
 
+        let mut corrections = corrections;
         for stmt in stmts.body().iter() {
             if let Some(c) = stmt.as_call_node() {
                 let name = c.name().as_slice();
@@ -138,14 +145,42 @@ impl Cop for ScatteredLet {
                         // This let is after a non-let statement
                         let loc = stmt.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             "Group all let/let! blocks in the example group together.".to_string(),
-                        ));
+                        );
+
+                        if !corrected_one
+                            && let Some(anchor) = first_let_insert_after
+                            && let Some(corrections) = &mut corrections
+                            && let Some((remove_start, remove_end, moved_text)) =
+                                movable_statement_text(source, &stmt)
+                            && anchor <= remove_start
+                            && let Some(between_text) = source.try_byte_slice(anchor, remove_start)
+                        {
+                            corrections.push(crate::correction::Correction {
+                                start: anchor,
+                                end: remove_end,
+                                replacement: format!("{moved_text}{between_text}"),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                            corrected_one = true;
+                        }
+
+                        diagnostics.push(diagnostic);
                     } else {
                         in_let_group = true;
+                        if first_let_insert_after.is_none() {
+                            let mut end = stmt.location().end_offset();
+                            if source.as_bytes().get(end).copied() == Some(b'\n') {
+                                end += 1;
+                            }
+                            first_let_insert_after = Some(end);
+                        }
                     }
                     continue;
                 }
@@ -158,8 +193,47 @@ impl Cop for ScatteredLet {
     }
 }
 
+fn movable_statement_text(
+    source: &SourceFile,
+    stmt: &ruby_prism::Node<'_>,
+) -> Option<(usize, usize, String)> {
+    let loc = stmt.location();
+    let (line, _) = source.offset_to_line_col(loc.start_offset());
+    let line_start = source.line_start_offset(line);
+
+    let mut remove_start = loc.start_offset();
+    if source
+        .try_byte_slice(line_start, loc.start_offset())
+        .is_some_and(|s| s.trim().is_empty())
+    {
+        remove_start = line_start;
+    }
+
+    let mut remove_end = loc.end_offset();
+    if source.as_bytes().get(remove_end).copied() == Some(b'\n') {
+        remove_end += 1;
+    }
+
+    let moved_text = source.try_byte_slice(remove_start, remove_end)?.to_string();
+    Some((remove_start, remove_end, moved_text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ScatteredLet, "cops/rspec/scattered_let");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ScatteredLet.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_moves_first_scattered_let_after_first_let() {
+        crate::testutil::assert_cop_autocorrect(
+            &ScatteredLet,
+            b"RSpec.describe User do\n  let(:a) { a }\n  it { expect(subject.foo).to eq(a) }\n  let(:b) { b }\nend\n",
+            b"RSpec.describe User do\n  let(:a) { a }\n  let(:b) { b }\n  it { expect(subject.foo).to eq(a) }\nend\n",
+        );
+    }
 }
