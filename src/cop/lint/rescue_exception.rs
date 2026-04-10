@@ -18,6 +18,10 @@ impl Cop for RescueException {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[BEGIN_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE]
     }
@@ -29,7 +33,7 @@ impl Cop for RescueException {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Match BeginNode to get rescue_clause
         let begin_node = match node.as_begin_node() {
@@ -58,13 +62,27 @@ impl Cop for RescueException {
                     // Point at the `rescue` keyword, matching RuboCop's resbody node location
                     let loc = rescue_node.keyword_loc();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Avoid rescuing the `Exception` class. Perhaps you meant `StandardError`?"
                             .to_string(),
-                    ));
+                    );
+
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let exception_loc = exception.location();
+                        corrections.push(crate::correction::Correction {
+                            start: exception_loc.start_offset(),
+                            end: exception_loc.end_offset(),
+                            replacement: "StandardError".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
             rescue_opt = rescue_node.subsequent();
@@ -76,4 +94,18 @@ impl Cop for RescueException {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RescueException, "cops/lint/rescue_exception");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RescueException.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_replaces_exception_with_standard_error() {
+        crate::testutil::assert_cop_autocorrect(
+            &RescueException,
+            b"begin\n  foo\nrescue Exception\n  bar\nend\n",
+            b"begin\n  foo\nrescue StandardError\n  bar\nend\n",
+        );
+    }
 }
