@@ -52,8 +52,12 @@ pub struct ReceiveMessages;
 struct StubInfo {
     receiver_text: String,
     receive_msg: String,
+    receive_key: Option<String>,
+    return_src: String,
     offset: usize,
     line: usize,
+    stmt_start: usize,
+    stmt_end: usize,
 }
 
 impl Cop for ReceiveMessages {
@@ -69,6 +73,10 @@ impl Cop for ReceiveMessages {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -76,12 +84,13 @@ impl Cop for ReceiveMessages {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ReceiveMessagesVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             skip_begin_body: false,
         };
         visitor.visit(&parse_result.node());
@@ -93,6 +102,7 @@ struct ReceiveMessagesVisitor<'a> {
     cop: &'a ReceiveMessages,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// Set before descending into `BeginNode` so the next `visit_statements_node`
     /// call (for the begin body) skips `check_statements`.
     skip_begin_body: bool,
@@ -177,6 +187,71 @@ impl<'a> ReceiveMessagesVisitor<'a> {
                     column,
                     "Use `receive_messages` instead of multiple stubs.".to_string(),
                 ));
+            }
+
+            if let Some(ref mut corrections) = self.corrections {
+                let correction_candidates: Vec<&StubInfo> = uniq_indices
+                    .iter()
+                    .map(|&idx| &stubs[idx])
+                    .filter(|s| s.receive_key.is_some())
+                    .collect();
+
+                if correction_candidates.len() >= 2 {
+                    let anchor = correction_candidates
+                        .iter()
+                        .max_by_key(|s| s.offset)
+                        .copied();
+
+                    if let Some(anchor) = anchor {
+                        let args = correction_candidates
+                            .iter()
+                            .filter_map(|s| {
+                                s.receive_key
+                                    .as_ref()
+                                    .map(|k| format!("{k}: {}", s.return_src))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        let replacement = format!(
+                            "allow({}).to receive_messages({})",
+                            anchor.receiver_text, args
+                        );
+
+                        corrections.push(crate::correction::Correction {
+                            start: anchor.stmt_start,
+                            end: anchor.stmt_end,
+                            replacement,
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+
+                        for s in correction_candidates.iter().filter(|s| s.offset != anchor.offset) {
+                            let (line, _) = self.source.offset_to_line_col(s.stmt_start);
+                            let line_start = self.source.line_start_offset(line);
+                            let mut start = s.stmt_start;
+                            if self
+                                .source
+                                .try_byte_slice(line_start, s.stmt_start)
+                                .is_some_and(|x| x.trim().is_empty())
+                            {
+                                start = line_start;
+                            }
+                            let mut end = s.stmt_end;
+                            if self.source.as_bytes().get(end).copied() == Some(b'\n') {
+                                end += 1;
+                            }
+
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -272,14 +347,45 @@ fn extract_allow_receive_info(
     let receive_msg = source
         .byte_slice(msg_loc.start_offset(), msg_loc.end_offset(), "")
         .to_string();
+    let receive_key = receive_symbol_key(receive_msg.as_str());
+
+    let return_arg = &and_return_arg_list[0];
+    let return_loc = return_arg.location();
+    let raw_return = source.byte_slice(return_loc.start_offset(), return_loc.end_offset(), "");
+    let return_src = if return_arg.as_hash_node().is_some() && !raw_return.trim_start().starts_with('{') {
+        format!("{{ {} }}", raw_return)
+    } else {
+        raw_return.to_string()
+    };
+
     let (line, _) = source.offset_to_line_col(stmt_loc.start_offset());
 
     Some(StubInfo {
         receiver_text,
         receive_msg,
+        receive_key,
+        return_src,
         offset: stmt_loc.start_offset(),
         line,
+        stmt_start: stmt_loc.start_offset(),
+        stmt_end: stmt_loc.end_offset(),
     })
+}
+
+fn receive_symbol_key(sym_src: &str) -> Option<String> {
+    let key = sym_src.strip_prefix(':')?;
+    if key.is_empty() {
+        return None;
+    }
+    let mut chars = key.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(key.to_string())
 }
 
 fn heredoc_or_splat(node: &ruby_prism::Node<'_>) -> bool {
@@ -306,4 +412,18 @@ fn heredoc_or_splat(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReceiveMessages, "cops/rspec/receive_messages");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ReceiveMessages.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_repeated_stubs_to_receive_messages() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReceiveMessages,
+            b"before do\n  allow(Service).to receive(:foo).and_return(1)\n  allow(Service).to receive(:bar).and_return(2)\nend\n",
+            b"before do\n  allow(Service).to receive_messages(foo: 1, bar: 2)\nend\n",
+        );
+    }
 }
