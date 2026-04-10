@@ -53,6 +53,10 @@ impl Cop for UriEscapeUnescape {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE]
     }
@@ -64,7 +68,7 @@ impl Cop for UriEscapeUnescape {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -102,10 +106,34 @@ impl Cop for UriEscapeUnescape {
             double_colon, method_str, replacements
         );
 
-        // RuboCop reports the offense on the full send expression
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, message));
+        let mut diagnostic = self.diagnostic(source, line, column, message);
+
+        if let Some(corrections) = corrections
+            && (method_name == b"escape" || method_name == b"unescape")
+            && let Some(args) = call.arguments()
+            && args.arguments().len() == 1
+            && let Some(first) = args.arguments().iter().next()
+            && let Some(arg_src) = source
+                .try_byte_slice(first.location().start_offset(), first.location().end_offset())
+        {
+            let replacement_method = if method_name == b"escape" {
+                "CGI.escape"
+            } else {
+                "CGI.unescape"
+            };
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("{replacement_method}({arg_src})"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -113,4 +141,18 @@ impl Cop for UriEscapeUnescape {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UriEscapeUnescape, "cops/lint/uri_escape_unescape");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(UriEscapeUnescape.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_uri_escape_to_cgi_escape() {
+        crate::testutil::assert_cop_autocorrect(
+            &UriEscapeUnescape,
+            b"URI.escape(\"http://example.com\")\n",
+            b"CGI.escape(\"http://example.com\")\n",
+        );
+    }
 }
