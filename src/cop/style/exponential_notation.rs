@@ -40,6 +40,10 @@ impl Cop for ExponentialNotation {
         "Style/ExponentialNotation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[FLOAT_NODE]
     }
@@ -51,7 +55,7 @@ impl Cop for ExponentialNotation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let float_node = match node.as_float_node() {
             Some(f) => f,
@@ -105,8 +109,61 @@ impl Cop for ExponentialNotation {
         };
 
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+        let mut diagnostic = self.diagnostic(source, line, column, message.to_string());
+
+        if style == "scientific"
+            && let Some(corrections) = corrections
+            && let Some(replacement) = normalize_scientific(src_str)
+        {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
+}
+
+fn normalize_scientific(src: &str) -> Option<String> {
+    let (mantissa, exponent) = src.split_once('e')?;
+    if mantissa.starts_with('+') {
+        return None;
+    }
+
+    let (negative, unsigned) = if let Some(rest) = mantissa.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, mantissa)
+    };
+
+    let (int_part, frac_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let all_digits = format!("{int_part}{frac_part}");
+    let first_non_zero = all_digits.bytes().position(|b| b != b'0')?;
+    let significant = &all_digits[first_non_zero..];
+    let exponent_value: i32 = exponent.parse().ok()?;
+
+    let decimal_index = int_part.len() as i32;
+    let canonical_exp = exponent_value + decimal_index - first_non_zero as i32 - 1;
+
+    let mut mantissa_out = String::new();
+    if negative {
+        mantissa_out.push('-');
+    }
+    mantissa_out.push(significant.chars().next()?);
+    if significant.len() > 1 {
+        let rest = significant[1..].trim_end_matches('0');
+        if !rest.is_empty() {
+            mantissa_out.push('.');
+            mantissa_out.push_str(rest);
+        }
+    }
+
+    Some(format!("{mantissa_out}e{canonical_exp}"))
 }
 
 fn exponent_divisible_by_three(exponent: &str) -> bool {
@@ -125,4 +182,18 @@ fn exponent_divisible_by_three(exponent: &str) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ExponentialNotation, "cops/style/exponential_notation");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ExponentialNotation.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_scientific_notation_baseline() {
+        crate::testutil::assert_cop_autocorrect(
+            &ExponentialNotation,
+            b"x = 12.34e3\n",
+            b"x = 1.234e4\n",
+        );
+    }
 }
