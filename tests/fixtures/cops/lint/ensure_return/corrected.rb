@@ -1,0 +1,17 @@
+begin
+  do_something
+rescue
+  handle_error
+ensure
+  cleanup
+end
+begin
+  foo
+ensure
+  1
+end
+begin
+  bar
+ensure
+  2
+end
