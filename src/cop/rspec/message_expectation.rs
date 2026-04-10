@@ -54,6 +54,10 @@ impl Cop for MessageExpectation {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -61,7 +65,7 @@ impl Cop for MessageExpectation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: EnforcedStyle — "allow" (default) or "expect"
         let enforced_style = config.get_str("EnforcedStyle", "allow");
@@ -136,12 +140,27 @@ impl Cop for MessageExpectation {
             }
             let loc = recv_call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `expect` for setting message expectations.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corrs) = corrections
+                && let Some(selector) = recv_call.message_loc()
+            {
+                corrs.push(crate::correction::Correction {
+                    start: selector.start_offset(),
+                    end: selector.end_offset(),
+                    replacement: "expect".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         } else {
             // Default "allow" style: flag `expect(...).to receive(...)`, prefer `allow`
             if recv_name != b"expect" {
@@ -149,12 +168,27 @@ impl Cop for MessageExpectation {
             }
             let loc = recv_call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer `allow` for setting message expectations.".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corrs) = corrections
+                && let Some(selector) = recv_call.message_loc()
+            {
+                corrs.push(crate::correction::Correction {
+                    start: selector.start_offset(),
+                    end: selector.end_offset(),
+                    replacement: "allow".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -191,6 +225,7 @@ fn subtree_includes_receive(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MessageExpectation, "cops/rspec/message_expectation");
+    crate::cop_autocorrect_fixture_tests!(MessageExpectation, "cops/rspec/message_expectation");
 
     #[test]
     fn expect_style_flags_allow_receive() {
@@ -225,5 +260,27 @@ mod tests {
         let source = b"expect(foo).to receive(:bar)\n";
         let diags = crate::testutil::run_cop_full_with_config(&MessageExpectation, source, config);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn expect_style_autocorrects_allow_to_expect() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("expect".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &MessageExpectation,
+            b"allow(foo).to receive(:bar)\n",
+            b"expect(foo).to receive(:bar)\n",
+            config,
+        );
     }
 }

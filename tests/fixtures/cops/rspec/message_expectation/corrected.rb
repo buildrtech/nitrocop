@@ -1,0 +1,5 @@
+allow(foo).to receive(:bar)
+allow(foo).to receive(:baz).with(1)
+allow(obj).to receive(:qux).and_return(true).at_least(:once)
+allow(items).to all receive(:process)
+allow(items).to all(receive(:process).with(:arg))
