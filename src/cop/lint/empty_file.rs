@@ -19,19 +19,34 @@ impl Cop for EmptyFile {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_lines(
         &self,
         source: &SourceFile,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let src = source.as_bytes();
 
         // RuboCop only flags truly empty files (0 bytes).
         // Whitespace-only files are NOT flagged.
         if src.is_empty() {
-            diagnostics.push(self.diagnostic(source, 1, 0, "Empty file detected.".to_string()));
+            let mut diagnostic = self.diagnostic(source, 1, 0, "Empty file detected.".to_string());
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: 0,
+                    end: 0,
+                    replacement: "nil\n".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
             return;
         }
 
@@ -48,7 +63,20 @@ impl Cop for EmptyFile {
             });
 
             if !has_code {
-                diagnostics.push(self.diagnostic(source, 1, 0, "Empty file detected.".to_string()));
+                let mut diagnostic = self.diagnostic(source, 1, 0, "Empty file detected.".to_string());
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let insert_at = src.len();
+                    let prefix = if src.last().is_some_and(|b| *b == b'\n') { "" } else { "\n" };
+                    corrections.push(crate::correction::Correction {
+                        start: insert_at,
+                        end: insert_at,
+                        replacement: format!("{prefix}nil\n"),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -64,4 +92,14 @@ mod tests {
         empty_no_newline = "empty_no_newline.rb",
         empty_crlf = "empty_crlf.rb",
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyFile.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_empty_file_inserts_nil() {
+        crate::testutil::assert_cop_autocorrect(&EmptyFile, b"", b"nil\n");
+    }
 }
