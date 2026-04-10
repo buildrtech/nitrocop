@@ -13,6 +13,10 @@ impl Cop for UnspecifiedException {
         "RSpec/UnspecifiedException"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -32,7 +36,7 @@ impl Cop for UnspecifiedException {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -110,12 +114,29 @@ impl Cop for UnspecifiedException {
 
         let loc = root.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Specify the exception being captured.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = corrections {
+            let insert_at = root
+                .message_loc()
+                .map(|m| m.end_offset())
+                .unwrap_or(loc.end_offset());
+            corrections.push(crate::correction::Correction {
+                start: insert_at,
+                end: insert_at,
+                replacement: "(StandardError)".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -136,4 +157,5 @@ fn find_root_call<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::CallNod
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UnspecifiedException, "cops/rspec/unspecified_exception");
+    crate::cop_autocorrect_fixture_tests!(UnspecifiedException, "cops/rspec/unspecified_exception");
 }
