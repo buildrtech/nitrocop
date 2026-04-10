@@ -78,6 +78,7 @@
 - Style/ExponentialNotation parity follow-up: extend autocorrect beyond scientific-style baseline to engineering/integral styles and add edge-case coverage for signed mantissas and underscore-separated digits.
 - Lint/UriEscapeUnescape parity follow-up: expand autocorrect beyond escape/unescape one-arg baseline to selected safe encode/decode forms with explicit replacement policy and fixture coverage for behavior-sensitive URL cases.
 - Lint/UselessDefined parity follow-up: validate replacement fidelity for interpolated string/symbol offense forms and consider source-style-preserving replacement choice where projects prefer single-quoted literals.
+- Lint/ToEnumArguments parity follow-up: preserve original invocation style/parentheses and support wrapped method-ref forms (e.g., helper-wrapped `__method__`) while keeping canonical argument reconstruction safe.
 - Lint/RandOne parity follow-up: validate autocorrect coverage for unary-minus numeric node shapes and parenthesized-call formatting to ensure stable rewrite parity with RuboCop detection forms.
 - Lint/EmptyBlock parity follow-up: refine inserted `nil` formatting for multiline `do...end` bodies (indent/newline preservation) and validate guarded behavior with `AllowComments: false` comment-only blocks.
 - Lint/SelfAssignment parity/safety follow-up: evaluate extending autocorrect beyond plain `=` variable/constant writes to selected compound assignment forms only if behavior remains side-effect safe; keep setter/index/multi-assign forms diagnostic-only unless stronger safety proof exists.

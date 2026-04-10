@@ -15,6 +15,10 @@ impl Cop for ItWithoutArgumentsInBlock {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[]
     }
@@ -34,6 +38,11 @@ impl Cop for ItWithoutArgumentsInBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ItWithoutArgumentsInBlock.supports_autocorrect());
+    }
 
     #[test]
     fn never_fires() {
