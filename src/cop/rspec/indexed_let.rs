@@ -26,6 +26,10 @@ impl Cop for IndexedLet {
         "RSpec/IndexedLet"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -51,7 +55,7 @@ impl Cop for IndexedLet {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: Max — maximum allowed group size (default 1)
         let max = config.get_usize("Max", 1);
@@ -103,6 +107,7 @@ impl Cop for IndexedLet {
             first_index: String,
             line: usize,
             column: usize,
+            correction: Option<(usize, usize, String)>,
         }
 
         let mut indexed_lets: Vec<LetInfo> = Vec::new();
@@ -167,11 +172,25 @@ impl Cop for IndexedLet {
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 let group_key = strip_all_digits(&name_str);
                 let first_index = first_digit_sequence(&name_str).unwrap_or_default();
+                let correction = first_arg.as_symbol_node().and_then(|_| {
+                    let cleaned = strip_trailing_index(&name_str);
+                    if cleaned.is_empty() || cleaned == name_str {
+                        return None;
+                    }
+                    let arg_loc = first_arg.location();
+                    Some((
+                        arg_loc.start_offset(),
+                        arg_loc.end_offset(),
+                        format!(":{cleaned}"),
+                    ))
+                });
+
                 indexed_lets.push(LetInfo {
                     group_key,
                     first_index,
                     line,
                     column,
+                    correction,
                 });
             }
         }
@@ -185,7 +204,7 @@ impl Cop for IndexedLet {
         for lets in groups.values() {
             if lets.len() > max {
                 for let_info in lets {
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         let_info.line,
                         let_info.column,
@@ -193,7 +212,22 @@ impl Cop for IndexedLet {
                             "This `let` statement uses `{}` in its name. Please give it a meaningful name.",
                             let_info.first_index
                         ),
-                    ));
+                    );
+
+                    if let Some((start, end, replacement)) = &let_info.correction
+                        && let Some(corrections) = corrections.as_deref_mut()
+                    {
+                        corrections.push(crate::correction::Correction {
+                            start: *start,
+                            end: *end,
+                            replacement: replacement.clone(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -210,6 +244,18 @@ fn has_trailing_index(name: &str) -> bool {
     }
     // Must have trailing digits, and not be all digits
     i < bytes.len() && i > 0
+}
+
+fn strip_trailing_index(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i < bytes.len() && i > 0 && bytes[i - 1] == b'_' {
+        i -= 1;
+    }
+    name[..i].to_string()
 }
 
 /// Strip ALL digit sequences from name (equivalent to Ruby's `gsub(/\d+/, '')`).
@@ -245,6 +291,7 @@ fn first_digit_sequence(name: &str) -> Option<String> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(IndexedLet, "cops/rspec/indexed_let");
+    crate::cop_autocorrect_fixture_tests!(IndexedLet, "cops/rspec/indexed_let");
 
     #[test]
     fn max_config_allows_larger_groups() {
