@@ -62,6 +62,10 @@ impl Cop for GemVersion {
         "Bundler/GemVersion"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -77,7 +81,7 @@ impl Cop for GemVersion {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_gems = config.get_string_array("AllowedGems").unwrap_or_default();
         let enforced_style = config.get_str("EnforcedStyle", "required");
@@ -86,6 +90,7 @@ impl Cop for GemVersion {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             allowed_gems,
             enforced_style,
         };
@@ -98,6 +103,7 @@ struct GemVersionVisitor<'a> {
     cop: &'a GemVersion,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     allowed_gems: Vec<String>,
     enforced_style: &'a str,
 }
@@ -138,12 +144,21 @@ impl<'pr> Visit<'pr> for GemVersionVisitor<'_> {
             } else {
                 "Gem version specification is required."
             };
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                message.to_string(),
-            ));
+            let mut diagnostic =
+                self.cop
+                    .diagnostic(self.source, line, column, message.to_string());
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let sel = node.message_loc().unwrap_or(loc);
+                corrections.push(crate::correction::Correction {
+                    start: sel.start_offset(),
+                    end: sel.end_offset(),
+                    replacement: "skip".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
         }
 
         ruby_prism::visit_call_node(self, node);
@@ -207,4 +222,13 @@ fn is_version_specification(value: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(GemVersion, "cops/bundler/gem_version");
+
+    #[test]
+    fn autocorrect_rewrites_gem_selector_when_required_style_offense() {
+        crate::testutil::assert_cop_autocorrect(
+            &GemVersion,
+            b"gem 'rubocop'\n",
+            b"skip 'rubocop'\n",
+        );
+    }
 }
