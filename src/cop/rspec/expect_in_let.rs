@@ -48,6 +48,10 @@ impl Cop for ExpectInLet {
         "RSpec/ExpectInLet"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -67,7 +71,7 @@ impl Cop for ExpectInLet {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -99,204 +103,211 @@ impl Cop for ExpectInLet {
             None => return,
         };
 
-        find_expects_in_node(&body, source, self, diagnostics);
+        let mut hits = Vec::new();
+        find_expects_in_node(&body, &mut hits);
+
+        for hit in hits {
+            let method_str = std::str::from_utf8(hit.method.as_slice()).unwrap_or("expect");
+            let (line, column) = source.offset_to_line_col(hit.start);
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                format!("Do not use `{method_str}` in let"),
+            );
+
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: hit.start,
+                    end: hit.end,
+                    replacement: "skip".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
+        }
     }
 }
 
-fn find_expects_in_node(
-    node: &ruby_prism::Node<'_>,
-    source: &SourceFile,
-    cop: &ExpectInLet,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    if let Some(call) = node.as_call_node() {
-        if call.receiver().is_none() {
-            let name = call.name().as_slice();
-            if EXPECT_METHODS.contains(&name) {
-                let method_str = std::str::from_utf8(name).unwrap_or("expect");
-                let loc = call.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(cop.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("Do not use `{method_str}` in let"),
-                ));
-                // Continue recursion to find nested expect calls (RuboCop's
-                // def_node_search finds ALL matching nodes in the subtree).
-                // Fall through to the CallNode handler below.
-            }
+struct ExpectHit {
+    method: Vec<u8>,
+    start: usize,
+    end: usize,
+}
+
+fn find_expects_in_node(node: &ruby_prism::Node<'_>, hits: &mut Vec<ExpectHit>) {
+    if let Some(call) = node.as_call_node()
+        && call.receiver().is_none()
+        && EXPECT_METHODS.contains(&call.name().as_slice())
+    {
+        if let Some(selector) = call.message_loc() {
+            hits.push(ExpectHit {
+                method: call.name().as_slice().to_vec(),
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+            });
         }
     }
 
-    // Recurse into all child nodes (deep search like RuboCop's def_node_search).
-    // ruby_prism::Node doesn't expose a generic child_nodes() iterator, so we
-    // handle each container type that can appear inside a let body.
     if let Some(stmts) = node.as_statements_node() {
         for child in stmts.body().iter() {
-            find_expects_in_node(&child, source, cop, diagnostics);
+            find_expects_in_node(&child, hits);
         }
         return;
     }
     if let Some(call) = node.as_call_node() {
-        // Recurse into receiver chain (e.g., expect(x).to eq(...))
         if let Some(recv) = call.receiver() {
-            find_expects_in_node(&recv, source, cop, diagnostics);
+            find_expects_in_node(&recv, hits);
         }
-        // Recurse into arguments
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
-                find_expects_in_node(&arg, source, cop, diagnostics);
+                find_expects_in_node(&arg, hits);
             }
         }
-        // Recurse into block
         if let Some(block) = call.block() {
-            find_expects_in_node(&block, source, cop, diagnostics);
+            find_expects_in_node(&block, hits);
         }
         return;
     }
     if let Some(block) = node.as_block_node() {
         if let Some(body) = block.body() {
-            find_expects_in_node(&body, source, cop, diagnostics);
+            find_expects_in_node(&body, hits);
         }
         return;
     }
     if let Some(if_node) = node.as_if_node() {
         if let Some(stmts) = if_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         if let Some(subsequent) = if_node.subsequent() {
-            find_expects_in_node(&subsequent, source, cop, diagnostics);
+            find_expects_in_node(&subsequent, hits);
         }
         return;
     }
     if let Some(unless_node) = node.as_unless_node() {
         if let Some(stmts) = unless_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         if let Some(else_clause) = unless_node.else_clause() {
-            find_expects_in_node(&else_clause.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&else_clause.as_node(), hits);
         }
         return;
     }
     if let Some(else_node) = node.as_else_node() {
         if let Some(stmts) = else_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         return;
     }
     if let Some(case_node) = node.as_case_node() {
         for cond in case_node.conditions().iter() {
-            find_expects_in_node(&cond, source, cop, diagnostics);
+            find_expects_in_node(&cond, hits);
         }
         if let Some(else_clause) = case_node.else_clause() {
-            find_expects_in_node(&else_clause.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&else_clause.as_node(), hits);
         }
         return;
     }
     if let Some(when_node) = node.as_when_node() {
         if let Some(stmts) = when_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         return;
     }
     if let Some(begin_node) = node.as_begin_node() {
         if let Some(stmts) = begin_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         if let Some(rescue_clause) = begin_node.rescue_clause() {
-            find_expects_in_node(&rescue_clause.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&rescue_clause.as_node(), hits);
         }
         if let Some(ensure_clause) = begin_node.ensure_clause() {
-            find_expects_in_node(&ensure_clause.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&ensure_clause.as_node(), hits);
         }
         return;
     }
     if let Some(rescue_node) = node.as_rescue_node() {
-        // Recurse into the rescue clause body
         if let Some(stmts) = rescue_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
-        // Recurse into chained rescue clauses (rescue A => ... rescue B => ...)
         if let Some(consequent) = rescue_node.subsequent() {
-            find_expects_in_node(&consequent.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&consequent.as_node(), hits);
         }
         return;
     }
     if let Some(rescue_mod) = node.as_rescue_modifier_node() {
-        find_expects_in_node(&rescue_mod.expression(), source, cop, diagnostics);
-        find_expects_in_node(&rescue_mod.rescue_expression(), source, cop, diagnostics);
+        find_expects_in_node(&rescue_mod.expression(), hits);
+        find_expects_in_node(&rescue_mod.rescue_expression(), hits);
         return;
     }
     if let Some(ensure_node) = node.as_ensure_node() {
         if let Some(stmts) = ensure_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         return;
     }
     if let Some(in_node) = node.as_in_node() {
         if let Some(stmts) = in_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         return;
     }
     if let Some(case_match) = node.as_case_match_node() {
         for cond in case_match.conditions().iter() {
-            find_expects_in_node(&cond, source, cop, diagnostics);
+            find_expects_in_node(&cond, hits);
         }
         if let Some(else_clause) = case_match.else_clause() {
-            find_expects_in_node(&else_clause.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&else_clause.as_node(), hits);
         }
         return;
     }
     if let Some(parentheses) = node.as_parentheses_node() {
         if let Some(body) = parentheses.body() {
-            find_expects_in_node(&body, source, cop, diagnostics);
+            find_expects_in_node(&body, hits);
         }
         return;
     }
-    // For/while/until loops
     if let Some(for_node) = node.as_for_node() {
         if let Some(stmts) = for_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         return;
     }
     if let Some(while_node) = node.as_while_node() {
         if let Some(stmts) = while_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         return;
     }
     if let Some(until_node) = node.as_until_node() {
         if let Some(stmts) = until_node.statements() {
-            find_expects_in_node(&stmts.as_node(), source, cop, diagnostics);
+            find_expects_in_node(&stmts.as_node(), hits);
         }
         return;
     }
-    // AndNode / OrNode (logical operators: &&, ||, and, or)
     if let Some(and_node) = node.as_and_node() {
-        find_expects_in_node(&and_node.left(), source, cop, diagnostics);
-        find_expects_in_node(&and_node.right(), source, cop, diagnostics);
+        find_expects_in_node(&and_node.left(), hits);
+        find_expects_in_node(&and_node.right(), hits);
         return;
     }
     if let Some(or_node) = node.as_or_node() {
-        find_expects_in_node(&or_node.left(), source, cop, diagnostics);
-        find_expects_in_node(&or_node.right(), source, cop, diagnostics);
+        find_expects_in_node(&or_node.left(), hits);
+        find_expects_in_node(&or_node.right(), hits);
         return;
     }
-    // DefNode — expect inside method definitions within let bodies (e.g., Class.new { def foo; expect(...); end })
     if let Some(def_node) = node.as_def_node() {
         if let Some(body) = def_node.body() {
-            find_expects_in_node(&body, source, cop, diagnostics);
+            find_expects_in_node(&body, hits);
         }
         return;
     }
-    // Lambda literal
-    if let Some(lambda) = node.as_lambda_node() {
-        if let Some(body) = lambda.body() {
-            find_expects_in_node(&body, source, cop, diagnostics);
-        }
+    if let Some(lambda) = node.as_lambda_node()
+        && let Some(body) = lambda.body()
+    {
+        find_expects_in_node(&body, hits);
     }
 }
 
@@ -304,4 +315,5 @@ fn find_expects_in_node(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ExpectInLet, "cops/rspec/expect_in_let");
+    crate::cop_autocorrect_fixture_tests!(ExpectInLet, "cops/rspec/expect_in_let");
 }
