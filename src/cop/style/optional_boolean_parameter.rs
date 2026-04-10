@@ -13,6 +13,10 @@ impl Cop for OptionalBooleanParameter {
         "Style/OptionalBooleanParameter"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[DEF_NODE, FALSE_NODE, OPTIONAL_PARAMETER_NODE, TRUE_NODE]
     }
@@ -24,7 +28,7 @@ impl Cop for OptionalBooleanParameter {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -53,7 +57,18 @@ impl Cop for OptionalBooleanParameter {
             None => return,
         };
 
-        for opt in params.optionals().iter() {
+        let optionals: Vec<_> = params.optionals().iter().collect();
+        let optional_is_boolean: Vec<bool> = optionals
+            .iter()
+            .map(|opt| {
+                opt.as_optional_parameter_node().is_some_and(|opt_param| {
+                    let value = opt_param.value();
+                    value.as_true_node().is_some() || value.as_false_node().is_some()
+                })
+            })
+            .collect();
+
+        for (index, opt) in optionals.iter().enumerate() {
             if let Some(opt_param) = opt.as_optional_parameter_node() {
                 let value = opt_param.value();
                 let is_boolean = value.as_true_node().is_some() || value.as_false_node().is_some();
@@ -74,7 +89,7 @@ impl Cop for OptionalBooleanParameter {
                     let replacement = format!("{}: {}", param_name, value_src);
 
                     let (line, column) = source.offset_to_line_col(param_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
@@ -82,7 +97,26 @@ impl Cop for OptionalBooleanParameter {
                             "Prefer keyword arguments for arguments with a boolean default value; use `{}` instead of `{}`.",
                             replacement, param_src_str
                         ),
-                    ));
+                    );
+
+                    // Conservative safety guard: only autocorrect this optional
+                    // parameter when all following optional parameters are also
+                    // boolean defaults (and thus keyword-convertible), preventing
+                    // invalid signatures like `foo: true, bar = 1`.
+                    let safe_to_autocorrect = optional_is_boolean[index + 1..].iter().all(|b| *b);
+
+                    if safe_to_autocorrect && let Some(ref mut corrs) = corrections {
+                        corrs.push(crate::correction::Correction {
+                            start: param_loc.start_offset(),
+                            end: param_loc.end_offset(),
+                            replacement: replacement.clone(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -93,6 +127,10 @@ impl Cop for OptionalBooleanParameter {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        OptionalBooleanParameter,
+        "cops/style/optional_boolean_parameter"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         OptionalBooleanParameter,
         "cops/style/optional_boolean_parameter"
     );
