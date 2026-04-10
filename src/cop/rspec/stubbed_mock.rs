@@ -38,6 +38,10 @@ impl Cop for StubbedMock {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -45,7 +49,7 @@ impl Cop for StubbedMock {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -107,31 +111,74 @@ impl Cop for StubbedMock {
 
         match recv_name {
             b"expect" if recv_call.receiver().is_none() => {
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Prefer `allow` over `expect` when configuring a response.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corrs) = corrections
+                    && let Some(selector) = recv_call.message_loc()
+                {
+                    corrs.push(crate::correction::Correction {
+                        start: selector.start_offset(),
+                        end: selector.end_offset(),
+                        replacement: "allow".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
             b"expect_any_instance_of" if recv_call.receiver().is_none() => {
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Prefer `allow_any_instance_of` over `expect_any_instance_of` when configuring a response.".to_string(),
-                ));
+                );
+
+                if let Some(ref mut corrs) = corrections
+                    && let Some(selector) = recv_call.message_loc()
+                {
+                    corrs.push(crate::correction::Correction {
+                        start: selector.start_offset(),
+                        end: selector.end_offset(),
+                        replacement: "allow_any_instance_of".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
             b"is_expected" if recv_call.receiver().is_none() => {
-                diagnostics.push(
-                    self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Prefer `allow(subject)` over `is_expected` when configuring a response."
-                            .to_string(),
-                    ),
+                let mut diagnostic = self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Prefer `allow(subject)` over `is_expected` when configuring a response."
+                        .to_string(),
                 );
+
+                if let Some(ref mut corrs) = corrections
+                    && let Some(selector) = recv_call.message_loc()
+                {
+                    corrs.push(crate::correction::Correction {
+                        start: selector.start_offset(),
+                        end: selector.end_offset(),
+                        replacement: "allow(subject)".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
             _ => {}
         }
@@ -347,4 +394,5 @@ fn is_matcher_with_block(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(StubbedMock, "cops/rspec/stubbed_mock");
+    crate::cop_autocorrect_fixture_tests!(StubbedMock, "cops/rspec/stubbed_mock");
 }
