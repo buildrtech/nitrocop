@@ -110,6 +110,10 @@ impl Cop for LeadingSubject {
         &[PROGRAM_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -117,7 +121,7 @@ impl Cop for LeadingSubject {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match node.as_program_node() {
             Some(p) => p,
@@ -127,9 +131,10 @@ impl Cop for LeadingSubject {
         // Walk top-level statements looking for spec groups.
         // Only spec groups at the file root (not inside module/class) are checked,
         // matching RuboCop's InsideExampleGroup behavior.
+        let mut corrections = corrections;
         for stmt in program.statements().body().iter() {
             if is_spec_group_call(&stmt) {
-                self.check_block_body(source, &stmt, diagnostics);
+                self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
             }
             // Skip modules, classes, requires, and anything else at the top level.
         }
@@ -147,6 +152,7 @@ impl LeadingSubject {
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -171,71 +177,82 @@ impl LeadingSubject {
             None => return,
         };
 
-        // Check subject ordering within this block
         let mut first_relevant_name: Option<&[u8]> = None;
+        let mut first_relevant_insert_at: Option<usize> = None;
+        let mut corrected_one = false;
 
+        let mut corrections = corrections;
         for stmt in stmts.body().iter() {
-            // Handle if/unless nodes: recurse into their bodies to find
-            // spec groups, matching RuboCop's on_block which fires on ALL
-            // blocks regardless of wrapping control flow.
             if stmt.as_if_node().is_some() || stmt.as_unless_node().is_some() {
-                self.recurse_into_conditional(source, &stmt, diagnostics);
+                self.recurse_into_conditional(source, &stmt, diagnostics, corrections.as_deref_mut());
                 continue;
             }
 
             if let Some(c) = stmt.as_call_node() {
                 let name = c.name().as_slice();
 
-                // Handle calls with receiver (e.g. RSpec.describe, items.each)
                 if c.receiver().is_some() {
                     let is_rspec_group = util::constant_name(&c.receiver().unwrap())
                         .is_some_and(|n| n == b"RSpec")
                         && is_rspec_example_group(name);
                     if is_rspec_group {
-                        // Recurse into RSpec.describe / RSpec.shared_examples_for / etc.
-                        self.check_block_body(source, &stmt, diagnostics);
-                        // Also treat as offending (spec_group in RuboCop)
+                        self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                         if first_relevant_name.is_none() {
                             first_relevant_name = Some(name);
+                            first_relevant_insert_at = first_statement_insert_at(source, &stmt);
                         }
                     } else if c.block().is_some() {
-                        // Arbitrary receiver calls with blocks (e.g. items.each do...end)
-                        // must be recursed into to find subjects in nested scopes,
-                        // matching RuboCop's on_block behavior.
-                        self.check_block_body(source, &stmt, diagnostics);
+                        self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                     }
                     continue;
                 }
 
                 if is_rspec_subject(name) {
-                    // Subject found -- check if something relevant came before it
                     if let Some(prev_name) = first_relevant_name {
                         let prev_str = std::str::from_utf8(prev_name).unwrap_or("let");
                         let loc = stmt.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             format!("Declare `subject` above any other `{prev_str}` declarations."),
-                        ));
+                        );
+
+                        if !corrected_one
+                            && let Some(insert_at) = first_relevant_insert_at
+                            && let Some(corrections) = &mut corrections
+                            && let Some((remove_start, remove_end, moved_text)) =
+                                movable_statement_text(source, &stmt)
+                            && insert_at <= remove_start
+                            && let Some(between_text) = source.try_byte_slice(insert_at, remove_start)
+                        {
+                            corrections.push(crate::correction::Correction {
+                                start: insert_at,
+                                end: remove_end,
+                                replacement: format!("{moved_text}{between_text}"),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                            corrected_one = true;
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 } else if is_rspec_example_group(name) {
-                    // Recurse into nested context/describe/shared_examples blocks
-                    self.check_block_body(source, &stmt, diagnostics);
+                    self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                     if first_relevant_name.is_none() {
                         first_relevant_name = Some(name);
+                        first_relevant_insert_at = first_statement_insert_at(source, &stmt);
                     }
                 } else if is_example_include(name) {
-                    // Recurse into include-family blocks; also treat as offending
-                    self.check_block_body(source, &stmt, diagnostics);
+                    self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                     if first_relevant_name.is_none() {
                         first_relevant_name = Some(name);
+                        first_relevant_insert_at = first_statement_insert_at(source, &stmt);
                     }
                 } else if is_rspec_let(name) {
-                    // RuboCop's let? requires a block or block_pass:
-                    //   (block (send nil? #Helpers.all ...) ...)
-                    //   (send nil? #Helpers.all _ block_pass)
                     let has_block = c.block().is_some();
                     let has_block_pass = c.arguments().is_some_and(|args| {
                         args.arguments()
@@ -243,59 +260,54 @@ impl LeadingSubject {
                             .any(|a| a.as_block_argument_node().is_some())
                     });
                     if has_block {
-                        self.check_block_body(source, &stmt, diagnostics);
+                        self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                     }
                     if (has_block || has_block_pass) && first_relevant_name.is_none() {
                         first_relevant_name = Some(name);
+                        first_relevant_insert_at = first_statement_insert_at(source, &stmt);
                     }
                 } else if is_rspec_hook(name) || is_rspec_example(name) {
-                    // RuboCop's hook? and example? require a block
                     if c.block().is_some() {
-                        self.check_block_body(source, &stmt, diagnostics);
+                        self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                         if first_relevant_name.is_none() {
                             first_relevant_name = Some(name);
+                            first_relevant_insert_at = first_statement_insert_at(source, &stmt);
                         }
                     }
                 } else if c.block().is_some() {
-                    // Arbitrary block-bearing calls (custom DSL methods, etc.)
-                    // are NOT offending but we must recurse into their blocks
-                    // to check subject ordering within, matching RuboCop's
-                    // on_block behavior that fires on ALL blocks.
-                    self.check_block_body(source, &stmt, diagnostics);
+                    self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                 }
             }
         }
     }
 
-    /// Recurse into if/unless node bodies looking for call nodes that should
-    /// be checked (spec groups, arbitrary blocks, etc.). This matches RuboCop's
-    /// behavior where `on_block` fires on all blocks regardless of wrapping
-    /// control flow like `if linux?` or `unless ENV["CI"]`.
     fn recurse_into_conditional(
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         if let Some(if_node) = node.as_if_node() {
             if let Some(stmts) = if_node.statements() {
-                self.recurse_conditional_stmts(source, &stmts, diagnostics);
+                self.recurse_conditional_stmts(source, &stmts, diagnostics, corrections.as_deref_mut());
             }
             if let Some(subsequent) = if_node.subsequent() {
-                self.recurse_into_conditional(source, &subsequent, diagnostics);
+                self.recurse_into_conditional(source, &subsequent, diagnostics, corrections);
             }
         } else if let Some(unless_node) = node.as_unless_node() {
             if let Some(stmts) = unless_node.statements() {
-                self.recurse_conditional_stmts(source, &stmts, diagnostics);
+                self.recurse_conditional_stmts(source, &stmts, diagnostics, corrections.as_deref_mut());
             }
             if let Some(else_clause) = unless_node.else_clause() {
                 if let Some(stmts) = else_clause.statements() {
-                    self.recurse_conditional_stmts(source, &stmts, diagnostics);
+                    self.recurse_conditional_stmts(source, &stmts, diagnostics, corrections.as_deref_mut());
                 }
             }
         } else if let Some(else_node) = node.as_else_node() {
             if let Some(stmts) = else_node.statements() {
-                self.recurse_conditional_stmts(source, &stmts, diagnostics);
+                self.recurse_conditional_stmts(source, &stmts, diagnostics, corrections);
             }
         }
     }
@@ -305,13 +317,15 @@ impl LeadingSubject {
         source: &SourceFile,
         stmts: &ruby_prism::StatementsNode<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         for stmt in stmts.body().iter() {
             if stmt.as_if_node().is_some() || stmt.as_unless_node().is_some() {
-                self.recurse_into_conditional(source, &stmt, diagnostics);
+                self.recurse_into_conditional(source, &stmt, diagnostics, corrections.as_deref_mut());
             } else if let Some(c) = stmt.as_call_node() {
                 if c.block().is_some() {
-                    self.check_block_body(source, &stmt, diagnostics);
+                    self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                 }
             }
         }
@@ -339,8 +353,61 @@ fn is_example_include(name: &[u8]) -> bool {
         || name == b"include_context"
 }
 
+fn first_statement_insert_at(source: &SourceFile, stmt: &ruby_prism::Node<'_>) -> Option<usize> {
+    let loc = stmt.location();
+    let (line, _) = source.offset_to_line_col(loc.start_offset());
+    let line_start = source.line_start_offset(line);
+    if source
+        .try_byte_slice(line_start, loc.start_offset())
+        .is_some_and(|s| s.trim().is_empty())
+    {
+        Some(line_start)
+    } else {
+        Some(loc.start_offset())
+    }
+}
+
+fn movable_statement_text(
+    source: &SourceFile,
+    stmt: &ruby_prism::Node<'_>,
+) -> Option<(usize, usize, String)> {
+    let loc = stmt.location();
+    let (line, _) = source.offset_to_line_col(loc.start_offset());
+    let line_start = source.line_start_offset(line);
+
+    let mut remove_start = loc.start_offset();
+    if source
+        .try_byte_slice(line_start, loc.start_offset())
+        .is_some_and(|s| s.trim().is_empty())
+    {
+        remove_start = line_start;
+    }
+
+    let mut remove_end = loc.end_offset();
+    if source.as_bytes().get(remove_end).copied() == Some(b'\n') {
+        remove_end += 1;
+    }
+
+    let moved_text = source.try_byte_slice(remove_start, remove_end)?.to_string();
+    Some((remove_start, remove_end, moved_text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(LeadingSubject, "cops/rspec/leading_subject");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(LeadingSubject.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_moves_subject_before_let() {
+        crate::testutil::assert_cop_autocorrect(
+            &LeadingSubject,
+            b"RSpec.describe User do\n  let(:params) { foo }\n\n  subject { described_class.new }\nend\n",
+            b"RSpec.describe User do\n  subject { described_class.new }\n  let(:params) { foo }\n\nend\n",
+        );
+    }
 }

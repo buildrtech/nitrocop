@@ -65,6 +65,7 @@
 - RSpec/HooksBeforeExamples parity follow-up: extend from one-move-per-group baseline to full RuboCop multi-sibling move behavior while preserving comment/blank-line layout stability.
 - RSpec/LetBeforeExamples parity follow-up: extend from one-move-per-group baseline to full RuboCop move behavior (multi-let reorder) and preserve include-examples/autocorrect-incompatible semantics with stable comment handling.
 - RSpec/ScatteredLet parity follow-up: extend from one-move-per-group baseline to full RuboCop let clustering behavior with stable ordering across multiple scattered lets and comment-aware movement.
+- RSpec/ScatteredSetup parity follow-up: extend from one-merge-per-duplicate-group baseline to full RuboCop repeated-hook merge behavior across all duplicate occurrences with heredoc/end-location parity.
 - FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` should remain diagnostic-only (no upstream AutoCorrector) or get an explicit nitrocop-only unsafe autocorrect mode.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
