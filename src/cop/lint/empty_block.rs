@@ -84,6 +84,10 @@ impl Cop for EmptyBlock {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, SUPER_NODE, FORWARDING_SUPER_NODE]
     }
@@ -95,7 +99,7 @@ impl Cop for EmptyBlock {
         parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let (call_node, super_node, forwarding_super_node, block_node) =
             if let Some(call_node) = node.as_call_node() {
@@ -210,12 +214,40 @@ impl Cop for EmptyBlock {
         };
 
         let (line, column) = source.offset_to_line_col(diagnostic_offset);
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Empty block detected.".to_string(),
-        ));
+        let mut diagnostic = self.diagnostic(source, line, column, "Empty block detected.".to_string());
+
+        // Conservative baseline autocorrect: only rewrite truly empty blocks with no comments
+        // in the block range by inserting a `nil` expression between block delimiters.
+        // This preserves runtime behavior (empty block return value is already nil).
+        let block_start = block_node.location().start_offset();
+        let block_end = block_node.location().end_offset();
+        let mut has_any_block_comment = false;
+        for comment in parse_result.comments() {
+            let comment_offset = comment.location().start_offset();
+            if comment_offset >= block_start && comment_offset < block_end {
+                has_any_block_comment = true;
+                break;
+            }
+        }
+
+        if !has_any_block_comment {
+            if let Some(corrections) = corrections {
+                let body_start = block_node
+                    .parameters()
+                    .map(|params| params.location().end_offset())
+                    .unwrap_or_else(|| block_node.opening_loc().end_offset());
+                corrections.push(crate::correction::Correction {
+                    start: body_start,
+                    end: block_node.closing_loc().start_offset(),
+                    replacement: " nil ".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -223,4 +255,14 @@ impl Cop for EmptyBlock {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyBlock, "cops/lint/empty_block");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyBlock.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_nil_for_empty_brace_block() {
+        crate::testutil::assert_cop_autocorrect(&EmptyBlock, b"items.each { |x| }\n", b"items.each { |x| nil }\n");
+    }
 }
