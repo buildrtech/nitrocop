@@ -46,6 +46,10 @@ impl Cop for EmptyLineAfterSubject {
         &[PROGRAM_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -53,7 +57,7 @@ impl Cop for EmptyLineAfterSubject {
         parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match node.as_program_node() {
             Some(p) => p,
@@ -64,17 +68,18 @@ impl Cop for EmptyLineAfterSubject {
 
         // Match RuboCop's InsideExampleGroup root scoping: only process top-level
         // spec groups. Specs wrapped in module/class roots are intentionally skipped.
+        let mut visitor = SubjectSeparationVisitor {
+            source,
+            cop: self,
+            diagnostics,
+            corrections,
+            comment_lines: &comment_lines,
+            enable_directive_lines: &enable_directive_lines,
+        };
         for stmt in program.statements().body().iter() {
             if !is_spec_group_call(&stmt) {
                 continue;
             }
-            let mut visitor = SubjectSeparationVisitor {
-                source,
-                cop: self,
-                diagnostics,
-                comment_lines: &comment_lines,
-                enable_directive_lines: &enable_directive_lines,
-            };
             visitor.visit(&stmt);
         }
     }
@@ -84,6 +89,7 @@ struct SubjectSeparationVisitor<'a> {
     source: &'a SourceFile,
     cop: &'a EmptyLineAfterSubject,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     comment_lines: &'a HashSet<usize>,
     enable_directive_lines: &'a HashSet<usize>,
 }
@@ -119,12 +125,26 @@ impl<'a> SubjectSeparationVisitor<'a> {
             .unwrap_or(0);
 
         let method_name = std::str::from_utf8(subject_call.name().as_slice()).unwrap_or("subject");
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             report_line,
             report_col,
             format!("Add an empty line after `{method_name}`."),
-        ));
+        );
+
+        if let Some(ref mut corrections) = self.corrections {
+            let insert_at = self.source.line_start_offset(report_line + 1);
+            corrections.push(crate::correction::Correction {
+                start: insert_at,
+                end: insert_at,
+                replacement: "\n".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -283,4 +303,18 @@ fn find_max_heredoc_end_offset(source: &SourceFile, node: &ruby_prism::Node<'_>)
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyLineAfterSubject, "cops/rspec/empty_line_after_subject");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyLineAfterSubject.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_blank_line_after_subject() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyLineAfterSubject,
+            b"RSpec.describe User do\n  subject { described_class.new }\n  let(:params) { foo }\nend\n",
+            b"RSpec.describe User do\n  subject { described_class.new }\n\n  let(:params) { foo }\nend\n",
+        );
+    }
 }
