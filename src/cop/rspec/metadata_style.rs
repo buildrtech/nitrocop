@@ -70,6 +70,10 @@ impl Cop for MetadataStyle {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -77,7 +81,7 @@ impl Cop for MetadataStyle {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -88,7 +92,7 @@ impl Cop for MetadataStyle {
 
         // Handle RSpec.configure blocks: walk their body for hook calls
         if method_name == b"configure" {
-            self.check_configure_call(source, &call, config, diagnostics);
+            self.check_configure_call(source, &call, config, diagnostics, corrections);
             return;
         }
 
@@ -132,7 +136,7 @@ impl Cop for MetadataStyle {
         let metadata_args = &arg_list[1..];
 
         let style = config.get_str("EnforcedStyle", "symbol");
-        self.check_metadata_args(source, metadata_args, style, diagnostics);
+        self.check_metadata_args(source, metadata_args, style, diagnostics, corrections);
     }
 }
 
@@ -145,11 +149,13 @@ impl MetadataStyle {
         metadata_args: &[ruby_prism::Node<'_>],
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if style == "symbol" {
             // Flag `key: true` keyword args — should be `:key` symbol style
+            let mut corrections = corrections;
             for arg in metadata_args {
-                self.check_hash_like_for_symbol_style(source, arg, diagnostics);
+                self.check_hash_like_for_symbol_style(source, arg, diagnostics, corrections.as_deref_mut());
             }
         } else if style == "hash" {
             // Flag `:key` symbol args — should be `key: true` hash style
@@ -175,20 +181,19 @@ impl MetadataStyle {
         source: &SourceFile,
         arg: &ruby_prism::Node<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Collect elements from either KeywordHashNode or HashNode
-        let elements: Option<ruby_prism::NodeList<'_>> =
+        let (elements, can_autocorrect_pairs): (ruby_prism::NodeList<'_>, bool) =
             if let Some(kw) = arg.as_keyword_hash_node() {
-                Some(kw.elements())
+                (kw.elements(), true)
+            } else if let Some(h) = arg.as_hash_node() {
+                (h.elements(), false)
             } else {
-                arg.as_hash_node().map(|h| h.elements())
+                return;
             };
 
-        let elements = match elements {
-            Some(e) => e,
-            None => return,
-        };
-
+        let mut corrections = corrections;
         for elem in elements.iter() {
             if let Some(assoc) = elem.as_assoc_node() {
                 // Key must be a symbol
@@ -199,12 +204,32 @@ impl MetadataStyle {
                 if assoc.value().as_true_node().is_some() {
                     let loc = elem.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Use symbol style for metadata.".to_string(),
-                    ));
+                    );
+
+                    if can_autocorrect_pairs {
+                        if let Some(key) = assoc.key().as_symbol_node() {
+                            let key_name = std::str::from_utf8(key.unescaped()).unwrap_or("");
+                            if !key_name.is_empty() {
+                                if let Some(corrections) = &mut corrections {
+                                    corrections.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement: format!(":{key_name}"),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                            }
+                        }
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -219,6 +244,7 @@ impl MetadataStyle {
         call: &ruby_prism::CallNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Receiver must be RSpec
         let recv = match call.receiver() {
@@ -269,7 +295,7 @@ impl MetadataStyle {
         };
 
         let style = config.get_str("EnforcedStyle", "symbol");
-        self.walk_for_config_hooks(source, &body, param_name.as_slice(), style, diagnostics);
+        self.walk_for_config_hooks(source, &body, param_name.as_slice(), style, diagnostics, corrections);
     }
 
     /// Walk statements looking for hook calls on the config variable.
@@ -281,13 +307,15 @@ impl MetadataStyle {
         param_name: &[u8],
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         if let Some(stmts) = node.as_statements_node() {
             for stmt in stmts.body().iter() {
-                self.walk_for_config_hooks_single(source, &stmt, param_name, style, diagnostics);
+                self.walk_for_config_hooks_single(source, &stmt, param_name, style, diagnostics, corrections.as_deref_mut());
             }
         } else {
-            self.walk_for_config_hooks_single(source, node, param_name, style, diagnostics);
+            self.walk_for_config_hooks_single(source, node, param_name, style, diagnostics, corrections);
         }
     }
 
@@ -299,58 +327,35 @@ impl MetadataStyle {
         param_name: &[u8],
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Direct hook call
         if node.as_call_node().is_some() {
-            self.check_config_hook_call(source, node, param_name, style, diagnostics);
+            self.check_config_hook_call(source, node, param_name, style, diagnostics, corrections);
             return;
         }
-        // Recurse into if/unless branches
+        // Recurse into if/unless branches (diagnostic-only in these nested paths for baseline)
         if let Some(if_node) = node.as_if_node() {
             if let Some(stmts) = if_node.statements() {
-                self.walk_for_config_hooks(
-                    source,
-                    &stmts.as_node(),
-                    param_name,
-                    style,
-                    diagnostics,
-                );
+                self.walk_for_config_hooks(source, &stmts.as_node(), param_name, style, diagnostics, None);
             }
             if let Some(subsequent) = if_node.subsequent() {
-                self.walk_for_config_hooks(source, &subsequent, param_name, style, diagnostics);
+                self.walk_for_config_hooks(source, &subsequent, param_name, style, diagnostics, None);
             }
             return;
         }
         if let Some(unless_node) = node.as_unless_node() {
             if let Some(stmts) = unless_node.statements() {
-                self.walk_for_config_hooks(
-                    source,
-                    &stmts.as_node(),
-                    param_name,
-                    style,
-                    diagnostics,
-                );
+                self.walk_for_config_hooks(source, &stmts.as_node(), param_name, style, diagnostics, None);
             }
             if let Some(else_clause) = unless_node.else_clause() {
-                self.walk_for_config_hooks(
-                    source,
-                    &else_clause.as_node(),
-                    param_name,
-                    style,
-                    diagnostics,
-                );
+                self.walk_for_config_hooks(source, &else_clause.as_node(), param_name, style, diagnostics, None);
             }
             return;
         }
         if let Some(else_node) = node.as_else_node() {
             if let Some(stmts) = else_node.statements() {
-                self.walk_for_config_hooks(
-                    source,
-                    &stmts.as_node(),
-                    param_name,
-                    style,
-                    diagnostics,
-                );
+                self.walk_for_config_hooks(source, &stmts.as_node(), param_name, style, diagnostics, None);
             }
         }
     }
@@ -363,6 +368,7 @@ impl MetadataStyle {
         param_name: &[u8],
         style: &str,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match stmt.as_call_node() {
             Some(c) => c,
@@ -394,7 +400,7 @@ impl MetadataStyle {
             return;
         }
         let metadata_args = &arg_list[1..];
-        self.check_metadata_args(source, metadata_args, style, diagnostics);
+        self.check_metadata_args(source, metadata_args, style, diagnostics, corrections);
     }
 }
 
@@ -402,4 +408,18 @@ impl MetadataStyle {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MetadataStyle, "cops/rspec/metadata_style");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(MetadataStyle.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_converts_true_keyword_metadata_to_symbol_style() {
+        crate::testutil::assert_cop_autocorrect(
+            &MetadataStyle,
+            b"describe 'Something', a: true, b: true do\nend\n",
+            b"describe 'Something', :a, :b do\nend\n",
+        );
+    }
 }
