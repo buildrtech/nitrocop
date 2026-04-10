@@ -59,6 +59,10 @@ impl Cop for EmptyLineAfterFinalLet {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -66,13 +70,14 @@ impl Cop for EmptyLineAfterFinalLet {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let (comment_lines, enable_directive_lines) = build_comment_line_sets(source, parse_result);
         let mut visitor = FinalLetVisitor {
             source,
             cop: self,
             diagnostics,
+            corrections,
             comment_lines: &comment_lines,
             enable_directive_lines: &enable_directive_lines,
         };
@@ -84,6 +89,7 @@ struct FinalLetVisitor<'a> {
     source: &'a SourceFile,
     cop: &'a EmptyLineAfterFinalLet,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     comment_lines: &'a HashSet<usize>,
     enable_directive_lines: &'a HashSet<usize>,
 }
@@ -183,12 +189,26 @@ impl<'a, 'pr> Visit<'pr> for FinalLetVisitor<'a> {
             0
         };
 
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             report_line,
             report_col,
             format!("Add an empty line after the last `{let_name}`."),
-        ));
+        );
+
+        if let Some(ref mut corrections) = self.corrections {
+            let insert_at = self.source.line_start_offset(report_line + 1);
+            corrections.push(crate::correction::Correction {
+                start: insert_at,
+                end: insert_at,
+                replacement: "\n".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
 
         ruby_prism::visit_call_node(self, node);
     }
@@ -318,4 +338,18 @@ mod tests {
         EmptyLineAfterFinalLet,
         "cops/rspec/empty_line_after_final_let"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyLineAfterFinalLet.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_blank_line_after_final_let() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyLineAfterFinalLet,
+            b"RSpec.describe User do\n  let(:a) { a }\n  it { expect(a).to eq(a) }\nend\n",
+            b"RSpec.describe User do\n  let(:a) { a }\n\n  it { expect(a).to eq(a) }\nend\n",
+        );
+    }
 }

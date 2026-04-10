@@ -46,7 +46,8 @@
 - FactoryBot/CreateList parity follow-up: extend autocorrect beyond n_times baseline to RuboCop parity for array-literal and create_list-style conversions, including block-preserving rewrites.
 - RSpec/EmptyExampleGroup parity follow-up: verify whole-line removal whitespace/comment cleanup against RuboCop for nested empty groups and adjacent blank-line normalization.
 - RSpec/ReceiveMessages parity follow-up: align autocorrect with RuboCop’s line-selection/order behavior and quoted-key normalization for non-identifier symbol names and hash-return formatting edge cases.
-- FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` and `FactoryAssociationWithStrategy` should remain diagnostic-only (no upstream AutoCorrector) or get explicit nitrocop-only unsafe autocorrect modes.
+- RSpec/VerifiedDoubles parity follow-up: evaluate safer mapping strategy across `double`/`spy` forms (instance vs class/object verifying doubles) and expand fixture coverage for symbolic/constant edge names.
+- FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` should remain diagnostic-only (no upstream AutoCorrector) or get an explicit nitrocop-only unsafe autocorrect mode.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
