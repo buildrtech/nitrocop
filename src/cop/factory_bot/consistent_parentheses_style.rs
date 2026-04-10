@@ -59,6 +59,10 @@ impl Cop for ConsistentParenthesesStyle {
         FACTORY_BOT_SPEC_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -66,7 +70,7 @@ impl Cop for ConsistentParenthesesStyle {
         _code_map: &crate::cop::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "require_parentheses");
         let explicit_only = config.get_bool("ExplicitOnly", false);
@@ -77,6 +81,7 @@ impl Cop for ConsistentParenthesesStyle {
             style,
             explicit_only,
             diagnostics: Vec::new(),
+            corrections,
             parent_is_ambiguous: false,
             ambiguity_kind: None,
         };
@@ -85,12 +90,13 @@ impl Cop for ConsistentParenthesesStyle {
     }
 }
 
-struct ParenStyleVisitor<'s> {
+struct ParenStyleVisitor<'s, 'c> {
     source: &'s SourceFile,
     cop: &'s ConsistentParenthesesStyle,
     style: &'s str,
     explicit_only: bool,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'c mut Vec<crate::correction::Correction>>,
     parent_is_ambiguous: bool,
     ambiguity_kind: Option<AmbiguityKind>,
 }
@@ -104,7 +110,7 @@ enum AmbiguityKind {
     If,
 }
 
-impl<'s> ParenStyleVisitor<'s> {
+impl<'s, 'c> ParenStyleVisitor<'s, 'c> {
     fn check_factory_call(&mut self, call: &ruby_prism::CallNode<'_>) {
         let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
         if !FACTORY_BOT_METHODS.contains(&method_name) {
@@ -152,12 +158,34 @@ impl<'s> ParenStyleVisitor<'s> {
         if self.style == "require_parentheses" && !has_parens {
             let msg_loc = call.message_loc().unwrap_or(call.location());
             let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Prefer method call with parentheses".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corrections) = self.corrections {
+                let first_arg_loc = first_arg.location();
+                let args_loc = args.location();
+                corrections.push(crate::correction::Correction {
+                    start: msg_loc.end_offset(),
+                    end: first_arg_loc.start_offset(),
+                    replacement: "(".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                corrections.push(crate::correction::Correction {
+                    start: args_loc.end_offset(),
+                    end: args_loc.end_offset(),
+                    replacement: ")".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            self.diagnostics.push(diagnostic);
         }
 
         if self.style == "omit_parentheses" && has_parens {
@@ -176,17 +204,39 @@ impl<'s> ParenStyleVisitor<'s> {
 
             let msg_loc = call.message_loc().unwrap_or(call.location());
             let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Prefer method call without parentheses".to_string(),
-            ));
+            );
+
+            if let Some(ref mut corrections) = self.corrections {
+                if let (Some(open), Some(close)) = (call.opening_loc(), call.closing_loc()) {
+                    corrections.push(crate::correction::Correction {
+                        start: open.start_offset(),
+                        end: open.end_offset(),
+                        replacement: " ".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    corrections.push(crate::correction::Correction {
+                        start: close.start_offset(),
+                        end: close.end_offset(),
+                        replacement: String::new(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+
+            self.diagnostics.push(diagnostic);
         }
     }
 }
 
-impl<'pr> Visit<'pr> for ParenStyleVisitor<'_> {
+impl<'pr> Visit<'pr> for ParenStyleVisitor<'_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         self.check_factory_call(node);
 
@@ -385,4 +435,39 @@ mod tests {
         ConsistentParenthesesStyle,
         "cops/factorybot/consistent_parentheses_style"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ConsistentParenthesesStyle.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_require_parentheses_style() {
+        crate::testutil::assert_cop_autocorrect(
+            &ConsistentParenthesesStyle,
+            b"create :user\n",
+            b"create(:user)\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_omit_parentheses_style() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("omit_parentheses".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &ConsistentParenthesesStyle,
+            b"create(:user)\n",
+            b"create :user\n",
+            config,
+        );
+    }
 }
