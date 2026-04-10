@@ -32,6 +32,10 @@ impl Cop for MethodCalledOnDoEndBlock {
         false
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, LAMBDA_NODE]
     }
@@ -43,7 +47,7 @@ impl Cop for MethodCalledOnDoEndBlock {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -68,7 +72,7 @@ impl Cop for MethodCalledOnDoEndBlock {
         // The receiver can be:
         // 1. A CallNode with a BlockNode child (e.g., `items.each do ... end`)
         // 2. A LambdaNode (e.g., `-> do ... end`)
-        let closing_loc = if let Some(recv_call) = receiver.as_call_node() {
+        let (opening_loc, closing_loc) = if let Some(recv_call) = receiver.as_call_node() {
             let block = match recv_call.block() {
                 Some(b) => b,
                 None => return,
@@ -82,26 +86,47 @@ impl Cop for MethodCalledOnDoEndBlock {
             if opening_loc.as_slice() != b"do" {
                 return;
             }
-            block_node.closing_loc()
+            (opening_loc, block_node.closing_loc())
         } else if let Some(lambda_node) = receiver.as_lambda_node() {
             // Lambda with do...end: -> do ... end.call
             let opening_loc = lambda_node.opening_loc();
             if opening_loc.as_slice() != b"do" {
                 return;
             }
-            lambda_node.closing_loc()
+            (opening_loc, lambda_node.closing_loc())
         } else {
             return;
         };
 
         // Report at the `end` keyword position (matching RuboCop's behavior)
         let (line, column) = source.offset_to_line_col(closing_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Avoid chaining a method call on a do...end block.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = corrections {
+            // Conservative token rewrite: `do...end` -> `{...}`
+            corrections.push(crate::correction::Correction {
+                start: opening_loc.start_offset(),
+                end: opening_loc.end_offset(),
+                replacement: "{".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            corrections.push(crate::correction::Correction {
+                start: closing_loc.start_offset(),
+                end: closing_loc.end_offset(),
+                replacement: "}".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -109,6 +134,10 @@ impl Cop for MethodCalledOnDoEndBlock {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        MethodCalledOnDoEndBlock,
+        "cops/style/method_called_on_do_end_block"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         MethodCalledOnDoEndBlock,
         "cops/style/method_called_on_do_end_block"
     );
