@@ -18,6 +18,10 @@ impl Cop for ExampleWithoutDescription {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_include(&self) -> &'static [&'static str] {
         RSPEC_DEFAULT_INCLUDE
     }
@@ -33,7 +37,7 @@ impl Cop for ExampleWithoutDescription {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -67,13 +71,41 @@ impl Cop for ExampleWithoutDescription {
                     if s.unescaped().is_empty() {
                         let loc = s.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             "Omit the argument when you want to have auto-generated description."
                                 .to_string(),
-                        ));
+                        );
+
+                        if let Some(corrections) = corrections.as_deref_mut() {
+                            let bytes = source.as_bytes();
+                            let mut start = loc.start_offset();
+                            let mut end = loc.end_offset();
+
+                            if start > 0
+                                && end < bytes.len()
+                                && bytes[start - 1] == b'('
+                                && bytes[end] == b')'
+                            {
+                                start -= 1;
+                                end += 1;
+                            } else if start > 0 && bytes[start - 1].is_ascii_whitespace() {
+                                start -= 1;
+                            }
+
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -152,4 +184,18 @@ mod tests {
         ExampleWithoutDescription,
         "cops/rspec/example_without_description"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ExampleWithoutDescription.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_empty_description_argument() {
+        crate::testutil::assert_cop_autocorrect(
+            &ExampleWithoutDescription,
+            b"it '' do\n  expect(subject).to be_good\nend\n",
+            b"it do\n  expect(subject).to be_good\nend\n",
+        );
+    }
 }
