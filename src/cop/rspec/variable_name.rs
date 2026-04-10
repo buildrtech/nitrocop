@@ -14,6 +14,10 @@ impl Cop for VariableName {
         "RSpec/VariableName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -29,7 +33,7 @@ impl Cop for VariableName {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: EnforcedStyle — "snake_case" (default) or "camelCase"
         let enforced_camel_case = config.get_str("EnforcedStyle", "snake_case") == "camelCase";
@@ -45,6 +49,7 @@ impl Cop for VariableName {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             in_spec_group_root: false,
             enforced_camel_case,
             allowed_patterns,
@@ -58,6 +63,7 @@ struct VariableNameVisitor<'a> {
     cop: &'a VariableName,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     // Mirrors RuboCop's InsideExampleGroup mixin: this is true only when the
     // current top-level root expression is an RSpec example/shared group.
     in_spec_group_root: bool,
@@ -121,12 +127,38 @@ impl<'pr> Visit<'pr> for VariableNameVisitor<'_> {
                         if !self.matches_allowed_pattern(&name) && !self.check_style(&name) {
                             let loc = arg.location();
                             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                            self.diagnostics.push(self.cop.diagnostic(
+                            let mut diagnostic = self.cop.diagnostic(
                                 self.source,
                                 line,
                                 column,
                                 format!("Use {} for variable names.", self.style_name()),
-                            ));
+                            );
+
+                            if !self.enforced_camel_case
+                                && let Some(sym) = arg.as_symbol_node()
+                                && let Some(corrected_name) = to_snake_case(sym.unescaped())
+                            {
+                                let replacement = format!(":{corrected_name}");
+                                if replacement
+                                    != self.source.byte_slice(
+                                        loc.start_offset(),
+                                        loc.end_offset(),
+                                        "",
+                                    )
+                                    && let Some(corrections) = self.corrections.as_deref_mut()
+                                {
+                                    corrections.push(crate::correction::Correction {
+                                        start: loc.start_offset(),
+                                        end: loc.end_offset(),
+                                        replacement,
+                                        cop_name: self.cop.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                            }
+
+                            self.diagnostics.push(diagnostic);
                         }
                     }
                     break;
@@ -140,6 +172,27 @@ impl<'pr> Visit<'pr> for VariableNameVisitor<'_> {
 
 fn is_variable_definition_method(name: &[u8]) -> bool {
     matches!(name, b"let" | b"let!" | b"subject" | b"subject!")
+}
+
+fn to_snake_case(name: &[u8]) -> Option<String> {
+    let input = std::str::from_utf8(name).ok()?;
+    if input.is_empty() {
+        return None;
+    }
+
+    let mut out = String::with_capacity(input.len() + 4);
+    for (idx, ch) in input.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if idx != 0 && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+
+    Some(out)
 }
 
 fn is_spec_group_root_statement(node: &ruby_prism::Node<'_>) -> bool {
@@ -175,6 +228,7 @@ fn is_spec_group_call(call: &ruby_prism::CallNode<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(VariableName, "cops/rspec/variable_name");
+    crate::cop_autocorrect_fixture_tests!(VariableName, "cops/rspec/variable_name");
 
     #[test]
     fn camel_case_style_flags_snake_case() {
