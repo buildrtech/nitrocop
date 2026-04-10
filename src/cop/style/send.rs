@@ -18,6 +18,10 @@ impl Cop for Send {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -25,7 +29,7 @@ impl Cop for Send {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -49,12 +53,25 @@ impl Cop for Send {
 
         let msg_loc = call.message_loc().unwrap_or_else(|| call.location());
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Prefer `Object#__send__` or `Object#public_send` to `send`.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corrs) = corrections {
+            corrs.push(crate::correction::Correction {
+                start: msg_loc.start_offset(),
+                end: msg_loc.end_offset(),
+                replacement: "__send__".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -62,4 +79,5 @@ impl Cop for Send {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Send, "cops/style/send");
+    crate::cop_autocorrect_fixture_tests!(Send, "cops/style/send");
 }
