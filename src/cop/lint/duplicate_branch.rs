@@ -112,6 +112,18 @@ use crate::parse::source::SourceFile;
 ///    path checks `val == 0.0` (which matches both `0.0` and `-0.0` per IEEE 754).
 pub struct DuplicateBranch;
 
+fn predicate_autocorrect_safe(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_local_variable_read_node().is_some()
+        || node.as_instance_variable_read_node().is_some()
+        || node.as_class_variable_read_node().is_some()
+        || node.as_global_variable_read_node().is_some()
+        || node.as_constant_read_node().is_some()
+        || node.as_constant_path_node().is_some()
+        || node.as_true_node().is_some()
+        || node.as_false_node().is_some()
+        || node.as_nil_node().is_some()
+}
+
 impl Cop for DuplicateBranch {
     fn name(&self) -> &'static str {
         "Lint/DuplicateBranch"
@@ -119,6 +131,10 @@ impl Cop for DuplicateBranch {
 
     fn default_severity(&self) -> Severity {
         Severity::Warning
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -132,7 +148,7 @@ impl Cop for DuplicateBranch {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let ignore_literal = config.get_bool("IgnoreLiteralBranches", false);
         let ignore_constant = config.get_bool("IgnoreConstantBranches", false);
@@ -147,6 +163,7 @@ impl Cop for DuplicateBranch {
                 ignore_constant,
                 ignore_dup_else,
                 diagnostics,
+                corrections.as_deref_mut(),
             );
             return;
         }
@@ -765,6 +782,7 @@ struct BranchInfo<'pr> {
     is_else: bool,
     is_last: bool,
     stmts: Option<ruby_prism::StatementsNode<'pr>>,
+    autocorrect_range: Option<(usize, usize)>,
 }
 
 fn check_if_branches(
@@ -775,6 +793,7 @@ fn check_if_branches(
     ignore_constant: bool,
     ignore_dup_else: bool,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) {
     // Skip elsif nodes - only process the outermost if.
     // In Prism, elsif is a nested IfNode whose if_keyword_loc() says "elsif".
@@ -809,6 +828,7 @@ fn check_if_branches(
         is_else: false,
         is_last: false,
         stmts: if_stmts,
+        autocorrect_range: None,
     });
 
     // Walk elsif/else chain
@@ -820,12 +840,30 @@ fn check_if_branches(
         if let Some(elsif) = sub.as_if_node() {
             let stmts = elsif.statements();
             let body = stmts_source(source, &stmts);
+            let autocorrect_range = if is_last
+                && elsif.subsequent().is_none()
+                && predicate_autocorrect_safe(&elsif.predicate())
+            {
+                let mut start = elsif.location().start_offset();
+                if start > 0 && source.as_bytes()[start - 1] == b'\n' {
+                    start -= 1;
+                }
+                let end = elsif
+                    .end_keyword_loc()
+                    .map(|l| l.start_offset())
+                    .unwrap_or_else(|| elsif.location().end_offset());
+                Some((start, end))
+            } else {
+                None
+            };
+
             branches.push(BranchInfo {
                 body,
                 report_offset: elsif.location().start_offset(),
                 is_else: false,
                 is_last,
                 stmts,
+                autocorrect_range,
             });
             subsequent = elsif.subsequent();
         } else if let Some(else_node) = sub.as_else_node() {
@@ -852,6 +890,7 @@ fn check_if_branches(
                 is_else: true,
                 is_last: true,
                 stmts,
+                autocorrect_range: None,
             });
             break;
         } else {
@@ -865,6 +904,7 @@ fn check_if_branches(
 
     let total_branches = branches.len();
     let mut seen = HashSet::new();
+    let mut corrections = corrections;
 
     for bi in &branches {
         if !should_consider(
@@ -880,7 +920,28 @@ fn check_if_branches(
             continue;
         }
         if !seen.insert(bi.body.clone()) {
-            emit(cop, source, bi.report_offset, diagnostics);
+            let (line, column) = source.offset_to_line_col(bi.report_offset);
+            let mut diagnostic = cop.diagnostic(
+                source,
+                line,
+                column,
+                "Duplicate branch body detected.".to_string(),
+            );
+
+            if let (Some(corrections), Some((start, end))) =
+                (corrections.as_deref_mut(), bi.autocorrect_range)
+            {
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: "\n".to_string(),
+                    cop_name: cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -1137,6 +1198,29 @@ mod tests {
 
         assert!(arg.as_keyword_hash_node().is_some());
         assert!(is_literal_node(&arg, false));
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DuplicateBranch.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_final_duplicate_elsif_branch_with_safe_predicate() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicateBranch,
+            b"if @flag\n  :a\nelsif @other\n  :b\nelsif @flag\n  :b\nend\n",
+            b"if @flag\n  :a\nelsif @other\n  :b\nend\n",
+        );
+    }
+
+    #[test]
+    fn does_not_autocorrect_duplicate_elsif_with_call_predicate() {
+        let (_diagnostics, corrections) = crate::testutil::run_cop_autocorrect(
+            &DuplicateBranch,
+            b"if cond\n  :a\nelsif check?\n  :a\nend\n",
+        );
+        assert!(corrections.is_empty());
     }
 
     #[test]
