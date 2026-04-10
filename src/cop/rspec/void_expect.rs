@@ -101,6 +101,10 @@ impl Cop for VoidExpect {
         "RSpec/VoidExpect"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -116,12 +120,13 @@ impl Cop for VoidExpect {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = VoidExpectVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             chained_expect_offsets: Vec::new(),
             in_example: 0,
             pending_block_body: 0,
@@ -136,6 +141,7 @@ struct VoidExpectVisitor<'a> {
     cop: &'a VoidExpect,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// Start offsets of expect calls that are receivers of .to/.not_to/.to_not
     chained_expect_offsets: Vec<usize>,
     /// Depth counter for being inside an RSpec example block (it, specify, etc.)
@@ -155,18 +161,19 @@ struct VoidExpectVisitor<'a> {
 /// If the node is a DIRECT receiverless `expect` call (NOT wrapped in parentheses),
 /// return its start offset. Parenthesized expects like `(expect x)` are excluded
 /// because RuboCop treats them as void even when `.to` is chained.
-fn extract_direct_expect_offset(node: &ruby_prism::Node<'_>) -> Option<usize> {
+fn extract_direct_expect_range(node: &ruby_prism::Node<'_>) -> Option<(usize, usize)> {
     if let Some(call) = node.as_call_node() {
         if call.name().as_slice() == b"expect" && call.receiver().is_none() {
-            return Some(call.location().start_offset());
+            let loc = call.location();
+            return Some((loc.start_offset(), loc.end_offset()));
         }
     }
     None
 }
 
 /// If the node is a ParenthesesNode containing a single receiverless `expect` call,
-/// return the expect call's start offset.
-fn extract_paren_expect_offset(node: &ruby_prism::Node<'_>) -> Option<usize> {
+/// return the expect call's source range.
+fn extract_paren_expect_range(node: &ruby_prism::Node<'_>) -> Option<(usize, usize)> {
     let parens = node.as_parentheses_node()?;
     let body = parens.body()?;
     let stmts = body.as_statements_node()?;
@@ -174,7 +181,8 @@ fn extract_paren_expect_offset(node: &ruby_prism::Node<'_>) -> Option<usize> {
     if body_nodes.len() == 1 {
         if let Some(call) = body_nodes[0].as_call_node() {
             if call.name().as_slice() == b"expect" && call.receiver().is_none() {
-                return Some(call.location().start_offset());
+                let loc = call.location();
+                return Some((loc.start_offset(), loc.end_offset()));
             }
         }
     }
@@ -187,31 +195,54 @@ impl VoidExpectVisitor<'_> {
         // Direct expect call as a statement
         if let Some(call) = stmt.as_call_node() {
             if call.name().as_slice() == b"expect" && call.receiver().is_none() {
-                let offset = call.location().start_offset();
+                let loc = call.location();
+                let offset = loc.start_offset();
                 if !self.chained_expect_offsets.contains(&offset) {
                     let (line, column) = self.source.offset_to_line_col(offset);
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diagnostic = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
                         "Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = self.corrections.as_deref_mut() {
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "skip('TODO: avoid void expect')".to_string(),
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    self.diagnostics.push(diagnostic);
                 }
             }
         }
         // Parenthesized expect as a statement: (expect ...)
         // Always void per RuboCop (parens create begin parent)
-        if let Some(offset) = extract_paren_expect_offset(stmt) {
-            if !self.chained_expect_offsets.contains(&offset) {
-                let (line, column) = self.source.offset_to_line_col(offset);
-                self.diagnostics.push(self.cop.diagnostic(
+        if let Some((start, end)) = extract_paren_expect_range(stmt) {
+            if !self.chained_expect_offsets.contains(&start) {
+                let (line, column) = self.source.offset_to_line_col(start);
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     "Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.".to_string(),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement: "skip('TODO: avoid void expect')".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
                 // Mark as handled so inner StatementsNode visit doesn't double-flag
-                self.chained_expect_offsets.push(offset);
+                self.chained_expect_offsets.push(start);
             }
         }
     }
@@ -226,24 +257,35 @@ impl Visit<'_> for VoidExpectVisitor<'_> {
         // 2. Parenthesized expect receiver -> flag as void (RuboCop's begin_type? logic)
         if MATCHER_METHODS.iter().any(|m| name.as_slice() == *m) {
             if let Some(receiver) = node.receiver() {
-                if let Some(offset) = extract_direct_expect_offset(&receiver) {
-                    self.chained_expect_offsets.push(offset);
+                if let Some((start, _end)) = extract_direct_expect_range(&receiver) {
+                    self.chained_expect_offsets.push(start);
                 }
                 // Parenthesized expects like `(expect x).to be 1` are void per RuboCop:
                 // parens create a begin node parent for the expect send, and begin_type?
                 // makes void? return true regardless of the outer .to chain.
                 if self.in_example > 0 {
-                    if let Some(offset) = extract_paren_expect_offset(&receiver) {
-                        let (line, column) = self.source.offset_to_line_col(offset);
-                        self.diagnostics.push(self.cop.diagnostic(
+                    if let Some((start, end)) = extract_paren_expect_range(&receiver) {
+                        let (line, column) = self.source.offset_to_line_col(start);
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Do not use `expect()` without `.to` or `.not_to`. Chain the methods or remove it.".to_string(),
-                        ));
+                        );
+                        if let Some(corrections) = self.corrections.as_deref_mut() {
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: "skip('TODO: avoid void expect')".to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        self.diagnostics.push(diagnostic);
                         // Mark as handled so visit_statements_node doesn't flag it again
                         // when visiting the StatementsNode inside the ParenthesesNode.
-                        self.chained_expect_offsets.push(offset);
+                        self.chained_expect_offsets.push(start);
                     }
                 }
             }
@@ -375,6 +417,7 @@ impl Visit<'_> for VoidExpectVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(VoidExpect, "cops/rspec/void_expect");
+    crate::cop_autocorrect_fixture_tests!(VoidExpect, "cops/rspec/void_expect");
 
     #[test]
     fn explicit_begin_end_not_void() {
