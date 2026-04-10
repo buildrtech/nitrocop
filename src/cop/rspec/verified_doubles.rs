@@ -39,6 +39,10 @@ impl Cop for VerifiedDoubles {
         &[CALL_NODE, KEYWORD_HASH_NODE, STRING_NODE, SYMBOL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -46,7 +50,7 @@ impl Cop for VerifiedDoubles {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: IgnoreNameless — ignore doubles without a name argument
         let ignore_nameless = config.get_bool("IgnoreNameless", true);
@@ -68,19 +72,23 @@ impl Cop for VerifiedDoubles {
         }
 
         // Check arguments for name
-        let (has_name_arg, is_symbolic) = if let Some(args) = call.arguments() {
+        let (has_name_arg, is_symbolic, first_arg_is_autocorrectable) = if let Some(args) = call.arguments() {
             let arg_list: Vec<_> = args.arguments().iter().collect();
             if arg_list.is_empty()
                 || arg_list[0].as_keyword_hash_node().is_some()
                 || arg_list[0].as_hash_node().is_some()
             {
-                (false, false)
+                (false, false, false)
             } else {
-                let sym = arg_list[0].as_symbol_node().is_some();
-                (true, sym)
+                let first = &arg_list[0];
+                let sym = first.as_symbol_node().is_some();
+                let autocorrectable = first.as_string_node().is_some()
+                    || first.as_constant_read_node().is_some()
+                    || first.as_constant_path_node().is_some();
+                (true, sym, autocorrectable)
             }
         } else {
-            (false, false)
+            (false, false, false)
         };
 
         // IgnoreNameless: skip doubles without a name argument
@@ -95,12 +103,34 @@ impl Cop for VerifiedDoubles {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Prefer using verifying doubles over normal doubles.".to_string(),
-        ));
+        );
+
+        if first_arg_is_autocorrectable {
+            if let Some(ref mut corr) = corrections {
+                if let Some(msg_loc) = call.message_loc() {
+                    let replacement = if method_name == b"double" {
+                        "instance_double"
+                    } else {
+                        "instance_spy"
+                    };
+                    corr.push(crate::correction::Correction {
+                        start: msg_loc.start_offset(),
+                        end: msg_loc.end_offset(),
+                        replacement: replacement.to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -152,5 +182,19 @@ mod tests {
         let source = b"double(:foo)\n";
         let diags = crate::testutil::run_cop_full_with_config(&VerifiedDoubles, source, config);
         assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(VerifiedDoubles.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_double_to_instance_double_for_string_name() {
+        crate::testutil::assert_cop_autocorrect(
+            &VerifiedDoubles,
+            b"double(\"Widget\")\n",
+            b"instance_double(\"Widget\")\n",
+        );
     }
 }
