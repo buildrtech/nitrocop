@@ -11,6 +11,10 @@ impl Cop for AnyInstance {
         "RSpec/AnyInstance"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -30,7 +34,7 @@ impl Cop for AnyInstance {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -46,12 +50,32 @@ impl Cop for AnyInstance {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             let label = std::str::from_utf8(method_name).unwrap_or("allow_any_instance_of");
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Avoid stubbing using `{label}`."),
-            ));
+            );
+
+            if let Some(selector) = call.message_loc()
+                && let Some(corrections) = corrections
+            {
+                let replacement = if method_name == b"allow_any_instance_of" {
+                    "allow"
+                } else {
+                    "expect"
+                };
+                corrections.push(crate::correction::Correction {
+                    start: selector.start_offset(),
+                    end: selector.end_offset(),
+                    replacement: replacement.to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
 
         // Check for old syntax: `Object.any_instance`
@@ -72,4 +96,5 @@ impl Cop for AnyInstance {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AnyInstance, "cops/rspec/any_instance");
+    crate::cop_autocorrect_fixture_tests!(AnyInstance, "cops/rspec/any_instance");
 }
