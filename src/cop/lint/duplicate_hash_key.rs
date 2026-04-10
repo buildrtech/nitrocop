@@ -1,5 +1,4 @@
-use std::collections::HashSet;
-
+use std::collections::{HashMap, HashSet};
 use crate::cop::node_type::{ASSOC_NODE, HASH_NODE, KEYWORD_HASH_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -207,6 +206,35 @@ fn is_literal(node: &ruby_prism::Node<'_>) -> bool {
 /// The 4 noosfero FPs remain as parser-difference artifacts (unchanged).
 pub struct DuplicateHashKey;
 
+fn pair_removal_range(
+    source: &SourceFile,
+    elements: &[ruby_prism::Node<'_>],
+    idx: usize,
+) -> (usize, usize) {
+    let pair_loc = elements[idx].location();
+
+    if idx + 1 < elements.len() {
+        return (pair_loc.start_offset(), elements[idx + 1].location().start_offset());
+    }
+
+    if idx > 0 {
+        let bytes = source.as_bytes();
+        let mut start = pair_loc.start_offset();
+        while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+            start -= 1;
+        }
+        if start > 0 && bytes[start - 1] == b',' {
+            start -= 1;
+            while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+                start -= 1;
+            }
+        }
+        return (start, pair_loc.end_offset());
+    }
+
+    (pair_loc.start_offset(), pair_loc.end_offset())
+}
+
 impl Cop for DuplicateHashKey {
     fn name(&self) -> &'static str {
         "Lint/DuplicateHashKey"
@@ -214,6 +242,10 @@ impl Cop for DuplicateHashKey {
 
     fn default_severity(&self) -> Severity {
         Severity::Warning
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -227,7 +259,7 @@ impl Cop for DuplicateHashKey {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let elements = if let Some(hash_node) = node.as_hash_node() {
             hash_node.elements()
@@ -237,9 +269,11 @@ impl Cop for DuplicateHashKey {
             return;
         };
 
+        let elements_vec: Vec<_> = elements.iter().collect();
         let mut seen = HashSet::new();
+        let mut latest_index_by_key: HashMap<Vec<u8>, usize> = HashMap::new();
 
-        for element in elements.iter() {
+        for (idx, element) in elements_vec.iter().enumerate() {
             let assoc = match element.as_assoc_node() {
                 Some(a) => a,
                 None => continue, // skip AssocSplatNode (**)
@@ -254,15 +288,40 @@ impl Cop for DuplicateHashKey {
             let key_loc = key.location();
             let canonical = canonical_key_bytes(&key);
 
-            if !seen.insert(canonical) {
+            if !seen.insert(canonical.clone()) {
                 let (line, column) = source.offset_to_line_col(key_loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Duplicated key in hash literal.".to_string(),
-                ));
+                );
+
+                // Conservative baseline autocorrect: preserve final value semantics by
+                // deleting the previous duplicate pair only when both values are literal.
+                if let Some(prev_idx) = latest_index_by_key.get(&canonical).copied()
+                    && let Some(prev_assoc) = elements_vec[prev_idx].as_assoc_node()
+                    && is_literal(&prev_assoc.value())
+                    && is_literal(&assoc.value())
+                    && let Some(corrections) = corrections.as_deref_mut()
+                {
+                    let (start, end) = pair_removal_range(source, &elements_vec, prev_idx);
+                    if start < end {
+                        corrections.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                }
+
+                diagnostics.push(diagnostic);
             }
+
+            latest_index_by_key.insert(canonical, idx);
         }
     }
 }
@@ -271,4 +330,18 @@ impl Cop for DuplicateHashKey {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicateHashKey, "cops/lint/duplicate_hash_key");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DuplicateHashKey.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_earlier_literal_duplicate_pair() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicateHashKey,
+            b"hash = { a: 1, b: 2, a: 3 }\n",
+            b"hash = { b: 2, a: 3 }\n",
+        );
+    }
 }
