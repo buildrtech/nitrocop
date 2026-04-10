@@ -14,6 +14,10 @@ impl Cop for EmptyClass {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CLASS_NODE, SINGLETON_CLASS_NODE, STATEMENTS_NODE]
     }
@@ -25,10 +29,10 @@ impl Cop for EmptyClass {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle both ClassNode and SingletonClassNode (metaclass)
-        let (body_empty, kw_loc, start_line, end_line) =
+        let (body_empty, kw_loc, end_loc, start_line, end_line) =
             if let Some(class_node) = node.as_class_node() {
                 // Per RuboCop: skip classes with a parent class (e.g. class Error < StandardError; end)
                 if class_node.superclass().is_some() {
@@ -47,7 +51,7 @@ impl Cop for EmptyClass {
                 let loc = class_node.location();
                 let (sl, _) = source.offset_to_line_col(loc.start_offset());
                 let (el, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
-                (empty, class_node.class_keyword_loc(), sl, el)
+                (empty, class_node.class_keyword_loc(), class_node.end_keyword_loc(), sl, el)
             } else if let Some(sclass) = node.as_singleton_class_node() {
                 let empty = match sclass.body() {
                     None => true,
@@ -62,7 +66,7 @@ impl Cop for EmptyClass {
                 let loc = sclass.location();
                 let (sl, _) = source.offset_to_line_col(loc.start_offset());
                 let (el, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
-                (empty, sclass.class_keyword_loc(), sl, el)
+                (empty, sclass.class_keyword_loc(), sclass.end_keyword_loc(), sl, el)
             } else {
                 return;
             };
@@ -90,12 +94,26 @@ impl Cop for EmptyClass {
         }
 
         let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Empty class detected.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let indent = " ".repeat(column + 2);
+            corrections.push(crate::correction::Correction {
+                start: end_loc.start_offset(),
+                end: end_loc.start_offset(),
+                replacement: format!("{indent}nil\n"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -103,4 +121,18 @@ impl Cop for EmptyClass {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyClass, "cops/lint/empty_class");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyClass.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_nil_in_empty_class_body() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyClass,
+            b"class Foo\nend\n",
+            b"class Foo\n  nil\nend\n",
+        );
+    }
 }
