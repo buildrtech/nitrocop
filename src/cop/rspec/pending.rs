@@ -106,6 +106,10 @@ impl Cop for Pending {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -113,7 +117,7 @@ impl Cop for Pending {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         use ruby_prism::Visit;
 
@@ -121,18 +125,35 @@ impl Cop for Pending {
             cop: &'a Pending,
             source: &'a SourceFile,
             diagnostics: &'a mut Vec<Diagnostic>,
+            corrections: Option<&'a mut Vec<crate::correction::Correction>>,
         }
 
         impl Visitor<'_> {
-            fn flag(&mut self, call: &ruby_prism::CallNode<'_>) {
+            fn flag(&mut self, call: &ruby_prism::CallNode<'_>, correction: Option<&str>) {
                 let loc = call.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     "Pending spec found.".to_string(),
-                ));
+                );
+
+                if let Some(replacement) = correction
+                    && let Some(selector_loc) = call.message_loc()
+                    && let Some(corrections) = self.corrections.as_mut()
+                {
+                    corrections.push(crate::correction::Correction {
+                        start: selector_loc.start_offset(),
+                        end: selector_loc.end_offset(),
+                        replacement: replacement.to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                self.diagnostics.push(diagnostic);
             }
 
             fn check_call(&mut self, call: &ruby_prism::CallNode<'_>) {
@@ -141,14 +162,16 @@ impl Cop for Pending {
                 // 1. X-prefixed example groups (xdescribe, xcontext, xfeature)
                 //    Matches with nil or RSpec receiver, with or without block.
                 if XGROUP_METHODS.contains(&method_name) && has_rspec_or_nil_receiver(call) {
-                    self.flag(call);
+                    let replacement = std::str::from_utf8(&method_name[1..]).ok();
+                    self.flag(call, replacement);
                     return;
                 }
 
                 // 2. X-prefixed examples (xit, xspecify, xexample, xscenario)
                 //    Nil receiver only, with or without block.
                 if XEXAMPLE_METHODS.contains(&method_name) && call.receiver().is_none() {
-                    self.flag(call);
+                    let replacement = std::str::from_utf8(&method_name[1..]).ok();
+                    self.flag(call, replacement);
                     return;
                 }
 
@@ -157,7 +180,7 @@ impl Cop for Pending {
                 if (method_name == b"skip" || method_name == b"pending")
                     && call.receiver().is_none()
                 {
-                    self.flag(call);
+                    self.flag(call, None);
                     return;
                 }
 
@@ -166,7 +189,7 @@ impl Cop for Pending {
                     && has_rspec_or_nil_receiver(call)
                     && has_skip_or_pending_metadata(call)
                 {
-                    self.flag(call);
+                    self.flag(call, None);
                     return;
                 }
 
@@ -175,7 +198,7 @@ impl Cop for Pending {
                     && call.receiver().is_none()
                     && has_skip_or_pending_metadata(call)
                 {
-                    self.flag(call);
+                    self.flag(call, None);
                     return;
                 }
 
@@ -186,7 +209,7 @@ impl Cop for Pending {
                     && call.block().and_then(|b| b.as_block_node()).is_none()
                     && call.arguments().is_some()
                 {
-                    self.flag(call);
+                    self.flag(call, None);
                 }
             }
         }
@@ -202,6 +225,7 @@ impl Cop for Pending {
             cop: self,
             source,
             diagnostics,
+            corrections,
         };
         let root = parse_result.node();
         visitor.visit(&root);
@@ -212,4 +236,5 @@ impl Cop for Pending {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Pending, "cops/rspec/pending");
+    crate::cop_autocorrect_fixture_tests!(Pending, "cops/rspec/pending");
 }
