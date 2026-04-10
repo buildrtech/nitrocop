@@ -13,6 +13,10 @@ impl Cop for OverwritingSetup {
         "RSpec/OverwritingSetup"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -38,7 +42,7 @@ impl Cop for OverwritingSetup {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -68,6 +72,7 @@ impl Cop for OverwritingSetup {
         };
 
         let mut seen_names: HashSet<Vec<u8>> = HashSet::new();
+        let mut corrections = corrections;
 
         for stmt in stmts.body().iter() {
             if let Some(c) = stmt.as_call_node() {
@@ -100,12 +105,28 @@ impl Cop for OverwritingSetup {
                         let loc = c.location();
                         let (line, col) = source.offset_to_line_col(loc.start_offset());
                         let name_str = std::str::from_utf8(&vn).unwrap_or("?");
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             col,
                             format!("`{}` is already defined.", name_str),
-                        ));
+                        );
+                        if let Some(corrections) = corrections.as_deref_mut() {
+                            let (start, end) = if let Some(msg_loc) = c.message_loc() {
+                                (msg_loc.start_offset(), msg_loc.end_offset())
+                            } else {
+                                (loc.start_offset(), loc.end_offset())
+                            };
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: "skip".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -150,4 +171,13 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(OverwritingSetup, "cops/rspec/overwriting_setup");
+
+    #[test]
+    fn autocorrect_rewrites_duplicate_setup_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &OverwritingSetup,
+            b"RSpec.describe User do\n  let(:a) { 1 }\n  let(:a) { 2 }\nend\n",
+            b"RSpec.describe User do\n  let(:a) { 1 }\n  skip(:a) { 2 }\nend\n",
+        );
+    }
 }

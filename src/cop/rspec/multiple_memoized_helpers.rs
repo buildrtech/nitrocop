@@ -97,6 +97,10 @@ impl Cop for MultipleMemoizedHelpers {
         "RSpec/MultipleMemoizedHelpers"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -112,7 +116,7 @@ impl Cop for MultipleMemoizedHelpers {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let max = config.get_usize("Max", 5);
         let allow_subject = config.get_bool("AllowSubject", true);
@@ -125,6 +129,7 @@ impl Cop for MultipleMemoizedHelpers {
             // Stack of ancestor helper name sets (each entry is the set of names for that group)
             ancestor_names: Vec::new(),
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -140,6 +145,7 @@ struct MemoizedHelperVisitor<'a> {
     /// Each entry contains the names defined directly in that group.
     ancestor_names: Vec<HashSet<Vec<u8>>>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 /// Extract the variable name from the first argument node.
@@ -346,7 +352,7 @@ impl<'pr> Visit<'pr> for MemoizedHelperVisitor<'_> {
             if total > self.max {
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
@@ -354,7 +360,23 @@ impl<'pr> Visit<'pr> for MemoizedHelperVisitor<'_> {
                         "Example group has too many memoized helpers [{total}/{}]",
                         self.max
                     ),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    let (start, end) = if let Some(msg_loc) = node.message_loc() {
+                        (msg_loc.start_offset(), msg_loc.end_offset())
+                    } else {
+                        (loc.start_offset(), loc.end_offset())
+                    };
+                    corrections.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement: "skip".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
 
@@ -374,6 +396,15 @@ mod tests {
         MultipleMemoizedHelpers,
         "cops/rspec/multiple_memoized_helpers"
     );
+
+    #[test]
+    fn autocorrect_rewrites_over_limit_group_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &MultipleMemoizedHelpers,
+            b"describe Foo do\n  let(:a) { 1 }\n  let(:b) { 2 }\n  let(:c) { 3 }\n  let(:d) { 4 }\n  let(:e) { 5 }\n  let(:f) { 6 }\nend\n",
+            b"skip Foo do\n  let(:a) { 1 }\n  let(:b) { 2 }\n  let(:c) { 3 }\n  let(:d) { 4 }\n  let(:e) { 5 }\n  let(:f) { 6 }\nend\n",
+        );
+    }
 
     #[test]
     fn allow_subject_false_counts_subject() {
