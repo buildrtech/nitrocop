@@ -70,6 +70,10 @@ impl Cop for NoReturnInBeginEndBlocks {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -77,12 +81,13 @@ impl Cop for NoReturnInBeginEndBlocks {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = NoReturnVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             in_begin_assignment: false,
             in_assignment_value: false,
         };
@@ -95,6 +100,7 @@ struct NoReturnVisitor<'a, 'src> {
     cop: &'a NoReturnInBeginEndBlocks,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// True when we're inside a begin..end block that is a descendant of an
     /// assignment value. RuboCop uses `node.each_node(:kwbegin)` to find
     /// begin blocks at ANY depth within assignment values, not just direct.
@@ -316,12 +322,39 @@ impl<'pr> Visit<'pr> for NoReturnVisitor<'_, '_> {
         if self.in_begin_assignment {
             let loc = node.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Do not `return` in `begin..end` blocks in assignment contexts.".to_string(),
-            ));
+            );
+
+            // Conservative baseline autocorrect: for `return <value>` only,
+            // remove the `return` keyword (and one following space if present),
+            // keeping the returned expression in-place.
+            if node.arguments().is_some()
+                && let Some(corrections) = self.corrections.as_mut()
+            {
+                let mut end = loc.start_offset().saturating_add(6); // "return"
+                if self
+                    .source
+                    .as_bytes()
+                    .get(end)
+                    .is_some_and(|b| b.is_ascii_whitespace())
+                {
+                    end = end.saturating_add(1);
+                }
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end,
+                    replacement: String::new(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            self.diagnostics.push(diagnostic);
         }
     }
 
@@ -363,4 +396,15 @@ mod tests {
         NoReturnInBeginEndBlocks,
         "cops/lint/no_return_in_begin_end_blocks"
     );
+
+    #[test]
+    fn autocorrect_removes_return_keyword_when_value_present() {
+        use crate::testutil::assert_cop_autocorrect;
+
+        assert_cop_autocorrect(
+            &NoReturnInBeginEndBlocks,
+            b"x = begin\n  return 1\nend\n",
+            b"x = begin\n  1\nend\n",
+        );
+    }
 }
