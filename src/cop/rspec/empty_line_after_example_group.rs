@@ -51,6 +51,10 @@ impl Cop for EmptyLineAfterExampleGroup {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -58,7 +62,7 @@ impl Cop for EmptyLineAfterExampleGroup {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -173,12 +177,26 @@ impl Cop for EmptyLineAfterExampleGroup {
             0
         };
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             end_line,
             report_col,
             format!("Add an empty line after `{method_str}`."),
-        ));
+        );
+
+        if let Some(corrections) = corrections {
+            let insert_at = source.line_start_offset(end_line + 1);
+            corrections.push(crate::correction::Correction {
+                start: insert_at,
+                end: insert_at,
+                replacement: "\n".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -217,4 +235,18 @@ mod tests {
         EmptyLineAfterExampleGroup,
         "cops/rspec/empty_line_after_example_group"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyLineAfterExampleGroup.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_blank_line_after_example_group() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyLineAfterExampleGroup,
+            b"RSpec.describe Foo do\n  describe '#bar' do\n  end\n  describe '#baz' do\n  end\nend\n",
+            b"RSpec.describe Foo do\n  describe '#bar' do\n  end\n\n  describe '#baz' do\n  end\nend\n",
+        );
+    }
 }
