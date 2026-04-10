@@ -158,6 +158,10 @@ struct HookInfo {
     hook_name: Vec<u8>,
     line: usize,
     column: usize,
+    start: usize,
+    end: usize,
+    body_start: Option<usize>,
+    body_end: Option<usize>,
 }
 
 /// Visitor that recursively collects hooks within an example group scope.
@@ -245,11 +249,21 @@ impl<'a, 'pr> Visit<'pr> for HookCollector<'a> {
                 let key = build_hook_key(hook_name, node, self.source);
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                let (body_start, body_end) = node
+                    .block()
+                    .and_then(|b| b.as_block_node())
+                    .and_then(|b| b.body())
+                    .map(|body| (body.location().start_offset(), body.location().end_offset()))
+                    .map_or((None, None), |(s, e)| (Some(s), Some(e)));
                 self.hooks.push(HookInfo {
                     key,
                     hook_name: hook_name.to_vec(),
                     line,
                     column,
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    body_start,
+                    body_end,
                 });
             }
             // Don't recurse into hook body
@@ -296,6 +310,10 @@ impl Cop for ScatteredSetup {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -303,7 +321,7 @@ impl Cop for ScatteredSetup {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -348,8 +366,11 @@ impl Cop for ScatteredSetup {
             groups.entry(hook.key.clone()).or_default().push(hook);
         }
 
+        let mut corrections = corrections;
         for hooks in groups.values() {
             if hooks.len() > 1 {
+                let first = hooks[0];
+                let mut corrected_one = false;
                 for hook in hooks {
                     let other_lines: Vec<String> = hooks
                         .iter()
@@ -362,22 +383,82 @@ impl Cop for ScatteredSetup {
                         format!("lines {}", other_lines.join(", "))
                     };
                     let hook_display = String::from_utf8_lossy(&hook.hook_name).into_owned();
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         hook.line,
                         hook.column,
                         format!(
                             "Do not define multiple `{hook_display}` hooks in the same example group (also defined on {also})."
                         ),
-                    ));
+                    );
+
+                    if !corrected_one
+                        && first.start != hook.start
+                        && let Some(corrections) = &mut corrections
+                        && let (Some(first_body_end), Some(body_start), Some(body_end)) =
+                            (first.body_end, hook.body_start, hook.body_end)
+                        && let Some(body_text) = source.try_byte_slice(body_start, body_end)
+                        && let Some((remove_start, remove_end)) = whole_line_range(source, hook.start, hook.end)
+                    {
+                        corrections.push(crate::correction::Correction {
+                            start: first_body_end,
+                            end: first_body_end,
+                            replacement: format!("\n{body_text}"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        corrections.push(crate::correction::Correction {
+                            start: remove_start,
+                            end: remove_end,
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                        corrected_one = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
     }
 }
 
+fn whole_line_range(source: &SourceFile, start: usize, end: usize) -> Option<(usize, usize)> {
+    let (line, _) = source.offset_to_line_col(start);
+    let line_start = source.line_start_offset(line);
+    let mut remove_start = start;
+    if source
+        .try_byte_slice(line_start, start)
+        .is_some_and(|s| s.trim().is_empty())
+    {
+        remove_start = line_start;
+    }
+
+    let mut remove_end = end;
+    if source.as_bytes().get(remove_end).copied() == Some(b'\n') {
+        remove_end += 1;
+    }
+    Some((remove_start, remove_end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ScatteredSetup, "cops/rspec/scattered_setup");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ScatteredSetup.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_merges_one_repeated_before_hook() {
+        crate::testutil::assert_cop_autocorrect(
+            &ScatteredSetup,
+            b"describe Foo do\n  before { bar }\n  before { baz }\nend\n",
+            b"describe Foo do\n  before { bar\nbaz }\nend\n",
+        );
+    }
 }
