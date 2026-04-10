@@ -44,6 +44,10 @@ impl Cop for ExampleLength {
         "RSpec/ExampleLength"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -63,7 +67,7 @@ impl Cop for ExampleLength {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -113,12 +117,28 @@ impl Cop for ExampleLength {
         if adjusted > max {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Example has too many lines. [{adjusted}/{max}]"),
-            ));
+            );
+            if let Some(corrections) = corrections {
+                let (start, end) = if let Some(msg_loc) = call.message_loc() {
+                    (msg_loc.start_offset(), msg_loc.end_offset())
+                } else {
+                    (loc.start_offset(), loc.end_offset())
+                };
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: "skip".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -237,6 +257,15 @@ mod tests {
     crate::cop_fixture_tests!(ExampleLength, "cops/rspec/example_length");
 
     use crate::testutil;
+
+    #[test]
+    fn autocorrect_rewrites_long_example_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &ExampleLength,
+            b"RSpec.describe Foo do\n  it 'too long' do\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n    e = 5\n    f = 6\n  end\nend\n",
+            b"RSpec.describe Foo do\n  skip 'too long' do\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n    e = 5\n    f = 6\n  end\nend\n",
+        );
+    }
 
     fn offenses(source: &str) -> Vec<crate::diagnostic::Diagnostic> {
         testutil::run_cop_full_internal(
