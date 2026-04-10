@@ -29,6 +29,10 @@ impl Cop for SharedMutableDefault {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ARRAY_NODE,
@@ -47,7 +51,7 @@ impl Cop for SharedMutableDefault {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -98,13 +102,53 @@ impl Cop for SharedMutableDefault {
 
         let loc = call.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not create a Hash with a mutable default value as the default value can accidentally be changed.".to_string(),
-        ));
+        );
+
+        if let Some(replacement) = conservative_hash_new_replacement(&call, first_arg)
+            && let Some(ref mut corrs) = corrections
+        {
+            corrs.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
+}
+
+fn conservative_hash_new_replacement(
+    call: &ruby_prism::CallNode<'_>,
+    first_arg: &ruby_prism::Node<'_>,
+) -> Option<String> {
+    // Conservative baseline autocorrect only for no-block literal defaults.
+    if call.block().is_some() {
+        return None;
+    }
+
+    let default_src = if first_arg.as_array_node().is_some() || first_arg.as_hash_node().is_some() {
+        std::str::from_utf8(first_arg.location().as_slice())
+            .ok()?
+            .to_string()
+    } else {
+        return None;
+    };
+
+    let receiver = call.receiver()?;
+    let receiver_src = std::str::from_utf8(receiver.location().as_slice()).ok()?;
+
+    Some(format!(
+        "{receiver_src}.new {{ |h, k| h[k] = {default_src} }}"
+    ))
 }
 
 fn is_mutable_value(node: &ruby_prism::Node<'_>) -> bool {
@@ -163,4 +207,5 @@ fn is_capacity_keyword_argument(kh: &ruby_prism::KeywordHashNode<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SharedMutableDefault, "cops/lint/shared_mutable_default");
+    crate::cop_autocorrect_fixture_tests!(SharedMutableDefault, "cops/lint/shared_mutable_default");
 }
