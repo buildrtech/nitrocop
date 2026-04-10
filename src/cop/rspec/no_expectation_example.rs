@@ -82,6 +82,10 @@ impl Cop for NoExpectationExample {
         "RSpec/NoExpectationExample"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -101,7 +105,7 @@ impl Cop for NoExpectationExample {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -175,12 +179,28 @@ impl Cop for NoExpectationExample {
         if !finder.found {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "No expectation found in this example.".to_string(),
-            ));
+            );
+
+            if let Some(body) = block.body()
+                && let Some(corrections) = corrections
+            {
+                let body_loc = body.location();
+                corrections.push(crate::correction::Correction {
+                    start: body_loc.start_offset(),
+                    end: body_loc.end_offset(),
+                    replacement: "skip('TODO: add expectation')".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -233,6 +253,10 @@ impl<'pr> Visit<'pr> for ExpectationFinder<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NoExpectationExample, "cops/rspec/no_expectation_example");
+    crate::cop_autocorrect_fixture_tests!(
+        NoExpectationExample,
+        "cops/rspec/no_expectation_example"
+    );
 
     #[test]
     fn allowed_patterns_skips_matching_description() {
