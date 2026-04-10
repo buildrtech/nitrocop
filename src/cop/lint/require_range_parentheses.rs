@@ -14,6 +14,10 @@ impl Cop for RequireRangeParentheses {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -21,12 +25,13 @@ impl Cop for RequireRangeParentheses {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = RangeVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             in_parens: false,
         };
         visitor.visit(&parse_result.node());
@@ -38,6 +43,7 @@ struct RangeVisitor<'a, 'src> {
     cop: &'a RequireRangeParentheses,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     in_parens: bool,
 }
 
@@ -85,14 +91,27 @@ impl<'pr> Visit<'pr> for RangeVisitor<'_, '_> {
 
             let loc = node.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 format!(
                     "Wrap the endless range literal `{left_src}{op_src}` to avoid precedence ambiguity."
                 ),
-            ));
+            );
+
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: op_end,
+                    replacement: format!("({left_src}{op_src})"),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            self.diagnostics.push(diagnostic);
         }
 
         ruby_prism::visit_range_node(self, node);
@@ -106,4 +125,18 @@ mod tests {
         RequireRangeParentheses,
         "cops/lint/require_range_parentheses"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RequireRangeParentheses.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_wraps_operator_prefix_as_endless_range() {
+        crate::testutil::assert_cop_autocorrect(
+            &RequireRangeParentheses,
+            b"1..\n42\n",
+            b"(1..)\n42\n",
+        );
+    }
 }
