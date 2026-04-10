@@ -54,6 +54,10 @@ impl Cop for ConstantResolution {
         false
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -65,7 +69,7 @@ impl Cop for ConstantResolution {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check Only/Ignore config.
         // RuboCop uses `cop_config['Only'].blank?` which returns true for both
@@ -81,13 +85,14 @@ impl Cop for ConstantResolution {
             ignore,
             def_name_ranges: Vec::new(),
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct ConstantResolutionVisitor<'a, 'src> {
+struct ConstantResolutionVisitor<'a, 'src, 'corr> {
     cop: &'a ConstantResolution,
     source: &'src SourceFile,
     only: Vec<String>,
@@ -97,9 +102,10 @@ struct ConstantResolutionVisitor<'a, 'src> {
     /// and should not be flagged.
     def_name_ranges: Vec<std::ops::Range<usize>>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl ConstantResolutionVisitor<'_, '_> {
+impl ConstantResolutionVisitor<'_, '_, '_> {
     fn is_in_def_name(&self, offset: usize) -> bool {
         self.def_name_ranges
             .iter()
@@ -173,7 +179,7 @@ fn is_class_or_module_new(node: &ruby_prism::Node<'_>) -> bool {
     matches!(receiver_name, "Class" | "Module")
 }
 
-impl<'pr> Visit<'pr> for ConstantResolutionVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for ConstantResolutionVisitor<'_, '_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         // The constant_path() of a ClassNode is the class name being defined.
         // Only mark it when the constant_path() is a simple ConstantReadNode
@@ -256,12 +262,25 @@ impl<'pr> Visit<'pr> for ConstantResolutionVisitor<'_, '_> {
         }
 
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Fully qualify this constant to avoid possibly ambiguous resolution.".to_string(),
-        ));
+        );
+
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.start_offset(),
+                replacement: "::".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        self.diagnostics.push(diagnostic);
     }
 
     fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
@@ -299,6 +318,29 @@ mod tests {
     use crate::testutil::{assert_cop_no_offenses_with_config, run_cop_full_with_config};
     use std::collections::HashMap;
     crate::cop_fixture_tests!(ConstantResolution, "cops/lint/constant_resolution");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ConstantResolution.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_prefixes_unqualified_constant() {
+        crate::testutil::assert_cop_autocorrect(
+            &ConstantResolution,
+            b"User\n",
+            b"::User\n",
+        );
+    }
+
+    #[test]
+    fn autocorrect_prefixes_root_of_constant_path() {
+        crate::testutil::assert_cop_autocorrect(
+            &ConstantResolution,
+            b"User::Login\n",
+            b"::User::Login\n",
+        );
+    }
 
     fn config_with_only(values: Vec<&str>) -> crate::cop::CopConfig {
         let mut options = HashMap::new();
