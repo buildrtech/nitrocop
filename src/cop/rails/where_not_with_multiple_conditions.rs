@@ -62,6 +62,10 @@ impl Cop for WhereNotWithMultipleConditions {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[ASSOC_NODE, CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE]
     }
@@ -73,7 +77,7 @@ impl Cop for WhereNotWithMultipleConditions {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match util::as_method_chain(node) {
             Some(c) => c,
@@ -108,12 +112,62 @@ impl Cop for WhereNotWithMultipleConditions {
             .message_loc()
             .unwrap_or_else(|| where_call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use a SQL statement instead of `where.not` with multiple conditions.".to_string(),
-        ));
+        );
+
+        // Conservative baseline autocorrect: only split top-level multi-pair hash arguments
+        // into chained `.where.not(<single_pair>)` calls.
+        // Skip nested-hash forms (`where.not(posts: { ... })`) to avoid broad rewrites.
+        if let Some(corrections) = corrections.as_deref_mut()
+            && let Some(receiver) = call.receiver()
+        {
+            let direct_pairs: Vec<ruby_prism::Node<'_>> = if let Some(hash) = arg_list[0].as_hash_node() {
+                hash.elements().iter().filter(|n| n.as_assoc_node().is_some()).collect()
+            } else if let Some(kw_hash) = arg_list[0].as_keyword_hash_node() {
+                kw_hash.elements().iter().filter(|n| n.as_assoc_node().is_some()).collect()
+            } else {
+                Vec::new()
+            };
+
+            if direct_pairs.len() >= 2 {
+                let receiver_loc = receiver.location();
+                let receiver_source = source.byte_slice(
+                    receiver_loc.start_offset(),
+                    receiver_loc.end_offset(),
+                    "",
+                );
+
+                let mut pair_sources = Vec::with_capacity(direct_pairs.len());
+                for pair in direct_pairs {
+                    let pair_loc = pair.location();
+                    pair_sources.push(source.byte_slice(
+                        pair_loc.start_offset(),
+                        pair_loc.end_offset(),
+                        "",
+                    ));
+                }
+
+                let mut replacement = format!("{receiver_source}.not({})", pair_sources[0]);
+                for pair in pair_sources.iter().skip(1) {
+                    replacement.push_str(&format!(".where.not({pair})"));
+                }
+
+                corrections.push(crate::correction::Correction {
+                    start: call.location().start_offset(),
+                    end: call.location().end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -124,4 +178,30 @@ mod tests {
         WhereNotWithMultipleConditions,
         "cops/rails/where_not_with_multiple_conditions"
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(WhereNotWithMultipleConditions.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_splits_top_level_pairs_into_chained_where_not_calls() {
+        crate::testutil::assert_cop_autocorrect(
+            &WhereNotWithMultipleConditions,
+            b"User.where.not(trashed: true, role: 'admin')\n",
+            b"User.where.not(trashed: true).where.not(role: 'admin')\n",
+        );
+    }
+
+    #[test]
+    fn nested_hash_offense_remains_uncorrected_in_baseline() {
+        let input = b"User.joins(:posts).where.not(posts: { trashed: true, title: 'Rails' })\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(
+            &WhereNotWithMultipleConditions,
+            input,
+        );
+        assert_eq!(diags.len(), 1);
+        assert!(!diags[0].corrected);
+        assert!(corrections.is_empty());
+    }
 }
