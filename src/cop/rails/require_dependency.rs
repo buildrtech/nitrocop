@@ -3,6 +3,9 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Conservative autocorrect baseline (nitrocop-only): rewrite
+/// `require_dependency` to `require` for already-flagged calls in Rails >= 6.0
+/// (Zeitwerk mode), where `require_dependency` is obsolete.
 pub struct RequireDependency;
 
 impl Cop for RequireDependency {
@@ -22,6 +25,10 @@ impl Cop for RequireDependency {
         &[CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -29,7 +36,7 @@ impl Cop for RequireDependency {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 6.0
         if !config.rails_version_at_least(6.0) {
@@ -74,12 +81,27 @@ impl Cop for RequireDependency {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not use `require_dependency` with Zeitwerk mode.".to_string(),
-        ));
+        );
+
+        if let Some(ref mut corrs) = corrections
+            && let Some(selector) = call.message_loc()
+        {
+            corrs.push(crate::correction::Correction {
+                start: selector.start_offset(),
+                end: selector.end_offset(),
+                replacement: "require".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -87,4 +109,32 @@ impl Cop for RequireDependency {
 mod tests {
     use super::*;
     crate::cop_rails_fixture_tests!(RequireDependency, "cops/rails/require_dependency", 6.0);
+
+    #[test]
+    fn autocorrects_require_dependency_to_require_for_zeitwerk() {
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_autocorrect_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "TargetRailsVersion".to_string(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(6.0)),
+                ),
+                (
+                    "__RailtiesInLockfile".to_string(),
+                    serde_yml::Value::Bool(true),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_autocorrect_with_config(
+            &RequireDependency,
+            b"require_dependency 'some_lib'\n",
+            b"require 'some_lib'\n",
+            config,
+        );
+    }
 }
