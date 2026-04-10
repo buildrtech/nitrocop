@@ -43,6 +43,10 @@ impl Cop for BeforeAfterAll {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, SYMBOL_NODE]
     }
@@ -54,7 +58,7 @@ impl Cop for BeforeAfterAll {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -114,7 +118,7 @@ impl Cop for BeforeAfterAll {
         let hook = String::from_utf8_lossy(&source.as_bytes()[call_start..hook_end]);
 
         let (line, column) = source.offset_to_line_col(call_start);
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
@@ -123,7 +127,27 @@ impl Cop for BeforeAfterAll {
                  If you are using `rspec-rails`, and `use_transactional_fixtures` is enabled, \
                  then records created in `{hook}` are not automatically rolled back."
             ),
-        ));
+        );
+
+        let replacement = if scope == b"all" || scope == b"context" {
+            Some(":each")
+        } else {
+            None
+        };
+        if let Some(replacement) = replacement
+            && let Some(ref mut corrs) = corrections
+        {
+            corrs.push(crate::correction::Correction {
+                start: first_arg.location().start_offset(),
+                end: first_arg.location().end_offset(),
+                replacement: replacement.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -131,4 +155,5 @@ impl Cop for BeforeAfterAll {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BeforeAfterAll, "cops/rspec/before_after_all");
+    crate::cop_autocorrect_fixture_tests!(BeforeAfterAll, "cops/rspec/before_after_all");
 }
