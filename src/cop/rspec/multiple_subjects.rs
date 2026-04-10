@@ -15,6 +15,17 @@ use crate::parse::source::SourceFile;
 /// declarations, while still avoiding traversal into nested block scopes.
 pub struct MultipleSubjects;
 
+struct SubjectDecl {
+    line: usize,
+    col: usize,
+    method_name: Vec<u8>,
+    has_args: bool,
+    start: usize,
+    end: usize,
+    selector_start: Option<usize>,
+    selector_end: Option<usize>,
+}
+
 impl Cop for MultipleSubjects {
     fn name(&self) -> &'static str {
         "RSpec/MultipleSubjects"
@@ -32,6 +43,10 @@ impl Cop for MultipleSubjects {
         &[BLOCK_NODE, CALL_NODE, STATEMENTS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -39,7 +54,7 @@ impl Cop for MultipleSubjects {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for call nodes that are example groups (describe/context/etc.)
         let call = match node.as_call_node() {
@@ -71,7 +86,7 @@ impl Cop for MultipleSubjects {
 
         // Collect subject declarations in this group's body, including
         // top-level conditional branches (`if`/`elsif`/`else`, `unless`).
-        let mut subject_calls: Vec<(usize, usize)> = Vec::new(); // (line, col)
+        let mut subject_calls: Vec<SubjectDecl> = Vec::new();
         self.collect_subject_calls_from_statements(source, &stmts, &mut subject_calls);
 
         if subject_calls.len() <= 1 {
@@ -79,13 +94,46 @@ impl Cop for MultipleSubjects {
         }
 
         // Flag all except the last one
-        for &(line, col) in &subject_calls[..subject_calls.len() - 1] {
-            diagnostics.push(self.diagnostic(
+        let mut corrections = corrections;
+        for subject in &subject_calls[..subject_calls.len() - 1] {
+            let mut diagnostic = self.diagnostic(
                 source,
-                line,
-                col,
+                subject.line,
+                subject.col,
                 "Do not set more than one subject per example group".to_string(),
-            ));
+            );
+
+            if let Some(corrections) = &mut corrections {
+                // RuboCop baseline:
+                // - subject(:name) -> let(:name)
+                // - subject { ... }  -> remove overwritten subject
+                // - subject!          -> no autocorrect
+                if subject.method_name.as_slice() == b"subject" && subject.has_args {
+                    if let (Some(selector_start), Some(selector_end)) =
+                        (subject.selector_start, subject.selector_end)
+                    {
+                        corrections.push(crate::correction::Correction {
+                            start: selector_start,
+                            end: selector_end,
+                            replacement: "let".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                } else if subject.method_name.as_slice() == b"subject" && !subject.has_args {
+                    corrections.push(crate::correction::Correction {
+                        start: subject.start,
+                        end: subject.end,
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -95,7 +143,7 @@ impl MultipleSubjects {
         &self,
         source: &SourceFile,
         stmts: &ruby_prism::StatementsNode<'_>,
-        subject_calls: &mut Vec<(usize, usize)>,
+        subject_calls: &mut Vec<SubjectDecl>,
     ) {
         for stmt in stmts.body().iter() {
             self.collect_subject_calls(source, &stmt, subject_calls);
@@ -106,13 +154,29 @@ impl MultipleSubjects {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        subject_calls: &mut Vec<(usize, usize)>,
+        subject_calls: &mut Vec<SubjectDecl>,
     ) {
         if let Some(call) = node.as_call_node() {
             if is_subject_declaration(&call) {
                 let loc = call.location();
                 let (line, col) = source.offset_to_line_col(loc.start_offset());
-                subject_calls.push((line, col));
+                let method_name = call.name().as_slice().to_vec();
+                let has_args = call.arguments().is_some_and(|a| a.arguments().iter().next().is_some());
+                let (selector_start, selector_end) = if let Some(selector) = call.message_loc() {
+                    (Some(selector.start_offset()), Some(selector.end_offset()))
+                } else {
+                    (None, None)
+                };
+                subject_calls.push(SubjectDecl {
+                    line,
+                    col,
+                    method_name,
+                    has_args,
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    selector_start,
+                    selector_end,
+                });
             }
             return;
         }
@@ -173,4 +237,27 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(MultipleSubjects, "cops/rspec/multiple_subjects");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(MultipleSubjects.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_named_subject_to_let() {
+        crate::testutil::assert_cop_autocorrect(
+            &MultipleSubjects,
+            b"describe Foo do\n  subject(:a) { 1 }\n  subject(:b) { 2 }\nend\n",
+            b"describe Foo do\n  let(:a) { 1 }\n  subject(:b) { 2 }\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_unnamed_subject_by_removing_overwritten_definition() {
+        crate::testutil::assert_cop_autocorrect(
+            &MultipleSubjects,
+            b"describe Foo do\n  subject { 1 }\n  subject { 2 }\nend\n",
+            b"describe Foo do\n  \n  subject { 2 }\nend\n",
+        );
+    }
 }
