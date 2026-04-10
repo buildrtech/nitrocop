@@ -30,6 +30,10 @@ impl Cop for NonLocalExitFromIterator {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -37,13 +41,15 @@ impl Cop for NonLocalExitFromIterator {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = NonLocalExitVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             block_stack: Vec::new(),
+            lexical_block_depth: 0,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -90,7 +96,12 @@ struct NonLocalExitVisitor<'a, 'src> {
     cop: &'a NonLocalExitFromIterator,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     block_stack: Vec<StackEntry>,
+    /// Tracks lexical block bodies (not synthetic ancestor context while walking
+    /// call receivers/arguments). Used to only autocorrect `return` -> `next`
+    /// when the token is actually inside a block body.
+    lexical_block_depth: usize,
 }
 
 impl NonLocalExitVisitor<'_, '_> {
@@ -130,16 +141,35 @@ impl<'pr> Visit<'pr> for NonLocalExitVisitor<'_, '_> {
                         // This is a non-local exit from an iterator
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(
-                            self.cop.diagnostic(
-                                self.source,
-                                line,
-                                column,
-                                "Non-local exit from iterator, without return value. \
-                                 `next`, `break`, `Array#find`, `Array#any?`, etc. is preferred."
-                                    .to_string(),
-                            ),
+                        let mut diagnostic = self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            "Non-local exit from iterator, without return value. \
+                             `next`, `break`, `Array#find`, `Array#any?`, etc. is preferred."
+                                .to_string(),
                         );
+
+                        // Conservative baseline autocorrect: only when this `return`
+                        // token is lexically inside a block body, replace with `next`.
+                        // Skip receiver/argument subtrees visited under synthetic block
+                        // ancestor context, where `next` would be invalid syntax.
+                        if self.lexical_block_depth > 0
+                            && let Some(corrections) = self.corrections.as_mut()
+                        {
+                            let start = loc.start_offset();
+                            let end = start.saturating_add(6); // "return"
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: "next".to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        self.diagnostics.push(diagnostic);
                         break;
                     }
                     // Block has args but no receiver — not an iterator, continue looking outward
@@ -157,7 +187,9 @@ impl<'pr> Visit<'pr> for NonLocalExitVisitor<'_, '_> {
             is_define_method: false,
         });
         if let Some(body) = node.body() {
+            self.lexical_block_depth += 1;
             self.visit(&body);
+            self.lexical_block_depth = self.lexical_block_depth.saturating_sub(1);
         }
         self.block_stack.pop();
     }
@@ -187,7 +219,9 @@ impl<'pr> Visit<'pr> for NonLocalExitVisitor<'_, '_> {
                         self.visit(&args.as_node());
                     }
                     if let Some(body) = block_node.body() {
+                        self.lexical_block_depth += 1;
                         self.visit(&body);
+                        self.lexical_block_depth = self.lexical_block_depth.saturating_sub(1);
                     }
                     self.block_stack.pop();
                 } else {
@@ -211,7 +245,9 @@ impl<'pr> Visit<'pr> for NonLocalExitVisitor<'_, '_> {
                         self.visit(&args.as_node());
                     }
                     if let Some(body) = block_node.body() {
+                        self.lexical_block_depth += 1;
                         self.visit(&body);
+                        self.lexical_block_depth = self.lexical_block_depth.saturating_sub(1);
                     }
                     self.block_stack.pop();
                 }
@@ -267,7 +303,9 @@ impl<'pr> Visit<'pr> for NonLocalExitVisitor<'_, '_> {
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         self.block_stack.push(StackEntry::Scope);
         if let Some(body) = node.body() {
+            self.lexical_block_depth += 1;
             self.visit(&body);
+            self.lexical_block_depth = self.lexical_block_depth.saturating_sub(1);
         }
         self.block_stack.pop();
     }
@@ -437,5 +475,16 @@ mod tests {
         let source = b"transaction do\n  items.each do |item|\n    return if item.nil?\n    item.with_lock do\n      return if item.stock == 0\n    end\n  end\nend\n";
         let diags = run_cop_full(&NonLocalExitFromIterator, source);
         assert_eq!(diags.len(), 2, "should flag both returns: {:?}", diags);
+    }
+
+    #[test]
+    fn autocorrects_bare_return_to_next_in_iterator_block() {
+        use crate::testutil::assert_cop_autocorrect;
+
+        assert_cop_autocorrect(
+            &NonLocalExitFromIterator,
+            b"items.each do |item|\n  return if item.bad?\nend\n",
+            b"items.each do |item|\n  next if item.bad?\nend\n",
+        );
     }
 }
