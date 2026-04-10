@@ -103,6 +103,39 @@ fn is_assumed_usage_context(call: &ruby_prism::CallNode<'_>, source_bytes: &[u8]
     false
 }
 
+fn standalone_statement_line_range(
+    source: &SourceFile,
+    loc: ruby_prism::Location<'_>,
+) -> Option<(usize, usize)> {
+    let (line, _) = source.offset_to_line_col(loc.start_offset());
+    let line_start = source.line_start_offset(line);
+
+    let mut line_end = source.as_bytes().len();
+    let mut i = line_start;
+    while i < source.as_bytes().len() {
+        if source.as_bytes()[i] == b'\n' {
+            line_end = i;
+            break;
+        }
+        i += 1;
+    }
+
+    let before = source.try_byte_slice(line_start, loc.start_offset())?;
+    let after = source.try_byte_slice(loc.end_offset(), line_end)?;
+    if !before.trim().is_empty() {
+        return None;
+    }
+    if !(after.trim().is_empty() || after.trim_start().starts_with('#')) {
+        return None;
+    }
+
+    let mut remove_end = line_end;
+    if remove_end < source.as_bytes().len() && source.as_bytes()[remove_end] == b'\n' {
+        remove_end += 1;
+    }
+    Some((line_start, remove_end))
+}
+
 fn matches_spec_str(call: &ruby_prism::CallNode<'_>, spec: &str) -> bool {
     let parts: Vec<&str> = spec.split('.').collect();
     if parts.is_empty() {
@@ -159,6 +192,10 @@ impl Cop for Debugger {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
@@ -170,8 +207,9 @@ impl Cop for Debugger {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -199,12 +237,26 @@ impl Cop for Debugger {
                             let source_text =
                                 std::str::from_utf8(loc.as_slice()).unwrap_or("require");
                             let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
+                            let mut diagnostic = self.diagnostic(
                                 source,
                                 line,
                                 column,
                                 format!("Remove debugger entry point `{source_text}`."),
-                            ));
+                            );
+                            if let Some(corrections) = corrections.as_deref_mut()
+                                && let Some((start, end)) =
+                                    standalone_statement_line_range(source, loc)
+                            {
+                                corrections.push(crate::correction::Correction {
+                                    start,
+                                    end,
+                                    replacement: String::new(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+                            diagnostics.push(diagnostic);
                         }
                     }
                 }
@@ -233,12 +285,25 @@ impl Cop for Debugger {
                         let loc = call.location();
                         let source_text = std::str::from_utf8(loc.as_slice()).unwrap_or("debugger");
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             format!("Remove debugger entry point `{source_text}`."),
-                        ));
+                        );
+                        if let Some(corrections) = corrections.as_deref_mut()
+                            && let Some((start, end)) = standalone_statement_line_range(source, loc)
+                        {
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        diagnostics.push(diagnostic);
                         return;
                     }
                 }
@@ -254,12 +319,25 @@ impl Cop for Debugger {
                         let loc = call.location();
                         let source_text = std::str::from_utf8(loc.as_slice()).unwrap_or("debugger");
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             column,
                             format!("Remove debugger entry point `{source_text}`."),
-                        ));
+                        );
+                        if let Some(corrections) = corrections.as_deref_mut()
+                            && let Some((start, end)) = standalone_statement_line_range(source, loc)
+                        {
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        diagnostics.push(diagnostic);
                         return;
                     }
                 }
@@ -376,6 +454,20 @@ mod tests {
             diags.len(),
             1,
             "custom debugger method with known leaf should be detected"
+        );
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Debugger.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_standalone_debugger_line() {
+        crate::testutil::assert_cop_autocorrect(
+            &Debugger,
+            b"x = 1\ndebugger\ny = 2\n",
+            b"x = 1\ny = 2\n",
         );
     }
 }
