@@ -61,6 +61,10 @@ impl Cop for LeakyConstantDeclaration {
         "RSpec/LeakyConstantDeclaration"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -76,13 +80,14 @@ impl Cop for LeakyConstantDeclaration {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = LeakyVisitor {
             source,
             cop: self,
             example_group_depth: 0,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -95,6 +100,7 @@ struct LeakyVisitor<'a> {
     /// Tracks how deep we are inside example group blocks. > 0 means inside.
     example_group_depth: usize,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'a> LeakyVisitor<'a> {
@@ -106,6 +112,24 @@ impl<'a> LeakyVisitor<'a> {
         } else {
             is_rspec_example_group(method_name) || is_rspec_shared_group(method_name)
         }
+    }
+
+    fn push_diag(&mut self, loc: ruby_prism::Location<'_>, message: &str, allow_correction: bool) {
+        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+        let mut diagnostic = self
+            .cop
+            .diagnostic(self.source, line, column, message.to_string());
+        if allow_correction && let Some(corrections) = self.corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "skip('TODO: avoid leaky constant declaration')".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -138,14 +162,11 @@ impl Visit<'_> for LeakyVisitor<'_> {
 
     fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'_>) {
         if self.example_group_depth > 0 {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Stub constant instead of declaring explicitly.".to_string(),
-            ));
+            self.push_diag(
+                node.location(),
+                "Stub constant instead of declaring explicitly.",
+                true,
+            );
         }
         // Recurse into the value — it may contain blocks (e.g., Class.new do...end)
         // with more constant assignments inside.
@@ -154,28 +175,22 @@ impl Visit<'_> for LeakyVisitor<'_> {
 
     fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'_>) {
         if self.example_group_depth > 0 {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Stub constant instead of declaring explicitly.".to_string(),
-            ));
+            self.push_diag(
+                node.location(),
+                "Stub constant instead of declaring explicitly.",
+                true,
+            );
         }
         ruby_prism::visit_constant_or_write_node(self, node);
     }
 
     fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'_>) {
         if self.example_group_depth > 0 {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Stub constant instead of declaring explicitly.".to_string(),
-            ));
+            self.push_diag(
+                node.location(),
+                "Stub constant instead of declaring explicitly.",
+                true,
+            );
         }
         ruby_prism::visit_constant_and_write_node(self, node);
     }
@@ -185,14 +200,11 @@ impl Visit<'_> for LeakyVisitor<'_> {
         node: &ruby_prism::ConstantOperatorWriteNode<'_>,
     ) {
         if self.example_group_depth > 0 {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Stub constant instead of declaring explicitly.".to_string(),
-            ));
+            self.push_diag(
+                node.location(),
+                "Stub constant instead of declaring explicitly.",
+                true,
+            );
         }
         ruby_prism::visit_constant_operator_write_node(self, node);
     }
@@ -269,14 +281,11 @@ impl Visit<'_> for LeakyVisitor<'_> {
             // constant_path_node (Foo::Bar, self::Bar, ::Bar) is intentionally
             // excluded — qualified constants don't leak in the same way.
             if const_path.as_constant_read_node().is_some() {
-                let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    "Stub class constant instead of declaring explicitly.".to_string(),
-                ));
+                self.push_diag(
+                    node.location(),
+                    "Stub class constant instead of declaring explicitly.",
+                    true,
+                );
             }
         }
         // Always recurse into class body regardless of depth. At depth 0, the class itself
@@ -292,14 +301,11 @@ impl Visit<'_> for LeakyVisitor<'_> {
         if self.example_group_depth > 0 {
             let const_path = node.constant_path();
             if const_path.as_constant_read_node().is_some() {
-                let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    "Stub module constant instead of declaring explicitly.".to_string(),
-                ));
+                self.push_diag(
+                    node.location(),
+                    "Stub module constant instead of declaring explicitly.",
+                    true,
+                );
             }
         }
         // Always recurse into module body regardless of depth. At depth 0, the module itself
