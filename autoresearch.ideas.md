@@ -54,6 +54,7 @@
 - RSpec/EmptyLineAfterExample parity follow-up: validate insertion behavior under `AllowConsecutiveOneLiners: false`, inline wrapper/terminator edge forms, and directive-comment placement to match RuboCop EmptyLineSeparation autocorrect boundaries.
 - RSpec/AlignLeftLetBrace parity follow-up: validate spacing insertion stability with let!/interpolated keys and backslash-continued call lines, and document/autotest incompatibility expectations with layout spacing cops.
 - RSpec/AlignRightLetBrace parity follow-up: validate spacing insertion stability with mixed let/let! and backslash-continued call-line grouping edge cases, and document/autotest incompatibility expectations with layout spacing cops.
+- RSpec/ExcessiveDocstringSpacing parity follow-up: extend autocorrect from plain string literals to RuboCop-style dstr handling while preserving interpolation fidelity and heredoc/invalid-UTF8 safety guards.
 - FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` should remain diagnostic-only (no upstream AutoCorrector) or get an explicit nitrocop-only unsafe autocorrect mode.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.

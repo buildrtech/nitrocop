@@ -65,6 +65,10 @@ impl Cop for ExampleWording {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -72,7 +76,7 @@ impl Cop for ExampleWording {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: CustomTransform — hash of word replacements (unused: requires hash config)
         let custom_transform = config
@@ -191,12 +195,30 @@ impl Cop for ExampleWording {
                     ));
                 } else if starts_with_it_prefix(&desc) {
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Do not repeat 'it' when describing your tests.".to_string(),
-                    ));
+                    );
+
+                    // Conservative autocorrect baseline: remove leading `it ` prefix
+                    // from the description content range only.
+                    let corrected = strip_it_prefix(desc_str);
+                    if corrected != desc_str {
+                        if let Some(corrections) = &mut corrections {
+                            corrections.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: corrected.to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                    }
+
+                    diagnostics.push(diagnostic);
                 } else if let Some(ref disallowed) = disallowed_examples {
                     // DisallowedExamples: RuboCop preprocesses with strip + squeeze(' ') + downcase
                     let preprocessed = preprocess_description(desc_str);
@@ -347,6 +369,19 @@ fn starts_with_it_prefix(desc: &[u8]) -> bool {
     lower == b"it" && desc[2] == b' '
 }
 
+fn strip_it_prefix(desc: &str) -> &str {
+    if desc.len() >= 3 {
+        let bytes = desc.as_bytes();
+        if bytes[0].eq_ignore_ascii_case(&b'i')
+            && bytes[1].eq_ignore_ascii_case(&b't')
+            && bytes[2] == b' '
+        {
+            return &desc[3..];
+        }
+    }
+    desc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +508,19 @@ mod tests {
         let source = b"it 'should do something' do\nend\n";
         let diags = crate::testutil::run_cop_full_with_config(&ExampleWording, source, config);
         assert!(diags.is_empty(), "IgnoredWords should skip 'should' check");
+    }
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ExampleWording.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_it_prefix_for_string_descriptions() {
+        crate::testutil::assert_cop_autocorrect(
+            &ExampleWording,
+            b"it 'it does things' do\nend\n",
+            b"it 'does things' do\nend\n",
+        );
     }
 }
