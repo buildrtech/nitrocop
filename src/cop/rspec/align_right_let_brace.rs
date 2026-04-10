@@ -77,6 +77,10 @@ impl Cop for AlignRightLetBrace {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -84,7 +88,7 @@ impl Cop for AlignRightLetBrace {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Step 1: Collect all single-line let blocks with their closing brace positions
         let mut collector = LetCollector {
@@ -103,17 +107,35 @@ impl Cop for AlignRightLetBrace {
         let groups = chunk_adjacent_lets(&lets);
 
         // Step 3: Check alignment within each group
+        let mut corrections = corrections;
         for group in &groups {
             if group.len() >= 2 {
                 let max_col = group.iter().map(|(_, c)| *c).max().unwrap_or(0);
                 for &(line_num, brace_col) in group {
                     if brace_col != max_col {
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line_num,
                             brace_col,
                             "Align right let brace".to_string(),
-                        ));
+                        );
+
+                        if let Some(corrections) = &mut corrections {
+                            if let Some(insert_at) = source.line_col_to_offset(line_num, brace_col)
+                            {
+                                let pad = " ".repeat(max_col - brace_col);
+                                corrections.push(crate::correction::Correction {
+                                    start: insert_at,
+                                    end: insert_at,
+                                    replacement: pad,
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+                        }
+
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -201,4 +223,18 @@ fn chunk_adjacent_lets(lets: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AlignRightLetBrace, "cops/rspec/align_right_let_brace");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(AlignRightLetBrace.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_aligns_closing_braces() {
+        crate::testutil::assert_cop_autocorrect(
+            &AlignRightLetBrace,
+            b"RSpec.describe 'test' do\n  let(:foo)      { a }\n  let(:hi)       { ab }\n  let(:blahblah) { abcd }\nend\n",
+            b"RSpec.describe 'test' do\n  let(:foo)      { a    }\n  let(:hi)       { ab   }\n  let(:blahblah) { abcd }\nend\n",
+        );
+    }
 }
