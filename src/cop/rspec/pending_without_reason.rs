@@ -88,6 +88,10 @@ impl Cop for PendingWithoutReason {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
@@ -99,12 +103,13 @@ impl Cop for PendingWithoutReason {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = PendingWithoutReasonVisitor {
             source,
             cop: self,
             diagnostics,
+            corrections,
             ancestors: Vec::new(),
         };
         visitor.visit(&parse_result.node());
@@ -122,6 +127,7 @@ struct PendingWithoutReasonVisitor<'a, 'pr> {
     source: &'a SourceFile,
     cop: &'a PendingWithoutReason,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     ancestors: Vec<ruby_prism::Node<'pr>>,
 }
 
@@ -202,7 +208,14 @@ impl<'a, 'pr> Visit<'pr> for PendingWithoutReasonVisitor<'a, 'pr> {
 
         if is_metadata_target_call(node) {
             if let Some(label) = metadata_without_reason_label(node) {
-                add_reason_offense(self.cop, self.source, self.diagnostics, node, label);
+                add_reason_offense(
+                    self.cop,
+                    self.source,
+                    self.diagnostics,
+                    self.corrections.as_deref_mut(),
+                    node,
+                    label,
+                );
             }
         }
 
@@ -217,7 +230,14 @@ impl<'a, 'pr> Visit<'pr> for PendingWithoutReasonVisitor<'a, 'pr> {
             && (no_args || has_block)
         {
             let label = method_label(method_name);
-            add_reason_offense(self.cop, self.source, self.diagnostics, node, label);
+            add_reason_offense(
+                self.cop,
+                self.source,
+                self.diagnostics,
+                self.corrections.as_deref_mut(),
+                node,
+                label,
+            );
         }
 
         // RuboCop: in example context, flag only no-arg skipped/pending calls.
@@ -227,7 +247,14 @@ impl<'a, 'pr> Visit<'pr> for PendingWithoutReasonVisitor<'a, 'pr> {
             && no_args
         {
             let label = method_label(method_name);
-            add_reason_offense(self.cop, self.source, self.diagnostics, node, label);
+            add_reason_offense(
+                self.cop,
+                self.source,
+                self.diagnostics,
+                self.corrections.as_deref_mut(),
+                node,
+                label,
+            );
         }
 
         // RuboCop: skipped example-group methods report "skip".
@@ -247,7 +274,14 @@ impl<'a, 'pr> Visit<'pr> for PendingWithoutReasonVisitor<'a, 'pr> {
                     && is_explicit_rspec_receiver(node.receiver())
                     && !self.is_sole_top_level()))
         {
-            add_reason_offense(self.cop, self.source, self.diagnostics, node, "skip");
+            add_reason_offense(
+                self.cop,
+                self.source,
+                self.diagnostics,
+                self.corrections.as_deref_mut(),
+                node,
+                "skip",
+            );
         }
 
         ruby_prism::visit_call_node(self, node);
@@ -345,23 +379,40 @@ fn add_reason_offense(
     cop: &PendingWithoutReason,
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     call: &ruby_prism::CallNode<'_>,
     label: &str,
 ) {
     let loc = call.location();
     let (line, column) = source.offset_to_line_col(loc.start_offset());
-    diagnostics.push(cop.diagnostic(
-        source,
-        line,
-        column,
-        format!("Give the reason for {label}."),
-    ));
+    let mut diagnostic = cop.diagnostic(source, line, column, format!("Give the reason for {label}."));
+
+    // Conservative baseline autocorrect: only for receiverless no-arg pending/skip
+    // style calls. Insert a placeholder reason argument.
+    if call.receiver().is_none()
+        && call.arguments().is_none()
+        && let Some(selector_loc) = call.message_loc()
+        && let Some(corrections) = corrections
+    {
+        let method = std::str::from_utf8(call.name().as_slice()).unwrap_or("pending");
+        corrections.push(crate::correction::Correction {
+            start: selector_loc.start_offset(),
+            end: selector_loc.end_offset(),
+            replacement: format!("{method}('TODO: reason')"),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+
+    diagnostics.push(diagnostic);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(PendingWithoutReason, "cops/rspec/pending_without_reason");
+    crate::cop_autocorrect_fixture_tests!(PendingWithoutReason, "cops/rspec/pending_without_reason");
 
     /// RuboCop does not flag `RSpec.xdescribe` when it is the sole top-level
     /// statement (Parser-gem `parent_node` returns nil → `on_send` returns early).
