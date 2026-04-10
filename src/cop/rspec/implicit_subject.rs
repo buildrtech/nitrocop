@@ -117,6 +117,10 @@ impl Cop for ImplicitSubject {
         &[CALL_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -124,7 +128,7 @@ impl Cop for ImplicitSubject {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: EnforcedStyle — "single_line_only" (default), "single_statement_only", or "disallow"
         let enforced_style = config.get_str("EnforcedStyle", "single_line_only");
@@ -165,12 +169,10 @@ impl Cop for ImplicitSubject {
 
         // "disallow" style: flag all implicit subject usage (except `its` handled above)
         if enforced_style == "disallow" {
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
-                "Don't use implicit subject.".to_string(),
-            ));
+            let mut diagnostic =
+                self.diagnostic(source, line, column, "Don't use implicit subject.".to_string());
+            apply_autocorrect(self, &call, corrections, &mut diagnostic);
+            diagnostics.push(diagnostic);
             return;
         }
 
@@ -211,12 +213,10 @@ impl Cop for ImplicitSubject {
         }
 
         // This is used in a context that should be flagged
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Don't use implicit subject.".to_string(),
-        ));
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Don't use implicit subject.".to_string());
+        apply_autocorrect(self, &call, corrections, &mut diagnostic);
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -286,10 +286,42 @@ fn is_single_statement_block(source: &SourceFile, example_line: usize, call_line
     statement_count == 1
 }
 
+fn apply_autocorrect(
+    cop: &ImplicitSubject,
+    call: &ruby_prism::CallNode<'_>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
+    diagnostic: &mut Diagnostic,
+) {
+    let replacement = match call.name().as_slice() {
+        b"is_expected" => "expect(subject)",
+        b"should" => "expect(subject).to",
+        b"should_not" => "expect(subject).not_to",
+        _ => return,
+    };
+
+    if let Some(selector) = call.message_loc()
+        && let Some(corrections) = corrections
+    {
+        corrections.push(crate::correction::Correction {
+            start: selector.start_offset(),
+            end: selector.end_offset(),
+            replacement: replacement.to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ImplicitSubject, "cops/rspec/implicit_subject");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(ImplicitSubject.supports_autocorrect());
+    }
 
     #[test]
     fn disallow_style_flags_single_line_too() {
@@ -368,5 +400,14 @@ mod tests {
         let source = b"it 'checks' do\n  subject.age = 18\n  is_expected.to be_valid\nend\n";
         let diags = crate::testutil::run_cop_full_with_config(&ImplicitSubject, source, config);
         assert_eq!(diags.len(), 1, "multi-statement should be flagged");
+    }
+
+    #[test]
+    fn autocorrects_implicit_subject_to_explicit_subject() {
+        crate::testutil::assert_cop_autocorrect(
+            &ImplicitSubject,
+            b"it 'checks the subject' do\n  is_expected.to be_good\nend\n",
+            b"it 'checks the subject' do\n  expect(subject).to be_good\nend\n",
+        );
     }
 }
