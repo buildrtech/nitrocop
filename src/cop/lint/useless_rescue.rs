@@ -26,6 +26,10 @@ impl Cop for UselessRescue {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -33,16 +37,20 @@ impl Cop for UselessRescue {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = RescueVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections: Vec::new(),
             ensure_var_names: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(c) = corrections {
+            c.extend(visitor.corrections);
+        }
     }
 }
 
@@ -50,6 +58,7 @@ struct RescueVisitor<'a, 'src> {
     cop: &'a UselessRescue,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Vec<crate::correction::Correction>,
     /// Local variable names referenced in the current ensure context.
     /// When visiting inside a begin/def node with an ensure clause,
     /// this contains variable names used in the ensure body.
@@ -78,12 +87,26 @@ impl<'pr> Visit<'pr> for RescueVisitor<'_, '_> {
         {
             let loc = node.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Useless `rescue` detected.".to_string(),
-            ));
+            );
+
+            let mut start = loc.start_offset();
+            if start > 0 && self.source.as_bytes()[start - 1] == b'\n' {
+                start -= 1;
+            }
+            self.corrections.push(crate::correction::Correction {
+                start,
+                end: loc.end_offset(),
+                replacement: String::new(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+            self.diagnostics.push(diagnostic);
         }
 
         // Continue visiting children
@@ -95,12 +118,27 @@ impl<'pr> Visit<'pr> for RescueVisitor<'_, '_> {
             let rescue_offset = rescue_modifier_keyword_offset(node, self.source)
                 .unwrap_or_else(|| node.location().start_offset());
             let (line, column) = self.source.offset_to_line_col(rescue_offset);
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Useless `rescue` detected.".to_string(),
-            ));
+            );
+
+            let bytes = self.source.as_bytes();
+            let mut start = rescue_offset;
+            if start > 0 && bytes[start - 1].is_ascii_whitespace() && bytes[start - 1] != b'\n' {
+                start -= 1;
+            }
+            self.corrections.push(crate::correction::Correction {
+                start,
+                end: node.location().end_offset(),
+                replacement: String::new(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+            self.diagnostics.push(diagnostic);
         }
 
         ruby_prism::visit_rescue_modifier_node(self, node);
@@ -275,4 +313,27 @@ fn rescue_modifier_keyword_offset(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UselessRescue, "cops/lint/useless_rescue");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(UselessRescue.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_useless_rescue_clause() {
+        crate::testutil::assert_cop_autocorrect(
+            &UselessRescue,
+            b"def foo\n  do_something\nrescue\n  raise\nend\n",
+            b"def foo\n  do_something\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrect_removes_modifier_rescue_reraise_segment() {
+        crate::testutil::assert_cop_autocorrect(
+            &UselessRescue,
+            b"raise 'TEST_ME' rescue raise rescue nil\n",
+            b"raise 'TEST_ME' rescue nil\n",
+        );
+    }
 }
