@@ -39,6 +39,10 @@ impl Cop for DescribeMethod {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -46,7 +50,7 @@ impl Cop for DescribeMethod {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match parse_result.node().as_program_node() {
             Some(p) => p,
@@ -57,11 +61,12 @@ impl Cop for DescribeMethod {
 
         // Mirror RuboCop's TopLevelGroup logic: if single top-level statement,
         // unwrap module/class/begin wrappers. If multiple, check each directly.
+        let mut corrections = corrections;
         if stmts.len() == 1 {
-            self.collect_from_wrapper(&stmts[0], source, diagnostics);
+            self.collect_from_wrapper(&stmts[0], source, diagnostics, corrections.as_deref_mut());
         } else {
             for stmt in &stmts {
-                self.check_describe_call(stmt, source, diagnostics);
+                self.check_describe_call(stmt, source, diagnostics, corrections.as_deref_mut());
             }
         }
     }
@@ -74,9 +79,10 @@ impl DescribeMethod {
         node: &ruby_prism::Node<'_>,
         source: &SourceFile,
         diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Direct describe call
-        if self.check_describe_call(node, source, diagnostics) {
+        if self.check_describe_call(node, source, diagnostics, corrections.as_deref_mut()) {
             return;
         }
 
@@ -88,7 +94,12 @@ impl DescribeMethod {
                     .iter()
                     .flat_map(|s| s.body().iter())
                 {
-                    self.collect_from_wrapper(&child, source, diagnostics);
+                    self.collect_from_wrapper(
+                        &child,
+                        source,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                    );
                 }
             }
             return;
@@ -102,7 +113,12 @@ impl DescribeMethod {
                     .iter()
                     .flat_map(|s| s.body().iter())
                 {
-                    self.collect_from_wrapper(&child, source, diagnostics);
+                    self.collect_from_wrapper(
+                        &child,
+                        source,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                    );
                 }
             }
             return;
@@ -112,7 +128,12 @@ impl DescribeMethod {
         if let Some(begin_node) = node.as_begin_node() {
             if let Some(stmts) = begin_node.statements() {
                 for child in stmts.body().iter() {
-                    self.collect_from_wrapper(&child, source, diagnostics);
+                    self.collect_from_wrapper(
+                        &child,
+                        source,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                    );
                 }
             }
         }
@@ -125,6 +146,7 @@ impl DescribeMethod {
         node: &ruby_prism::Node<'_>,
         source: &SourceFile,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) -> bool {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -185,12 +207,28 @@ impl DescribeMethod {
 
         let loc = arg_list[1].location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "The second argument to describe should be the method being tested. '#instance' or '.class'.".to_string(),
-        ));
+        );
+
+        if let Some(s) = arg_list[1].as_string_node()
+            && let Some(corrections) = corrections
+        {
+            let content_loc = s.content_loc();
+            corrections.push(crate::correction::Correction {
+                start: content_loc.start_offset(),
+                end: content_loc.start_offset(),
+                replacement: "#".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
         true
     }
 }
@@ -212,6 +250,7 @@ fn is_rspec_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DescribeMethod, "cops/rspec/describe_method");
+    crate::cop_autocorrect_fixture_tests!(DescribeMethod, "cops/rspec/describe_method");
 
     #[test]
     fn qualified_rspec_receiver_offense() {
