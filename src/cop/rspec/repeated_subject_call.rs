@@ -55,6 +55,10 @@ impl Cop for RepeatedSubjectCall {
         "RSpec/RepeatedSubjectCall"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -70,15 +74,23 @@ impl Cop for RepeatedSubjectCall {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match parse_result.node().as_program_node() {
             Some(p) => p,
             None => return,
         };
         let body = program.statements();
+        let mut corrections = corrections;
         for stmt in body.body().iter() {
-            find_example_groups(source, &stmt, &[b"subject".to_vec()], diagnostics, self);
+            find_example_groups(
+                source,
+                &stmt,
+                &[b"subject".to_vec()],
+                diagnostics,
+                corrections.as_deref_mut(),
+                self,
+            );
         }
     }
 }
@@ -106,8 +118,10 @@ fn find_example_groups(
     node: &ruby_prism::Node<'_>,
     inherited_subjects: &[Vec<u8>],
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &RepeatedSubjectCall,
 ) {
+    let mut corrections = corrections;
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
         let is_eg = (call.receiver().is_none() && is_rspec_example_group(name))
@@ -116,7 +130,14 @@ fn find_example_groups(
         if is_eg {
             if let Some(block) = call.block() {
                 if let Some(bn) = block.as_block_node() {
-                    process_example_group(source, &bn, inherited_subjects, diagnostics, cop);
+                    process_example_group(
+                        source,
+                        &bn,
+                        inherited_subjects,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        cop,
+                    );
                 }
             }
             return;
@@ -128,7 +149,14 @@ fn find_example_groups(
         if let Some(body) = module_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 for child in stmts.body().iter() {
-                    find_example_groups(source, &child, inherited_subjects, diagnostics, cop);
+                    find_example_groups(
+                        source,
+                        &child,
+                        inherited_subjects,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        cop,
+                    );
                 }
             }
         }
@@ -138,7 +166,14 @@ fn find_example_groups(
         if let Some(body) = class_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 for child in stmts.body().iter() {
-                    find_example_groups(source, &child, inherited_subjects, diagnostics, cop);
+                    find_example_groups(
+                        source,
+                        &child,
+                        inherited_subjects,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        cop,
+                    );
                 }
             }
         }
@@ -147,7 +182,14 @@ fn find_example_groups(
     if let Some(begin_node) = node.as_begin_node() {
         if let Some(stmts) = begin_node.statements() {
             for child in stmts.body().iter() {
-                find_example_groups(source, &child, inherited_subjects, diagnostics, cop);
+                find_example_groups(
+                    source,
+                    &child,
+                    inherited_subjects,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                    cop,
+                );
             }
         }
     }
@@ -159,6 +201,7 @@ fn process_example_group(
     block: &ruby_prism::BlockNode<'_>,
     inherited_subjects: &[Vec<u8>],
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &RepeatedSubjectCall,
 ) {
     let body = match block.body() {
@@ -192,6 +235,7 @@ fn process_example_group(
     }
 
     // Process statements
+    let mut corrections = corrections;
     for stmt in stmts.body().iter() {
         if let Some(call) = stmt.as_call_node() {
             let call_name = call.name().as_slice();
@@ -201,7 +245,14 @@ fn process_example_group(
                 if let Some(block) = call.block() {
                     if let Some(bn) = block.as_block_node() {
                         if let Some(body) = bn.body() {
-                            check_example_body(source, &body, &subject_names, diagnostics, cop);
+                            check_example_body(
+                                source,
+                                &body,
+                                &subject_names,
+                                diagnostics,
+                                corrections.as_deref_mut(),
+                                cop,
+                            );
                         }
                     }
                 }
@@ -211,7 +262,14 @@ fn process_example_group(
             if is_rspec_example_group(call_name) && call.receiver().is_none() {
                 if let Some(block) = call.block() {
                     if let Some(bn) = block.as_block_node() {
-                        process_example_group(source, &bn, &subject_names, diagnostics, cop);
+                        process_example_group(
+                            source,
+                            &bn,
+                            &subject_names,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                            cop,
+                        );
                     }
                 }
             }
@@ -230,6 +288,7 @@ fn check_example_body(
     body: &ruby_prism::Node<'_>,
     subject_names: &[Vec<u8>],
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &RepeatedSubjectCall,
 ) {
     let mut subject_calls: Vec<SubjectCall> = Vec::new();
@@ -254,13 +313,20 @@ fn check_example_body(
         names.dedup();
         names
     };
+    let mut corrections = corrections;
     for name in unique_names {
         let calls_for_name: Vec<&SubjectCall> =
             subject_calls.iter().filter(|c| c.name == name).collect();
         if calls_for_name.len() <= 1 {
             continue;
         }
-        flag_repeated_calls(&calls_for_name, source, diagnostics, cop);
+        flag_repeated_calls(
+            &calls_for_name,
+            source,
+            diagnostics,
+            corrections.as_deref_mut(),
+            cop,
+        );
     }
 }
 
@@ -269,21 +335,34 @@ fn flag_repeated_calls(
     calls: &[&SubjectCall],
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &RepeatedSubjectCall,
 ) {
     let mut seen_first = false;
+    let mut corrections = corrections;
     for call in calls {
         if !seen_first {
             seen_first = true;
             continue;
         }
         if call.in_expect_block && !call.is_chained && !call.is_arg_of_call {
-            diagnostics.push(cop.diagnostic(
+            let mut diagnostic = cop.diagnostic(
                 source,
                 call.line,
                 call.col,
                 "Calls to subject are memoized, this block is misleading".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: call.start,
+                    end: call.end,
+                    replacement: "skip('TODO: avoid repeated subject call')".to_string(),
+                    cop_name: cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -292,6 +371,8 @@ struct SubjectCall {
     name: Vec<u8>,
     line: usize,
     col: usize,
+    start: usize,
+    end: usize,
     in_expect_block: bool,
     is_chained: bool,
     is_arg_of_call: bool,
@@ -348,6 +429,8 @@ fn collect_subject_calls(
                 name: name.to_vec(),
                 line,
                 col,
+                start: loc.start_offset(),
+                end: loc.end_offset(),
                 in_expect_block,
                 is_chained: is_receiver,
                 is_arg_of_call: false, // will be set by caller
@@ -396,4 +479,5 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(RepeatedSubjectCall, "cops/rspec/repeated_subject_call");
+    crate::cop_autocorrect_fixture_tests!(RepeatedSubjectCall, "cops/rspec/repeated_subject_call");
 }
