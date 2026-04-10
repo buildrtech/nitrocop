@@ -69,6 +69,10 @@ impl Cop for SubjectStub {
         "RSpec/SubjectStub"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -84,7 +88,7 @@ impl Cop for SubjectStub {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match parse_result.node().as_program_node() {
             Some(p) => p,
@@ -93,15 +97,16 @@ impl Cop for SubjectStub {
         let body = program.statements();
         let stmts: Vec<_> = body.body().iter().collect();
 
+        let mut corrections = corrections;
         if stmts.len() == 1 {
             // Single top-level statement: unwrap module/class wrappers to find spec groups.
-            self.find_top_level_groups(&stmts[0], source, diagnostics);
+            self.find_top_level_groups(&stmts[0], source, diagnostics, corrections.as_deref_mut());
         } else {
             // Multiple top-level statements (e.g., `require "spec_helper"` + `describe Foo`):
             // Only check direct children for spec groups, do NOT unwrap modules/classes.
             // This matches RuboCop's TopLevelGroup `:begin` branch.
             for stmt in &stmts {
-                self.check_direct_spec_group(stmt, source, diagnostics);
+                self.check_direct_spec_group(stmt, source, diagnostics, corrections.as_deref_mut());
             }
         }
     }
@@ -115,6 +120,7 @@ impl SubjectStub {
         node: &ruby_prism::Node<'_>,
         source: &SourceFile,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(call) = node.as_call_node() {
             if let Some(block) = call.block() {
@@ -131,6 +137,7 @@ impl SubjectStub {
                             bn,
                             &mut subject_names,
                             diagnostics,
+                            corrections,
                             self,
                         );
                     }
@@ -146,7 +153,9 @@ impl SubjectStub {
         node: &ruby_prism::Node<'_>,
         source: &SourceFile,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Check if this node is a spec group call
         if let Some(call) = node.as_call_node() {
             if let Some(block) = call.block() {
@@ -163,6 +172,7 @@ impl SubjectStub {
                             bn,
                             &mut subject_names,
                             diagnostics,
+                            corrections.as_deref_mut(),
                             self,
                         );
                         return;
@@ -176,7 +186,12 @@ impl SubjectStub {
             if let Some(body) = module_node.body() {
                 if let Some(stmts) = body.as_statements_node() {
                     for child in stmts.body().iter() {
-                        self.find_top_level_groups(&child, source, diagnostics);
+                        self.find_top_level_groups(
+                            &child,
+                            source,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                        );
                     }
                 }
             }
@@ -188,7 +203,12 @@ impl SubjectStub {
             if let Some(body) = class_node.body() {
                 if let Some(stmts) = body.as_statements_node() {
                     for child in stmts.body().iter() {
-                        self.find_top_level_groups(&child, source, diagnostics);
+                        self.find_top_level_groups(
+                            &child,
+                            source,
+                            diagnostics,
+                            corrections.as_deref_mut(),
+                        );
                     }
                 }
             }
@@ -199,7 +219,12 @@ impl SubjectStub {
         if let Some(begin_node) = node.as_begin_node() {
             if let Some(stmts) = begin_node.statements() {
                 for child in stmts.body().iter() {
-                    self.find_top_level_groups(&child, source, diagnostics);
+                    self.find_top_level_groups(
+                        &child,
+                        source,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                    );
                 }
             }
         }
@@ -211,6 +236,7 @@ fn collect_subject_stub_offenses(
     block: ruby_prism::BlockNode<'_>,
     subject_names: &mut Vec<Vec<u8>>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &SubjectStub,
 ) {
     let body = match block.body() {
@@ -264,8 +290,16 @@ fn collect_subject_stub_offenses(
     }
 
     // Second pass: check for stubs on subject names and recurse into nested groups
+    let mut corrections = corrections;
     for stmt in stmts.body().iter() {
-        check_for_subject_stubs(source, &stmt, subject_names, diagnostics, cop);
+        check_for_subject_stubs(
+            source,
+            &stmt,
+            subject_names,
+            diagnostics,
+            corrections.as_deref_mut(),
+            cop,
+        );
     }
 
     // Restore subject names for this scope (don't leak child-scope subjects to siblings)
@@ -281,13 +315,23 @@ fn check_for_subject_stubs(
     node: &ruby_prism::Node<'_>,
     subject_names: &[Vec<u8>],
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &SubjectStub,
 ) {
+    let mut corrections = corrections;
     if let Some(call) = node.as_call_node() {
         // Check for allow(subject_name).to receive(...) or expect(subject_name).to receive(...)
         // Also handles chained calls after .to (e.g., .to(...).at_least(:once) or
         // .to(receive(...)).and_return(baz)) where .to is buried in the receiver chain.
-        if check_stub_expression(&call, node, source, subject_names, diagnostics, cop) {
+        if check_stub_expression(
+            &call,
+            node,
+            source,
+            subject_names,
+            diagnostics,
+            corrections.as_deref_mut(),
+            cop,
+        ) {
             return;
         }
 
@@ -296,7 +340,14 @@ fn check_for_subject_stubs(
         // This handles cases like: expect(Thread).to receive(:new) do |&block|
         //   expect(subject).to receive(:method)  # block is on .to, not .and_return
         // end.and_return(fake_thread)
-        recurse_into_call_blocks(&call, source, subject_names, diagnostics, cop);
+        recurse_into_call_blocks(
+            &call,
+            source,
+            subject_names,
+            diagnostics,
+            corrections.as_deref_mut(),
+            cop,
+        );
     }
 
     // Check instance method def nodes for subject stubs too.
@@ -309,7 +360,14 @@ fn check_for_subject_stubs(
         if let Some(body) = def_node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 for s in stmts.body().iter() {
-                    check_for_subject_stubs(source, &s, subject_names, diagnostics, cop);
+                    check_for_subject_stubs(
+                        source,
+                        &s,
+                        subject_names,
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        cop,
+                    );
                 }
             }
         }
@@ -326,8 +384,10 @@ fn recurse_into_call_blocks(
     source: &SourceFile,
     subject_names: &[Vec<u8>],
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &SubjectStub,
 ) {
+    let mut corrections = corrections;
     // Check block on this call
     if let Some(block) = call.block() {
         if let Some(bn) = block.as_block_node() {
@@ -335,13 +395,27 @@ fn recurse_into_call_blocks(
             if is_rspec_example_group(call_name) {
                 // Nested example group — create new scope with inherited subject names
                 let mut child_names = subject_names.to_vec();
-                collect_subject_stub_offenses(source, bn, &mut child_names, diagnostics, cop);
+                collect_subject_stub_offenses(
+                    source,
+                    bn,
+                    &mut child_names,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                    cop,
+                );
             } else {
                 // Non-example-group block (before, it, specify, def, etc.)
                 if let Some(body) = bn.body() {
                     if let Some(stmts) = body.as_statements_node() {
                         for s in stmts.body().iter() {
-                            check_for_subject_stubs(source, &s, subject_names, diagnostics, cop);
+                            check_for_subject_stubs(
+                                source,
+                                &s,
+                                subject_names,
+                                diagnostics,
+                                corrections.as_deref_mut(),
+                                cop,
+                            );
                         }
                     }
                 }
@@ -354,7 +428,14 @@ fn recurse_into_call_blocks(
     // (e.g., .to has a do...end block, but .and_return is the outermost call).
     if let Some(recv) = call.receiver() {
         if let Some(recv_call) = recv.as_call_node() {
-            recurse_into_call_blocks(&recv_call, source, subject_names, diagnostics, cop);
+            recurse_into_call_blocks(
+                &recv_call,
+                source,
+                subject_names,
+                diagnostics,
+                corrections,
+                cop,
+            );
         }
     }
 }
@@ -369,6 +450,7 @@ fn check_stub_expression(
     source: &SourceFile,
     subject_names: &[Vec<u8>],
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     cop: &SubjectStub,
 ) -> bool {
     let method = call.name().as_slice();
@@ -391,12 +473,25 @@ fn check_stub_expression(
         SubjectMatch::IsExpected | SubjectMatch::NamedSubject => {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(cop.diagnostic(
+            let mut diagnostic = cop.diagnostic(
                 source,
                 line,
                 column,
                 "Do not stub methods of the object under test.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections {
+                let start = loc.start_offset();
+                let end = call.location().end_offset();
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: "skip('TODO: avoid subject stub')".to_string(),
+                    cop_name: cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
             true
         }
         SubjectMatch::None => false,
@@ -567,4 +662,13 @@ fn is_rspec_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SubjectStub, "cops/rspec/subject_stub");
+
+    #[test]
+    fn autocorrect_replaces_subject_stub_expression() {
+        crate::testutil::assert_cop_autocorrect(
+            &SubjectStub,
+            b"describe MyClass do\n  subject(:thing) { build(:thing) }\n  it do\n    expect(thing).to receive(:run)\n  end\nend\n",
+            b"describe MyClass do\n  subject(:thing) { build(:thing) }\n  it do\n    skip('TODO: avoid subject stub')\n  end\nend\n",
+        );
+    }
 }
