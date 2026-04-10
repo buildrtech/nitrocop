@@ -39,6 +39,10 @@ impl Cop for IteratedExpectation {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -46,7 +50,7 @@ impl Cop for IteratedExpectation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Flag `.each { |x| expect(x)... }` — suggest using `all` matcher
         let call = match node.as_call_node() {
@@ -129,18 +133,54 @@ impl Cop for IteratedExpectation {
 
         // RuboCop requires ALL statements in the block body to be
         // expect(block_param).to ... where block_param is a bare lvar.
-        if is_single_expectation_with_param(&body, &param_name)
-            || is_all_expectations_with_param(&body, &param_name)
-        {
+        let single_to_call = if is_expectation_with_param(&body, &param_name) {
+            body.as_call_node()
+        } else if let Some(stmts) = body.as_statements_node() {
+            let children: Vec<_> = stmts.body().iter().collect();
+            if children.len() == 1 && is_expectation_with_param(&children[0], &param_name) {
+                children[0].as_call_node()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if single_to_call.is_some() || is_all_expectations_with_param(&body, &param_name) {
             let recv = call.receiver().unwrap();
             let loc = recv.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Prefer using the `all` matcher instead of iterating over an array.".to_string(),
-            ));
+            );
+
+            if let (Some(to_call), Some(corrections), Some(block_raw)) =
+                (single_to_call, corrections, call.block())
+                && let Some(matcher) = to_call.arguments().and_then(|a| a.arguments().iter().next())
+                && !matcher_uses_param(&matcher, &param_name)
+                && let Some(collection_text) =
+                    source.try_byte_slice(recv.location().start_offset(), recv.location().end_offset())
+                && let Some(matcher_text) = source.try_byte_slice(
+                    matcher.location().start_offset(),
+                    matcher.location().end_offset(),
+                )
+                && let Some(_block_node) = block_raw.as_block_node()
+            {
+                let call_loc = call.location();
+                corrections.push(crate::correction::Correction {
+                    start: call_loc.start_offset(),
+                    end: call_loc.end_offset(),
+                    replacement: format!("expect({collection_text}).to all({matcher_text})"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -199,9 +239,28 @@ fn is_expectation_with_param(node: &ruby_prism::Node<'_>, param_name: &[u8]) -> 
     }
 }
 
-/// Check if a single node is an expectation with the param.
-fn is_single_expectation_with_param(node: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
-    is_expectation_with_param(node, param_name)
+fn matcher_uses_param(node: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
+    use ruby_prism::Visit;
+
+    struct ParamUseVisitor<'a> {
+        target: &'a [u8],
+        found: bool,
+    }
+
+    impl<'pr> Visit<'pr> for ParamUseVisitor<'_> {
+        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+            if node.name().as_slice() == self.target {
+                self.found = true;
+            }
+        }
+    }
+
+    let mut visitor = ParamUseVisitor {
+        target: param_name,
+        found: false,
+    };
+    visitor.visit(node);
+    visitor.found
 }
 
 /// Check if all statements in a begin/statements node are expectations with the param.
@@ -223,4 +282,27 @@ fn is_all_expectations_with_param(node: &ruby_prism::Node<'_>, param_name: &[u8]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(IteratedExpectation, "cops/rspec/iterated_expectation");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(IteratedExpectation.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_simple_each_expectation_to_all_matcher() {
+        crate::testutil::assert_cop_autocorrect(
+            &IteratedExpectation,
+            b"users.each { |user| expect(user).to be_valid }\n",
+            b"expect(users).to all(be_valid)\n",
+        );
+    }
+
+    #[test]
+    fn does_not_autocorrect_when_matcher_uses_block_param() {
+        let input = b"users.each { |user| expect(user).to have_attributes(id: user.id) }\n";
+        let (diags, corrections) = crate::testutil::run_cop_autocorrect(&IteratedExpectation, input);
+        assert_eq!(diags.len(), 1);
+        assert!(!diags[0].corrected);
+        assert!(corrections.is_empty());
+    }
 }
