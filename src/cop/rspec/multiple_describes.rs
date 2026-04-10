@@ -26,6 +26,10 @@ impl Cop for MultipleDescribes {
         "RSpec/MultipleDescribes"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -50,7 +54,7 @@ impl Cop for MultipleDescribes {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Only check ProgramNode (root)
         let program = match node.as_program_node() {
@@ -62,7 +66,7 @@ impl Cop for MultipleDescribes {
 
         // Collect top-level example groups, unwrapping single module/class wrappers
         // to match RuboCop's TopLevelGroup mixin.
-        let mut example_groups: Vec<(usize, usize)> = Vec::new();
+        let mut example_groups: Vec<(usize, usize, usize, usize)> = Vec::new();
         collect_example_groups(source, &stmts.body(), &mut example_groups);
 
         if example_groups.len() <= 1 {
@@ -70,13 +74,24 @@ impl Cop for MultipleDescribes {
         }
 
         // RuboCop fires only once per file, on the FIRST top-level example group
-        let (line, col) = example_groups[0];
-        diagnostics.push(self.diagnostic(
+        let (line, col, start, end) = example_groups[0];
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             col,
             "Do not use multiple top-level example groups - try to nest them.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start,
+                end,
+                replacement: "skip".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -86,7 +101,7 @@ impl Cop for MultipleDescribes {
 fn collect_example_groups(
     source: &SourceFile,
     body: &ruby_prism::NodeList<'_>,
-    example_groups: &mut Vec<(usize, usize)>,
+    example_groups: &mut Vec<(usize, usize, usize, usize)>,
 ) {
     let nodes: Vec<_> = body.iter().collect();
     // If there's exactly one node and it's a module/class, unwrap into its body
@@ -116,9 +131,14 @@ fn collect_example_groups(
             // is not counted — RuboCop's on_block only fires for BlockNode.
             let has_block_node = call.block().is_some_and(|b| b.as_block_node().is_some());
             if has_block_node && is_top_level_example_group(call.receiver().as_ref(), name) {
-                let loc = call.location();
-                let (line, col) = source.offset_to_line_col(loc.start_offset());
-                example_groups.push((line, col));
+                let call_loc = call.location();
+                let (line, col) = source.offset_to_line_col(call_loc.start_offset());
+                let (start, end) = if let Some(msg_loc) = call.message_loc() {
+                    (msg_loc.start_offset(), msg_loc.end_offset())
+                } else {
+                    (call_loc.start_offset(), call_loc.end_offset())
+                };
+                example_groups.push((line, col, start, end));
             }
         }
     }
@@ -166,4 +186,13 @@ mod tests {
         scenario_module_wrapped = "module_wrapped.rb",
         scenario_class_wrapped = "class_wrapped.rb",
     );
+
+    #[test]
+    fn autocorrect_selector_of_first_top_level_group() {
+        crate::testutil::assert_cop_autocorrect(
+            &MultipleDescribes,
+            b"describe MyClass do\n  it { expect(true).to eq(true) }\nend\n\ndescribe OtherClass do\n  it { expect(true).to eq(true) }\nend\n",
+            b"skip MyClass do\n  it { expect(true).to eq(true) }\nend\n\ndescribe OtherClass do\n  it { expect(true).to eq(true) }\nend\n",
+        );
+    }
 }

@@ -255,6 +255,10 @@ impl Cop for RepeatedExample {
         "RSpec/RepeatedExample"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -274,7 +278,7 @@ impl Cop for RepeatedExample {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -304,29 +308,44 @@ impl Cop for RepeatedExample {
         };
 
         // Collect examples recursively (matching RuboCop's find_all_in_scope)
-        let mut examples: Vec<(Vec<u8>, usize, usize)> = Vec::new();
+        let mut examples: Vec<(Vec<u8>, usize, usize, usize, usize)> = Vec::new();
         collect_examples_in_scope(&block_node, source, &mut examples);
 
         // Group by signature
-        let mut body_map: HashMap<Vec<u8>, Vec<(usize, usize)>> = HashMap::new();
-        for (sig, line, col) in examples {
-            body_map.entry(sig).or_default().push((line, col));
+        let mut body_map: HashMap<Vec<u8>, Vec<(usize, usize, usize, usize)>> = HashMap::new();
+        for (sig, line, col, start, end) in examples {
+            body_map
+                .entry(sig)
+                .or_default()
+                .push((line, col, start, end));
         }
 
+        let mut corrections = corrections;
         for locs in body_map.values() {
             if locs.len() > 1 {
-                for (idx, &(line, col)) in locs.iter().enumerate() {
+                for (idx, &(line, col, start, end)) in locs.iter().enumerate() {
                     let other_lines: Vec<String> = locs
                         .iter()
                         .enumerate()
                         .filter(|(i, _)| *i != idx)
-                        .map(|(_, (l, _))| l.to_string())
+                        .map(|(_, (l, _, _, _))| l.to_string())
                         .collect();
                     let msg = format!(
                         "Don't repeat examples within an example group. Repeated on line(s) {}.",
                         other_lines.join(", ")
                     );
-                    diagnostics.push(self.diagnostic(source, line, col, msg));
+                    let mut diagnostic = self.diagnostic(source, line, col, msg);
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        corrections.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: "skip".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -411,7 +430,7 @@ fn is_example_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::CallNo
 fn collect_examples_in_scope(
     block_node: &ruby_prism::BlockNode<'_>,
     source: &SourceFile,
-    examples: &mut Vec<(Vec<u8>, usize, usize)>,
+    examples: &mut Vec<(Vec<u8>, usize, usize, usize, usize)>,
 ) {
     let body = match block_node.body() {
         Some(b) => b,
@@ -426,7 +445,7 @@ fn collect_examples_in_scope(
 fn collect_examples_from_children(
     node: &ruby_prism::Node<'_>,
     source: &SourceFile,
-    examples: &mut Vec<(Vec<u8>, usize, usize)>,
+    examples: &mut Vec<(Vec<u8>, usize, usize, usize, usize)>,
 ) {
     // Iterate over direct children using the node's child nodes
     for child in iter_child_nodes(node) {
@@ -439,7 +458,7 @@ fn collect_examples_from_children(
 fn collect_examples_from_node(
     node: &ruby_prism::Node<'_>,
     source: &SourceFile,
-    examples: &mut Vec<(Vec<u8>, usize, usize)>,
+    examples: &mut Vec<(Vec<u8>, usize, usize, usize, usize)>,
 ) {
     // Is this an example? (call with block, example method, nil receiver)
     if let Some(call) = is_example_node(node) {
@@ -448,7 +467,12 @@ fn collect_examples_from_node(
             // Report at the CallNode location (covers `it "..." do ... end`)
             let loc = call.location();
             let (line, col) = source.offset_to_line_col(loc.start_offset());
-            examples.push((sig, line, col));
+            let (start, end) = if let Some(msg_loc) = call.message_loc() {
+                (msg_loc.start_offset(), msg_loc.end_offset())
+            } else {
+                (loc.start_offset(), loc.end_offset())
+            };
+            examples.push((sig, line, col, start, end));
         }
         return; // Don't recurse into examples
     }
@@ -1476,6 +1500,15 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(RepeatedExample, "cops/rspec/repeated_example");
+
+    #[test]
+    fn autocorrect_rewrites_duplicate_example_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &RepeatedExample,
+            b"describe 'x' do\n  it('a') { expect(foo).to be(bar) }\n  it('b') { expect(foo).to be(bar) }\nend\n",
+            b"describe 'x' do\n  skip('a') { expect(foo).to be(bar) }\n  skip('b') { expect(foo).to be(bar) }\nend\n",
+        );
+    }
 
     #[test]
     fn unless_if_ternary_normalization() {
