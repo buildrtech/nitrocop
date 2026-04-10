@@ -42,6 +42,10 @@ impl Cop for SpecFilePathSuffix {
         "RSpec/SpecFilePathSuffix"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -66,7 +70,7 @@ impl Cop for SpecFilePathSuffix {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Only check ProgramNode (root)
         let program = match node.as_program_node() {
@@ -96,12 +100,25 @@ impl Cop for SpecFilePathSuffix {
         }
 
         // File-level offense — report at line 1, column 0
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             1,
             0,
             "Spec path should end with `_spec.rb`.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            if let Some((start, end)) = first_example_group_selector_range(program) {
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: "skip".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -154,6 +171,76 @@ fn has_example_group_node(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
+fn first_example_group_selector_range(
+    program: ruby_prism::ProgramNode<'_>,
+) -> Option<(usize, usize)> {
+    let stmts = program.statements();
+    let body = stmts.body();
+
+    if body.len() == 1 {
+        first_example_group_selector_in_nodes(body.iter())
+    } else {
+        first_direct_example_group_selector(body.iter())
+    }
+}
+
+fn first_direct_example_group_selector<'a>(
+    nodes: impl Iterator<Item = ruby_prism::Node<'a>>,
+) -> Option<(usize, usize)> {
+    for node in nodes {
+        if let Some(call) = node.as_call_node() {
+            if is_rspec_example_group_call(&call) {
+                if let Some(msg_loc) = call.message_loc() {
+                    return Some((msg_loc.start_offset(), msg_loc.end_offset()));
+                }
+                let loc = call.location();
+                return Some((loc.start_offset(), loc.end_offset()));
+            }
+        }
+    }
+    None
+}
+
+fn first_example_group_selector_in_nodes<'a>(
+    nodes: impl Iterator<Item = ruby_prism::Node<'a>>,
+) -> Option<(usize, usize)> {
+    for node in nodes {
+        if let Some(range) = first_example_group_selector_in_node(&node) {
+            return Some(range);
+        }
+    }
+    None
+}
+
+fn first_example_group_selector_in_node(node: &ruby_prism::Node<'_>) -> Option<(usize, usize)> {
+    if let Some(module_node) = node.as_module_node() {
+        if let Some(body) = module_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                return first_example_group_selector_in_nodes(stmts.body().iter());
+            }
+        }
+        return None;
+    }
+    if let Some(class_node) = node.as_class_node() {
+        if let Some(body) = class_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                return first_example_group_selector_in_nodes(stmts.body().iter());
+            }
+        }
+        return None;
+    }
+    if let Some(call) = node.as_call_node() {
+        if is_rspec_example_group_call(&call) {
+            if let Some(msg_loc) = call.message_loc() {
+                return Some((msg_loc.start_offset(), msg_loc.end_offset()));
+            }
+            let loc = call.location();
+            return Some((loc.start_offset(), loc.end_offset()));
+        }
+    }
+    None
+}
+
 fn is_rspec_example_group_call(call: &ruby_prism::CallNode<'_>) -> bool {
     let name = call.name().as_slice();
     // Check receiver: must be None, or be RSpec/::RSpec
@@ -197,6 +284,15 @@ mod tests {
         scenario_module_wrapped = "module_wrapped.rb",
         scenario_class_wrapped = "class_wrapped.rb",
     );
+
+    #[test]
+    fn autocorrect_rewrites_selector_for_bad_suffix() {
+        crate::testutil::assert_cop_autocorrect(
+            &SpecFilePathSuffix,
+            b"# nitrocop-filename: spec/models/user.rb\ndescribe User do\nend\n",
+            b"skip User do\nend\n",
+        );
+    }
 
     #[test]
     fn integer_receiver_describe_not_flagged() {
