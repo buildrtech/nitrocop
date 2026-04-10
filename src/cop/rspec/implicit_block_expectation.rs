@@ -49,6 +49,10 @@ impl Cop for ImplicitBlockExpectation {
         "RSpec/ImplicitBlockExpectation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -64,12 +68,13 @@ impl Cop for ImplicitBlockExpectation {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ImplicitBlockVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -80,6 +85,7 @@ struct ImplicitBlockVisitor<'a> {
     cop: &'a ImplicitBlockExpectation,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> Visit<'pr> for ImplicitBlockVisitor<'_> {
@@ -186,6 +192,7 @@ impl ImplicitBlockVisitor<'_> {
                 cop: self.cop,
                 source: self.source,
                 diagnostics: &mut self.diagnostics,
+                corrections: self.corrections.as_deref_mut(),
             };
             finder.visit(&body);
         }
@@ -198,6 +205,7 @@ struct ImplicitExpectFinder<'a> {
     cop: &'a ImplicitBlockExpectation,
     source: &'a SourceFile,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> Visit<'pr> for ImplicitExpectFinder<'_> {
@@ -209,12 +217,24 @@ impl<'pr> Visit<'pr> for ImplicitExpectFinder<'_> {
         {
             let loc = node.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Avoid implicit block expectations.".to_string(),
-            ));
+            );
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let loc = node.location();
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "skip('TODO: avoid implicit block expectations')".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
             return; // Don't recurse into the call
         }
 
@@ -298,6 +318,10 @@ fn is_lambda_or_proc(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        ImplicitBlockExpectation,
+        "cops/rspec/implicit_block_expectation"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         ImplicitBlockExpectation,
         "cops/rspec/implicit_block_expectation"
     );
