@@ -19,6 +19,10 @@ impl Cop for AmbiguousAssignment {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CLASS_VARIABLE_WRITE_NODE,
@@ -37,7 +41,7 @@ impl Cop for AmbiguousAssignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check variable assignment node types
         let (operator_loc, value) = if let Some(n) = node.as_local_variable_write_node() {
@@ -87,12 +91,25 @@ impl Cop for AmbiguousAssignment {
         for &(mistake, correction) in MISTAKES {
             if range_source == mistake {
                 let (line, column) = source.offset_to_line_col(range_start);
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     format!("Suspicious assignment detected. Did you mean `{correction}`?"),
-                ));
+                );
+
+                if let Some(ref mut corrs) = corrections {
+                    corrs.push(crate::correction::Correction {
+                        start: range_start,
+                        end: range_end,
+                        replacement: correction.to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -102,4 +119,5 @@ impl Cop for AmbiguousAssignment {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AmbiguousAssignment, "cops/lint/ambiguous_assignment");
+    crate::cop_autocorrect_fixture_tests!(AmbiguousAssignment, "cops/lint/ambiguous_assignment");
 }
