@@ -9,6 +9,10 @@ impl Cop for DevelopmentDependencies {
         "Gemspec/DevelopmentDependencies"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_include(&self) -> &'static [&'static str] {
         &["**/*.gemspec"]
     }
@@ -18,7 +22,7 @@ impl Cop for DevelopmentDependencies {
         source: &SourceFile,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "Gemfile");
         let allowed_gems = config.get_string_array("AllowedGems").unwrap_or_default();
@@ -30,6 +34,7 @@ impl Cop for DevelopmentDependencies {
 
         // For "Gemfile" or "gems.rb" styles, flag add_development_dependency calls
         let lines: Vec<&[u8]> = source.lines().collect();
+        let mut corrections = corrections;
         for (line_idx, line) in lines.iter().enumerate() {
             let line_str = match std::str::from_utf8(line) {
                 Ok(s) => s,
@@ -64,12 +69,26 @@ impl Cop for DevelopmentDependencies {
                 if is_gem_allowed(after_method, &allowed_gems) {
                     continue;
                 }
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line_idx + 1,
                     pos + 1, // skip the dot
                     format!("Specify development dependencies in `{style}` instead of gemspec."),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    if let Some(start) = source.line_col_to_offset(line_idx + 1, pos + 1) {
+                        let end = start + "add_development_dependency".len();
+                        corrections.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: "add_dependency".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -313,4 +332,13 @@ mod tests {
         DevelopmentDependencies,
         "cops/gemspec/development_dependencies"
     );
+
+    #[test]
+    fn autocorrect_rewrites_development_dependency_method_name() {
+        crate::testutil::assert_cop_autocorrect(
+            &DevelopmentDependencies,
+            b"Gem::Specification.new do |spec|\n  spec.add_development_dependency 'rspec'\nend\n",
+            b"Gem::Specification.new do |spec|\n  spec.add_dependency 'rspec'\nend\n",
+        );
+    }
 }

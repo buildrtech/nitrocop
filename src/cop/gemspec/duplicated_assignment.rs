@@ -11,6 +11,10 @@ impl Cop for DuplicatedAssignment {
         "Gemspec/DuplicatedAssignment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_include(&self) -> &'static [&'static str] {
         &["**/*.gemspec"]
     }
@@ -20,10 +24,12 @@ impl Cop for DuplicatedAssignment {
         source: &SourceFile,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Track: attribute_name -> first occurrence line
         let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut corrected_lines = std::collections::HashSet::new();
+        let mut corrections = corrections;
 
         for (line_idx, line) in source.lines().enumerate() {
             let line_str = match std::str::from_utf8(line) {
@@ -43,7 +49,7 @@ impl Cop for DuplicatedAssignment {
                     std::collections::hash_map::Entry::Occupied(e) => {
                         // Find the position of the attribute in the original line
                         let dot_pos = line_str.find('.').unwrap_or(0);
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line_num,
                             dot_pos + 1, // after the dot
@@ -52,7 +58,23 @@ impl Cop for DuplicatedAssignment {
                                 e.key(),
                                 e.get()
                             ),
-                        ));
+                        );
+                        if corrected_lines.insert(line_num) {
+                            if let Some(corrections) = corrections.as_deref_mut() {
+                                if let Some(start) = source.line_col_to_offset(line_num, 0) {
+                                    let end = start + line.len();
+                                    corrections.push(crate::correction::Correction {
+                                        start,
+                                        end,
+                                        replacement: "".to_string(),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                            }
+                        }
+                        diagnostics.push(diagnostic);
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
                         e.insert(line_num);
@@ -134,4 +156,13 @@ fn extract_assignment_attrs(trimmed: &str) -> Vec<String> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicatedAssignment, "cops/gemspec/duplicated_assignment");
+
+    #[test]
+    fn autocorrect_removes_duplicate_assignment_line() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicatedAssignment,
+            b"Gem::Specification.new do |spec|\n  spec.name = 'example'\n  spec.name = 'other'\nend\n",
+            b"Gem::Specification.new do |spec|\n  spec.name = 'example'\n\nend\n",
+        );
+    }
 }
