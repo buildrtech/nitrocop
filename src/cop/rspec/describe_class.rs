@@ -63,6 +63,10 @@ impl Cop for DescribeClass {
         "RSpec/DescribeClass"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -91,7 +95,7 @@ impl Cop for DescribeClass {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let program = match node.as_program_node() {
             Some(p) => p,
@@ -102,7 +106,15 @@ impl Cop for DescribeClass {
         let ignored_metadata = parse_ignored_metadata(config);
 
         let stmts: Vec<_> = program.statements().body().iter().collect();
-        visit_top_level_nodes(self, source, &stmts, diagnostics, &ignored_metadata);
+        let mut corrections = corrections;
+        visit_top_level_nodes(
+            self,
+            source,
+            &stmts,
+            diagnostics,
+            &ignored_metadata,
+            corrections.as_deref_mut(),
+        );
     }
 }
 
@@ -117,25 +129,48 @@ fn visit_top_level_nodes(
     stmts: &[ruby_prism::Node<'_>],
     diagnostics: &mut Vec<Diagnostic>,
     ignored_metadata: &HashMap<String, Vec<String>>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) {
+    let mut corrections = corrections;
     if stmts.len() == 1 {
         let node = &stmts[0];
         if let Some(module_node) = node.as_module_node() {
             if let Some(body) = module_node.body() {
-                visit_body(cop, source, &body, diagnostics, ignored_metadata);
+                visit_body(
+                    cop,
+                    source,
+                    &body,
+                    diagnostics,
+                    ignored_metadata,
+                    corrections,
+                );
             }
             return;
         }
         if let Some(class_node) = node.as_class_node() {
             if let Some(body) = class_node.body() {
-                visit_body(cop, source, &body, diagnostics, ignored_metadata);
+                visit_body(
+                    cop,
+                    source,
+                    &body,
+                    diagnostics,
+                    ignored_metadata,
+                    corrections,
+                );
             }
             return;
         }
     }
     // Multiple siblings or non-wrapper node: check each directly
     for stmt in stmts {
-        check_top_level_describe(cop, source, stmt, diagnostics, ignored_metadata);
+        check_top_level_describe(
+            cop,
+            source,
+            stmt,
+            diagnostics,
+            ignored_metadata,
+            corrections.as_deref_mut(),
+        );
     }
 }
 
@@ -146,18 +181,40 @@ fn visit_body(
     body: &ruby_prism::Node<'_>,
     diagnostics: &mut Vec<Diagnostic>,
     ignored_metadata: &HashMap<String, Vec<String>>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) {
     if let Some(stmts) = body.as_statements_node() {
         let children: Vec<_> = stmts.body().iter().collect();
-        visit_top_level_nodes(cop, source, &children, diagnostics, ignored_metadata);
+        visit_top_level_nodes(
+            cop,
+            source,
+            &children,
+            diagnostics,
+            ignored_metadata,
+            corrections,
+        );
     } else if let Some(begin) = body.as_begin_node() {
         if let Some(stmts) = begin.statements() {
             let children: Vec<_> = stmts.body().iter().collect();
-            visit_top_level_nodes(cop, source, &children, diagnostics, ignored_metadata);
+            visit_top_level_nodes(
+                cop,
+                source,
+                &children,
+                diagnostics,
+                ignored_metadata,
+                corrections,
+            );
         }
     } else {
         // Single expression body — treat as sole child
-        check_top_level_describe(cop, source, body, diagnostics, ignored_metadata);
+        check_top_level_describe(
+            cop,
+            source,
+            body,
+            diagnostics,
+            ignored_metadata,
+            corrections,
+        );
     }
 }
 
@@ -195,6 +252,7 @@ fn check_top_level_describe(
     node: &ruby_prism::Node<'_>,
     diagnostics: &mut Vec<Diagnostic>,
     ignored_metadata: &HashMap<String, Vec<String>>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) {
     let call = match node.as_call_node() {
         Some(c) => c,
@@ -262,12 +320,23 @@ fn check_top_level_describe(
     // Flag the first argument
     let loc = first_arg.location();
     let (line, col) = source.offset_to_line_col(loc.start_offset());
-    diagnostics.push(cop.diagnostic(
+    let mut diagnostic = cop.diagnostic(
         source,
         line,
         col,
         "The first argument to describe should be the class or module being tested.".to_string(),
-    ));
+    );
+    if let Some(corrections) = corrections {
+        corrections.push(crate::correction::Correction {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+            replacement: "described_class".to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        diagnostic.corrected = true;
+    }
+    diagnostics.push(diagnostic);
 }
 
 /// Check if a string value looks like a Ruby constant name.
@@ -376,6 +445,15 @@ mod tests {
         nested_modules = "nested_modules.rb",
         class_wrapper = "class_wrapper.rb",
     );
+
+    #[test]
+    fn autocorrect_rewrites_first_arg_to_described_class() {
+        crate::testutil::assert_cop_autocorrect(
+            &DescribeClass,
+            b"describe 'some feature' do\nend\n",
+            b"describe described_class do\nend\n",
+        );
+    }
 
     #[test]
     fn ignored_metadata_skips_describe_with_matching_key_and_value() {

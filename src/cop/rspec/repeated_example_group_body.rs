@@ -74,6 +74,10 @@ impl Cop for RepeatedExampleGroupBody {
         "RSpec/RepeatedExampleGroupBody"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -93,11 +97,17 @@ impl Cop for RepeatedExampleGroupBody {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle top-level statements
+        let mut corrections = corrections;
         if let Some(program) = node.as_program_node() {
-            diagnostics.extend(check_sibling_groups(self, source, &program.statements()));
+            diagnostics.extend(check_sibling_groups(
+                self,
+                source,
+                &program.statements(),
+                corrections.as_deref_mut(),
+            ));
             return;
         }
 
@@ -126,7 +136,12 @@ impl Cop for RepeatedExampleGroupBody {
             Some(s) => s,
             None => return,
         };
-        diagnostics.extend(check_sibling_groups(self, source, &inner_stmts));
+        diagnostics.extend(check_sibling_groups(
+            self,
+            source,
+            &inner_stmts,
+            corrections,
+        ));
     }
 }
 
@@ -134,12 +149,21 @@ fn check_sibling_groups(
     cop: &RepeatedExampleGroupBody,
     source: &SourceFile,
     stmts: &ruby_prism::StatementsNode<'_>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) -> Vec<Diagnostic> {
-    let mut diagnostics = check_sibling_groups_iter(cop, source, stmts.body().iter());
+    let mut corrections = corrections;
+    let mut diagnostics =
+        check_sibling_groups_iter(cop, source, stmts.body().iter(), corrections.as_deref_mut());
     // Recurse into if/elsif/else/unless/case branches to find sibling groups there.
     // RuboCop's on_begin fires for every multi-statement body including branch bodies.
     for stmt in stmts.body().iter() {
-        collect_branch_diagnostics(cop, source, &stmt, &mut diagnostics);
+        collect_branch_diagnostics(
+            cop,
+            source,
+            &stmt,
+            &mut diagnostics,
+            corrections.as_deref_mut(),
+        );
     }
     diagnostics
 }
@@ -150,38 +174,76 @@ fn collect_branch_diagnostics(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) {
+    let mut corrections = corrections;
     if let Some(if_node) = node.as_if_node() {
         if let Some(stmts) = if_node.statements() {
-            diagnostics.extend(check_sibling_groups(cop, source, &stmts));
+            diagnostics.extend(check_sibling_groups(
+                cop,
+                source,
+                &stmts,
+                corrections.as_deref_mut(),
+            ));
         }
         if let Some(subsequent) = if_node.subsequent() {
-            collect_branch_diagnostics(cop, source, &subsequent, diagnostics);
+            collect_branch_diagnostics(
+                cop,
+                source,
+                &subsequent,
+                diagnostics,
+                corrections.as_deref_mut(),
+            );
         }
     } else if let Some(unless_node) = node.as_unless_node() {
         if let Some(stmts) = unless_node.statements() {
-            diagnostics.extend(check_sibling_groups(cop, source, &stmts));
+            diagnostics.extend(check_sibling_groups(
+                cop,
+                source,
+                &stmts,
+                corrections.as_deref_mut(),
+            ));
         }
         if let Some(else_clause) = unless_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
-                diagnostics.extend(check_sibling_groups(cop, source, &stmts));
+                diagnostics.extend(check_sibling_groups(
+                    cop,
+                    source,
+                    &stmts,
+                    corrections.as_deref_mut(),
+                ));
             }
         }
     } else if let Some(else_node) = node.as_else_node() {
         if let Some(stmts) = else_node.statements() {
-            diagnostics.extend(check_sibling_groups(cop, source, &stmts));
+            diagnostics.extend(check_sibling_groups(
+                cop,
+                source,
+                &stmts,
+                corrections.as_deref_mut(),
+            ));
         }
     } else if let Some(case_node) = node.as_case_node() {
         for condition in case_node.conditions().iter() {
             if let Some(when_node) = condition.as_when_node() {
                 if let Some(stmts) = when_node.statements() {
-                    diagnostics.extend(check_sibling_groups(cop, source, &stmts));
+                    diagnostics.extend(check_sibling_groups(
+                        cop,
+                        source,
+                        &stmts,
+                        corrections.as_deref_mut(),
+                    ));
                 }
             }
         }
         if let Some(else_clause) = case_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
-                diagnostics.extend(check_sibling_groups(cop, source, &stmts));
+                diagnostics.extend(check_sibling_groups(
+                    cop,
+                    source,
+                    &stmts,
+                    corrections.as_deref_mut(),
+                ));
             }
         }
     }
@@ -191,9 +253,11 @@ fn check_sibling_groups_iter<'a>(
     cop: &RepeatedExampleGroupBody,
     source: &SourceFile,
     stmts: impl Iterator<Item = ruby_prism::Node<'a>>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) -> Vec<Diagnostic> {
+    let mut corrections = corrections;
     #[allow(clippy::type_complexity)] // internal collection used only in this function
-    let mut body_map: HashMap<u64, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
+    let mut body_map: HashMap<u64, Vec<(usize, usize, usize, usize, Vec<u8>)>> = HashMap::new();
 
     for stmt in stmts {
         let call = match stmt.as_call_node() {
@@ -243,21 +307,26 @@ fn check_sibling_groups_iter<'a>(
 
         let call_loc = call.location();
         let (line, col) = source.offset_to_line_col(call_loc.start_offset());
+        let (msg_start, msg_end) = if let Some(msg_loc) = call.message_loc() {
+            (msg_loc.start_offset(), msg_loc.end_offset())
+        } else {
+            (call_loc.start_offset(), call_loc.end_offset())
+        };
         body_map
             .entry(sig)
             .or_default()
-            .push((line, col, name.to_vec()));
+            .push((line, col, msg_start, msg_end, name.to_vec()));
     }
 
     let mut diagnostics = Vec::new();
     for locs in body_map.values() {
         if locs.len() > 1 {
-            for (idx, (line, col, group_name)) in locs.iter().enumerate() {
+            for (idx, (line, col, start, end, group_name)) in locs.iter().enumerate() {
                 let other_lines: Vec<String> = locs
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != idx)
-                    .map(|(_, (l, _, _))| l.to_string())
+                    .map(|(_, (l, _, _, _, _))| l.to_string())
                     .collect();
                 let group_type = std::str::from_utf8(group_name).unwrap_or("describe");
                 // Strip f/x prefix for display
@@ -270,7 +339,18 @@ fn check_sibling_groups_iter<'a>(
                     display_type,
                     other_lines.join(", ")
                 );
-                diagnostics.push(cop.diagnostic(source, *line, *col, msg));
+                let mut diagnostic = cop.diagnostic(source, *line, *col, msg);
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: *start,
+                        end: *end,
+                        replacement: "skip".to_string(),
+                        cop_name: cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -694,6 +774,10 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(
+        RepeatedExampleGroupBody,
+        "cops/rspec/repeated_example_group_body"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         RepeatedExampleGroupBody,
         "cops/rspec/repeated_example_group_body"
     );
