@@ -41,6 +41,10 @@ impl Cop for SuppressedException {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[BEGIN_NODE, NIL_NODE]
     }
@@ -52,7 +56,7 @@ impl Cop for SuppressedException {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // RescueNode is visited via visit_begin_node's specific method,
         // not via the generic visit() dispatch. So we match BeginNode
@@ -125,12 +129,26 @@ impl Cop for SuppressedException {
                 if suppressed {
                     let kw_loc = rescue_node.keyword_loc();
                     let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Do not suppress exceptions.".to_string(),
-                    ));
+                    );
+
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let indent = " ".repeat(column + 2);
+                        corrections.push(crate::correction::Correction {
+                            start: rescue_node.location().end_offset(),
+                            end: rescue_node.location().end_offset(),
+                            replacement: format!("\n{indent}nil"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             } else if allow_nil {
                 if let Some(stmts) = &body_stmts {
@@ -150,4 +168,18 @@ impl Cop for SuppressedException {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SuppressedException, "cops/lint/suppressed_exception");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(SuppressedException.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_nil_into_empty_rescue_body() {
+        crate::testutil::assert_cop_autocorrect(
+            &SuppressedException,
+            b"begin\n  do_something\nrescue\nend\n",
+            b"begin\n  do_something\nrescue\n  nil\nend\n",
+        );
+    }
 }
