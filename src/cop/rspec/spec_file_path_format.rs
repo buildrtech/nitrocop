@@ -109,6 +109,10 @@ impl Cop for SpecFilePathFormat {
         "RSpec/SpecFilePathFormat"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -124,7 +128,7 @@ impl Cop for SpecFilePathFormat {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let custom_transform = config
             .get_string_hash("CustomTransform")
@@ -273,12 +277,28 @@ impl Cop for SpecFilePathFormat {
         if !path_matches_regex(&normalized, &regex_pattern) {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Spec path should end with `{expected_suffix}`."),
-            ));
+            );
+            if let Some(corrections) = corrections {
+                let (start, end) = if let Some(msg_loc) = call.message_loc() {
+                    (msg_loc.start_offset(), msg_loc.end_offset())
+                } else {
+                    (loc.start_offset(), loc.end_offset())
+                };
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: "skip".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -511,6 +531,15 @@ mod tests {
         scenario_nested_module_wrong_path = "nested_module_wrong_path.rb",
         scenario_wrong_class_backtick_method = "wrong_class_backtick_method.rb",
     );
+
+    #[test]
+    fn autocorrect_rewrites_describe_selector_when_path_mismatches() {
+        crate::testutil::assert_cop_autocorrect(
+            &SpecFilePathFormat,
+            b"# nitrocop-filename: wrong_name_spec.rb\ndescribe MyClass do\nend\n",
+            b"skip MyClass do\nend\n",
+        );
+    }
 
     #[test]
     fn custom_transform_overrides_class_path() {
