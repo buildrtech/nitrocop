@@ -36,6 +36,10 @@ impl Cop for LetSetup {
         "RSpec/LetSetup"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -51,13 +55,14 @@ impl Cop for LetSetup {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = LetSetupVisitor {
             cop: self,
             source,
             diagnostics,
             ancestor_let_bang_names: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
     }
@@ -69,6 +74,7 @@ struct LetSetupVisitor<'a> {
     diagnostics: &'a mut Vec<Diagnostic>,
     /// Stack of sets: each set contains the `let!` names defined at that ancestor scope level.
     ancestor_let_bang_names: Vec<HashSet<Vec<u8>>>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> LetSetupVisitor<'_> {
@@ -84,7 +90,7 @@ impl<'pr> LetSetupVisitor<'_> {
 
         // Collect let! names (recursing through non-scope-change blocks)
         // and all method-call identifiers used in the same scope.
-        let mut let_bang_decls: Vec<(Vec<u8>, usize, usize)> = Vec::new();
+        let mut let_bang_decls: Vec<(Vec<u8>, usize, usize, usize, usize)> = Vec::new();
         let mut used_names: HashSet<Vec<u8>> = HashSet::new();
         let mut this_scope_let_bang_names: HashSet<Vec<u8>> = HashSet::new();
 
@@ -106,18 +112,29 @@ impl<'pr> LetSetupVisitor<'_> {
             collector.visit(&stmt);
         }
 
-        for (let_name, line, col) in &let_bang_decls {
+        for (let_name, line, col, start, end) in &let_bang_decls {
             // Skip if this let! overrides an outer let! with the same name
             if self.overrides_outer_let_bang(let_name) {
                 continue;
             }
             if !used_names.contains(let_name) {
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     *line,
                     *col,
                     "Do not use `let!` to setup objects not referenced in tests.".to_string(),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: *start,
+                        end: *end,
+                        replacement: "skip".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
 
@@ -136,7 +153,7 @@ impl<'pr> LetSetupVisitor<'_> {
     fn collect_let_bangs_in_scope(
         &self,
         node: &ruby_prism::Node<'pr>,
-        decls: &mut Vec<(Vec<u8>, usize, usize)>,
+        decls: &mut Vec<(Vec<u8>, usize, usize, usize, usize)>,
         scope_names: &mut HashSet<Vec<u8>>,
     ) {
         // Unwrap trailing if/unless modifiers: `let!(:foo) { } if cond` parses as
@@ -175,8 +192,13 @@ impl<'pr> LetSetupVisitor<'_> {
                 if let Some(let_name) = extract_let_name(&c) {
                     let loc = c.location();
                     let (line, col) = self.source.offset_to_line_col(loc.start_offset());
+                    let (start, end) = if let Some(msg_loc) = c.message_loc() {
+                        (msg_loc.start_offset(), msg_loc.end_offset())
+                    } else {
+                        (loc.start_offset(), loc.end_offset())
+                    };
                     scope_names.insert(let_name.clone());
-                    decls.push((let_name, line, col));
+                    decls.push((let_name, line, col, start, end));
                 }
                 return;
             }
@@ -312,4 +334,13 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(LetSetup, "cops/rspec/let_setup");
+
+    #[test]
+    fn autocorrect_rewrites_unused_let_bang_selector() {
+        crate::testutil::assert_cop_autocorrect(
+            &LetSetup,
+            b"describe Foo do\n  let!(:foo) { bar }\n  it { expect(baz).to eq(qux) }\nend\n",
+            b"describe Foo do\n  skip(:foo) { bar }\n  it { expect(baz).to eq(qux) }\nend\n",
+        );
+    }
 }
