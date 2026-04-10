@@ -43,6 +43,10 @@ impl Cop for EmptyWhen {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CASE_NODE]
     }
@@ -54,7 +58,7 @@ impl Cop for EmptyWhen {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let case_node = match node.as_case_node() {
             Some(n) => n,
@@ -119,12 +123,26 @@ impl Cop for EmptyWhen {
 
             let kw_loc = when_node.keyword_loc();
             let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Avoid empty `when` conditions.".to_string(),
-            ));
+            );
+
+            if let Some(corrections) = corrections.as_deref_mut() {
+                let indent = " ".repeat(column + 2);
+                corrections.push(crate::correction::Correction {
+                    start: when_node.location().end_offset(),
+                    end: when_node.location().end_offset(),
+                    replacement: format!("\n{indent}nil"),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -133,4 +151,18 @@ impl Cop for EmptyWhen {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyWhen, "cops/lint/empty_when");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyWhen.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_nil_into_empty_when_branch() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyWhen,
+            b"case foo\nwhen 1\nwhen 2\n  do_something\nend\n",
+            b"case foo\nwhen 1\n  nil\nwhen 2\n  do_something\nend\n",
+        );
+    }
 }
