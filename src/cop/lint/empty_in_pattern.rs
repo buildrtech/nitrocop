@@ -14,6 +14,10 @@ impl Cop for EmptyInPattern {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CASE_MATCH_NODE, IN_NODE]
     }
@@ -25,7 +29,7 @@ impl Cop for EmptyInPattern {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_comments = config.get_bool("AllowComments", true);
 
@@ -74,12 +78,26 @@ impl Cop for EmptyInPattern {
 
                     let loc = in_node.in_loc();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Avoid `in` branches without a body.".to_string(),
-                    ));
+                    );
+
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let indent = " ".repeat(column + 2);
+                        corrections.push(crate::correction::Correction {
+                            start: in_node.location().end_offset(),
+                            end: in_node.location().end_offset(),
+                            replacement: format!("\n{indent}nil"),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -90,4 +108,18 @@ impl Cop for EmptyInPattern {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyInPattern, "cops/lint/empty_in_pattern");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyInPattern.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_nil_into_empty_in_branch() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyInPattern,
+            b"case condition\nin [a]\n  do_something\nin [a, b]\nend\n",
+            b"case condition\nin [a]\n  do_something\nin [a, b]\n  nil\nend\n",
+        );
+    }
 }
