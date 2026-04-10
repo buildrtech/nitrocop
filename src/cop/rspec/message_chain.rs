@@ -11,6 +11,10 @@ impl Cop for MessageChain {
         "RSpec/MessageChain"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -30,7 +34,7 @@ impl Cop for MessageChain {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -38,18 +42,32 @@ impl Cop for MessageChain {
         };
 
         let method_name = call.name().as_slice();
+        let mut corrections = corrections;
 
         // Check for `receive_message_chain` (receiverless)
         if method_name == b"receive_message_chain" && call.receiver().is_none() {
             let loc = call.location();
             let msg_loc = call.message_loc().unwrap_or(loc);
             let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Avoid stubbing using `receive_message_chain`.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections.as_deref_mut()
+                && let Some(msg_loc) = call.message_loc()
+            {
+                corrections.push(crate::correction::Correction {
+                    start: msg_loc.start_offset(),
+                    end: msg_loc.end_offset(),
+                    replacement: "skip".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
 
         // Check for old `stub_chain` syntax (has receiver)
@@ -59,12 +77,23 @@ impl Cop for MessageChain {
                 None => return,
             };
             let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Avoid stubbing using `stub_chain`.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: msg_loc.start_offset(),
+                    end: msg_loc.end_offset(),
+                    replacement: "skip".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -73,4 +102,5 @@ impl Cop for MessageChain {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MessageChain, "cops/rspec/message_chain");
+    crate::cop_autocorrect_fixture_tests!(MessageChain, "cops/rspec/message_chain");
 }
