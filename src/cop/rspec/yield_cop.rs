@@ -47,6 +47,10 @@ impl Cop for Yield {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_include(&self) -> &'static [&'static str] {
         RSPEC_DEFAULT_INCLUDE
     }
@@ -68,7 +72,7 @@ impl Cop for Yield {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for receive(:method) { |&block| block.call ... }
         // The node structure: CallNode(receive) with a BlockNode
@@ -186,7 +190,50 @@ impl Cop for Yield {
 
         let loc = block.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, "Use `.and_yield`.".to_string()));
+        let mut diagnostic = self.diagnostic(source, line, column, "Use `.and_yield`.".to_string());
+
+        if let Some(corrections) = corrections {
+            let mut replacement = String::new();
+            for stmt in &stmts {
+                let stmt_call = stmt
+                    .as_call_node()
+                    .expect("validated block.call statements should be call nodes");
+                let args_text = stmt_call
+                    .arguments()
+                    .map(|a| {
+                        a.arguments()
+                            .iter()
+                            .map(|arg| {
+                                let loc = arg.location();
+                                source.byte_slice(loc.start_offset(), loc.end_offset(), "")
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if args_text.is_empty() {
+                    replacement.push_str(".and_yield");
+                } else {
+                    replacement.push_str(&format!(".and_yield({})", args_text.join(", ")));
+                }
+            }
+
+            let mut start = block.opening_loc().start_offset();
+            if start > 0 && source.as_bytes()[start - 1] == b' ' {
+                start -= 1;
+            }
+            let end = block.closing_loc().end_offset();
+
+            corrections.push(crate::correction::Correction {
+                start,
+                end,
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -238,4 +285,27 @@ fn call_chain_includes_receive_shallow(call: &ruby_prism::CallNode<'_>) -> bool 
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Yield, "cops/rspec/yield_cop");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(Yield.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_rewrites_inline_block_call_to_and_yield() {
+        crate::testutil::assert_cop_autocorrect(
+            &Yield,
+            b"allow(foo).to receive(:bar) { |&block| block.call }\n",
+            b"allow(foo).to receive(:bar).and_yield\n",
+        );
+    }
+
+    #[test]
+    fn autocorrect_rewrites_do_end_block_call_with_args() {
+        crate::testutil::assert_cop_autocorrect(
+            &Yield,
+            b"allow(foo).to receive(:bar) do |&block|\n  block.call(1, 2)\nend\n",
+            b"allow(foo).to receive(:bar).and_yield(1, 2)\n",
+        );
+    }
 }
