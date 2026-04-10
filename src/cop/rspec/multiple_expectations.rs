@@ -38,6 +38,10 @@ impl Cop for MultipleExpectations {
         "RSpec/MultipleExpectations"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -53,7 +57,7 @@ impl Cop for MultipleExpectations {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let max = config.get_usize("Max", 1);
         let mut visitor = MultipleExpectationsVisitor {
@@ -62,6 +66,7 @@ impl Cop for MultipleExpectations {
             max,
             ancestor_aggregate_failures: false,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -74,6 +79,7 @@ struct MultipleExpectationsVisitor<'a> {
     max: usize,
     ancestor_aggregate_failures: bool,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'a, 'pr> MultipleExpectationsVisitor<'a> {
@@ -104,7 +110,7 @@ impl<'a, 'pr> MultipleExpectationsVisitor<'a> {
         if counter.count > self.max {
             let loc = call.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
@@ -112,7 +118,26 @@ impl<'a, 'pr> MultipleExpectationsVisitor<'a> {
                     "Example has too many expectations [{}/{}].",
                     counter.count, self.max
                 ),
-            ));
+            );
+
+            let method = call.name().as_slice();
+            if method != b"pending"
+                && method != b"skip"
+                && let Some(body) = block.body()
+                && let Some(corrections) = self.corrections.as_deref_mut()
+            {
+                let body_loc = body.location();
+                corrections.push(crate::correction::Correction {
+                    start: body_loc.start_offset(),
+                    end: body_loc.end_offset(),
+                    replacement: "skip('TODO: split expectations')".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            self.diagnostics.push(diagnostic);
         }
     }
 }
@@ -253,4 +278,5 @@ impl<'pr> Visit<'pr> for ExpectCounter {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MultipleExpectations, "cops/rspec/multiple_expectations");
+    crate::cop_autocorrect_fixture_tests!(MultipleExpectations, "cops/rspec/multiple_expectations");
 }
