@@ -35,6 +35,32 @@ impl SelfAssignment {
             "Self-assignment detected.".to_string(),
         ));
     }
+
+    fn emit_with_replacement(
+        &self,
+        source: &SourceFile,
+        loc: ruby_prism::Location<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
+        replacement: String,
+    ) {
+        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let mut diagnostic =
+            self.diagnostic(source, line, column, "Self-assignment detected.".to_string());
+
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
+    }
 }
 
 /// Check if a node is a "literal-like" value suitable for source-text comparison
@@ -59,6 +85,10 @@ impl Cop for SelfAssignment {
 
     fn default_severity(&self) -> Severity {
         Severity::Warning
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -97,7 +127,7 @@ impl Cop for SelfAssignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let _allow_rbs = config.get_bool("AllowRBSInlineAnnotation", false);
 
@@ -105,7 +135,16 @@ impl Cop for SelfAssignment {
         if let Some(write) = node.as_local_variable_write_node() {
             if let Some(read) = write.value().as_local_variable_read_node() {
                 if write.name().as_slice() == read.name().as_slice() {
-                    self.emit(source, write.location(), diagnostics);
+                    let replacement = std::str::from_utf8(write.name().as_slice())
+                        .unwrap_or("")
+                        .to_string();
+                    self.emit_with_replacement(
+                        source,
+                        write.location(),
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        replacement,
+                    );
                 }
             }
             return;
@@ -115,7 +154,16 @@ impl Cop for SelfAssignment {
         if let Some(write) = node.as_instance_variable_write_node() {
             if let Some(read) = write.value().as_instance_variable_read_node() {
                 if write.name().as_slice() == read.name().as_slice() {
-                    self.emit(source, write.location(), diagnostics);
+                    let replacement = std::str::from_utf8(write.name().as_slice())
+                        .unwrap_or("")
+                        .to_string();
+                    self.emit_with_replacement(
+                        source,
+                        write.location(),
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        replacement,
+                    );
                 }
             }
             return;
@@ -125,7 +173,16 @@ impl Cop for SelfAssignment {
         if let Some(write) = node.as_class_variable_write_node() {
             if let Some(read) = write.value().as_class_variable_read_node() {
                 if write.name().as_slice() == read.name().as_slice() {
-                    self.emit(source, write.location(), diagnostics);
+                    let replacement = std::str::from_utf8(write.name().as_slice())
+                        .unwrap_or("")
+                        .to_string();
+                    self.emit_with_replacement(
+                        source,
+                        write.location(),
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        replacement,
+                    );
                 }
             }
             return;
@@ -135,7 +192,16 @@ impl Cop for SelfAssignment {
         if let Some(write) = node.as_global_variable_write_node() {
             if let Some(read) = write.value().as_global_variable_read_node() {
                 if write.name().as_slice() == read.name().as_slice() {
-                    self.emit(source, write.location(), diagnostics);
+                    let replacement = std::str::from_utf8(write.name().as_slice())
+                        .unwrap_or("")
+                        .to_string();
+                    self.emit_with_replacement(
+                        source,
+                        write.location(),
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        replacement,
+                    );
                 }
             }
             return;
@@ -145,7 +211,16 @@ impl Cop for SelfAssignment {
         if let Some(write) = node.as_constant_write_node() {
             if let Some(read) = write.value().as_constant_read_node() {
                 if write.name().as_slice() == read.name().as_slice() {
-                    self.emit(source, write.location(), diagnostics);
+                    let replacement = std::str::from_utf8(write.name().as_slice())
+                        .unwrap_or("")
+                        .to_string();
+                    self.emit_with_replacement(
+                        source,
+                        write.location(),
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        replacement,
+                    );
                 }
             }
             return;
@@ -159,7 +234,14 @@ impl Cop for SelfAssignment {
                 let target_src = target.location().as_slice();
                 let val_src = val_path.location().as_slice();
                 if target_src == val_src {
-                    self.emit(source, write.location(), diagnostics);
+                    let replacement = std::str::from_utf8(target_src).unwrap_or("").to_string();
+                    self.emit_with_replacement(
+                        source,
+                        write.location(),
+                        diagnostics,
+                        corrections.as_deref_mut(),
+                        replacement,
+                    );
                 }
             }
             return;
@@ -426,4 +508,14 @@ impl Cop for SelfAssignment {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SelfAssignment, "cops/lint/self_assignment");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(SelfAssignment.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_rewrites_plain_local_self_assignment_to_read() {
+        crate::testutil::assert_cop_autocorrect(&SelfAssignment, b"x = x\n", b"x\n");
+    }
 }
