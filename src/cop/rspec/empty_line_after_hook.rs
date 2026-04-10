@@ -49,6 +49,10 @@ impl Cop for EmptyLineAfterHook {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -56,7 +60,7 @@ impl Cop for EmptyLineAfterHook {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_consecutive = config.get_bool("AllowConsecutiveOneLiners", true);
         let (comment_lines, enable_directive_lines) = build_comment_line_sets(source, parse_result);
@@ -64,6 +68,7 @@ impl Cop for EmptyLineAfterHook {
             source,
             cop: self,
             diagnostics,
+            corrections,
             allow_consecutive,
             comment_lines: &comment_lines,
             enable_directive_lines: &enable_directive_lines,
@@ -76,6 +81,7 @@ struct HookSeparationVisitor<'a> {
     source: &'a SourceFile,
     cop: &'a EmptyLineAfterHook,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     allow_consecutive: bool,
     comment_lines: &'a HashSet<usize>,
     enable_directive_lines: &'a HashSet<usize>,
@@ -136,12 +142,26 @@ impl<'a, 'pr> Visit<'pr> for HookSeparationVisitor<'a> {
                 .unwrap_or(0);
 
             let hook_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("before");
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 report_line,
                 report_col,
                 format!("Add an empty line after `{hook_name}`."),
-            ));
+            );
+
+            if let Some(ref mut corrections) = self.corrections {
+                let insert_at = self.source.line_start_offset(report_line + 1);
+                corrections.push(crate::correction::Correction {
+                    start: insert_at,
+                    end: insert_at,
+                    replacement: "\n".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            self.diagnostics.push(diagnostic);
         }
 
         ruby_prism::visit_statements_node(self, node);
@@ -257,4 +277,18 @@ fn find_max_heredoc_end_offset(source: &SourceFile, node: &ruby_prism::Node<'_>)
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyLineAfterHook, "cops/rspec/empty_line_after_hook");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyLineAfterHook.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_inserts_blank_line_after_hook() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyLineAfterHook,
+            b"RSpec.describe User do\n  before { setup }\n  it { expect(true).to be(true) }\nend\n",
+            b"RSpec.describe User do\n  before { setup }\n\n  it { expect(true).to be(true) }\nend\n",
+        );
+    }
 }

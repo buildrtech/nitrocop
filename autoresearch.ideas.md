@@ -47,6 +47,7 @@
 - RSpec/EmptyExampleGroup parity follow-up: verify whole-line removal whitespace/comment cleanup against RuboCop for nested empty groups and adjacent blank-line normalization.
 - RSpec/ReceiveMessages parity follow-up: align autocorrect with RuboCop’s line-selection/order behavior and quoted-key normalization for non-identifier symbol names and hash-return formatting edge cases.
 - RSpec/VerifiedDoubles parity follow-up: evaluate safer mapping strategy across `double`/`spy` forms (instance vs class/object verifying doubles) and expand fixture coverage for symbolic/constant edge names.
+- RSpec/EmptyLineAfterFinalLet parity follow-up: validate insertion behavior around trailing comments and `rubocop:enable` directives to match RuboCop empty-line separation autocorrect exactly.
 - FactoryBot remaining-gap policy check: confirm whether `ExcessiveCreateList` should remain diagnostic-only (no upstream AutoCorrector) or get an explicit nitrocop-only unsafe autocorrect mode.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
