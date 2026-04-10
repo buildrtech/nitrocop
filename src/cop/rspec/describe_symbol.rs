@@ -19,6 +19,10 @@ impl Cop for DescribeSymbol {
         Severity::Convention
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_include(&self) -> &'static [&'static str] {
         RSPEC_DEFAULT_INCLUDE
     }
@@ -34,7 +38,7 @@ impl Cop for DescribeSymbol {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -69,14 +73,27 @@ impl Cop for DescribeSymbol {
             return;
         }
 
-        let loc = arg_list[0].location();
+        let symbol = arg_list[0]
+            .as_symbol_node()
+            .expect("checked symbol argument above");
+        let loc = symbol.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Avoid describing symbols.".to_string(),
-        ));
+        let mut diagnostic = self.diagnostic(source, line, column, "Avoid describing symbols.".to_string());
+
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let symbol_name = std::str::from_utf8(symbol.unescaped()).unwrap_or("");
+            let escaped = symbol_name.replace('\\', "\\\\").replace('"', "\\\"");
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("\"#{escaped}\""),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -84,4 +101,18 @@ impl Cop for DescribeSymbol {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DescribeSymbol, "cops/rspec/describe_symbol");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(DescribeSymbol.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_rewrites_symbol_description_to_string() {
+        crate::testutil::assert_cop_autocorrect(
+            &DescribeSymbol,
+            b"describe(:to_s) { }\n",
+            b"describe(\"#to_s\") { }\n",
+        );
+    }
 }
