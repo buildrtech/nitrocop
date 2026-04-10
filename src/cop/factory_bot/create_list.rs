@@ -73,6 +73,10 @@ impl Cop for CreateList {
         ]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -80,7 +84,7 @@ impl Cop for CreateList {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "create_list");
         let explicit_only = config.get_bool("ExplicitOnly", false);
@@ -101,7 +105,12 @@ impl Cop for CreateList {
         }
 
         if style == "n_times" {
-            diagnostics.extend(self.check_for_n_times_style(source, &call, explicit_only));
+            diagnostics.extend(self.check_for_n_times_style(
+                source,
+                &call,
+                explicit_only,
+                corrections.as_deref_mut(),
+            ));
         }
     }
 }
@@ -260,6 +269,7 @@ impl CreateList {
         source: &SourceFile,
         call: &ruby_prism::CallNode<'_>,
         explicit_only: bool,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) -> Vec<Diagnostic> {
         if call.name().as_slice() != b"create_list" {
             return Vec::new();
@@ -296,7 +306,55 @@ impl CreateList {
 
         let msg_loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        vec![self.diagnostic(source, line, column, format!("Prefer {}.times.map.", count))]
+        let mut diagnostic = self.diagnostic(source, line, column, format!("Prefer {}.times.map.", count));
+
+        if call.block().is_none() {
+            if let Some(corrections) = corrections {
+                let count_src = source.byte_slice(
+                    arg_list[1].location().start_offset(),
+                    arg_list[1].location().end_offset(),
+                    "",
+                );
+                let mut create_args: Vec<String> = vec![source
+                    .byte_slice(
+                        arg_list[0].location().start_offset(),
+                        arg_list[0].location().end_offset(),
+                        "",
+                    )
+                    .to_string()];
+                for arg in arg_list.iter().skip(2) {
+                    create_args.push(
+                        source
+                            .byte_slice(arg.location().start_offset(), arg.location().end_offset(), "")
+                            .to_string(),
+                    );
+                }
+                let args_src = create_args.join(", ");
+                let receiver_prefix = call.receiver().map_or(String::new(), |recv| {
+                    format!(
+                        "{}.",
+                        source.byte_slice(recv.location().start_offset(), recv.location().end_offset(), "")
+                    )
+                });
+                let create_call = if call.opening_loc().is_some() {
+                    format!("{receiver_prefix}create({args_src})")
+                } else {
+                    format!("{receiver_prefix}create {args_src}")
+                };
+                let replacement = format!("{count_src}.times.map {{ {create_call} }}");
+
+                corrections.push(crate::correction::Correction {
+                    start: call.location().start_offset(),
+                    end: call.location().end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+
+        vec![diagnostic]
     }
 }
 
@@ -540,4 +598,30 @@ fn get_integer_value(node: &ruby_prism::Node<'_>, source: &SourceFile) -> Option
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CreateList, "cops/factorybot/create_list");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(CreateList.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrects_create_list_to_n_times_map_style() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("n_times".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &CreateList,
+            b"create_list(:user, 3)\n",
+            b"3.times.map { create(:user) }\n",
+            config,
+        );
+    }
 }

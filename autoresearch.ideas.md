@@ -42,6 +42,7 @@
 - FactoryBot/IdSequence parity follow-up: verify whole-line removal behavior with trailing comments and multi-line sequence argument formatting to match RuboCop range semantics.
 - FactoryBot/RedundantFactoryOption parity follow-up: extend removal logic to preserve formatting/comments in complex hash layouts and validate parity for nested/multiline option hashes.
 - FactoryBot/AttributeDefinedStatically parity follow-up: add RuboCop-style bare-hash wrapping autocorrect (`attr key: val` -> `attr { { key: val } }`) and broaden coverage for multiline/block-preserving forms.
+- FactoryBot/ConsistentParenthesesStyle parity follow-up: validate multiline/line-break-preserving autocorrect formatting across complex argument layouts and explicit receiver calls (`FactoryBot.create`) to match RuboCop output stability.
 - Performance/MethodObjectAsBlock parity follow-up: harden autocorrect for complex call shapes (extra positional args, receiver-qualified method objects, and alternate block-pass placements) beyond current simple baseline.
 - Performance/SelectMap parity follow-up: extend autocorrect beyond symbol block-pass direct chains to block-form and block-body candidate patterns while preserving current guards for bare `select.map` enumerator and numblock/`it` semantics.
 - Rails/SelectMap parity follow-up: extend autocorrect beyond direct `select(:col).map/collect(&:col)` chains to intermediate-chain forms (e.g., `select(...).where(...).map(...)`) with safe range replacement.
