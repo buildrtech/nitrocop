@@ -15,6 +15,10 @@ impl Cop for OptionHash {
         false
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -22,7 +26,7 @@ impl Cop for OptionHash {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let suspicious_names = config
             .get_string_array("SuspiciousParamNames")
@@ -43,10 +47,29 @@ impl Cop for OptionHash {
             suspicious_names,
             allowlist,
             diagnostics: Vec::new(),
+            pending_corrections: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+
+        if let Some(corrections) = corrections {
+            corrections.extend(visitor.pending_corrections.into_iter().map(|pending| {
+                crate::correction::Correction {
+                    start: pending.start,
+                    end: pending.end,
+                    replacement: pending.replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                }
+            }));
+        }
     }
+}
+
+struct PendingCorrection {
+    start: usize,
+    end: usize,
+    replacement: String,
 }
 
 struct OptionHashVisitor<'a> {
@@ -55,6 +78,7 @@ struct OptionHashVisitor<'a> {
     suspicious_names: Vec<String>,
     allowlist: Vec<String>,
     diagnostics: Vec<Diagnostic>,
+    pending_corrections: Vec<PendingCorrection>,
 }
 
 /// Check if a node tree contains a `super` or `super(...)` call.
@@ -134,12 +158,20 @@ impl<'pr> Visit<'pr> for OptionHashVisitor<'_> {
                                 let loc = opt_param.location();
                                 let (line, column) =
                                     self.source.offset_to_line_col(loc.start_offset());
-                                self.diagnostics.push(self.cop.diagnostic(
+                                let mut diagnostic = self.cop.diagnostic(
                                     self.source,
                                     line,
                                     column,
                                     format!("Use keyword arguments instead of an options hash argument `{name_str}`."),
-                                ));
+                                );
+
+                                self.pending_corrections.push(PendingCorrection {
+                                    start: loc.start_offset(),
+                                    end: loc.end_offset(),
+                                    replacement: format!("**{name_str}"),
+                                });
+                                diagnostic.corrected = true;
+                                self.diagnostics.push(diagnostic);
                             }
                         }
                     }
@@ -158,6 +190,7 @@ impl<'pr> Visit<'pr> for OptionHashVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(OptionHash, "cops/style/option_hash");
+    crate::cop_autocorrect_fixture_tests!(OptionHash, "cops/style/option_hash");
 
     #[test]
     fn allowlist_skips_method() {
