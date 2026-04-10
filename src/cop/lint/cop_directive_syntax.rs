@@ -56,6 +56,10 @@ impl Cop for CopDirectiveSyntax {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -67,7 +71,7 @@ impl Cop for CopDirectiveSyntax {
         code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut byte_offset = 0usize;
         for (i, line) in source.lines().enumerate() {
@@ -143,12 +147,28 @@ impl Cop for CopDirectiveSyntax {
                                 "Malformed directive comment detected. The cop name is missing.".to_string(),
                             ));
                         } else if !after_mode.is_empty() && is_malformed_cop_list(after_mode) {
-                            diagnostics.push(self.diagnostic(
+                            let mut diagnostic = self.diagnostic(
                                 source,
                                 i + 1,
                                 hash_pos,
                                 "Malformed directive comment detected. Cop names must be separated by commas. Comment in the directive must start with `--`.".to_string(),
-                            ));
+                            );
+
+                            if let Some(fixed_cops) = autocorrectable_cop_list(after_mode) {
+                                if let Some(corrections) = corrections.as_deref_mut() {
+                                    let replacement = format!("# rubocop:{mode} {fixed_cops}");
+                                    corrections.push(crate::correction::Correction {
+                                        start: byte_offset + hash_pos,
+                                        end: byte_offset + line.len(),
+                                        replacement,
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                            }
+
+                            diagnostics.push(diagnostic);
                         }
                     }
                 }
@@ -284,6 +304,29 @@ fn is_malformed_cop_list(cops_str: &str) -> bool {
 /// PascalCase identifiers optionally separated by `/`.
 /// Returns true if the token contains characters outside `[A-Za-z0-9/_]`,
 /// or starts/ends with `/`.
+fn autocorrectable_cop_list(cops_str: &str) -> Option<String> {
+    // Conservative autocorrect for the common malformed case:
+    // `# rubocop:disable A/B C/D` -> `# rubocop:disable A/B, C/D`
+    // Only when there is no inline comment and all tokens are valid cop names.
+    if cops_str.contains(" -- ") || cops_str.starts_with("--") || cops_str.contains(',') {
+        return None;
+    }
+
+    let tokens: Vec<&str> = cops_str.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return None;
+    }
+
+    if tokens
+        .iter()
+        .any(|token| *token != "all" && has_invalid_cop_name(token))
+    {
+        return None;
+    }
+
+    Some(tokens.join(", "))
+}
+
 fn has_invalid_cop_name(token: &str) -> bool {
     // Must not be empty (caller already checks)
     if token.is_empty() {
@@ -307,4 +350,18 @@ fn has_invalid_cop_name(token: &str) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(CopDirectiveSyntax, "cops/lint/cop_directive_syntax");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(CopDirectiveSyntax.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_adds_commas_between_cop_names() {
+        crate::testutil::assert_cop_autocorrect(
+            &CopDirectiveSyntax,
+            b"# rubocop:disable Layout/LineLength Style/Encoding\n",
+            b"# rubocop:disable Layout/LineLength, Style/Encoding\n",
+        );
+    }
 }
