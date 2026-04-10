@@ -69,6 +69,10 @@ impl Cop for EmptyExampleGroup {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -76,12 +80,13 @@ impl Cop for EmptyExampleGroup {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = EmptyGroupVisitor {
             source,
             cop: self,
             diagnostics,
+            corrections,
             def_depth: 0,
             example_depth: 0,
         };
@@ -93,6 +98,7 @@ struct EmptyGroupVisitor<'a> {
     source: &'a SourceFile,
     cop: &'a EmptyExampleGroup,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// Depth inside method definitions (def/defs). When > 0, skip flagging.
     def_depth: u32,
     /// Depth inside example blocks (it/specify/etc). When > 0, skip flagging.
@@ -147,12 +153,39 @@ impl<'a, 'pr> Visit<'pr> for EmptyGroupVisitor<'a> {
                     if !has_examples {
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Empty example group detected.".to_string(),
-                        ));
+                        );
+
+                        if let Some(ref mut corrections) = self.corrections {
+                            let line_start = self.source.line_start_offset(line);
+                            let mut start = loc.start_offset();
+                            if self
+                                .source
+                                .try_byte_slice(line_start, loc.start_offset())
+                                .is_some_and(|s| s.trim().is_empty())
+                            {
+                                start = line_start;
+                            }
+                            let mut end = loc.end_offset();
+                            if self.source.as_bytes().get(end).copied() == Some(b'\n') {
+                                end += 1;
+                            }
+
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+
+                        self.diagnostics.push(diagnostic);
                     }
 
                     // Visit inside the block to find nested example groups,
@@ -286,4 +319,18 @@ mod tests {
         scenario_begin_block_with_examples = "begin_block_with_examples.rb",
         scenario_constant_only = "constant_only.rb",
     );
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(EmptyExampleGroup.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_removes_empty_group_block() {
+        crate::testutil::assert_cop_autocorrect(
+            &EmptyExampleGroup,
+            b"describe Foo do\n  context 'x' do\n  end\n\n  it { expect(true).to be(true) }\nend\n",
+            b"describe Foo do\n\n  it { expect(true).to be(true) }\nend\n",
+        );
+    }
 }
