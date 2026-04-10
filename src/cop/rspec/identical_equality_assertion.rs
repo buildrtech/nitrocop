@@ -24,6 +24,10 @@ impl Cop for IdenticalEqualityAssertion {
         "RSpec/IdenticalEqualityAssertion"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -43,7 +47,7 @@ impl Cop for IdenticalEqualityAssertion {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Look for expect(X).to eq(X) / eql(X) / be(X)
         let call = match node.as_call_node() {
@@ -137,12 +141,24 @@ impl Cop for IdenticalEqualityAssertion {
         if expect_fp == matcher_fp {
             let loc = expect_call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
-                "Identical expressions on both sides of the equality may indicate a flawed test.".to_string(),
-            ));
+                "Identical expressions on both sides of the equality may indicate a flawed test."
+                    .to_string(),
+            );
+            if let Some(corrections) = corrections {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "skip('TODO: avoid identical equality assertion')".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -288,6 +304,10 @@ fn ast_fingerprint(bytes: &[u8], node: &ruby_prism::Node<'_>, out: &mut Vec<u8>)
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(
+        IdenticalEqualityAssertion,
+        "cops/rspec/identical_equality_assertion"
+    );
+    crate::cop_autocorrect_fixture_tests!(
         IdenticalEqualityAssertion,
         "cops/rspec/identical_equality_assertion"
     );
