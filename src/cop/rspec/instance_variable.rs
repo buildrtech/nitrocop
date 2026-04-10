@@ -45,6 +45,10 @@ impl Cop for InstanceVariable {
         "RSpec/InstanceVariable"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -60,7 +64,7 @@ impl Cop for InstanceVariable {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Config: AssignmentOnly — when true, only flag reads of ivars that are
         // also assigned within the same top-level example group. When false (default),
@@ -104,6 +108,7 @@ impl Cop for InstanceVariable {
             assigned_names,
             top_level_offsets: &top_level_offsets,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -181,6 +186,7 @@ struct IvarChecker<'a> {
     assigned_names: HashSet<Vec<u8>>,
     top_level_offsets: &'a HashSet<usize>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl IvarChecker<'_> {
@@ -198,13 +204,24 @@ impl IvarChecker<'_> {
             return;
         }
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Avoid instance variables - use let, a method call, or a local variable (if possible)."
                 .to_string(),
-        ));
+        );
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "skip('TODO: avoid instance variable')".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -432,6 +449,7 @@ impl<'pr> Visit<'pr> for IvarChecker<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(InstanceVariable, "cops/rspec/instance_variable");
+    crate::cop_autocorrect_fixture_tests!(InstanceVariable, "cops/rspec/instance_variable");
 
     #[test]
     fn assignment_only_skips_reads_without_assignment() {
