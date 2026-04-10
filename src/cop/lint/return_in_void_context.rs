@@ -47,6 +47,10 @@ impl Cop for ReturnInVoidContext {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -54,12 +58,13 @@ impl Cop for ReturnInVoidContext {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = VoidContextVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -93,6 +98,7 @@ struct VoidContextVisitor<'a, 'src> {
     cop: &'a ReturnInVoidContext,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> Visit<'pr> for VoidContextVisitor<'_, '_> {
@@ -115,27 +121,44 @@ impl<'pr> Visit<'pr> for VoidContextVisitor<'_, '_> {
         let method_name = format_method_name(name);
 
         // Found void context method, look for return nodes with values
-        let mut finder = ReturnWithValueFinder {
-            offsets: Vec::new(),
-        };
+        let mut finder = ReturnWithValueFinder { returns: Vec::new() };
         if let Some(body) = node.body() {
             finder.visit(&body);
         }
 
-        for offset in finder.offsets {
-            let (line, column) = self.source.offset_to_line_col(offset);
-            self.diagnostics.push(self.cop.diagnostic(
+        for ret in finder.returns {
+            let (line, column) = self.source.offset_to_line_col(ret.start_offset);
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 format!("Do not return a value in `{method_name}`."),
-            ));
+            );
+
+            if let Some(corrections) = self.corrections.as_mut() {
+                let keyword_end = ret.start_offset.saturating_add(6); // "return"
+                corrections.push(crate::correction::Correction {
+                    start: keyword_end,
+                    end: ret.args_end_offset,
+                    replacement: String::new(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+
+            self.diagnostics.push(diagnostic);
         }
     }
 }
 
 struct ReturnWithValueFinder {
-    offsets: Vec<usize>,
+    returns: Vec<ReturnWithValueLoc>,
+}
+
+struct ReturnWithValueLoc {
+    start_offset: usize,
+    args_end_offset: usize,
 }
 
 /// Scope-changing method names where `return` exits the block, not the enclosing method.
@@ -144,8 +167,11 @@ const SCOPE_CHANGING_METHODS: &[&[u8]] = &[b"lambda", b"define_method", b"define
 impl<'pr> Visit<'pr> for ReturnWithValueFinder {
     fn visit_return_node(&mut self, node: &ruby_prism::ReturnNode<'pr>) {
         // ReturnNode with arguments means `return value`
-        if node.arguments().is_some() {
-            self.offsets.push(node.location().start_offset());
+        if let Some(args) = node.arguments() {
+            self.returns.push(ReturnWithValueLoc {
+                start_offset: node.location().start_offset(),
+                args_end_offset: args.location().end_offset(),
+            });
         }
         ruby_prism::visit_return_node(self, node);
     }
@@ -175,4 +201,5 @@ impl<'pr> Visit<'pr> for ReturnWithValueFinder {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReturnInVoidContext, "cops/lint/return_in_void_context");
+    crate::cop_autocorrect_fixture_tests!(ReturnInVoidContext, "cops/lint/return_in_void_context");
 }
