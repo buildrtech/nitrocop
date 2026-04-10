@@ -24,6 +24,32 @@ fn is_assignment_method(call: &ruby_prism::CallNode<'_>) -> bool {
     name.ends_with(b"=") && name != b"=="
 }
 
+fn build_parenthesized_call_rewrite(
+    source: &SourceFile,
+    call: &ruby_prism::CallNode<'_>,
+    cop_name: &'static str,
+) -> Option<crate::correction::Correction> {
+    if call.block().is_some() {
+        return None;
+    }
+    let args = call.arguments()?;
+    let first_arg = args.arguments().iter().next()?;
+    let args_start = first_arg.location().start_offset();
+    let args_end = args.location().end_offset();
+
+    let call_start = call.location().start_offset();
+    let prefix = source.try_byte_slice(call_start, args_start)?;
+    let args_src = source.try_byte_slice(args_start, args_end)?;
+
+    Some(crate::correction::Correction {
+        start: call_start,
+        end: call.location().end_offset(),
+        replacement: format!("{}({})", prefix.trim_end(), args_src),
+        cop_name,
+        cop_index: 0,
+    })
+}
+
 impl Cop for RequireParentheses {
     fn name(&self) -> &'static str {
         "Lint/RequireParentheses"
@@ -31,6 +57,10 @@ impl Cop for RequireParentheses {
 
     fn default_severity(&self) -> Severity {
         Severity::Warning
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -44,8 +74,9 @@ impl Cop for RequireParentheses {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -71,13 +102,20 @@ impl Cop for RequireParentheses {
                 {
                     let loc = call.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Use parentheses in the method call to avoid confusion about precedence."
                             .to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut()
+                        && let Some(correction) = build_parenthesized_call_rewrite(source, &call, self.name())
+                    {
+                        corrections.push(correction);
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                     return;
                 }
             }
@@ -96,15 +134,20 @@ impl Cop for RequireParentheses {
         if has_boolean_arg {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(
-                self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use parentheses in the method call to avoid confusion about precedence."
-                        .to_string(),
-                ),
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                "Use parentheses in the method call to avoid confusion about precedence."
+                    .to_string(),
             );
+            if let Some(corrections) = corrections.as_deref_mut()
+                && let Some(correction) = build_parenthesized_call_rewrite(source, &call, self.name())
+            {
+                corrections.push(correction);
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -113,4 +156,18 @@ impl Cop for RequireParentheses {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RequireParentheses, "cops/lint/require_parentheses");
+
+    #[test]
+    fn supports_autocorrect() {
+        assert!(RequireParentheses.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_wraps_predicate_call_args() {
+        crate::testutil::assert_cop_autocorrect(
+            &RequireParentheses,
+            b"day_is? 'tuesday' || true\n",
+            b"day_is?('tuesday' || true)\n",
+        );
+    }
 }
