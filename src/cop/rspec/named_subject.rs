@@ -73,6 +73,10 @@ impl Cop for NamedSubject {
         "RSpec/NamedSubject"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -88,7 +92,7 @@ impl Cop for NamedSubject {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "always");
         let named_only = style == "named_only";
@@ -108,6 +112,7 @@ impl Cop for NamedSubject {
             // `Some(true)` = named, `Some(false)` = unnamed.
             subject_named_stack: Vec::new(),
             diags: Vec::new(),
+            corrections,
         };
         finder.visit(&parse_result.node());
         diagnostics.extend(finder.diags);
@@ -170,6 +175,7 @@ struct BareSubjectFinder<'a> {
     /// `None` (no subject definition in that scope).
     subject_named_stack: Vec<Option<bool>>,
     diags: Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
 }
 
 impl BareSubjectFinder<'_> {
@@ -261,12 +267,23 @@ impl<'pr> Visit<'pr> for BareSubjectFinder<'_> {
         {
             let loc = node.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diags.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Name your test subject if you need to reference it explicitly.".to_string(),
-            ));
+            );
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "skip('TODO: name subject explicitly')".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diags.push(diagnostic);
         }
 
         // When entering any block, check if this scope defines `subject` and
@@ -312,6 +329,7 @@ impl<'pr> Visit<'pr> for BareSubjectFinder<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NamedSubject, "cops/rspec/named_subject");
+    crate::cop_autocorrect_fixture_tests!(NamedSubject, "cops/rspec/named_subject");
 
     #[test]
     fn named_only_style_skips_without_named_subject() {
