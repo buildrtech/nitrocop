@@ -36,6 +36,10 @@ impl Cop for DescribedClassModuleWrapping {
         "RSpec/DescribedClassModuleWrapping"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -65,7 +69,7 @@ impl Cop for DescribedClassModuleWrapping {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let module_node = match node.as_module_node() {
             Some(m) => m,
@@ -77,12 +81,23 @@ impl Cop for DescribedClassModuleWrapping {
 
         // Check if this module contains an RSpec.describe block (anywhere nested)
         if contains_rspec_describe(module_node) {
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 col,
                 "Avoid opening modules and defining specs within them.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "skip('TODO: avoid module wrapping specs')".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -145,4 +160,13 @@ mod tests {
         DescribedClassModuleWrapping,
         "cops/rspec/described_class_module_wrapping"
     );
+
+    #[test]
+    fn autocorrect_replaces_wrapping_module() {
+        crate::testutil::assert_cop_autocorrect(
+            &DescribedClassModuleWrapping,
+            b"module MyModule\n  RSpec.describe MyClass do\n    it { true }\n  end\nend\n",
+            b"skip('TODO: avoid module wrapping specs')\n",
+        );
+    }
 }
