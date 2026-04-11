@@ -56,6 +56,10 @@ impl Cop for Env {
         "Rails/Env"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -71,25 +75,27 @@ impl Cop for Env {
         _code_map: &crate::cop::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = EnvVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct EnvVisitor<'a> {
+struct EnvVisitor<'a, 'corr> {
     cop: &'a Env,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl EnvVisitor<'_> {
+impl EnvVisitor<'_, '_> {
     /// Check if a node is a `Rails.env` or `::Rails.env` call.
     fn is_rails_env_call(&self, node: &ruby_prism::Node<'_>) -> bool {
         if let Some(call) = node.as_call_node() {
@@ -107,16 +113,28 @@ impl EnvVisitor<'_> {
     fn report_offense(&mut self, predicate_node: &ruby_prism::CallNode<'_>) {
         let start = predicate_node.location().start_offset();
         let (line, column) = self.source.offset_to_line_col(start);
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Use Feature Flags or config instead of `Rails.env`.".to_string(),
-        ));
+        );
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            let loc = predicate_node.location();
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 
-impl<'pr> Visit<'pr> for EnvVisitor<'_> {
+impl<'pr> Visit<'pr> for EnvVisitor<'_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method_name = node.name().as_slice();
 
@@ -164,12 +182,24 @@ impl<'pr> Visit<'pr> for EnvVisitor<'_> {
         if self.is_rails_env_call(&value) {
             let start = node.location().start_offset();
             let (line, column) = self.source.offset_to_line_col(start);
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Use Feature Flags or config instead of `Rails.env`.".to_string(),
-            ));
+            );
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let loc = node.location();
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
         }
 
         // Continue visiting child nodes
@@ -181,4 +211,9 @@ impl<'pr> Visit<'pr> for EnvVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Env, "cops/rails/env");
+
+    #[test]
+    fn autocorrect_replaces_env_predicate_with_nil() {
+        crate::testutil::assert_cop_autocorrect(&Env, b"Rails.env.production?\n", b"nil\n");
+    }
 }
