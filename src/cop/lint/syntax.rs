@@ -23,6 +23,10 @@ impl Cop for Syntax {
         "Lint/Syntax"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Fatal
     }
@@ -51,5 +55,10 @@ mod tests {
         let source = b"x = 1\ny = 2\n";
         let diags = run_cop_full(&Syntax, source);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(Syntax.supports_autocorrect());
     }
 }
