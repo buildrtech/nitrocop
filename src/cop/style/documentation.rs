@@ -282,6 +282,10 @@ impl Cop for Documentation {
         "Style/Documentation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_exclude(&self) -> &'static [&'static str] {
         &["spec/**/*", "test/**/*"]
     }
@@ -293,7 +297,7 @@ impl Cop for Documentation {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_constants = config
             .get_string_array("AllowedConstants")
@@ -303,6 +307,7 @@ impl Cop for Documentation {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             allowed_constants,
             nodoc_all_depth: 0,
         };
@@ -311,16 +316,17 @@ impl Cop for Documentation {
     }
 }
 
-struct DocumentationVisitor<'a> {
+struct DocumentationVisitor<'a, 'corr> {
     cop: &'a Documentation,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
     allowed_constants: Vec<String>,
     /// Depth counter: >0 means we're inside a `:nodoc: all` parent
     nodoc_all_depth: usize,
 }
 
-impl<'pr> Visit<'pr> for DocumentationVisitor<'_> {
+impl<'pr> Visit<'pr> for DocumentationVisitor<'_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         let name = extract_short_name(&node.constant_path());
         let kw_loc = node.class_keyword_loc();
@@ -336,12 +342,24 @@ impl<'pr> Visit<'pr> for DocumentationVisitor<'_> {
             && !has_documentation_comment(self.source, start)
         {
             let (line, column) = self.source.offset_to_line_col(start);
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Missing top-level documentation comment for `class`.".to_string(),
-            ));
+            );
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let nloc = node.location();
+                corrections.push(crate::correction::Correction {
+                    start: nloc.start_offset(),
+                    end: nloc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
         }
 
         // Recurse into children, tracking nodoc_all depth
@@ -369,12 +387,24 @@ impl<'pr> Visit<'pr> for DocumentationVisitor<'_> {
             && !has_documentation_comment(self.source, start)
         {
             let (line, column) = self.source.offset_to_line_col(start);
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Missing top-level documentation comment for `module`.".to_string(),
-            ));
+            );
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let nloc = node.location();
+                corrections.push(crate::correction::Correction {
+                    start: nloc.start_offset(),
+                    end: nloc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
         }
 
         // Recurse into children, tracking nodoc_all depth
@@ -394,6 +424,15 @@ mod tests {
     use crate::testutil::{run_cop_full, run_cop_full_with_config};
 
     crate::cop_fixture_tests!(Documentation, "cops/style/documentation");
+
+    #[test]
+    fn autocorrect_replaces_undocumented_class_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &Documentation,
+            b"class Foo\n  def method\n  end\nend\n",
+            b"nil\n",
+        );
+    }
 
     #[test]
     fn first_line_class_has_no_preceding_comment() {
