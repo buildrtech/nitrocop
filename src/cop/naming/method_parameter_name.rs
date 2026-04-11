@@ -58,6 +58,10 @@ impl Cop for MethodParameterName {
         "Naming/MethodParameterName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             DEF_NODE,
@@ -75,8 +79,9 @@ impl Cop for MethodParameterName {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let min_length = config.get_usize("MinNameLength", 3);
         let allow_numbers = config.get_bool("AllowNamesEndingInNumbers", true);
         let allowed_names = config.get_string_array("AllowedNames");
@@ -110,6 +115,7 @@ impl Cop for MethodParameterName {
                     &forbidden,
                     allow_numbers,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -128,6 +134,7 @@ impl Cop for MethodParameterName {
                     &forbidden,
                     allow_numbers,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -146,6 +153,7 @@ impl Cop for MethodParameterName {
                     &forbidden,
                     allow_numbers,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -170,6 +178,7 @@ impl Cop for MethodParameterName {
                     &forbidden,
                     allow_numbers,
                     diagnostics,
+                    &mut corrections,
                 );
             }
             if let Some(kw) = param.as_optional_keyword_parameter_node() {
@@ -189,6 +198,7 @@ impl Cop for MethodParameterName {
                     &forbidden,
                     allow_numbers,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -208,6 +218,7 @@ impl Cop for MethodParameterName {
                         &forbidden,
                         allow_numbers,
                         diagnostics,
+                        &mut corrections,
                     );
                 }
             }
@@ -228,6 +239,7 @@ impl Cop for MethodParameterName {
                         &forbidden,
                         allow_numbers,
                         diagnostics,
+                        &mut corrections,
                     );
                 }
             }
@@ -247,6 +259,7 @@ impl Cop for MethodParameterName {
                     &forbidden,
                     allow_numbers,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -264,6 +277,7 @@ fn check_param(
     forbidden: &[String],
     allow_numbers: bool,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     let name_str = std::str::from_utf8(name).unwrap_or("");
 
@@ -283,8 +297,9 @@ fn check_param(
 
     let (line, column) = source.offset_to_line_col(loc.start_offset());
 
+    let diagnostics_start = diagnostics.len();
+
     // RuboCop emits multiple offenses per param: forbidden, case, length, numbers.
-    // Check forbidden names
     if forbidden.iter().any(|f| f == basename) {
         diagnostics.push(cop.diagnostic(
             source,
@@ -294,7 +309,6 @@ fn check_param(
         ));
     }
 
-    // Check uppercase characters
     if basename.chars().any(|c| c.is_uppercase()) {
         diagnostics.push(cop.diagnostic(
             source,
@@ -304,7 +318,6 @@ fn check_param(
         ));
     }
 
-    // Check minimum length (against full name including underscores, matching RuboCop)
     if basename.len() < min_length {
         diagnostics.push(cop.diagnostic(
             source,
@@ -314,7 +327,6 @@ fn check_param(
         ));
     }
 
-    // Check names ending in numbers
     if !allow_numbers && basename.ends_with(|c: char| c.is_ascii_digit()) {
         diagnostics.push(cop.diagnostic(
             source,
@@ -323,6 +335,26 @@ fn check_param(
             "Do not end method parameter with a number.".to_string(),
         ));
     }
+
+    if diagnostics.len() > diagnostics_start {
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let replacement = if basename.len() < min_length {
+                "arg".to_string()
+            } else {
+                basename.to_ascii_lowercase()
+            };
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+            for diagnostic in diagnostics.iter_mut().skip(diagnostics_start) {
+                diagnostic.corrected = true;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -330,4 +362,13 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(MethodParameterName, "cops/naming/method_parameter_name");
+
+    #[test]
+    fn autocorrect_downcases_camelcase_param_name() {
+        crate::testutil::assert_cop_autocorrect(
+            &MethodParameterName,
+            b"def camel(fooBar)\nend\n",
+            b"def camel(foobar)\nend\n",
+        );
+    }
 }
