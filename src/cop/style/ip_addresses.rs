@@ -310,6 +310,7 @@ impl IpAddresses {
         string_node: &ruby_prism::StringNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Skip string segments inside interpolated strings (no opening delimiter).
         // Matches RuboCop's StringHelp `node.loc?(:begin)` check.
@@ -371,12 +372,23 @@ impl IpAddresses {
         if is_ip {
             let loc = string_node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Do not hardcode IP addresses.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "\"0.0.0.0\"".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -384,6 +396,10 @@ impl IpAddresses {
 impl Cop for IpAddresses {
     fn name(&self) -> &'static str {
         "Style/IpAddresses"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_enabled(&self) -> bool {
@@ -397,7 +413,7 @@ impl Cop for IpAddresses {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = IpAddressVisitor {
             cop: self,
@@ -405,6 +421,7 @@ impl Cop for IpAddresses {
             config,
             in_regexp_depth: 0,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -414,19 +431,25 @@ impl Cop for IpAddresses {
 /// AST visitor that tracks regexp nesting to skip string nodes inside regexps.
 /// Matches RuboCop's `StringHelp#on_regexp` which calls `ignore_node(node)`,
 /// causing all descendant `str` nodes to be skipped via `part_of_ignored_node?`.
-struct IpAddressVisitor<'a, 'src> {
+struct IpAddressVisitor<'a, 'src, 'corr> {
     cop: &'a IpAddresses,
     source: &'src SourceFile,
     config: &'a CopConfig,
     in_regexp_depth: u32,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for IpAddressVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for IpAddressVisitor<'_, '_, '_> {
     fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
         if self.in_regexp_depth == 0 {
-            self.cop
-                .check_string_node(self.source, node, self.config, &mut self.diagnostics);
+            self.cop.check_string_node(
+                self.source,
+                node,
+                self.config,
+                &mut self.diagnostics,
+                self.corrections.as_deref_mut(),
+            );
         }
         // StringNode is a leaf, no children to visit
     }
@@ -454,6 +477,15 @@ impl<'pr> Visit<'pr> for IpAddressVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(IpAddresses, "cops/style/ip_addresses");
+
+    #[test]
+    fn autocorrect_replaces_hardcoded_ip_string() {
+        crate::testutil::assert_cop_autocorrect(
+            &IpAddresses,
+            b"host = \"127.0.0.1\"\n",
+            b"host = \"0.0.0.0\"\n",
+        );
+    }
 
     #[test]
     fn test_ipv4_validation() {
