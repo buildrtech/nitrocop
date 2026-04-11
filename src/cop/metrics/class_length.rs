@@ -285,6 +285,10 @@ impl Cop for ClassLength {
         "Metrics/ClassLength"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CLASS_NODE,
@@ -559,5 +563,10 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(ClassLength.supports_autocorrect());
     }
 }
