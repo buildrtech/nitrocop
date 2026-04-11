@@ -16,6 +16,10 @@ impl Cop for OpenStructUse {
         "Style/OpenStructUse"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -23,42 +27,59 @@ impl Cop for OpenStructUse {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = OpenStructUseVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct OpenStructUseVisitor<'a> {
+struct OpenStructUseVisitor<'a, 'corr> {
     cop: &'a OpenStructUse,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl OpenStructUseVisitor<'_> {
-    fn check_open_struct(&mut self, name: &[u8], start_offset: usize) {
+impl OpenStructUseVisitor<'_, '_> {
+    fn check_open_struct(&mut self, name: &[u8], start_offset: usize, end_offset: usize) {
         if name == b"OpenStruct" {
             let (line, column) = self.source.offset_to_line_col(start_offset);
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Avoid using `OpenStruct`; use `Struct`, `Hash`, a class, or ActiveModel attributes instead."
                     .to_string(),
-            ));
+            );
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: start_offset,
+                    end: end_offset,
+                    replacement: "Struct".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
         }
     }
 }
 
-impl<'pr> Visit<'pr> for OpenStructUseVisitor<'_> {
+impl<'pr> Visit<'pr> for OpenStructUseVisitor<'_, '_> {
     fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
-        self.check_open_struct(node.name().as_slice(), node.location().start_offset());
+        self.check_open_struct(
+            node.name().as_slice(),
+            node.location().start_offset(),
+            node.location().end_offset(),
+        );
     }
 
     fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
@@ -66,7 +87,11 @@ impl<'pr> Visit<'pr> for OpenStructUseVisitor<'_> {
         // not namespaced like YARD::OpenStruct or Foo::Bar::OpenStruct
         if node.parent().is_none() {
             if let Some(name) = node.name() {
-                self.check_open_struct(name.as_slice(), node.location().start_offset());
+                self.check_open_struct(
+                    name.as_slice(),
+                    node.location().start_offset(),
+                    node.location().end_offset(),
+                );
             }
         }
     }
@@ -95,4 +120,13 @@ impl<'pr> Visit<'pr> for OpenStructUseVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(OpenStructUse, "cops/style/open_struct_use");
+
+    #[test]
+    fn autocorrect_replaces_open_struct_with_struct() {
+        crate::testutil::assert_cop_autocorrect(
+            &OpenStructUse,
+            b"OpenStruct.new(name: 'x')\n",
+            b"Struct.new(name: 'x')\n",
+        );
+    }
 }
