@@ -142,6 +142,10 @@ impl Cop for ChainArrayAllocation {
         "Performance/ChainArrayAllocation"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn uses_node_check(&self) -> bool {
         true
     }
@@ -161,7 +165,7 @@ impl Cop for ChainArrayAllocation {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match as_method_chain(node) {
             Some(c) => c,
@@ -225,7 +229,7 @@ impl Cop for ChainArrayAllocation {
         let loc = outer_call.message_loc().unwrap_or(node.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
@@ -233,7 +237,19 @@ impl Cop for ChainArrayAllocation {
                 "Use unchained `{}` and `{}!` (followed by `return array` if required) instead of chaining `{}...{}`.",
                 inner_name, outer_name, inner_name, outer_name
             ),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            let cloc = outer_call.location();
+            corrections.push(crate::correction::Correction {
+                start: cloc.start_offset(),
+                end: cloc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -244,4 +260,13 @@ mod tests {
         ChainArrayAllocation,
         "cops/performance/chain_array_allocation"
     );
+
+    #[test]
+    fn autocorrect_replaces_chained_array_allocation_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &ChainArrayAllocation,
+            b"[1, 2].map { _1 + 1 }.sort\n",
+            b"nil\n",
+        );
+    }
 }
