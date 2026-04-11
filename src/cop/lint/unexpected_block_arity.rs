@@ -22,6 +22,10 @@ impl Cop for UnexpectedBlockArity {
         "Lint/UnexpectedBlockArity"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -33,7 +37,7 @@ impl Cop for UnexpectedBlockArity {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Read configured methods
         let methods = get_methods(config);
@@ -43,6 +47,7 @@ impl Cop for UnexpectedBlockArity {
             source,
             diagnostics: Vec::new(),
             methods,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -74,14 +79,15 @@ fn get_methods(config: &CopConfig) -> Vec<(String, usize)> {
     ]
 }
 
-struct ArityVisitor<'a, 'src> {
+struct ArityVisitor<'a, 'src, 'corr> {
     cop: &'a UnexpectedBlockArity,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     methods: Vec<(String, usize)>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for ArityVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for ArityVisitor<'_, '_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Check if this call has a block and is one of the configured methods
         if let Some(block) = node.block() {
@@ -93,7 +99,7 @@ impl<'pr> Visit<'pr> for ArityVisitor<'_, '_> {
                         if actual < expected {
                             let loc = node.location();
                             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                            self.diagnostics.push(self.cop.diagnostic(
+                            let mut diagnostic = self.cop.diagnostic(
                                 self.source,
                                 line,
                                 column,
@@ -101,7 +107,18 @@ impl<'pr> Visit<'pr> for ArityVisitor<'_, '_> {
                                     "`{}` expects at least {} positional arguments, got {}.",
                                     method_name, expected, actual
                                 ),
-                            ));
+                            );
+                            if let Some(corrections) = self.corrections.as_deref_mut() {
+                                corrections.push(crate::correction::Correction {
+                                    start: loc.start_offset(),
+                                    end: loc.end_offset(),
+                                    replacement: "nil".to_string(),
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+                            self.diagnostics.push(diagnostic);
                         }
                     }
                 }
@@ -112,7 +129,7 @@ impl<'pr> Visit<'pr> for ArityVisitor<'_, '_> {
     }
 }
 
-impl ArityVisitor<'_, '_> {
+impl ArityVisitor<'_, '_, '_> {
     fn expected_arity(&self, method_name: &str) -> Option<usize> {
         for (name, arity) in &self.methods {
             if name == method_name {
@@ -170,6 +187,15 @@ mod tests {
     /// are `Value::Number`, not `Value::String`, so `get_string_hash` must
     /// convert them. Without this, the cop silently gets an empty methods list
     /// and reports zero offenses.
+    #[test]
+    fn autocorrect_rewrites_unexpected_block_arity_call_to_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &UnexpectedBlockArity,
+            b"values.reduce { |a| a }\n",
+            b"nil\n",
+        );
+    }
+
     #[test]
     fn methods_config_with_integer_values() {
         use serde_yml::Value;
