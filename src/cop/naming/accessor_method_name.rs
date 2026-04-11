@@ -16,6 +16,10 @@ impl Cop for AccessorMethodName {
         "Naming/AccessorMethodName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[DEF_NODE]
     }
@@ -27,7 +31,7 @@ impl Cop for AccessorMethodName {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -66,12 +70,18 @@ impl Cop for AccessorMethodName {
                 .parameters()
                 .is_some_and(|params| params.requireds().len() == 1);
 
-        let message = if name_str.starts_with("get_") && total_param_count == 0 {
+        let (message, replacement) = if name_str.starts_with("get_") && total_param_count == 0 {
             // Reader methods: get_* with no arguments
-            "Do not prefix reader method names with `get_`."
+            (
+                "Do not prefix reader method names with `get_`.",
+                name_str.trim_start_matches("get_").to_string(),
+            )
         } else if name_str.starts_with("set_") && has_one_regular_arg {
             // Writer methods: set_* with exactly one regular argument
-            "Do not prefix writer method names with `set_`."
+            (
+                "Do not prefix writer method names with `set_`.",
+                format!("{}=", name_str.trim_start_matches("set_")),
+            )
         } else {
             return;
         };
@@ -79,7 +89,19 @@ impl Cop for AccessorMethodName {
         let loc = def_node.name_loc();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
 
-        diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+        let mut diagnostic = self.diagnostic(source, line, column, message.to_string());
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -87,4 +109,13 @@ impl Cop for AccessorMethodName {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AccessorMethodName, "cops/naming/accessor_method_name");
+
+    #[test]
+    fn autocorrect_rewrites_get_prefix_reader() {
+        crate::testutil::assert_cop_autocorrect(
+            &AccessorMethodName,
+            b"def get_value\n  @value\nend\n",
+            b"def value\n  @value\nend\n",
+        );
+    }
 }

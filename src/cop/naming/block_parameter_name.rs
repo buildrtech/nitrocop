@@ -24,6 +24,10 @@ impl Cop for BlockParameterName {
         "Naming/BlockParameterName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             BLOCK_NODE,
@@ -43,8 +47,9 @@ impl Cop for BlockParameterName {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let min_length = config.get_usize("MinNameLength", 1);
         let _allow_numbers = config.get_bool("AllowNamesEndingInNumbers", true);
         let _allowed_names = config.get_string_array("AllowedNames");
@@ -83,6 +88,7 @@ impl Cop for BlockParameterName {
                     min_length,
                     config,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -98,6 +104,7 @@ impl Cop for BlockParameterName {
                     min_length,
                     config,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -118,6 +125,7 @@ impl Cop for BlockParameterName {
                     min_length,
                     config,
                     diagnostics,
+                    &mut corrections,
                 );
             }
             if let Some(kw) = param.as_optional_keyword_parameter_node() {
@@ -135,6 +143,7 @@ impl Cop for BlockParameterName {
                     min_length,
                     config,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -149,6 +158,7 @@ fn check_param_name(
     min_length: usize,
     config: &CopConfig,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     let name_str = std::str::from_utf8(name).unwrap_or("");
 
@@ -171,12 +181,22 @@ fn check_param_name(
     if let Some(forbidden) = config.get_string_array("ForbiddenNames") {
         if forbidden.iter().any(|f| f == stripped) {
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(cop.diagnostic(
+            let mut diagnostic = cop.diagnostic(
                 source,
                 line,
                 column,
                 "Block parameter name is too short.".to_string(),
-            ));
+            );
+            apply_block_param_autocorrect(
+                cop,
+                source,
+                loc,
+                stripped,
+                min_length,
+                corrections,
+                &mut diagnostic,
+            );
+            diagnostics.push(diagnostic);
             return;
         }
     }
@@ -184,25 +204,84 @@ fn check_param_name(
     // Check for capital letters (against stripped name, matching RuboCop)
     if stripped.bytes().any(|b| b.is_ascii_uppercase()) {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(cop.diagnostic(
+        let mut diagnostic = cop.diagnostic(
             source,
             line,
             column,
             "Block parameter must not contain capital letters.".to_string(),
-        ));
+        );
+        apply_block_param_autocorrect(
+            cop,
+            source,
+            loc,
+            stripped,
+            min_length,
+            corrections,
+            &mut diagnostic,
+        );
+        diagnostics.push(diagnostic);
         return;
     }
 
     // Check minimum length (against stripped name, matching RuboCop)
     if stripped.len() < min_length {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(cop.diagnostic(
+        let mut diagnostic = cop.diagnostic(
             source,
             line,
             column,
             "Block parameter name is too short.".to_string(),
-        ));
+        );
+        apply_block_param_autocorrect(
+            cop,
+            source,
+            loc,
+            stripped,
+            min_length,
+            corrections,
+            &mut diagnostic,
+        );
+        diagnostics.push(diagnostic);
     }
+}
+
+fn apply_block_param_autocorrect(
+    cop: &BlockParameterName,
+    source: &SourceFile,
+    loc: &ruby_prism::Location<'_>,
+    stripped: &str,
+    min_length: usize,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    diagnostic: &mut Diagnostic,
+) {
+    let Some(corrections) = corrections.as_deref_mut() else {
+        return;
+    };
+
+    let token = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+    if !token
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    {
+        return;
+    }
+
+    let mut replacement = stripped.to_ascii_lowercase();
+    if replacement.len() < min_length {
+        replacement = "arg".to_string();
+    }
+    if replacement.is_empty() {
+        replacement = "arg".to_string();
+    }
+
+    corrections.push(crate::correction::Correction {
+        start: loc.start_offset(),
+        end: loc.end_offset(),
+        replacement,
+        cop_name: cop.name(),
+        cop_index: 0,
+    });
+    diagnostic.corrected = true;
 }
 
 #[cfg(test)]
@@ -210,4 +289,13 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(BlockParameterName, "cops/naming/block_parameter_name");
+
+    #[test]
+    fn autocorrect_downcases_block_param_name() {
+        crate::testutil::assert_cop_autocorrect(
+            &BlockParameterName,
+            b"arr.each { |Foo| Foo }\n",
+            b"arr.each { |foo| Foo }\n",
+        );
+    }
 }
