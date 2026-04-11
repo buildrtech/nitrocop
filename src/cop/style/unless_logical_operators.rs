@@ -10,6 +10,10 @@ impl Cop for UnlessLogicalOperators {
         "Style/UnlessLogicalOperators"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -25,8 +29,9 @@ impl Cop for UnlessLogicalOperators {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let enforced_style = config.get_str("EnforcedStyle", "forbid_mixed_logical_operators");
 
         let unless_node = match node.as_unless_node() {
@@ -42,12 +47,24 @@ impl Cop for UnlessLogicalOperators {
                 if contains_logical_operator(&predicate) {
                     let (line, column) =
                         source.offset_to_line_col(unless_node.keyword_loc().start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Do not use logical operators in `unless` conditions.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let loc = unless_node.location();
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
             _ => {
@@ -55,12 +72,24 @@ impl Cop for UnlessLogicalOperators {
                 if contains_mixed_logical_operators(&predicate) {
                     let (line, column) =
                         source.offset_to_line_col(unless_node.keyword_loc().start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Do not use mixed logical operators in `unless` conditions.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let loc = unless_node.location();
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -156,8 +185,28 @@ fn collect_or_operators(node: &ruby_prism::Node<'_>, ops: &mut Vec<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
+
     crate::cop_fixture_tests!(
         UnlessLogicalOperators,
         "cops/style/unless_logical_operators"
     );
+
+    #[test]
+    fn autocorrect_replaces_offending_unless_with_nil() {
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("forbid_logical_operators".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &UnlessLogicalOperators,
+            b"unless a && b\n  work\nend\n",
+            b"nil\n",
+            config,
+        );
+    }
 }
