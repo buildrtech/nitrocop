@@ -190,6 +190,10 @@ impl Cop for I18nLocaleTexts {
         "Rails/I18nLocaleTexts"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -205,71 +209,69 @@ impl Cop for I18nLocaleTexts {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
+        };
+
+        let mut emit_for_value = |value: &ruby_prism::Node<'_>| {
+            let loc = value.location();
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            let mut diagnostic = self.diagnostic(source, line, column, MSG.to_string());
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "'TODO'".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         };
 
         let method_name = call.name().as_slice();
 
         match method_name {
             b"validates" => {
-                // Recursively search for (pair (sym :message) str) anywhere in args
                 let mut results = Vec::new();
                 find_pairs_recursive(source, node, b"message", &mut results);
                 for val in results {
-                    let loc = val.location();
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+                    emit_for_value(&val);
                 }
                 return;
             }
             b"redirect_to" | b"redirect_back" => {
-                // Recursively search for (pair (sym :notice/:alert) str) anywhere in args
                 for key in &[b"notice" as &[u8], b"alert"] {
                     let mut results = Vec::new();
                     find_pairs_recursive(source, node, key, &mut results);
                     for val in results {
-                        let loc = val.location();
-                        let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+                        emit_for_value(&val);
                     }
                 }
                 return;
             }
             b"mail" => {
-                // Recursively search for (pair (sym :subject) str) anywhere in args
                 let mut results = Vec::new();
                 find_pairs_recursive(source, node, b"subject", &mut results);
                 for val in results {
-                    let loc = val.location();
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+                    emit_for_value(&val);
                 }
             }
             _ => {}
         }
 
-        // Check flash[:notice] = "string" or flash.now[:notice] = "string"
-        // This is `[]=` call on `flash` or `flash.now`
         if method_name == b"[]=" {
             if let Some(receiver) = call.receiver() {
-                let is_flash = is_flash_receiver(&receiver);
-                if is_flash {
-                    // The last argument is the assigned value
+                if is_flash_receiver(&receiver) {
                     if let Some(args) = call.arguments() {
                         let arg_list: Vec<_> = args.arguments().iter().collect();
                         if arg_list.len() == 2 && is_string_literal(source, &arg_list[1]) {
-                            let loc = arg_list[1].location();
-                            let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                MSG.to_string(),
-                            ));
+                            emit_for_value(&arg_list[1]);
                         }
                     }
                 }
@@ -312,4 +314,13 @@ fn is_flash_receiver(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(I18nLocaleTexts, "cops/rails/i18n_locale_texts");
+
+    #[test]
+    fn autocorrect_replaces_flash_locale_text_with_todo_literal() {
+        crate::testutil::assert_cop_autocorrect(
+            &I18nLocaleTexts,
+            b"flash[:notice] = 'Welcome'\n",
+            b"flash[:notice] = 'TODO'\n",
+        );
+    }
 }
