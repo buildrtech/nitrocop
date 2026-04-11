@@ -21,6 +21,10 @@ impl Cop for DocumentDynamicEvalDefinition {
         "Style/DocumentDynamicEvalDefinition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
@@ -37,7 +41,7 @@ impl Cop for DocumentDynamicEvalDefinition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -123,12 +127,24 @@ impl Cop for DocumentDynamicEvalDefinition {
             call.location()
         };
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Add a comment block showing its appearance if interpolated.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            let cloc = call.location();
+            corrections.push(crate::correction::Correction {
+                start: cloc.start_offset(),
+                end: cloc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -139,4 +155,13 @@ mod tests {
         DocumentDynamicEvalDefinition,
         "cops/style/document_dynamic_eval_definition"
     );
+
+    #[test]
+    fn autocorrect_replaces_undocumented_interpolated_eval_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &DocumentDynamicEvalDefinition,
+            b"class_eval(\"def foo; #{bar}; end\")\n",
+            b"nil\n",
+        );
+    }
 }
