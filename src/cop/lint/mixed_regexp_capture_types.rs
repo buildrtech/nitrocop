@@ -20,6 +20,10 @@ impl Cop for MixedRegexpCaptureTypes {
         "Lint/MixedRegexpCaptureTypes"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -35,7 +39,7 @@ impl Cop for MixedRegexpCaptureTypes {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check RegularExpressionNode for mixed capture types
         let regexp = match node.as_regular_expression_node() {
@@ -65,12 +69,26 @@ impl Cop for MixedRegexpCaptureTypes {
         if has_mixed_captures(content_str, extended) {
             let loc = regexp.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Do not mix named captures and numbered captures in a Regexp literal.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections {
+                let raw = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
+                if let Some(replacement) = rewrite_first_numbered_capture_to_non_capturing(&raw) {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -176,6 +194,49 @@ fn has_mixed_captures(pattern: &str, extended: bool) -> bool {
     has_named && has_numbered
 }
 
+fn rewrite_first_numbered_capture_to_non_capturing(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    let len = bytes.len();
+    let mut in_class = false;
+
+    while i < len {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'[' {
+            in_class = true;
+            i += 1;
+            continue;
+        }
+        if in_class {
+            if bytes[i] == b']' {
+                in_class = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'(' {
+            if i + 1 < len && bytes[i + 1] == b'?' {
+                i += 1;
+                continue;
+            }
+            let mut out = String::with_capacity(raw.len() + 2);
+            out.push_str(&raw[..i + 1]);
+            out.push_str("?:");
+            out.push_str(&raw[i + 1..]);
+            return Some(out);
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,4 +244,13 @@ mod tests {
         MixedRegexpCaptureTypes,
         "cops/lint/mixed_regexp_capture_types"
     );
+
+    #[test]
+    fn autocorrect_rewrites_first_numbered_capture_to_non_capturing() {
+        crate::testutil::assert_cop_autocorrect(
+            &MixedRegexpCaptureTypes,
+            b"/(?<foo>bar)(baz)/\n",
+            b"/(?<foo>bar)(?:baz)/\n",
+        );
+    }
 }
