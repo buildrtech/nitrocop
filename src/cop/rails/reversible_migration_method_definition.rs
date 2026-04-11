@@ -10,6 +10,10 @@ impl Cop for ReversibleMigrationMethodDefinition {
         "Rails/ReversibleMigrationMethodDefinition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -33,8 +37,9 @@ impl Cop for ReversibleMigrationMethodDefinition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let class_node = match node.as_class_node() {
             Some(c) => c,
             None => return,
@@ -63,13 +68,21 @@ impl Cop for ReversibleMigrationMethodDefinition {
         let mut has_up = false;
         let mut has_down = false;
         let mut has_change = false;
+        let mut up_name_loc = None;
+        let mut down_name_loc = None;
 
         for stmt in stmts.body().iter() {
             if let Some(def_node) = stmt.as_def_node() {
                 let name = def_node.name().as_slice();
                 match name {
-                    b"up" => has_up = true,
-                    b"down" => has_down = true,
+                    b"up" => {
+                        has_up = true;
+                        up_name_loc = Some(def_node.name_loc());
+                    }
+                    b"down" => {
+                        has_down = true;
+                        down_name_loc = Some(def_node.name_loc());
+                    }
                     b"change" => has_change = true,
                     _ => {}
                 }
@@ -85,26 +98,49 @@ impl Cop for ReversibleMigrationMethodDefinition {
         if has_up && !has_down {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Define both `up` and `down` methods, or use `change` for reversible migrations."
                     .to_string(),
-            ));
+            );
+            if let (Some(name_loc), Some(corrections)) = (up_name_loc, corrections.as_deref_mut()) {
+                corrections.push(crate::correction::Correction {
+                    start: name_loc.start_offset(),
+                    end: name_loc.end_offset(),
+                    replacement: "change".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
 
         // If has `down` but not `up`, also flag
         if has_down && !has_up {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Define both `up` and `down` methods, or use `change` for reversible migrations."
                     .to_string(),
-            ));
+            );
+            if let (Some(name_loc), Some(corrections)) = (down_name_loc, corrections.as_deref_mut())
+            {
+                corrections.push(crate::correction::Correction {
+                    start: name_loc.start_offset(),
+                    end: name_loc.end_offset(),
+                    replacement: "change".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -116,4 +152,13 @@ mod tests {
         ReversibleMigrationMethodDefinition,
         "cops/rails/reversible_migration_method_definition"
     );
+
+    #[test]
+    fn autocorrect_renames_lone_up_method_to_change() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReversibleMigrationMethodDefinition,
+            b"class AddUsers < ActiveRecord::Migration[7.0]\n  def up\n  end\nend\n",
+            b"class AddUsers < ActiveRecord::Migration[7.0]\n  def change\n  end\nend\n",
+        );
+    }
 }
