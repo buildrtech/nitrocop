@@ -159,6 +159,10 @@ impl Cop for CompoundHash {
         "Security/CompoundHash"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -174,8 +178,9 @@ impl Cop for CompoundHash {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // === COMBINATOR pattern: detect operators inside def hash ===
 
         // Handle `def hash` and `def object.hash` (DefNode)
@@ -188,12 +193,19 @@ impl Cop for CompoundHash {
                     find_outermost_combinators(&body, source, &mut combinator_locs);
                     for loc in combinator_locs {
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            COMBINATOR_MSG.to_string(),
-                        ));
+                        let mut diagnostic =
+                            self.diagnostic(source, line, column, COMBINATOR_MSG.to_string());
+                        if let Some(corrections) = corrections.as_deref_mut() {
+                            corrections.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: "nil".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -226,12 +238,23 @@ impl Cop for CompoundHash {
                                         for loc in combinator_locs {
                                             let (line, column) =
                                                 source.offset_to_line_col(loc.start_offset());
-                                            diagnostics.push(self.diagnostic(
+                                            let mut diagnostic = self.diagnostic(
                                                 source,
                                                 line,
                                                 column,
                                                 COMBINATOR_MSG.to_string(),
-                                            ));
+                                            );
+                                            if let Some(corrections) = corrections.as_deref_mut() {
+                                                corrections.push(crate::correction::Correction {
+                                                    start: loc.start_offset(),
+                                                    end: loc.end_offset(),
+                                                    replacement: "nil".to_string(),
+                                                    cop_name: self.name(),
+                                                    cop_index: 0,
+                                                });
+                                                diagnostic.corrected = true;
+                                            }
+                                            diagnostics.push(diagnostic);
                                         }
                                     }
                                 }
@@ -281,7 +304,19 @@ impl Cop for CompoundHash {
             if !is_combinator_follow {
                 let msg_loc = call.message_loc().unwrap();
                 let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-                diagnostics.push(self.diagnostic(source, line, column, MONUPLE_MSG.to_string()));
+                let mut diagnostic = self.diagnostic(source, line, column, MONUPLE_MSG.to_string());
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let loc = call.location();
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
 
@@ -293,12 +328,19 @@ impl Cop for CompoundHash {
                     if c.name().as_slice() == b"hash" && c.arguments().is_none() {
                         let loc = c.location();
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            REDUNDANT_MSG.to_string(),
-                        ));
+                        let mut diagnostic =
+                            self.diagnostic(source, line, column, REDUNDANT_MSG.to_string());
+                        if let Some(corrections) = corrections.as_deref_mut() {
+                            corrections.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: "nil".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -352,5 +394,10 @@ mod tests {
             // Use nitrocop-expect to mark offenses
             b"define_method(:hash) do\n  1.hash ^ 2.hash\n  ^^^^^^^^^^^^^^^^ Security/CompoundHash: Use `[...].hash` instead of combining hash values manually.\nend\n",
         );
+    }
+
+    #[test]
+    fn autocorrect_replaces_monuple_hash_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(&CompoundHash, b"[value].hash\n", b"nil\n");
     }
 }
