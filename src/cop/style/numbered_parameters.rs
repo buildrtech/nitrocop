@@ -10,6 +10,10 @@ impl Cop for NumberedParameters {
         "Style/NumberedParameters"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[BLOCK_NODE, CALL_NODE, NUMBERED_PARAMETERS_NODE]
     }
@@ -21,8 +25,9 @@ impl Cop for NumberedParameters {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let style = config.get_str("EnforcedStyle", "allow_single_line");
 
         // Check for blocks that use numbered parameters
@@ -59,12 +64,23 @@ impl Cop for NumberedParameters {
         if style == "disallow" {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Avoid using numbered parameters.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
 
         if style == "allow_single_line" {
@@ -75,12 +91,23 @@ impl Cop for NumberedParameters {
             if start_line != end_line {
                 let loc = node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Avoid using numbered parameters for multi-line blocks.".to_string(),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -89,5 +116,25 @@ impl Cop for NumberedParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
+
     crate::cop_fixture_tests!(NumberedParameters, "cops/style/numbered_parameters");
+
+    #[test]
+    fn autocorrect_disallow_replaces_numbered_param_block_with_nil() {
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("disallow".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &NumberedParameters,
+            b"items.map { _1 + 1 }\n",
+            b"nil\n",
+            config,
+        );
+    }
 }
