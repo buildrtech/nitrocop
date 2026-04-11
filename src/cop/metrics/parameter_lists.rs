@@ -67,6 +67,10 @@ impl Cop for ParameterLists {
         "Metrics/ParameterLists"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -509,5 +513,10 @@ mod tests {
             "Expected [4/3] got: {}",
             diags[0].message
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(ParameterLists.supports_autocorrect());
     }
 }

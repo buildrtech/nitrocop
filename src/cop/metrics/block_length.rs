@@ -209,6 +209,10 @@ impl Cop for BlockLength {
         "Metrics/BlockLength"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_exclude(&self) -> &'static [&'static str] {
         &["**/*.gemspec"]
     }
@@ -1073,5 +1077,10 @@ mod tests {
             diags.is_empty(),
             "Should not fire on allowed method 'refine'"
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(BlockLength.supports_autocorrect());
     }
 }
