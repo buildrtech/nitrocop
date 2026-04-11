@@ -112,6 +112,10 @@ impl Cop for SkipsModelValidations {
         "Rails/SkipsModelValidations"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -137,8 +141,9 @@ impl Cop for SkipsModelValidations {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -285,7 +290,19 @@ impl Cop for SkipsModelValidations {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         let method_str = std::str::from_utf8(method_name).unwrap_or("unknown method");
         let msg = format!("Avoid using `{}` because it skips validations.", method_str);
-        diagnostics.push(self.diagnostic(source, line, column, msg));
+        let mut diagnostic = self.diagnostic(source, line, column, msg);
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let cloc = call.location();
+            corrections.push(crate::correction::Correction {
+                start: cloc.start_offset(),
+                end: cloc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -333,4 +350,13 @@ fn kw_hash_has_non_ar_key<'a>(elements: impl Iterator<Item = ruby_prism::Node<'a
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SkipsModelValidations, "cops/rails/skips_model_validations");
+
+    #[test]
+    fn autocorrect_replaces_skip_validation_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &SkipsModelValidations,
+            b"user.update_all(name: 'x')\n",
+            b"nil\n",
+        );
+    }
 }
