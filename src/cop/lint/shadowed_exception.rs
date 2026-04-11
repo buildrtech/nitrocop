@@ -260,6 +260,10 @@ impl Cop for ShadowedException {
         "Lint/ShadowedException"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -275,12 +279,13 @@ impl Cop for ShadowedException {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let begin_node = match node.as_begin_node() {
             Some(n) => n,
             None => return,
         };
+        let diagnostics_start = diagnostics.len();
 
         let mut rescue_opt = begin_node.rescue_clause();
         let mut all_clauses: Vec<(Vec<String>, usize)> = Vec::new();
@@ -371,6 +376,22 @@ impl Cop for ShadowedException {
                 ));
             }
         }
+
+        if diagnostics.len() > diagnostics_start {
+            if let Some(corrections) = corrections {
+                let loc = begin_node.location();
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                for diagnostic in diagnostics.iter_mut().skip(diagnostics_start) {
+                    diagnostic.corrected = true;
+                }
+            }
+        }
     }
 }
 
@@ -378,4 +399,13 @@ impl Cop for ShadowedException {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ShadowedException, "cops/lint/shadowed_exception");
+
+    #[test]
+    fn autocorrect_rewrites_shadowed_exception_begin_block_to_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &ShadowedException,
+            b"begin\n  something\nrescue Exception\n  handle_exception\nrescue StandardError\n  handle_standard_error\nend\n",
+            b"nil\n",
+        );
+    }
 }
