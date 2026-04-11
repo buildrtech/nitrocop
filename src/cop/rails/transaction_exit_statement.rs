@@ -136,6 +136,10 @@ impl Cop for TransactionExitStatement {
         "Rails/TransactionExitStatement"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -151,8 +155,9 @@ impl Cop for TransactionExitStatement {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // RuboCop disables this cop on Rails >= 7.2.
         if config.rails_version_at_least(7.2) {
             return;
@@ -211,12 +216,23 @@ impl Cop for TransactionExitStatement {
 
         for &(offset, statement) in &finder.found {
             let (line, column) = source.offset_to_line_col(offset);
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Do not use `{statement}` inside a transaction block."),
-            ));
+            );
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: offset,
+                    end: offset + statement.len(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -255,5 +271,14 @@ mod tests {
         let diags =
             run_cop_full_with_config(&TransactionExitStatement, source, config_with_rails(7.2));
         assert!(diags.is_empty(), "cop should be disabled on Rails >= 7.2");
+    }
+
+    #[test]
+    fn autocorrect_replaces_return_keyword_inside_transaction() {
+        crate::testutil::assert_cop_autocorrect(
+            &TransactionExitStatement,
+            b"transaction do\n  return if bad?\nend\n",
+            b"transaction do\n  nil if bad?\nend\n",
+        );
     }
 }
