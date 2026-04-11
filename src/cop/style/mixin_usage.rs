@@ -43,6 +43,10 @@ impl Cop for MixinUsage {
         "Style/MixinUsage"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -50,12 +54,13 @@ impl Cop for MixinUsage {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = MixinUsageVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             in_opaque_scope: false,
         };
         visitor.visit(&parse_result.node());
@@ -63,10 +68,11 @@ impl Cop for MixinUsage {
     }
 }
 
-struct MixinUsageVisitor<'a> {
+struct MixinUsageVisitor<'a, 'corr> {
     cop: &'a MixinUsage,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
     /// True when we're inside a scope that is NOT considered "top level" by RuboCop.
     /// RuboCop's `in_top_level_scope?` only treats `begin`, `kwbegin`, `if`, and `def`
     /// as transparent wrappers. Everything else (class, module, block, while, until,
@@ -74,7 +80,7 @@ struct MixinUsageVisitor<'a> {
     in_opaque_scope: bool,
 }
 
-impl<'pr> Visit<'pr> for MixinUsageVisitor<'_> {
+impl<'pr> Visit<'pr> for MixinUsageVisitor<'_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method_bytes = node.name().as_slice();
 
@@ -97,14 +103,25 @@ impl<'pr> Visit<'pr> for MixinUsageVisitor<'_> {
                 let method_str = std::str::from_utf8(method_bytes).unwrap_or("include");
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     format!(
                         "`{method_str}` is used at the top level. Use inside `class` or `module`."
                     ),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
 
@@ -238,4 +255,9 @@ impl<'pr> Visit<'pr> for MixinUsageVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MixinUsage, "cops/style/mixin_usage");
+
+    #[test]
+    fn autocorrect_replaces_top_level_include_with_nil() {
+        crate::testutil::assert_cop_autocorrect(&MixinUsage, b"include SomeMixin\n", b"nil\n");
+    }
 }
