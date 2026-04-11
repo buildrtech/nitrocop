@@ -42,7 +42,7 @@ enum IrreversibleCondition {
 
 /// Visitor that finds irreversible method calls inside a `change` method body.
 struct IrreversibleFinder {
-    offenses: Vec<(usize, String)>,
+    offenses: Vec<(usize, usize, String)>,
     inside_reversible: bool,
     inside_up_only: bool,
 }
@@ -98,6 +98,7 @@ impl<'pr> Visit<'pr> for IrreversibleFinder {
             let method_str = std::str::from_utf8(name).unwrap_or("execute");
             self.offenses.push((
                 node.location().start_offset(),
+                node.location().end_offset(),
                 format!("{method_str} is not reversible."),
             ));
             return;
@@ -110,6 +111,7 @@ impl<'pr> Visit<'pr> for IrreversibleFinder {
                 let desc = condition_desc(condition);
                 self.offenses.push((
                     node.location().start_offset(),
+                    node.location().end_offset(),
                     format!("{method_str}({desc}) is not reversible."),
                 ));
                 return;
@@ -147,6 +149,7 @@ impl IrreversibleFinder {
                 if name == b"change" && call.receiver().is_some() {
                     self.offenses.push((
                         call.location().start_offset(),
+                        call.location().end_offset(),
                         "change_table(with change) is not reversible.".to_string(),
                     ));
                 }
@@ -157,6 +160,7 @@ impl IrreversibleFinder {
                 {
                     self.offenses.push((
                         call.location().start_offset(),
+                        call.location().end_offset(),
                         "change_table(with change_default) is not reversible.".to_string(),
                     ));
                 }
@@ -164,6 +168,7 @@ impl IrreversibleFinder {
                 if name == b"remove" && call.receiver().is_some() && !has_type_option(&call) {
                     self.offenses.push((
                         call.location().start_offset(),
+                        call.location().end_offset(),
                         "t.remove (without type) is not reversible.".to_string(),
                     ));
                 }
@@ -299,6 +304,10 @@ impl Cop for ReversibleMigration {
         "Rails/ReversibleMigration"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -329,8 +338,9 @@ impl Cop for ReversibleMigration {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Only check class definitions that inherit from Migration
         let class_node = match node.as_class_node() {
             Some(c) => c,
@@ -369,9 +379,20 @@ impl Cop for ReversibleMigration {
                         };
                         finder.visit(&def_body);
 
-                        for (offset, msg) in finder.offenses {
-                            let (line, column) = source.offset_to_line_col(offset);
-                            diagnostics.push(self.diagnostic(source, line, column, msg));
+                        for (start, end, msg) in finder.offenses {
+                            let (line, column) = source.offset_to_line_col(start);
+                            let mut diagnostic = self.diagnostic(source, line, column, msg);
+                            if let Some(corrections) = corrections.as_deref_mut() {
+                                corrections.push(crate::correction::Correction {
+                                    start,
+                                    end,
+                                    replacement: "nil".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+                            diagnostics.push(diagnostic);
                         }
                     }
                 }
@@ -384,4 +405,13 @@ impl Cop for ReversibleMigration {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReversibleMigration, "cops/rails/reversible_migration");
+
+    #[test]
+    fn autocorrect_replaces_irreversible_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReversibleMigration,
+            b"class X < ActiveRecord::Migration[7.1]\n  def change\n    execute 'SQL'\n  end\nend\n",
+            b"class X < ActiveRecord::Migration[7.1]\n  def change\n    nil\n  end\nend\n",
+        );
+    }
 }
