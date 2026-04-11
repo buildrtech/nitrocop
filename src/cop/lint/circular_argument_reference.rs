@@ -19,6 +19,10 @@ impl Cop for CircularArgumentReference {
         "Lint/CircularArgumentReference"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -38,15 +42,17 @@ impl Cop for CircularArgumentReference {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
+
         // Check optional keyword arguments: def foo(bar: bar)
         if let Some(kwopt) = node.as_optional_keyword_parameter_node() {
             let param_name = kwopt.name().as_slice();
             let value = kwopt.value();
             if let Some(ref_offset) = find_circular_ref(param_name, &value) {
                 let (line, column) = source.offset_to_line_col(ref_offset);
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
@@ -54,7 +60,18 @@ impl Cop for CircularArgumentReference {
                         "Circular argument reference - `{}`.",
                         std::str::from_utf8(param_name).unwrap_or("?")
                     ),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: ref_offset,
+                        end: ref_offset + param_name.len(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
             return;
         }
@@ -65,7 +82,7 @@ impl Cop for CircularArgumentReference {
             let value = optarg.value();
             if let Some(ref_offset) = find_circular_ref(param_name, &value) {
                 let (line, column) = source.offset_to_line_col(ref_offset);
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
@@ -73,7 +90,18 @@ impl Cop for CircularArgumentReference {
                         "Circular argument reference - `{}`.",
                         std::str::from_utf8(param_name).unwrap_or("?")
                     ),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: ref_offset,
+                        end: ref_offset + param_name.len(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -103,4 +131,13 @@ mod tests {
         CircularArgumentReference,
         "cops/lint/circular_argument_reference"
     );
+
+    #[test]
+    fn autocorrect_replaces_circular_reference_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &CircularArgumentReference,
+            b"def cook(dry_ingredients = dry_ingredients)\n  dry_ingredients.reduce(&:+)\nend\n",
+            b"def cook(dry_ingredients = nil)\n  dry_ingredients.reduce(&:+)\nend\n",
+        );
+    }
 }

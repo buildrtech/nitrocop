@@ -47,6 +47,10 @@ impl Cop for LiteralAssignmentInCondition {
         "Lint/LiteralAssignmentInCondition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -62,7 +66,7 @@ impl Cop for LiteralAssignmentInCondition {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Get the condition from if/while/until
         let predicate = if let Some(if_node) = node.as_if_node() {
@@ -85,6 +89,7 @@ impl Cop for LiteralAssignmentInCondition {
             cop: self,
             source,
             diagnostics,
+            corrections,
         };
         finder.visit(&predicate);
     }
@@ -137,6 +142,7 @@ struct LiteralAssignmentFinder<'a, 'b> {
     cop: &'a LiteralAssignmentInCondition,
     source: &'a SourceFile,
     diagnostics: &'b mut Vec<Diagnostic>,
+    corrections: Option<&'b mut Vec<crate::correction::Correction>>,
 }
 
 impl<'pr> Visit<'pr> for LiteralAssignmentFinder<'_, '_> {
@@ -184,14 +190,31 @@ impl LiteralAssignmentFinder<'_, '_> {
             .byte_slice(rhs_loc.start_offset(), rhs_loc.end_offset(), "?");
         let loc = node.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             format!(
                 "Don't use literal assignment `= {rhs_src}` in conditional, should be `==` or non-literal operand."
             ),
-        ));
+        );
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            let prefix = self
+                .source
+                .byte_slice(loc.start_offset(), rhs_loc.start_offset(), "?");
+            if let Some(eq_rel) = prefix.find('=') {
+                let start = loc.start_offset() + eq_rel;
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end: start + 1,
+                    replacement: "==".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -202,4 +225,13 @@ mod tests {
         LiteralAssignmentInCondition,
         "cops/lint/literal_assignment_in_condition"
     );
+
+    #[test]
+    fn autocorrect_rewrites_assignment_to_equality_in_condition() {
+        crate::testutil::assert_cop_autocorrect(
+            &LiteralAssignmentInCondition,
+            b"if x = 42\n  do_something\nend\n",
+            b"if x == 42\n  do_something\nend\n",
+        );
+    }
 }

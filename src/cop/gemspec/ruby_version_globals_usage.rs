@@ -45,6 +45,10 @@ impl Cop for RubyVersionGlobalsUsage {
         "Gemspec/RubyVersionGlobalsUsage"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_include(&self) -> &'static [&'static str] {
         &["**/*.gemspec"]
     }
@@ -54,8 +58,9 @@ impl Cop for RubyVersionGlobalsUsage {
         source: &SourceFile,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         for (line_idx, line) in source.lines().enumerate() {
             let line_str = match std::str::from_utf8(line) {
                 Ok(s) => s,
@@ -80,12 +85,26 @@ impl Cop for RubyVersionGlobalsUsage {
                 // Skip if RUBY_VERSION is inside a string literal
                 let in_string = is_inside_string(line_str, abs_pos);
                 if before_ok && after_ok && !in_string {
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line_idx + 1,
                         abs_pos,
                         "Do not use `RUBY_VERSION` in gemspec.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        if let Some(start) = source.line_col_to_offset(line_idx + 1, abs_pos) {
+                            let end = start + "RUBY_VERSION".len();
+                            corrections.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: "'0.0.0'".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                    }
+                    diagnostics.push(diagnostic);
                 }
                 search_from = abs_pos + "RUBY_VERSION".len();
             }
@@ -100,4 +119,13 @@ mod tests {
         RubyVersionGlobalsUsage,
         "cops/gemspec/ruby_version_globals_usage"
     );
+
+    #[test]
+    fn autocorrect_replaces_ruby_version_constant() {
+        crate::testutil::assert_cop_autocorrect(
+            &RubyVersionGlobalsUsage,
+            b"Gem::Specification.new do |spec|\n  if RUBY_VERSION >= '3.0'\n    spec.add_dependency 'modern_gem'\n  end\nend\n",
+            b"Gem::Specification.new do |spec|\n  if '0.0.0' >= '3.0'\n    spec.add_dependency 'modern_gem'\n  end\nend\n",
+        );
+    }
 }

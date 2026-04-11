@@ -19,6 +19,10 @@ impl Cop for EachWithObjectArgument {
         "Lint/EachWithObjectArgument"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -34,7 +38,7 @@ impl Cop for EachWithObjectArgument {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -62,12 +66,23 @@ impl Cop for EachWithObjectArgument {
 
         let loc = first_arg.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "`each_with_object` called with an immutable argument.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "[]".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -78,4 +93,13 @@ mod tests {
         EachWithObjectArgument,
         "cops/lint/each_with_object_argument"
     );
+
+    #[test]
+    fn autocorrect_replaces_immutable_object_with_array_literal() {
+        crate::testutil::assert_cop_autocorrect(
+            &EachWithObjectArgument,
+            b"[1, 2, 3].each_with_object(0) { |x, sum| sum + x }\n",
+            b"[1, 2, 3].each_with_object([]) { |x, sum| sum + x }\n",
+        );
+    }
 }

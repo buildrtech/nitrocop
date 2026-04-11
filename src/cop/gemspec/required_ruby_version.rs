@@ -110,9 +110,23 @@ fn is_dynamic_rhs(rhs: &str) -> bool {
     false
 }
 
+fn assignment_rhs_cols(source: &SourceFile, line: usize) -> Option<(usize, usize)> {
+    let line_bytes = source.lines().nth(line - 1)?;
+    let line_str = std::str::from_utf8(line_bytes).ok()?;
+    let method_pos = line_str.find(".required_ruby_version")?;
+    let after_method = &line_str[method_pos + ".required_ruby_version".len()..];
+    let eq_rel = after_method.find('=')?;
+    let rhs_start = method_pos + ".required_ruby_version".len() + eq_rel + 1;
+    Some((rhs_start, line_str.len()))
+}
+
 impl Cop for RequiredRubyVersion {
     fn name(&self) -> &'static str {
         "Gemspec/RequiredRubyVersion"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_include(&self) -> &'static [&'static str] {
@@ -124,8 +138,9 @@ impl Cop for RequiredRubyVersion {
         source: &SourceFile,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let mut found = false;
         // Collect all required_ruby_version assignments for processing.
         // Each entry: (line_1based, col, extracted_version_string), or None if dynamic.
@@ -246,7 +261,7 @@ impl Cop for RequiredRubyVersion {
             for assignment in &assignments {
                 if let Some((line, col, ref gemspec_version)) = *assignment {
                     if *gemspec_version != target_str {
-                        diagnostics.push(self.diagnostic(
+                        let mut diagnostic = self.diagnostic(
                             source,
                             line,
                             col,
@@ -254,7 +269,27 @@ impl Cop for RequiredRubyVersion {
                                 "`required_ruby_version` and `TargetRubyVersion` \
                                  ({target_str}, which may be specified in .rubocop.yml) should be equal."
                             ),
-                        ));
+                        );
+                        if let Some(corrections) = corrections.as_deref_mut() {
+                            if let Some((rhs_start_col, rhs_end_col)) =
+                                assignment_rhs_cols(source, line)
+                            {
+                                if let (Some(start), Some(end)) = (
+                                    source.line_col_to_offset(line, rhs_start_col),
+                                    source.line_col_to_offset(line, rhs_end_col),
+                                ) {
+                                    corrections.push(crate::correction::Correction {
+                                        start,
+                                        end,
+                                        replacement: format!(" '>= {target_str}'"),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                            }
+                        }
+                        diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -285,6 +320,16 @@ mod tests {
             options,
             ..CopConfig::default()
         }
+    }
+
+    #[test]
+    fn autocorrect_rewrites_mismatched_required_ruby_version() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &RequiredRubyVersion,
+            b"Gem::Specification.new do |spec|\n  spec.required_ruby_version = '>= 2.4'\nend\n",
+            b"Gem::Specification.new do |spec|\n  spec.required_ruby_version = '>= 3.1'\nend\n",
+            config_with_target_ruby(3.1),
+        );
     }
 
     #[test]

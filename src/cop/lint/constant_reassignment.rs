@@ -67,6 +67,10 @@ impl Cop for ConstantReassignment {
         Severity::Warning
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -74,7 +78,7 @@ impl Cop for ConstantReassignment {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ConstantReassignmentVisitor {
             cop: self,
@@ -83,6 +87,7 @@ impl Cop for ConstantReassignment {
             seen_constants: HashSet::new(),
             namespace_stack: Vec::new(),
             non_simple_depth: 0,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -95,6 +100,7 @@ struct ConstantReassignmentVisitor<'a, 'src> {
     diagnostics: Vec<Diagnostic>,
     seen_constants: HashSet<String>,
     namespace_stack: Vec<String>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
     /// Tracks nesting depth inside non-simple contexts (conditionals, blocks,
     /// methods, rescue, etc.). When > 0, constant writes are skipped because
     /// they may be conditional first-time assignments.
@@ -168,15 +174,26 @@ impl ConstantReassignmentVisitor<'_, '_> {
     fn record_constant(&mut self, fqn: String, name: &str, start_offset: usize, end_offset: usize) {
         if !self.seen_constants.insert(fqn) {
             let (line, column) = self.source.offset_to_line_col(start_offset);
-            // Calculate the length of the offense span
-            let (end_line, end_column) = self.source.offset_to_line_col(end_offset);
-            let _ = (end_line, end_column); // used for span but diagnostic uses start only
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 format!("Constant `{name}` is already assigned in this namespace."),
-            ));
+            );
+            let assignment_src = self.source.byte_slice(start_offset, end_offset, "");
+            if let Some(eq_pos) = assignment_src.find('=') {
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: start_offset + eq_pos,
+                        end: start_offset + eq_pos + 1,
+                        replacement: "||=".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+            self.diagnostics.push(diagnostic);
         }
     }
 
@@ -192,7 +209,7 @@ impl<'pr> Visit<'pr> for ConstantReassignmentVisitor<'_, '_> {
         if self.non_simple_depth == 0 {
             let name = std::str::from_utf8(node.name().as_slice()).unwrap_or("");
             let fqn = self.fully_qualified_name(name);
-            let loc = node.name_loc();
+            let loc = node.location();
             self.record_constant(fqn, name, loc.start_offset(), loc.end_offset());
         }
 
@@ -345,4 +362,13 @@ impl<'pr> Visit<'pr> for ConstantReassignmentVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ConstantReassignment, "cops/lint/constant_reassignment");
+
+    #[test]
+    fn autocorrect_rewrites_reassignment_to_or_equals() {
+        crate::testutil::assert_cop_autocorrect(
+            &ConstantReassignment,
+            b"X = :foo\nX = :bar\n",
+            b"X = :foo\nX ||= :bar\n",
+        );
+    }
 }

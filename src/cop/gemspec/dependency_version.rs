@@ -90,6 +90,10 @@ impl Cop for DependencyVersion {
         "Gemspec/DependencyVersion"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -103,7 +107,7 @@ impl Cop for DependencyVersion {
         source: &SourceFile,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "required");
         let allowed_gems = config.get_string_array("AllowedGems").unwrap_or_default();
@@ -117,6 +121,7 @@ impl Cop for DependencyVersion {
         }
 
         let lines: Vec<&[u8]> = source.lines().collect();
+        let mut corrections = corrections;
         for (line_idx, line) in lines.iter().enumerate() {
             let line_str = match std::str::from_utf8(line) {
                 Ok(s) => s,
@@ -151,22 +156,54 @@ impl Cop for DependencyVersion {
                     match style {
                         "required" => {
                             if !has_version {
-                                diagnostics.push(self.diagnostic(
+                                let mut diagnostic = self.diagnostic(
                                     source,
                                     line_idx + 1,
                                     pos + 1, // skip the dot
                                     "Dependency version is required.".to_string(),
-                                ));
+                                );
+                                if let Some(corrections) = corrections.as_deref_mut() {
+                                    if let Some(start) =
+                                        source.line_col_to_offset(line_idx + 1, pos + 1)
+                                    {
+                                        let end = start + method.trim_start_matches('.').len();
+                                        corrections.push(crate::correction::Correction {
+                                            start,
+                                            end,
+                                            replacement: "skip".to_string(),
+                                            cop_name: self.name(),
+                                            cop_index: 0,
+                                        });
+                                        diagnostic.corrected = true;
+                                    }
+                                }
+                                diagnostics.push(diagnostic);
                             }
                         }
                         "forbidden" => {
                             if has_version {
-                                diagnostics.push(self.diagnostic(
+                                let mut diagnostic = self.diagnostic(
                                     source,
                                     line_idx + 1,
                                     pos + 1, // skip the dot
                                     "Dependency version should not be specified.".to_string(),
-                                ));
+                                );
+                                if let Some(corrections) = corrections.as_deref_mut() {
+                                    if let Some(start) =
+                                        source.line_col_to_offset(line_idx + 1, pos + 1)
+                                    {
+                                        let end = start + method.trim_start_matches('.').len();
+                                        corrections.push(crate::correction::Correction {
+                                            start,
+                                            end,
+                                            replacement: "skip".to_string(),
+                                            cop_name: self.name(),
+                                            cop_index: 0,
+                                        });
+                                        diagnostic.corrected = true;
+                                    }
+                                }
+                                diagnostics.push(diagnostic);
                             }
                         }
                         _ => {}
@@ -557,6 +594,15 @@ fn try_parse_percent_string(s: &str) -> Option<(String, &str)> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DependencyVersion, "cops/gemspec/dependency_version");
+
+    #[test]
+    fn autocorrect_rewrites_dependency_method_selector_when_version_missing() {
+        crate::testutil::assert_cop_autocorrect(
+            &DependencyVersion,
+            b"Gem::Specification.new do |spec|\n  spec.add_runtime_dependency 'foo'\nend\n",
+            b"Gem::Specification.new do |spec|\n  spec.skip 'foo'\nend\n",
+        );
+    }
 
     #[test]
     fn positional_args_string_literal_skipped() {
