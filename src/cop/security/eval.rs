@@ -36,6 +36,10 @@ impl Cop for Eval {
         "Security/Eval"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -51,8 +55,9 @@ impl Cop for Eval {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -108,12 +113,24 @@ impl Cop for Eval {
 
         let msg_loc = call.message_loc().unwrap();
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "The use of `eval` is a serious security risk.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let loc = call.location();
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -237,5 +254,10 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].cop_name, "Security/Eval");
+    }
+
+    #[test]
+    fn autocorrect_replaces_eval_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(&Eval, b"eval(user_input)\n", b"nil\n");
     }
 }

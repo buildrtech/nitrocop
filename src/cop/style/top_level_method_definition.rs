@@ -9,6 +9,10 @@ impl Cop for TopLevelMethodDefinition {
         "Style/TopLevelMethodDefinition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -20,8 +24,9 @@ impl Cop for TopLevelMethodDefinition {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let root = parse_result.node();
         if let Some(program) = root.as_program_node() {
             let stmts = program.statements();
@@ -29,12 +34,23 @@ impl Cop for TopLevelMethodDefinition {
                 if stmt.as_def_node().is_some() {
                     let loc = stmt.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Do not define methods at the top level.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -48,4 +64,13 @@ mod tests {
         TopLevelMethodDefinition,
         "cops/style/top_level_method_definition"
     );
+
+    #[test]
+    fn autocorrect_removes_top_level_method_definitions() {
+        crate::testutil::assert_cop_autocorrect(
+            &TopLevelMethodDefinition,
+            b"def top\n  1\nend\nputs 'x'\n",
+            b"\nputs 'x'\n",
+        );
+    }
 }
