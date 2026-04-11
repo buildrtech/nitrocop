@@ -68,8 +68,8 @@ use crate::parse::source::SourceFile;
 ///   recursion into `DefNode` bodies to match.
 pub struct LexicallyScopedActionFilter;
 
-/// (call_start_offset, only_action_names, except_action_names)
-type FilterCallInfo = (usize, Vec<Vec<u8>>, Vec<Vec<u8>>);
+/// (call_start_offset, call_end_offset, only_action_names, except_action_names)
+type FilterCallInfo = (usize, usize, Vec<Vec<u8>>, Vec<Vec<u8>>);
 
 const FILTER_METHODS: &[&[u8]] = &[
     b"after_action",
@@ -90,6 +90,10 @@ const FILTER_METHODS: &[&[u8]] = &[
 impl Cop for LexicallyScopedActionFilter {
     fn name(&self) -> &'static str {
         "Rails/LexicallyScopedActionFilter"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_severity(&self) -> Severity {
@@ -122,8 +126,9 @@ impl Cop for LexicallyScopedActionFilter {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Determine if this is a ClassNode or ModuleNode
         let (body, type_name) = if let Some(class) = node.as_class_node() {
             (class.body(), "class")
@@ -177,7 +182,8 @@ impl Cop for LexicallyScopedActionFilter {
         let mut filter_info: Vec<FilterCallInfo> = Vec::new();
         collect_filter_calls_recursive(&stmts, &mut filter_info);
 
-        for (call_offset, only_names, except_names) in &filter_info {
+        let mut corrected_offsets: Vec<usize> = Vec::new();
+        for (call_offset, call_end, only_names, except_names) in &filter_info {
             for action_names in [only_names, except_names] {
                 if action_names.is_empty() {
                     continue;
@@ -206,7 +212,21 @@ impl Cop for LexicallyScopedActionFilter {
                     format!("{joined} are not explicitly defined on the {type_name}.")
                 };
 
-                diagnostics.push(self.diagnostic(source, line, column, message));
+                let mut diagnostic = self.diagnostic(source, line, column, message);
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    if !corrected_offsets.contains(call_offset) {
+                        corrections.push(crate::correction::Correction {
+                            start: *call_offset,
+                            end: *call_end,
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        corrected_offsets.push(*call_offset);
+                    }
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -266,7 +286,8 @@ fn check_call_for_filter(call: &ruby_prism::CallNode<'_>, results: &mut Vec<Filt
         let only_names = extract_action_names_from_call(call, b"only");
         let except_names = extract_action_names_from_call(call, b"except");
         if !only_names.is_empty() || !except_names.is_empty() {
-            results.push((offset, only_names, except_names));
+            let end = call.location().end_offset();
+            results.push((offset, end, only_names, except_names));
         }
     } else {
         // Check inside block bodies (e.g., `included do ... end`)
@@ -463,4 +484,13 @@ mod tests {
         LexicallyScopedActionFilter,
         "cops/rails/lexically_scoped_action_filter"
     );
+
+    #[test]
+    fn autocorrect_replaces_offending_filter_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &LexicallyScopedActionFilter,
+            b"class UsersController < ApplicationController\n  before_action :authenticate, only: :show\n\n  def index; end\nend\n",
+            b"class UsersController < ApplicationController\n  nil\n\n  def index; end\nend\n",
+        );
+    }
 }
