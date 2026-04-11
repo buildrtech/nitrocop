@@ -120,6 +120,10 @@ impl Cop for ModuleLength {
         "Metrics/ModuleLength"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CLASS_NODE,
@@ -320,5 +324,10 @@ mod tests {
             diags.is_empty(),
             "Should not fire when array is folded (3/3)"
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(ModuleLength.supports_autocorrect());
     }
 }
