@@ -55,6 +55,7 @@ impl UnknownEnv {
         node: &ruby_prism::Node<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let chain = match as_method_chain(node) {
             Some(c) => c,
@@ -101,12 +102,24 @@ impl UnknownEnv {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Unknown environment `{env_str}`."),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let loc = node.location();
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 
     /// Check for `Rails.env == "staging"` or `"staging" == Rails.env` patterns.
@@ -117,6 +130,7 @@ impl UnknownEnv {
         node: &ruby_prism::Node<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -157,12 +171,24 @@ impl UnknownEnv {
                 if !self.is_known_env(&env_name, config) {
                     let loc = arg.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         format!("Unknown environment `{env_name}`."),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let nloc = node.location();
+                        corrections.push(crate::correction::Correction {
+                            start: nloc.start_offset(),
+                            end: nloc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         } else if self.is_rails_env(arg) {
@@ -173,12 +199,24 @@ impl UnknownEnv {
                 if !self.is_known_env(&env_name, config) {
                     let loc = receiver.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         format!("Unknown environment `{env_name}`."),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let nloc = node.location();
+                        corrections.push(crate::correction::Correction {
+                            start: nloc.start_offset(),
+                            end: nloc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -206,6 +244,10 @@ impl Cop for UnknownEnv {
         "Rails/UnknownEnv"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn uses_node_check(&self) -> bool {
         true
     }
@@ -221,10 +263,11 @@ impl Cop for UnknownEnv {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        self.check_predicate(source, node, config, diagnostics);
-        self.check_equality(source, node, config, diagnostics);
+        let mut corrections = corrections;
+        self.check_predicate(source, node, config, diagnostics, &mut corrections);
+        self.check_equality(source, node, config, diagnostics, &mut corrections);
     }
 }
 
@@ -232,4 +275,9 @@ impl Cop for UnknownEnv {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UnknownEnv, "cops/rails/unknown_env");
+
+    #[test]
+    fn autocorrect_replaces_unknown_env_predicate_with_nil() {
+        crate::testutil::assert_cop_autocorrect(&UnknownEnv, b"Rails.env.staging?\n", b"nil\n");
+    }
 }
