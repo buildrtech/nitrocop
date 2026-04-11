@@ -116,6 +116,10 @@ impl Cop for FormatParameterMismatch {
         "Lint/FormatParameterMismatch"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -141,8 +145,9 @@ impl Cop for FormatParameterMismatch {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -152,13 +157,45 @@ impl Cop for FormatParameterMismatch {
 
         // Check for format/sprintf (bare or Kernel.method)
         if (method_name == b"format" || method_name == b"sprintf") && is_format_call(&call) {
-            diagnostics.extend(check_format_sprintf(self, source, &call, method_name));
+            let mut new_diags = check_format_sprintf(self, source, &call, method_name);
+            if !new_diags.is_empty() {
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let loc = call.location();
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    for diag in &mut new_diags {
+                        diag.corrected = true;
+                    }
+                }
+            }
+            diagnostics.extend(new_diags);
             return;
         }
 
         // Check for String#% operator
         if method_name == b"%" && call.receiver().is_some() {
-            diagnostics.extend(check_string_percent(self, source, &call));
+            let mut new_diags = check_string_percent(self, source, &call);
+            if !new_diags.is_empty() {
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let loc = call.location();
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    for diag in &mut new_diags {
+                        diag.corrected = true;
+                    }
+                }
+            }
+            diagnostics.extend(new_diags);
         }
     }
 }
@@ -843,4 +880,13 @@ mod tests {
         FormatParameterMismatch,
         "cops/lint/format_parameter_mismatch"
     );
+
+    #[test]
+    fn autocorrect_rewrites_mismatched_format_call_to_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &FormatParameterMismatch,
+            b"format(\"%s %s\", 1)\n",
+            b"nil\n",
+        );
+    }
 }

@@ -46,7 +46,7 @@ pub struct NestedMethodDefinition;
 ///
 /// A def is flagged only when `def_depth > 0` (inside another def) AND
 /// `scope_depth == 0` (no scope-creating ancestor anywhere above).
-struct FullTreeWalker<'a> {
+struct FullTreeWalker<'a, 'corr> {
     source: &'a SourceFile,
     cop: &'a NestedMethodDefinition,
     def_depth: usize,
@@ -54,6 +54,7 @@ struct FullTreeWalker<'a> {
     allowed_methods: Option<&'a [String]>,
     allowed_patterns: Option<&'a [String]>,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
     // Stack to track what each branch node contributed (def_depth_inc, scope_depth_inc)
     stack: Vec<(bool, bool)>,
 }
@@ -90,7 +91,7 @@ fn has_allowed_receiver(def_node: &ruby_prism::DefNode<'_>) -> bool {
     false
 }
 
-impl<'pr> Visit<'pr> for FullTreeWalker<'_> {
+impl<'pr> Visit<'pr> for FullTreeWalker<'_, '_> {
     fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
         let mut is_def = false;
         let mut is_scope = false;
@@ -110,12 +111,24 @@ impl<'pr> Visit<'pr> for FullTreeWalker<'_> {
                 if !has_allowed_receiver(&def_node) {
                     let offset = node.location().start_offset();
                     let (line, column) = self.source.offset_to_line_col(offset);
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diagnostic = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
                         "Method definitions must not be nested. Use `lambda` instead.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = self.corrections.as_deref_mut() {
+                        let loc = node.location();
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "-> { }".to_string(),
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    self.diagnostics.push(diagnostic);
                 }
             }
         }
@@ -223,6 +236,10 @@ impl Cop for NestedMethodDefinition {
         "Lint/NestedMethodDefinition"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -234,7 +251,7 @@ impl Cop for NestedMethodDefinition {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_methods = config.get_string_array("AllowedMethods");
         let allowed_patterns = config.get_string_array("AllowedPatterns");
@@ -248,6 +265,7 @@ impl Cop for NestedMethodDefinition {
             allowed_methods: allowed_methods.as_deref(),
             allowed_patterns: allowed_patterns.as_deref(),
             diagnostics,
+            corrections,
             stack: vec![],
         };
         walker.visit(&root);
@@ -258,4 +276,13 @@ impl Cop for NestedMethodDefinition {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NestedMethodDefinition, "cops/lint/nested_method_definition");
+
+    #[test]
+    fn autocorrect_rewrites_nested_def_to_lambda_literal() {
+        crate::testutil::assert_cop_autocorrect(
+            &NestedMethodDefinition,
+            b"def outer\n  def inner\n    42\n  end\nend\n",
+            b"def outer\n  -> { }\nend\n",
+        );
+    }
 }
