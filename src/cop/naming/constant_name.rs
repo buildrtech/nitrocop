@@ -82,6 +82,10 @@ impl Cop for ConstantName {
         "Naming/ConstantName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CONSTANT_WRITE_NODE,
@@ -104,12 +108,20 @@ impl Cop for ConstantName {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         if let Some(cw) = node.as_constant_write_node() {
             let const_name = cw.name().as_slice();
             let value = cw.value();
-            diagnostics.extend(self.check_constant(source, const_name, &cw.name_loc(), &value));
+            self.check_constant(
+                source,
+                const_name,
+                &cw.name_loc(),
+                &value,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         if let Some(cpw) = node.as_constant_path_write_node() {
@@ -117,14 +129,28 @@ impl Cop for ConstantName {
             let name_loc = target.name_loc();
             let const_name = target.name().map(|n| n.as_slice()).unwrap_or(b"");
             let value = cpw.value();
-            diagnostics.extend(self.check_constant(source, const_name, &name_loc, &value));
+            self.check_constant(
+                source,
+                const_name,
+                &name_loc,
+                &value,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // Foo ||= value
         if let Some(cow) = node.as_constant_or_write_node() {
             let const_name = cow.name().as_slice();
             let value = cow.value();
-            diagnostics.extend(self.check_constant(source, const_name, &cow.name_loc(), &value));
+            self.check_constant(
+                source,
+                const_name,
+                &cow.name_loc(),
+                &value,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // Mod::Setting ||= value
@@ -133,14 +159,28 @@ impl Cop for ConstantName {
             let name_loc = target.name_loc();
             let const_name = target.name().map(|n| n.as_slice()).unwrap_or(b"");
             let value = cpow.value();
-            diagnostics.extend(self.check_constant(source, const_name, &name_loc, &value));
+            self.check_constant(
+                source,
+                const_name,
+                &name_loc,
+                &value,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // Foo &&= value
         if let Some(caw) = node.as_constant_and_write_node() {
             let const_name = caw.name().as_slice();
             let value = caw.value();
-            diagnostics.extend(self.check_constant(source, const_name, &caw.name_loc(), &value));
+            self.check_constant(
+                source,
+                const_name,
+                &caw.name_loc(),
+                &value,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // Mod::Setting &&= value
@@ -149,14 +189,28 @@ impl Cop for ConstantName {
             let name_loc = target.name_loc();
             let const_name = target.name().map(|n| n.as_slice()).unwrap_or(b"");
             let value = cpaw.value();
-            diagnostics.extend(self.check_constant(source, const_name, &name_loc, &value));
+            self.check_constant(
+                source,
+                const_name,
+                &name_loc,
+                &value,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // Foo += value
         if let Some(cow) = node.as_constant_operator_write_node() {
             let const_name = cow.name().as_slice();
             let value = cow.value();
-            diagnostics.extend(self.check_constant(source, const_name, &cow.name_loc(), &value));
+            self.check_constant(
+                source,
+                const_name,
+                &cow.name_loc(),
+                &value,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // Mod::Setting += value
@@ -165,7 +219,14 @@ impl Cop for ConstantName {
             let name_loc = target.name_loc();
             let const_name = target.name().map(|n| n.as_slice()).unwrap_or(b"");
             let value = cpow.value();
-            diagnostics.extend(self.check_constant(source, const_name, &name_loc, &value));
+            self.check_constant(
+                source,
+                const_name,
+                &name_loc,
+                &value,
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // ConstantTargetNode — appears in multi-assignment (A, B = 1, 2) and
@@ -174,12 +235,23 @@ impl Cop for ConstantName {
             let const_name = ct.name().as_slice();
             if !is_screaming_snake_case(const_name) {
                 let (line, column) = source.offset_to_line_col(ct.location().start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use SCREAMING_SNAKE_CASE for constants.".to_string(),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: ct.location().start_offset(),
+                        end: ct.location().end_offset(),
+                        replacement: to_screaming_snake(const_name),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
 
@@ -189,12 +261,23 @@ impl Cop for ConstantName {
             let const_name = cpt.name().map(|n| n.as_slice()).unwrap_or(b"");
             if !is_screaming_snake_case(const_name) {
                 let (line, column) = source.offset_to_line_col(name_loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Use SCREAMING_SNAKE_CASE for constants.".to_string(),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: name_loc.start_offset(),
+                        end: name_loc.end_offset(),
+                        replacement: to_screaming_snake(const_name),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -207,27 +290,52 @@ impl ConstantName {
         const_name: &[u8],
         loc: &ruby_prism::Location<'_>,
         value: &ruby_prism::Node<'_>,
-    ) -> Vec<Diagnostic> {
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    ) {
         // Allow SCREAMING_SNAKE_CASE (standard constant style)
         if is_screaming_snake_case(const_name) {
-            return Vec::new();
+            return;
         }
 
         // Allow non-SCREAMING_SNAKE_CASE only if the RHS is a class/module/struct creation
         // pattern. This matches RuboCop's `valid_for_assignment?` check.
         if is_valid_rhs_for_assignment(value) {
-            return Vec::new();
+            return;
         }
 
         let (line, column) = source.offset_to_line_col(loc.start_offset());
 
-        vec![self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use SCREAMING_SNAKE_CASE for constants.".to_string(),
-        )]
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: to_screaming_snake(const_name),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
+}
+
+fn to_screaming_snake(name: &[u8]) -> String {
+    let mut out = String::new();
+    for ch in String::from_utf8_lossy(name).chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
 }
 
 /// Check if the RHS of a constant assignment is an acceptable pattern for
@@ -382,4 +490,13 @@ fn branch_contains_constant(if_node: &ruby_prism::IfNode<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ConstantName, "cops/naming/constant_name");
+
+    #[test]
+    fn autocorrect_rewrites_constant_name_to_screaming_snake() {
+        crate::testutil::assert_cop_autocorrect(
+            &ConstantName,
+            b"Bad_name = 1\n",
+            b"BAD_NAME = 1\n",
+        );
+    }
 }
