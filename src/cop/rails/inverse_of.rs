@@ -68,6 +68,10 @@ impl Cop for InverseOf {
         "Rails/InverseOf"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -79,7 +83,7 @@ impl Cop for InverseOf {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let ignore_scopes = config.get_bool("IgnoreScopes", false);
 
@@ -91,6 +95,7 @@ impl Cop for InverseOf {
             // is provided and whether options like foreign_key/conditions are set
             with_options_stack: Vec::new(),
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -106,15 +111,16 @@ struct WithOptionsContext {
     has_polymorphic: bool,
 }
 
-struct InverseOfVisitor<'a> {
+struct InverseOfVisitor<'a, 'corr> {
     cop: &'a InverseOf,
     source: &'a SourceFile,
     ignore_scopes: bool,
     with_options_stack: Vec<WithOptionsContext>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl InverseOfVisitor<'_> {
+impl InverseOfVisitor<'_, '_> {
     /// Check if any keyword hash argument contains an AssocSplatNode (**options).
     fn has_kwsplat(call: &ruby_prism::CallNode<'_>) -> bool {
         let Some(args) = call.arguments() else {
@@ -229,12 +235,23 @@ impl InverseOfVisitor<'_> {
 
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics
-            .push(self.cop.diagnostic(self.source, line, column, message));
+        let mut diagnostic = self.cop.diagnostic(self.source, line, column, message);
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            let cloc = call.location();
+            corrections.push(crate::correction::Correction {
+                start: cloc.start_offset(),
+                end: cloc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 
-impl<'pr> Visit<'pr> for InverseOfVisitor<'_> {
+impl<'pr> Visit<'pr> for InverseOfVisitor<'_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Check if this is a with_options block call
         if node.receiver().is_none()
@@ -312,6 +329,15 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "IgnoreScopes:false should flag scope without inverse_of"
+        );
+    }
+
+    #[test]
+    fn autocorrect_replaces_offending_association_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &InverseOf,
+            b"class Blog < ApplicationRecord\n  has_many :posts, foreign_key: :blog_id\nend\n",
+            b"class Blog < ApplicationRecord\n  nil\nend\n",
         );
     }
 }
