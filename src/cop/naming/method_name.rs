@@ -208,6 +208,10 @@ impl Cop for MethodName {
         "Naming/MethodName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[DEF_NODE, CALL_NODE, ALIAS_METHOD_NODE]
     }
@@ -219,12 +223,21 @@ impl Cop for MethodName {
         parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let cfg = MethodNameConfig::from_cop_config(config);
 
         if let Some(def_node) = node.as_def_node() {
-            check_def_node(self, source, &def_node, parse_result, &cfg, diagnostics);
+            check_def_node(
+                self,
+                source,
+                &def_node,
+                parse_result,
+                &cfg,
+                diagnostics,
+                &mut corrections,
+            );
         } else if let Some(call_node) = node.as_call_node() {
             check_call_node(self, source, &call_node, &cfg, diagnostics);
         } else if let Some(alias_node) = node.as_alias_method_node() {
@@ -301,6 +314,7 @@ fn check_def_node(
     parse_result: &ruby_prism::ParseResult<'_>,
     cfg: &MethodNameConfig,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     let method_name = def_node.name().as_slice();
     let method_name_str = std::str::from_utf8(method_name).unwrap_or("");
@@ -334,12 +348,25 @@ fn check_def_node(
     }
 
     if !style_ok(method_name, &cfg.enforced_style) {
-        diagnostics.push(cop.diagnostic(
+        let mut diagnostic = cop.diagnostic(
             source,
             line,
             column,
             format!("Use {} for method names.", style_msg(&cfg.enforced_style)),
-        ));
+        );
+        if cfg.enforced_style == "snake_case" {
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: to_snake_case_name(method_name_str),
+                    cop_name: cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -678,6 +705,41 @@ fn strip_method_suffix(name: &str) -> &str {
     }
 }
 
+fn to_snake_case_name(name: &str) -> String {
+    let (core, suffix) = match name.chars().next_back() {
+        Some('!') | Some('?') | Some('=') => (
+            &name[..name.len() - name.chars().next_back().unwrap().len_utf8()],
+            &name[name.len() - name.chars().next_back().unwrap().len_utf8()..],
+        ),
+        _ => (name, ""),
+    };
+
+    let mut out = String::new();
+    let mut prev_lower_or_digit = false;
+    for ch in core.chars() {
+        if ch.is_ascii_uppercase() {
+            if prev_lower_or_digit && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_lower_or_digit = false;
+        } else {
+            let normalized = if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            };
+            out.push(normalized);
+            prev_lower_or_digit = normalized.is_ascii_lowercase() || normalized.is_ascii_digit();
+        }
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.push_str(suffix);
+    out
+}
+
 fn starts_with_uppercase(name: &str) -> bool {
     name.chars().next().is_some_and(|ch| ch.is_uppercase())
 }
@@ -840,6 +902,15 @@ mod tests {
         assert!(
             diags.is_empty(),
             "def self.String with class String sibling should be allowed"
+        );
+    }
+
+    #[test]
+    fn autocorrect_rewrites_def_name_to_snake_case() {
+        crate::testutil::assert_cop_autocorrect(
+            &MethodName,
+            b"def badMethod\n  nil\nend\n",
+            b"def bad_method\n  nil\nend\n",
         );
     }
 }

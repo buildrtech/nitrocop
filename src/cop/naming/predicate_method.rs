@@ -131,6 +131,10 @@ impl Cop for PredicateMethod {
         "Naming/PredicateMethod"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -138,7 +142,7 @@ impl Cop for PredicateMethod {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mode = config.get_str("Mode", "conservative");
         let conservative = mode == "conservative";
@@ -181,13 +185,14 @@ impl Cop for PredicateMethod {
             allow_bang,
             wayward,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct PredicateMethodVisitor<'a> {
+struct PredicateMethodVisitor<'a, 'corr> {
     cop: &'a PredicateMethod,
     source: &'a SourceFile,
     conservative: bool,
@@ -196,9 +201,10 @@ struct PredicateMethodVisitor<'a> {
     allow_bang: bool,
     wayward: Vec<String>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl PredicateMethodVisitor<'_> {
+impl PredicateMethodVisitor<'_, '_> {
     fn check_method(&mut self, node: &ruby_prism::DefNode<'_>) {
         let method_name = node.name().as_slice();
         let method_str = match std::str::from_utf8(method_name) {
@@ -261,30 +267,47 @@ impl PredicateMethodVisitor<'_> {
             if potential_non_predicate(&return_types, self.conservative) {
                 let name_loc = node.name_loc();
                 let (line, column) = self.source.offset_to_line_col(name_loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    MSG_NON_PREDICATE.to_string(),
-                ));
+                let mut diagnostic =
+                    self.cop
+                        .diagnostic(self.source, line, column, MSG_NON_PREDICATE.to_string());
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    let name_stripped = method_str.strip_suffix('?').unwrap_or(method_str);
+                    corrections.push(crate::correction::Correction {
+                        start: name_loc.start_offset(),
+                        end: name_loc.end_offset(),
+                        replacement: name_stripped.to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         } else {
             // Method does NOT end with ? but all return values are boolean
             if all_return_values_boolean(&return_types) {
                 let name_loc = node.name_loc();
                 let (line, column) = self.source.offset_to_line_col(name_loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    MSG_PREDICATE.to_string(),
-                ));
+                let mut diagnostic =
+                    self.cop
+                        .diagnostic(self.source, line, column, MSG_PREDICATE.to_string());
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: name_loc.start_offset(),
+                        end: name_loc.end_offset(),
+                        replacement: format!("{method_str}?"),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
     }
 }
 
-impl<'pr> Visit<'pr> for PredicateMethodVisitor<'_> {
+impl<'pr> Visit<'pr> for PredicateMethodVisitor<'_, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         self.check_method(node);
         // Recurse into def body to find nested defs (inside class << self,
@@ -880,6 +903,15 @@ mod tests {
             diags.len(),
             0,
             "yield with no nil return should not be flagged"
+        );
+    }
+
+    #[test]
+    fn autocorrect_appends_question_mark_for_boolean_method() {
+        crate::testutil::assert_cop_autocorrect(
+            &PredicateMethod,
+            b"def foo\n  true\nend\n",
+            b"def foo?\n  true\nend\n",
         );
     }
 }

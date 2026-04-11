@@ -29,9 +29,37 @@ use crate::parse::source::SourceFile;
 /// `parse/directives.rs`.
 pub struct ClassAndModuleCamelCase;
 
+fn to_camel_case_constant_path(path: &str) -> String {
+    path.split("::")
+        .map(|segment| {
+            segment
+                .split('_')
+                .filter(|part| !part.is_empty())
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        Some(first) => {
+                            let mut out = String::new();
+                            out.push(first.to_ascii_uppercase());
+                            out.push_str(chars.as_str());
+                            out
+                        }
+                        None => String::new(),
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
 impl Cop for ClassAndModuleCamelCase {
     fn name(&self) -> &'static str {
         "Naming/ClassAndModuleCamelCase"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -45,7 +73,7 @@ impl Cop for ClassAndModuleCamelCase {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let name_node = if let Some(class_node) = node.as_class_node() {
             class_node.constant_path()
@@ -87,12 +115,23 @@ impl Cop for ClassAndModuleCamelCase {
 
         let (line, column) = source.offset_to_line_col(start);
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use CamelCase for classes and modules.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start,
+                end,
+                replacement: to_camel_case_constant_path(name_source),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -103,4 +142,13 @@ mod tests {
         ClassAndModuleCamelCase,
         "cops/naming/class_and_module_camel_case"
     );
+
+    #[test]
+    fn autocorrect_rewrites_class_name_to_camel_case() {
+        crate::testutil::assert_cop_autocorrect(
+            &ClassAndModuleCamelCase,
+            b"class Bad_class\nend\n",
+            b"class BadClass\nend\n",
+        );
+    }
 }
