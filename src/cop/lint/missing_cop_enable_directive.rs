@@ -44,6 +44,10 @@ impl Cop for MissingCopEnableDirective {
         "Lint/MissingCopEnableDirective"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -55,7 +59,7 @@ impl Cop for MissingCopEnableDirective {
         code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Fast reject: most files have no rubocop directives.
         if !contains_subslice(source.as_bytes(), b"rubocop:") {
@@ -151,6 +155,8 @@ impl Cop for MissingCopEnableDirective {
             return;
         }
 
+        let mut missing_enable_cops: Vec<String> = Vec::new();
+
         // Report all remaining open disables (never re-enabled)
         for (cop, (line, _col)) in &open_disables {
             // RuboCop's acceptable_range? skips offenses when the disabled cop is
@@ -167,9 +173,33 @@ impl Cop for MissingCopEnableDirective {
                         0,
                         format_message(cop, Some(max_range as usize)),
                     ));
+                    missing_enable_cops.push(cop.clone());
                 }
             } else {
                 diagnostics.push(self.diagnostic(source, *line, 0, format_message(cop, None)));
+                missing_enable_cops.push(cop.clone());
+            }
+        }
+
+        if let Some(corrections) = corrections {
+            if !missing_enable_cops.is_empty() {
+                missing_enable_cops.sort();
+                missing_enable_cops.dedup();
+                let mut appendix = String::new();
+                if !source.as_bytes().ends_with(b"\n") {
+                    appendix.push('\n');
+                }
+                for cop in &missing_enable_cops {
+                    appendix.push_str(&format!("# rubocop:enable {cop}\n"));
+                }
+                let eof = source.as_bytes().len();
+                corrections.push(crate::correction::Correction {
+                    start: eof,
+                    end: eof,
+                    replacement: appendix,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
             }
         }
 
@@ -301,4 +331,13 @@ mod tests {
         missing_enable_two = "missing_enable_two.rb",
         missing_enable_spaced = "missing_enable_spaced.rb",
     );
+
+    #[test]
+    fn autocorrect_appends_missing_enable_directive() {
+        crate::testutil::assert_cop_autocorrect(
+            &MissingCopEnableDirective,
+            b"# rubocop:disable Layout/LineLength\nx =   0\n",
+            b"# rubocop:disable Layout/LineLength\nx =   0\n# rubocop:enable Layout/LineLength\n",
+        );
+    }
 }
