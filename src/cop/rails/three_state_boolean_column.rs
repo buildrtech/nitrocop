@@ -11,6 +11,10 @@ impl Cop for ThreeStateBooleanColumn {
         "Rails/ThreeStateBooleanColumn"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -26,12 +30,13 @@ impl Cop for ThreeStateBooleanColumn {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ThreeStateBooleanVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             def_body: None,
             current_table_name: None,
         };
@@ -41,17 +46,18 @@ impl Cop for ThreeStateBooleanColumn {
 }
 
 /// Visitor that tracks method def context and create_table/change_table block context.
-struct ThreeStateBooleanVisitor<'a, 'pr> {
+struct ThreeStateBooleanVisitor<'a, 'pr, 'corr> {
     cop: &'a ThreeStateBooleanColumn,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
     /// The body node of the enclosing def, if any (for searching change_column_null).
     def_body: Option<ruby_prism::Node<'pr>>,
     /// The current table name from an enclosing create_table/change_table block.
     current_table_name: Option<Vec<u8>>,
 }
 
-impl<'pr> Visit<'pr> for ThreeStateBooleanVisitor<'_, 'pr> {
+impl<'pr> Visit<'pr> for ThreeStateBooleanVisitor<'_, 'pr, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         let old_def_body = self.def_body.take();
         self.def_body = node.body();
@@ -111,13 +117,24 @@ impl<'pr> Visit<'pr> for ThreeStateBooleanVisitor<'_, 'pr> {
                 if !should_skip {
                     let loc = node.location();
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
+                    let mut diagnostic = self.cop.diagnostic(
                         self.source,
                         line,
                         column,
                         "Boolean columns should always have a default value and a `NOT NULL` constraint."
                             .to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = self.corrections.as_deref_mut() {
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    self.diagnostics.push(diagnostic);
                 }
             }
         }
@@ -133,7 +150,7 @@ struct BooleanColumnInfo {
     column_name: Option<Vec<u8>>,
 }
 
-impl ThreeStateBooleanVisitor<'_, '_> {
+impl ThreeStateBooleanVisitor<'_, '_, '_> {
     /// Search the current def body for a `change_column_null(table, column, false)` call
     /// that matches the given table and column names.
     fn has_change_column_null(
@@ -282,4 +299,13 @@ mod tests {
         ThreeStateBooleanColumn,
         "cops/rails/three_state_boolean_column"
     );
+
+    #[test]
+    fn autocorrect_replaces_offending_boolean_column_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &ThreeStateBooleanColumn,
+            b"add_column :users, :active, :boolean\n",
+            b"nil\n",
+        );
+    }
 }
