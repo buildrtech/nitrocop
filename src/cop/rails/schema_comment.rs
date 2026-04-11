@@ -200,6 +200,10 @@ impl Cop for SchemaComment {
         "Rails/SchemaComment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -219,8 +223,9 @@ impl Cop for SchemaComment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -242,13 +247,31 @@ impl Cop for SchemaComment {
                     // Table without comment — only report table-level offense
                     let loc = node.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(source, line, column, TABLE_MSG.to_string()));
+                    let mut diagnostic =
+                        self.diagnostic(source, line, column, TABLE_MSG.to_string());
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let loc = call.location();
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 } else {
                     // Table has comment — check column definitions inside the block
                     if let Some(block) = call.block() {
                         if let Some(block_node) = block.as_block_node() {
                             if let Some(body) = block_node.body() {
-                                self.check_block_columns(source, &body, diagnostics);
+                                self.check_block_columns(
+                                    source,
+                                    &body,
+                                    diagnostics,
+                                    &mut corrections,
+                                );
                             }
                         }
                     }
@@ -268,7 +291,20 @@ impl Cop for SchemaComment {
                 if !has_valid_comment(&call) {
                     let loc = node.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(source, line, column, COLUMN_MSG.to_string()));
+                    let mut diagnostic =
+                        self.diagnostic(source, line, column, COLUMN_MSG.to_string());
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let loc = call.location();
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
             _ => {}
@@ -282,14 +318,15 @@ impl SchemaComment {
         source: &SourceFile,
         body: &ruby_prism::Node<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(stmts) = body.as_statements_node() {
             for stmt in stmts.body().iter() {
-                self.check_column_call(source, &stmt, diagnostics);
+                self.check_column_call(source, &stmt, diagnostics, corrections);
             }
         } else {
             // Single statement body
-            self.check_column_call(source, body, diagnostics);
+            self.check_column_call(source, body, diagnostics, corrections);
         }
     }
 
@@ -298,6 +335,7 @@ impl SchemaComment {
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -316,7 +354,18 @@ impl SchemaComment {
         if !has_valid_comment(&call) {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(source, line, column, COLUMN_MSG.to_string()));
+            let mut diagnostic = self.diagnostic(source, line, column, COLUMN_MSG.to_string());
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -325,4 +374,13 @@ impl SchemaComment {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(SchemaComment, "cops/rails/schema_comment");
+
+    #[test]
+    fn autocorrect_replaces_add_column_without_comment_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &SchemaComment,
+            b"add_column :users, :name, :string\n",
+            b"nil\n",
+        );
+    }
 }

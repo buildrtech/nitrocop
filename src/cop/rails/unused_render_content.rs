@@ -55,6 +55,10 @@ impl Cop for UnusedRenderContent {
         "Rails/UnusedRenderContent"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -76,8 +80,9 @@ impl Cop for UnusedRenderContent {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -114,15 +119,25 @@ impl Cop for UnusedRenderContent {
             if is_positional_content {
                 let loc = arg.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(
-                    self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Do not specify body content for a response with a non-content status code"
-                            .to_string(),
-                    ),
+                let mut diagnostic = self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Do not specify body content for a response with a non-content status code"
+                        .to_string(),
                 );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let cloc = call.location();
+                    corrections.push(crate::correction::Correction {
+                        start: cloc.start_offset(),
+                        end: cloc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
                 return;
             }
         }
@@ -149,13 +164,25 @@ impl Cop for UnusedRenderContent {
                     // Report at this pair (key: value), matching RuboCop
                     let loc = assoc.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Do not specify body content for a response with a non-content status code"
                             .to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let cloc = call.location();
+                        corrections.push(crate::correction::Correction {
+                            start: cloc.start_offset(),
+                            end: cloc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                     return;
                 }
             }
@@ -239,6 +266,15 @@ mod tests {
         assert_eq!(
             diags[0].location.column, 7,
             "Offense should be at :action_name (col 7)"
+        );
+    }
+
+    #[test]
+    fn autocorrect_replaces_render_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &UnusedRenderContent,
+            b"render 'foo', status: :no_content\n",
+            b"nil\n",
         );
     }
 }
