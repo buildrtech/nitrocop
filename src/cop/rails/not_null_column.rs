@@ -11,6 +11,10 @@ impl Cop for NotNullColumn {
         "Rails/NotNullColumn"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -30,8 +34,9 @@ impl Cop for NotNullColumn {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let database = config.get_str("Database", "");
 
         let call = match node.as_call_node() {
@@ -92,12 +97,23 @@ impl Cop for NotNullColumn {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not add a NOT NULL column without a default value.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -156,6 +172,15 @@ mod tests {
         assert!(
             diags.is_empty(),
             "virtual generated columns should not be flagged by Rails/NotNullColumn"
+        );
+    }
+
+    #[test]
+    fn autocorrect_replaces_not_null_add_column_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &NotNullColumn,
+            b"add_column :users, :name, :string, null: false\n",
+            b"nil\n",
         );
     }
 }

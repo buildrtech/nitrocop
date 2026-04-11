@@ -74,6 +74,10 @@ impl Cop for EnvironmentVariableAccess {
         "Rails/EnvironmentVariableAccess"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -99,13 +103,13 @@ impl Cop for EnvironmentVariableAccess {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let allow_reads = config.get_bool("AllowReads", false);
         let allow_writes = config.get_bool("AllowWrites", false);
 
         // Handle multi-write: ENV['A'], ENV['B'] = a, b
-        // Prism parses these targets as IndexTargetNode inside MultiWriteNode.
         if let Some(mw) = node.as_multi_write_node() {
             if !allow_writes {
                 for target in mw.lefts().iter() {
@@ -114,28 +118,20 @@ impl Cop for EnvironmentVariableAccess {
                         if is_env_receiver(&recv) {
                             let loc = recv.location();
                             let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                WRITE_MSG.to_string(),
-                            ));
-                        }
-                    }
-                }
-                // Also check rest target if present
-                if let Some(rest) = mw.rest() {
-                    if let Some(idx) = rest.as_index_target_node() {
-                        let recv = idx.receiver();
-                        if is_env_receiver(&recv) {
-                            let loc = recv.location();
-                            let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                WRITE_MSG.to_string(),
-                            ));
+                            let mut diagnostic =
+                                self.diagnostic(source, line, column, WRITE_MSG.to_string());
+                            if let Some(corrections) = corrections.as_deref_mut() {
+                                let mw_loc = mw.location();
+                                corrections.push(crate::correction::Correction {
+                                    start: mw_loc.start_offset(),
+                                    end: mw_loc.end_offset(),
+                                    replacement: "nil".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diagnostic.corrected = true;
+                            }
+                            diagnostics.push(diagnostic);
                         }
                     }
                 }
@@ -143,8 +139,6 @@ impl Cop for EnvironmentVariableAccess {
             return;
         }
 
-        // Handle ENV['KEY'] ||= val, &&= val, += val (IndexOrWriteNode, IndexAndWriteNode,
-        // IndexOperatorWriteNode). These are all writes — RuboCop's env_write? matches `indexasgn`.
         if let Some(recv) = node
             .as_index_or_write_node()
             .and_then(|n| n.receiver())
@@ -157,7 +151,19 @@ impl Cop for EnvironmentVariableAccess {
             if !allow_writes && is_env_receiver(&recv) {
                 let loc = recv.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(source, line, column, WRITE_MSG.to_string()));
+                let mut diagnostic = self.diagnostic(source, line, column, WRITE_MSG.to_string());
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let nloc = node.location();
+                    corrections.push(crate::correction::Correction {
+                        start: nloc.start_offset(),
+                        end: nloc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
             return;
         }
@@ -176,25 +182,42 @@ impl Cop for EnvironmentVariableAccess {
             return;
         }
 
-        let method = call.name();
-        let method_bytes = method.as_slice();
-
-        // `[]=` is a write; everything else is a read
+        let method_bytes = call.name().as_slice();
         if method_bytes == b"[]=" {
             if !allow_writes {
                 let loc = recv.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(source, line, column, WRITE_MSG.to_string()));
-                // RuboCop's on_const fires for every const child of the send node,
-                // including const arguments. Report write offenses for those too.
+                let mut diagnostic = self.diagnostic(source, line, column, WRITE_MSG.to_string());
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let cloc = call.location();
+                    corrections.push(crate::correction::Correction {
+                        start: cloc.start_offset(),
+                        end: cloc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
                 report_const_args(self, source, &call, WRITE_MSG, diagnostics);
             }
         } else if !allow_reads {
             let loc = recv.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(source, line, column, READ_MSG.to_string()));
-            // RuboCop's on_const fires for every const child of the send node,
-            // including const arguments. Report read offenses for those too.
+            let mut diagnostic = self.diagnostic(source, line, column, READ_MSG.to_string());
+            if let Some(corrections) = corrections.as_deref_mut() {
+                let cloc = call.location();
+                corrections.push(crate::correction::Correction {
+                    start: cloc.start_offset(),
+                    end: cloc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
             report_const_args(self, source, &call, READ_MSG, diagnostics);
         }
     }
@@ -241,4 +264,13 @@ mod tests {
         EnvironmentVariableAccess,
         "cops/rails/environment_variable_access"
     );
+
+    #[test]
+    fn autocorrect_replaces_env_read_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &EnvironmentVariableAccess,
+            b"ENV['FOO']\n",
+            b"nil\n",
+        );
+    }
 }

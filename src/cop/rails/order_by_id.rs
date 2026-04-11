@@ -33,6 +33,10 @@ impl Cop for OrderById {
         "Rails/OrderById"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -52,8 +56,9 @@ impl Cop for OrderById {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -125,12 +130,24 @@ impl Cop for OrderById {
 
         let msg_loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not use the `id` column for ordering. Use a timestamp column to order chronologically.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let loc = call.location();
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -154,4 +171,9 @@ fn hash_key_is_primary_key(elem: Option<ruby_prism::Node<'_>>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(OrderById, "cops/rails/order_by_id");
+
+    #[test]
+    fn autocorrect_replaces_order_by_id_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(&OrderById, b"users.order(:id)\n", b"nil\n");
+    }
 }
