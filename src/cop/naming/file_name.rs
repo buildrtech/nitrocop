@@ -262,6 +262,10 @@ impl Cop for FileName {
         "Naming/FileName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_lines(
         &self,
         source: &SourceFile,
@@ -780,5 +784,10 @@ mod tests {
             diags.is_empty(),
             "Without hierarchy check, just the class name should match"
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(FileName.supports_autocorrect());
     }
 }
