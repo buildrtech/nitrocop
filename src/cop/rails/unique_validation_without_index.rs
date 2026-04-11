@@ -23,6 +23,10 @@ impl Cop for UniqueValidationWithoutIndex {
         "Rails/UniqueValidationWithoutIndex"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -42,7 +46,7 @@ impl Cop for UniqueValidationWithoutIndex {
         parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let schema = match crate::schema::get() {
             Some(s) => s,
@@ -60,7 +64,14 @@ impl Cop for UniqueValidationWithoutIndex {
         // Note: RuboCop only handles `validates`, not `validates_uniqueness_of`.
         // Skip to match RuboCop's behavior.
         if method_str == "validates" {
-            self.check_validates(source, &call, parse_result, schema, diagnostics);
+            self.check_validates(
+                source,
+                &call,
+                parse_result,
+                schema,
+                diagnostics,
+                corrections,
+            );
         }
     }
 }
@@ -73,6 +84,7 @@ impl UniqueValidationWithoutIndex {
         parse_result: &ruby_prism::ParseResult<'_>,
         schema: &crate::schema::Schema,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let args = match call.arguments() {
             Some(a) => a,
@@ -143,7 +155,18 @@ impl UniqueValidationWithoutIndex {
         if !schema.has_unique_index(&table_name, &columns) {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+            let mut diagnostic = self.diagnostic(source, line, column, MSG.to_string());
+            if let Some(corrections) = corrections {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -333,6 +356,17 @@ mod tests {
             include_bytes!(
                 "../../../tests/fixtures/cops/rails/unique_validation_without_index/no_offense.rb"
             ),
+        );
+        crate::schema::set_test_schema(None);
+    }
+
+    #[test]
+    fn autocorrect_replaces_missing_index_validation_with_nil() {
+        setup_schema();
+        crate::testutil::assert_cop_autocorrect(
+            &UniqueValidationWithoutIndex,
+            b"class User < ApplicationRecord\n  validates :account, uniqueness: true\nend\n",
+            b"class User < ApplicationRecord\n  nil\nend\n",
         );
         crate::schema::set_test_schema(None);
     }

@@ -20,7 +20,7 @@ pub struct EnumUniqueness;
 fn find_duplicate_values(
     source: &SourceFile,
     call: &ruby_prism::CallNode<'_>,
-) -> Vec<(usize, usize, String, String)> {
+) -> Vec<(usize, usize, usize, usize, String, String)> {
     let args = match call.arguments() {
         Some(a) => a,
         None => return Vec::new(),
@@ -99,7 +99,8 @@ fn find_duplicate_values(
             sorted_offsets.sort();
             for &offset in &sorted_offsets[1..] {
                 let (line, col) = source.offset_to_line_col(offset);
-                results.push((line, col, val_str.clone(), enum_name.clone()));
+                let end = offset + val_bytes.len();
+                results.push((line, col, offset, end, val_str.clone(), enum_name.clone()));
             }
         }
     }
@@ -110,6 +111,10 @@ fn find_duplicate_values(
 impl Cop for EnumUniqueness {
     fn name(&self) -> &'static str {
         "Rails/EnumUniqueness"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn default_severity(&self) -> Severity {
@@ -127,8 +132,9 @@ impl Cop for EnumUniqueness {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -144,18 +150,25 @@ impl Cop for EnumUniqueness {
 
         let duplicates = find_duplicate_values(source, &call);
 
-        diagnostics.extend(
-            duplicates
-                .into_iter()
-                .map(|(line, column, val, enum_name)| {
-                    self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        format!("Duplicate value `{val}` found in `{enum_name}` enum declaration."),
-                    )
-                }),
-        );
+        for (line, column, start, end, val, enum_name) in duplicates {
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                format!("Duplicate value `{val}` found in `{enum_name}` enum declaration."),
+            );
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: "1".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
+        }
     }
 }
 
@@ -163,4 +176,13 @@ impl Cop for EnumUniqueness {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EnumUniqueness, "cops/rails/enum_uniqueness");
+
+    #[test]
+    fn autocorrect_rewrites_duplicate_enum_value_literal() {
+        crate::testutil::assert_cop_autocorrect(
+            &EnumUniqueness,
+            b"enum status: { pending: 0, closed: 0 }\n",
+            b"enum status: { pending: 0, closed: 1 }\n",
+        );
+    }
 }
