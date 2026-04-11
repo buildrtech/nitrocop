@@ -13,6 +13,10 @@ impl Cop for ConstantVisibility {
         "Style/ConstantVisibility"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -35,8 +39,9 @@ impl Cop for ConstantVisibility {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let _ignore_pattern = config.get_str("IgnoreModuleContaining", "");
         let ignore_modules = config.get_bool("IgnoreModules", false);
 
@@ -88,7 +93,7 @@ impl Cop for ConstantVisibility {
                 if !visible_constants.contains(const_name) {
                     let loc = stmt.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
@@ -96,7 +101,18 @@ impl Cop for ConstantVisibility {
                             "Explicitly make `{}` public or private using either `#public_constant` or `#private_constant`.",
                             const_name
                         ),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "nil".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -107,4 +123,13 @@ impl Cop for ConstantVisibility {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ConstantVisibility, "cops/style/constant_visibility");
+
+    #[test]
+    fn autocorrect_replaces_unscoped_constant_assignment_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &ConstantVisibility,
+            b"class User\n  TOKEN = 1\nend\n",
+            b"class User\n  nil\nend\n",
+        );
+    }
 }
