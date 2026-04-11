@@ -117,6 +117,10 @@ impl Cop for VariableNumber {
         "Naming/VariableNumber"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CLASS_VARIABLE_AND_WRITE_NODE,
@@ -149,8 +153,9 @@ impl Cop for VariableNumber {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let enforced_style = config.get_str("EnforcedStyle", "normalcase");
         let check_method_names = config.get_bool("CheckMethodNames", true);
         let allowed = config.get_string_array("AllowedIdentifiers");
@@ -226,6 +231,7 @@ impl Cop for VariableNumber {
                     enforced_style,
                     "variable",
                     is_bare,
+                    &mut corrections,
                 ) {
                     diagnostics.push(diag);
                 }
@@ -247,6 +253,7 @@ impl Cop for VariableNumber {
                         enforced_style,
                         "method name",
                         true,
+                        &mut corrections,
                     ) {
                         diagnostics.push(diag);
                     }
@@ -267,6 +274,7 @@ impl Cop for VariableNumber {
                     enforced_style,
                     "variable",
                     true,
+                    &mut corrections,
                 ) {
                     diagnostics.push(diag);
                 }
@@ -288,6 +296,7 @@ impl Cop for VariableNumber {
                     &allowed_ids,
                     &allowed_pats,
                     diagnostics,
+                    &mut corrections,
                 );
             }
             // Check the rest target (splat) if present
@@ -301,6 +310,7 @@ impl Cop for VariableNumber {
                             &allowed_ids,
                             &allowed_pats,
                             diagnostics,
+                            &mut corrections,
                         );
                     }
                 }
@@ -313,6 +323,7 @@ impl Cop for VariableNumber {
                     &allowed_ids,
                     &allowed_pats,
                     diagnostics,
+                    &mut corrections,
                 );
             }
         }
@@ -327,6 +338,7 @@ impl Cop for VariableNumber {
                 &allowed_ids,
                 &allowed_pats,
                 diagnostics,
+                &mut corrections,
             );
         }
     }
@@ -338,7 +350,7 @@ impl Cop for VariableNumber {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // This visitor handles two cases that require tree-walking context:
         //
@@ -366,6 +378,7 @@ impl Cop for VariableNumber {
             allowed_ids: &allowed_ids,
             allowed_pats: &allowed_pats,
             diagnostics,
+            corrections,
         };
         visitor.visit(&parse_result.node());
     }
@@ -380,7 +393,7 @@ impl Cop for VariableNumber {
 /// keys inside HashPatternNode. Parser gem creates match_var nodes instead,
 /// so RuboCop's on_sym never fires. This visitor skips HashPatternNode
 /// subtrees entirely for symbol checking to match RuboCop behavior.
-struct VariableNumberVisitor<'a> {
+struct VariableNumberVisitor<'a, 'corr> {
     cop: &'a VariableNumber,
     source: &'a SourceFile,
     enforced_style: &'a str,
@@ -388,9 +401,10 @@ struct VariableNumberVisitor<'a> {
     allowed_ids: &'a [String],
     allowed_pats: &'a [String],
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
+impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_, '_> {
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         if let Some(reference) = node.reference() {
             self.cop.check_target_variable(
@@ -400,6 +414,7 @@ impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
                 self.allowed_ids,
                 self.allowed_pats,
                 self.diagnostics,
+                &mut self.corrections,
             );
         }
         // Continue walking children (subsequent rescue clauses, etc.)
@@ -441,6 +456,7 @@ impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
                 self.enforced_style,
                 "symbol",
                 true,
+                &mut self.corrections,
             ) {
                 self.diagnostics.push(diag);
             }
@@ -486,6 +502,7 @@ impl VariableNumber {
         allowed_ids: &[String],
         allowed_pats: &[String],
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let (name_bytes, loc) = if let Some(n) = target.as_local_variable_target_node() {
             (n.name().as_slice(), n.location())
@@ -514,6 +531,7 @@ impl VariableNumber {
                 enforced_style,
                 "variable",
                 is_bare,
+                corrections,
             ) {
                 diagnostics.push(diag);
             }
@@ -543,6 +561,7 @@ fn check_number_style(
     enforced_style: &str,
     identifier_type: &str,
     is_bare_name: bool,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) -> Option<Diagnostic> {
     // Skip names without digits — the style regex always matches non-empty
     // strings ending with a non-digit character. But empty names (e.g. `:""`
@@ -581,15 +600,72 @@ fn check_number_style(
 
     if !valid {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        return Some(cop.diagnostic(
+        let mut diagnostic = cop.diagnostic(
             source,
             line,
             column,
             format!("Use {enforced_style} for {identifier_type} numbers."),
-        ));
+        );
+        if is_bare_name {
+            if let Some(corrections) = corrections.as_deref_mut() {
+                if let Some(replacement) = normalized_number_name(name, enforced_style) {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement,
+                        cop_name: cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+            }
+        }
+        return Some(diagnostic);
     }
 
     None
+}
+
+fn normalized_number_name(name: &str, enforced_style: &str) -> Option<String> {
+    let trailing_digits_rev: String = name
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if trailing_digits_rev.is_empty() {
+        return None;
+    }
+    let trailing_digits: String = trailing_digits_rev.chars().rev().collect();
+    let prefix = &name[..name.len() - trailing_digits.len()];
+
+    match enforced_style {
+        "snake_case" => {
+            if prefix.ends_with('_') {
+                None
+            } else {
+                Some(format!("{prefix}_{trailing_digits}"))
+            }
+        }
+        "non_integer" => {
+            if prefix.is_empty() {
+                None
+            } else {
+                Some(prefix.trim_end_matches('_').to_string())
+            }
+        }
+        _ => {
+            // normalcase: remove underscore before trailing digits
+            if prefix.ends_with('_') {
+                Some(format!(
+                    "{}{}",
+                    prefix.trim_end_matches('_'),
+                    trailing_digits
+                ))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// normalcase: /(?:\D|[^_\d]\d+|\A\d+)\z/
@@ -723,5 +799,10 @@ mod tests {
         assert_eq!(diags.len(), 0, "standalone :\"\" should NOT be flagged");
         let diags = crate::testutil::run_cop_full(&VariableNumber, b":''\n");
         assert_eq!(diags.len(), 0, "standalone :'' should NOT be flagged");
+    }
+
+    #[test]
+    fn autocorrect_normalcase_removes_underscore_before_digits() {
+        crate::testutil::assert_cop_autocorrect(&VariableNumber, b"foo_1 = 1\n", b"foo1 = 1\n");
     }
 }
