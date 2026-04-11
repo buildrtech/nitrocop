@@ -30,6 +30,10 @@ impl Cop for ActiveRecordOverride {
         "Rails/ActiveRecordOverride"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -41,27 +45,29 @@ impl Cop for ActiveRecordOverride {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ActiveRecordOverrideVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
             in_active_record_class: false,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct ActiveRecordOverrideVisitor<'a> {
+struct ActiveRecordOverrideVisitor<'a, 'corr> {
     cop: &'a ActiveRecordOverride,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
     in_active_record_class: bool,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for ActiveRecordOverrideVisitor<'_> {
+impl<'pr> Visit<'pr> for ActiveRecordOverrideVisitor<'_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         let was_in_ar = self.in_active_record_class;
         if is_active_record_class(self.source, node) {
@@ -103,12 +109,23 @@ impl<'pr> Visit<'pr> for ActiveRecordOverrideVisitor<'_> {
 
         let loc = node.name_loc();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             format!("Use {callbacks} callbacks instead of overriding the Active Record method `{method_str}`."),
-        ));
+        );
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("{method_str}_override"),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
     }
 
     // Don't descend into modules — methods in modules are not AR overrides
@@ -131,4 +148,13 @@ fn is_active_record_class(source: &SourceFile, class: &ruby_prism::ClassNode<'_>
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ActiveRecordOverride, "cops/rails/active_record_override");
+
+    #[test]
+    fn autocorrect_renames_overridden_save_method() {
+        crate::testutil::assert_cop_autocorrect(
+            &ActiveRecordOverride,
+            b"class User < ApplicationRecord\n  def save\n    super\n  end\nend\n",
+            b"class User < ApplicationRecord\n  def save_override\n    super\n  end\nend\n",
+        );
+    }
 }
