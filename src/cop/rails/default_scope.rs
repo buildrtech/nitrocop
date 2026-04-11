@@ -10,6 +10,10 @@ impl Cop for DefaultScope {
         "Rails/DefaultScope"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -29,19 +33,33 @@ impl Cop for DefaultScope {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Pattern 1: method call `default_scope -> { ... }`
         if let Some(call) = node.as_call_node() {
             if call.receiver().is_none() && call.name().as_slice() == b"default_scope" {
                 let loc = call.message_loc().unwrap_or(call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
-                    "Avoid use of `default_scope`. It is better to use explicitly named scopes.".to_string(),
-                ));
+                    "Avoid use of `default_scope`. It is better to use explicitly named scopes."
+                        .to_string(),
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let cloc = call.location();
+                    corrections.push(crate::correction::Correction {
+                        start: cloc.start_offset(),
+                        end: cloc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
 
@@ -50,12 +68,24 @@ impl Cop for DefaultScope {
             if def_node.name().as_slice() == b"default_scope" && def_node.receiver().is_some() {
                 let loc = def_node.name_loc();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
-                    "Avoid use of `default_scope`. It is better to use explicitly named scopes.".to_string(),
-                ));
+                    "Avoid use of `default_scope`. It is better to use explicitly named scopes."
+                        .to_string(),
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "default_scope_override".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -65,4 +95,13 @@ impl Cop for DefaultScope {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DefaultScope, "cops/rails/default_scope");
+
+    #[test]
+    fn autocorrect_replaces_default_scope_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &DefaultScope,
+            b"default_scope -> { where(active: true) }\n",
+            b"nil\n",
+        );
+    }
 }
