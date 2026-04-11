@@ -21,6 +21,10 @@ impl Cop for UnusedIgnoredColumns {
         "Rails/UnusedIgnoredColumns"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -44,8 +48,9 @@ impl Cop for UnusedIgnoredColumns {
         parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let schema = match crate::schema::get() {
             Some(s) => s,
             None => return,
@@ -104,14 +109,30 @@ impl Cop for UnusedIgnoredColumns {
             if !table.has_column(&col_name) {
                 let loc = elem.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     format!(
                         "Remove `{col_name}` from `ignored_columns` because the column does not exist."
                     ),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let replacement = if elem.as_symbol_node().is_some() {
+                        ":ignored_column".to_string()
+                    } else {
+                        "\"ignored_column\"".to_string()
+                    };
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -147,6 +168,17 @@ mod tests {
             include_bytes!(
                 "../../../tests/fixtures/cops/rails/unused_ignored_columns/no_offense.rb"
             ),
+        );
+        crate::schema::set_test_schema(None);
+    }
+
+    #[test]
+    fn autocorrect_replaces_missing_ignored_column_name() {
+        setup_schema();
+        crate::testutil::assert_cop_autocorrect(
+            &UnusedIgnoredColumns,
+            b"class User < ApplicationRecord\n  self.ignored_columns = [:missing_column]\nend\n",
+            b"class User < ApplicationRecord\n  self.ignored_columns = [:ignored_column]\nend\n",
         );
         crate::schema::set_test_schema(None);
     }
