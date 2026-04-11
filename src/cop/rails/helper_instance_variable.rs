@@ -35,6 +35,10 @@ impl Cop for HelperInstanceVariable {
         "Rails/HelperInstanceVariable"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -50,44 +54,57 @@ impl Cop for HelperInstanceVariable {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = HelperIvarVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
             class_depth: 0,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct HelperIvarVisitor<'a> {
+struct HelperIvarVisitor<'a, 'corr> {
     cop: &'a HelperInstanceVariable,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
     /// Track nesting depth inside class definitions. When > 0, ivars belong
     /// to the class and should not be flagged.
     class_depth: usize,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl HelperIvarVisitor<'_> {
-    fn add_offense(&mut self, offset: usize) {
+impl HelperIvarVisitor<'_, '_> {
+    fn add_offense(&mut self, start: usize, end: usize) {
         if self.class_depth > 0 {
             return;
         }
-        let (line, column) = self.source.offset_to_line_col(offset);
-        self.diagnostics.push(self.cop.diagnostic(
+        let (line, column) = self.source.offset_to_line_col(start);
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Do not use instance variables in helpers.".to_string(),
-        ));
+        );
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start,
+                end,
+                replacement: "helper_var".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 
-impl<'pr> Visit<'pr> for HelperIvarVisitor<'_> {
+impl<'pr> Visit<'pr> for HelperIvarVisitor<'_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         self.class_depth += 1;
         if let Some(body) = node.body() {
@@ -100,14 +117,15 @@ impl<'pr> Visit<'pr> for HelperIvarVisitor<'_> {
         &mut self,
         node: &ruby_prism::InstanceVariableReadNode<'pr>,
     ) {
-        self.add_offense(node.location().start_offset());
+        self.add_offense(node.location().start_offset(), node.location().end_offset());
     }
 
     fn visit_instance_variable_write_node(
         &mut self,
         node: &ruby_prism::InstanceVariableWriteNode<'pr>,
     ) {
-        self.add_offense(node.location().start_offset());
+        let loc = node.name_loc();
+        self.add_offense(loc.start_offset(), loc.end_offset());
         // Visit the value expression
         self.visit(&node.value());
     }
@@ -116,7 +134,8 @@ impl<'pr> Visit<'pr> for HelperIvarVisitor<'_> {
         &mut self,
         node: &ruby_prism::InstanceVariableOperatorWriteNode<'pr>,
     ) {
-        self.add_offense(node.location().start_offset());
+        let loc = node.name_loc();
+        self.add_offense(loc.start_offset(), loc.end_offset());
         self.visit(&node.value());
     }
 
@@ -124,7 +143,8 @@ impl<'pr> Visit<'pr> for HelperIvarVisitor<'_> {
         &mut self,
         node: &ruby_prism::InstanceVariableAndWriteNode<'pr>,
     ) {
-        self.add_offense(node.location().start_offset());
+        let loc = node.name_loc();
+        self.add_offense(loc.start_offset(), loc.end_offset());
         self.visit(&node.value());
     }
 
@@ -132,7 +152,7 @@ impl<'pr> Visit<'pr> for HelperIvarVisitor<'_> {
         &mut self,
         node: &ruby_prism::InstanceVariableTargetNode<'pr>,
     ) {
-        self.add_offense(node.location().start_offset());
+        self.add_offense(node.location().start_offset(), node.location().end_offset());
     }
 
     // Deliberately NOT implementing visit_instance_variable_or_write_node —
@@ -146,4 +166,13 @@ mod tests {
         HelperInstanceVariable,
         "cops/rails/helper_instance_variable"
     );
+
+    #[test]
+    fn autocorrect_renames_instance_variable_in_helper() {
+        crate::testutil::assert_cop_autocorrect(
+            &HelperInstanceVariable,
+            b"@user = current_user\n",
+            b"helper_var = current_user\n",
+        );
+    }
 }
