@@ -100,6 +100,10 @@ impl Cop for BlockNesting {
         "Metrics/BlockNesting"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -480,5 +484,10 @@ mod tests {
         assert_eq!(diagnostic.location.line, 6);
         assert_eq!(diagnostic.location.column, 10);
         assert_eq!(diagnostic.cop_name, "Metrics/BlockNesting");
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(BlockNesting.supports_autocorrect());
     }
 }
