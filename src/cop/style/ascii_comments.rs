@@ -26,6 +26,10 @@ impl Cop for AsciiComments {
         "Style/AsciiComments"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -37,8 +41,9 @@ impl Cop for AsciiComments {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let allowed_chars = config.get_string_array("AllowedChars").unwrap_or_default();
         let bytes = source.as_bytes();
 
@@ -75,12 +80,37 @@ impl Cop for AsciiComments {
                     // Calculate position: offset of '#' + 1 (skip #) + char_idx
                     let byte_offset = start + 1 + char_idx;
                     let (line, col) = source.offset_to_line_col(byte_offset);
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         col,
                         "Use only ascii symbols in comments.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let mut replacement = String::with_capacity(comment_text.len());
+                        replacement.push('#');
+                        for c in after_hash.chars() {
+                            if c.is_ascii() {
+                                replacement.push(c);
+                            } else {
+                                let cs = c.to_string();
+                                if allowed_chars.iter().any(|a| a == &cs) {
+                                    replacement.push(c);
+                                } else {
+                                    replacement.push('?');
+                                }
+                            }
+                        }
+                        corrections.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                     break; // Only report first non-ASCII per comment
                 }
             }
@@ -92,4 +122,9 @@ impl Cop for AsciiComments {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AsciiComments, "cops/style/ascii_comments");
+
+    #[test]
+    fn autocorrect_replaces_non_ascii_comment_chars() {
+        crate::testutil::assert_cop_autocorrect(&AsciiComments, b"# caf\xC3\xA9\n", b"# caf?\n");
+    }
 }
