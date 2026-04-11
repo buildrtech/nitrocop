@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ruby_prism::Visit;
 
 use crate::cop::{Cop, CopConfig};
@@ -25,6 +27,10 @@ impl Cop for UselessConstantScoping {
         "Lint/UselessConstantScoping"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -36,32 +42,34 @@ impl Cop for UselessConstantScoping {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ConstScopingVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct ConstScopingVisitor<'a, 'src> {
+struct ConstScopingVisitor<'a, 'src, 'corr> {
     cop: &'a UselessConstantScoping,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for ConstScopingVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for ConstScopingVisitor<'_, '_, '_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         self.check_statements(node);
         ruby_prism::visit_statements_node(self, node);
     }
 }
 
-impl ConstScopingVisitor<'_, '_> {
+impl ConstScopingVisitor<'_, '_, '_> {
     fn check_statements(&mut self, stmts: &ruby_prism::StatementsNode<'_>) {
         let body_nodes: Vec<_> = stmts.body().iter().collect();
 
@@ -85,6 +93,7 @@ impl ConstScopingVisitor<'_, '_> {
         }
 
         // Second pass: check for constants after private modifier
+        let mut corrected_consts: HashSet<Vec<u8>> = HashSet::new();
         for node in &body_nodes {
             if let Some(call) = node.as_call_node() {
                 if call.name().as_slice() == b"private"
@@ -106,12 +115,29 @@ impl ConstScopingVisitor<'_, '_> {
                     {
                         let loc = casgn.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Useless `private` access modifier for constant scope.".to_string(),
-                        ));
+                        );
+                        if let Some(corrections) = self.corrections.as_deref_mut() {
+                            if corrected_consts.insert(const_name.to_vec()) {
+                                let insertion = format!(
+                                    "\nprivate_constant :{}",
+                                    String::from_utf8_lossy(const_name)
+                                );
+                                corrections.push(crate::correction::Correction {
+                                    start: loc.end_offset(),
+                                    end: loc.end_offset(),
+                                    replacement: insertion,
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                            }
+                            diagnostic.corrected = true;
+                        }
+                        self.diagnostics.push(diagnostic);
                     }
                 }
 
@@ -124,12 +150,29 @@ impl ConstScopingVisitor<'_, '_> {
                     {
                         let loc = cpw.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Useless `private` access modifier for constant scope.".to_string(),
-                        ));
+                        );
+                        if let Some(corrections) = self.corrections.as_deref_mut() {
+                            if corrected_consts.insert(const_name.to_vec()) {
+                                let insertion = format!(
+                                    "\nprivate_constant :{}",
+                                    String::from_utf8_lossy(const_name)
+                                );
+                                corrections.push(crate::correction::Correction {
+                                    start: loc.end_offset(),
+                                    end: loc.end_offset(),
+                                    replacement: insertion,
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                            }
+                            diagnostic.corrected = true;
+                        }
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -141,4 +184,13 @@ impl ConstScopingVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UselessConstantScoping, "cops/lint/useless_constant_scoping");
+
+    #[test]
+    fn autocorrect_adds_private_constant_after_assignment() {
+        crate::testutil::assert_cop_autocorrect(
+            &UselessConstantScoping,
+            b"class Foo\n  private\n  PRIVATE_CONST = 42\nend\n",
+            b"class Foo\n  private\n  PRIVATE_CONST = 42\nprivate_constant :PRIVATE_CONST\nend\n",
+        );
+    }
 }

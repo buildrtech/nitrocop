@@ -173,6 +173,10 @@ impl Cop for DuplicateMethods {
         "Lint/DuplicateMethods"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -184,7 +188,7 @@ impl Cop for DuplicateMethods {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let active_support = config.get_bool("ActiveSupportExtensionsEnabled", false);
         let mut visitor = DupMethodVisitor {
@@ -201,6 +205,7 @@ impl Cop for DuplicateMethods {
             ensure_forgiven: Vec::new(),
             rescue_ensure_type_stack: Vec::new(),
             active_support_extensions: active_support,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -213,7 +218,7 @@ struct DefLocation {
     line: usize,
 }
 
-struct DupMethodVisitor<'a, 'src> {
+struct DupMethodVisitor<'a, 'src, 'corr> {
     cop: &'a DuplicateMethods,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
@@ -243,6 +248,7 @@ struct DupMethodVisitor<'a, 'src> {
     rescue_ensure_type_stack: Vec<RescueEnsureType>,
     /// Whether ActiveSupport extensions are enabled (for `delegate` tracking).
     active_support_extensions: bool,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -257,7 +263,7 @@ struct ScopeEntry {
     is_singleton: bool,
 }
 
-impl DupMethodVisitor<'_, '_> {
+impl DupMethodVisitor<'_, '_, '_> {
     /// Build the qualified method name like RuboCop's `found_instance_method`.
     /// For instance methods: `ClassName#method_name`
     /// For singleton methods: `ClassName.method_name`
@@ -309,6 +315,7 @@ impl DupMethodVisitor<'_, '_> {
         is_singleton: bool,
         def_line: usize,
         offense_offset: usize,
+        correction_span: Option<(usize, usize)>,
     ) {
         let qualified = self.qualified_method_name(method_name, is_singleton);
         let key = self.method_key(&qualified);
@@ -344,7 +351,19 @@ impl DupMethodVisitor<'_, '_> {
             let message = format!(
                 "Method `{qualified}` is defined at both {path}:{first_line} and {path}:{line}."
             );
-            let diag = self.cop.diagnostic(self.source, line, column, message);
+            let mut diag = self.cop.diagnostic(self.source, line, column, message);
+            if let (Some((start, end)), Some(corrections)) =
+                (correction_span, self.corrections.as_deref_mut())
+            {
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: String::new(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diag.corrected = true;
+            }
             self.diagnostics.push(diag);
         } else {
             self.definitions.insert(key, DefLocation { line: def_line });
@@ -382,7 +401,13 @@ impl DupMethodVisitor<'_, '_> {
                     return;
                 }
                 let keyword_offset = node.def_keyword_loc().start_offset();
-                self.found_method(name, true, def_line, keyword_offset);
+                self.found_method(
+                    name,
+                    true,
+                    def_line,
+                    keyword_offset,
+                    Some((node.location().start_offset(), node.location().end_offset())),
+                );
             } else if let Some(const_read) = receiver.as_constant_read_node() {
                 // def ConstName.method: RuboCop's check_const_receiver resolves the constant
                 // independently of parent_module_name, so it works inside blocks too.
@@ -396,7 +421,13 @@ impl DupMethodVisitor<'_, '_> {
                         is_singleton: true,
                     });
                     let keyword_offset = node.def_keyword_loc().start_offset();
-                    self.found_method(name, true, def_line, keyword_offset);
+                    self.found_method(
+                        name,
+                        true,
+                        def_line,
+                        keyword_offset,
+                        Some((node.location().start_offset(), node.location().end_offset())),
+                    );
                     self.scope_stack = saved_scopes;
                 } else {
                     // Constant not in scope stack. RuboCop's lookup_constant returns the
@@ -428,7 +459,17 @@ impl DupMethodVisitor<'_, '_> {
                                 "Method `{qualified}` is defined at both \
                                  {path}:{first_line} and {path}:{line}."
                             );
-                            let diag = self.cop.diagnostic(self.source, line, column, message);
+                            let mut diag = self.cop.diagnostic(self.source, line, column, message);
+                            if let Some(corrections) = self.corrections.as_deref_mut() {
+                                corrections.push(crate::correction::Correction {
+                                    start: node.location().start_offset(),
+                                    end: node.location().end_offset(),
+                                    replacement: String::new(),
+                                    cop_name: self.cop.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
                             self.diagnostics.push(diag);
                         } else {
                             self.definitions.insert(key, DefLocation { line: def_line });
@@ -446,7 +487,13 @@ impl DupMethodVisitor<'_, '_> {
             }
             let is_singleton = self.in_singleton_scope();
             let keyword_offset = node.def_keyword_loc().start_offset();
-            self.found_method(name, is_singleton, def_line, keyword_offset);
+            self.found_method(
+                name,
+                is_singleton,
+                def_line,
+                keyword_offset,
+                Some((node.location().start_offset(), node.location().end_offset())),
+            );
         }
     }
 
@@ -526,7 +573,7 @@ impl DupMethodVisitor<'_, '_> {
             // The scope is already set to the sclass call scope (e.g., "new")
             // and is_singleton is true, so this will produce e.g., "new.meth"
             let is_singleton = self.in_singleton_scope();
-            self.found_method(&name, is_singleton, def_line, keyword_offset);
+            self.found_method(&name, is_singleton, def_line, keyword_offset, None);
         }
     }
 
@@ -557,7 +604,7 @@ impl DupMethodVisitor<'_, '_> {
             .source
             .offset_to_line_col(node.location().start_offset());
         let offset = node.location().start_offset();
-        self.found_method(name, is_singleton, def_line, offset);
+        self.found_method(name, is_singleton, def_line, offset, None);
     }
 
     /// Process a call node for alias_method, attr_*, def_delegator*, etc.
@@ -628,7 +675,7 @@ impl DupMethodVisitor<'_, '_> {
             .source
             .offset_to_line_col(node.location().start_offset());
         let offset = node.location().start_offset();
-        self.found_method(&new_name, is_singleton, def_line, offset);
+        self.found_method(&new_name, is_singleton, def_line, offset, None);
     }
 
     fn process_attr(
@@ -647,11 +694,11 @@ impl DupMethodVisitor<'_, '_> {
         for arg in args {
             if let Some(name) = extract_symbol_or_string(arg) {
                 if readable {
-                    self.found_method(&name, is_singleton, def_line, offset);
+                    self.found_method(&name, is_singleton, def_line, offset, None);
                 }
                 if writable {
                     let setter = format!("{name}=");
-                    self.found_method(&setter, is_singleton, def_line, offset);
+                    self.found_method(&setter, is_singleton, def_line, offset, None);
                 }
             }
         }
@@ -677,12 +724,12 @@ impl DupMethodVisitor<'_, '_> {
         let offset = node.location().start_offset();
 
         // Always readable
-        self.found_method(&name, is_singleton, def_line, offset);
+        self.found_method(&name, is_singleton, def_line, offset, None);
 
         // Writable if second arg is `true`
         if args.len() == 2 && args[1].as_true_node().is_some() {
             let setter = format!("{name}=");
-            self.found_method(&setter, is_singleton, def_line, offset);
+            self.found_method(&setter, is_singleton, def_line, offset, None);
         }
     }
 
@@ -708,10 +755,10 @@ impl DupMethodVisitor<'_, '_> {
         if args.len() >= 3 {
             // Third arg is the alias name -- that's the method being defined
             if let Some(name) = extract_symbol_or_string(&args[2]) {
-                self.found_method(&name, is_singleton, def_line, offset);
+                self.found_method(&name, is_singleton, def_line, offset, None);
             }
         } else if let Some(name) = extract_symbol_or_string(&args[1]) {
-            self.found_method(&name, is_singleton, def_line, offset);
+            self.found_method(&name, is_singleton, def_line, offset, None);
         }
     }
 
@@ -736,7 +783,7 @@ impl DupMethodVisitor<'_, '_> {
 
         for arg in &args[1..] {
             if let Some(name) = extract_symbol_or_string(arg) {
-                self.found_method(&name, is_singleton, def_line, offset);
+                self.found_method(&name, is_singleton, def_line, offset, None);
             }
         }
     }
@@ -813,7 +860,7 @@ impl DupMethodVisitor<'_, '_> {
                 } else {
                     name
                 };
-                self.found_method(&effective_name, is_singleton, def_line, offset);
+                self.found_method(&effective_name, is_singleton, def_line, offset, None);
             }
         }
     }
@@ -961,7 +1008,7 @@ fn humanize_scope(scope: &str) -> String {
     scope.to_string()
 }
 
-impl<'pr> Visit<'pr> for DupMethodVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for DupMethodVisitor<'_, '_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         let name = class_or_module_name_from_constant(node.constant_path());
         self.scope_stack.push(ScopeEntry {
@@ -1696,6 +1743,15 @@ mod tests {
         assert_eq!(
             n, 1,
             "delegate then def inside class << self should detect dup"
+        );
+    }
+
+    #[test]
+    fn autocorrect_removes_second_duplicate_def() {
+        crate::testutil::assert_cop_autocorrect(
+            &DuplicateMethods,
+            b"class Foo\n  def bar\n    1\n  end\n\n  def bar\n    2\n  end\nend\n",
+            b"class Foo\n  def bar\n    1\n  end\n\n  \nend\n",
         );
     }
 }

@@ -222,6 +222,10 @@ impl Cop for ShadowingOuterLocalVariable {
         "Lint/ShadowingOuterLocalVariable"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -238,12 +242,13 @@ impl Cop for ShadowingOuterLocalVariable {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = ShadowVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             scopes: Vec::new(),
             conditional_branch_stack: Vec::new(),
             when_condition_case_offset: None,
@@ -335,10 +340,11 @@ struct CondBranchEntry {
     is_else_clause: bool,
 }
 
-struct ShadowVisitor<'a, 'src> {
+struct ShadowVisitor<'a, 'src, 'corr> {
     cop: &'a ShadowingOuterLocalVariable,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
     /// Stack of maps of local variable names -> declaration info.
     scopes: Vec<HashMap<String, VarInfo>>,
     /// Stack of conditional branch contexts.
@@ -365,7 +371,7 @@ struct ShadowVisitor<'a, 'src> {
     inherited_cond_branch: Option<(usize, usize)>,
 }
 
-impl ShadowVisitor<'_, '_> {
+impl ShadowVisitor<'_, '_, '_> {
     fn current_locals(&self) -> HashMap<String, VarInfo> {
         let mut all = HashMap::new();
         for scope in &self.scopes {
@@ -654,7 +660,7 @@ impl ShadowVisitor<'_, '_> {
     }
 }
 
-impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         if let Some(receiver) = node.receiver() {
             self.visit(&receiver);
@@ -882,6 +888,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
                     &outer_locals,
                     &bctx,
                     &mut self.diagnostics,
+                    &mut self.corrections,
                 );
             }
         }
@@ -947,6 +954,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
                     &outer_locals,
                     &bctx,
                     &mut self.diagnostics,
+                    &mut self.corrections,
                 );
             }
         }
@@ -1270,6 +1278,7 @@ fn check_multi_target_shadow(
     outer_locals: &HashMap<String, VarInfo>,
     bctx: &BlockContext,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     for target in mt.lefts().iter() {
         if let Some(req) = target.as_required_parameter_node() {
@@ -1284,9 +1293,18 @@ fn check_multi_target_shadow(
                 outer_locals,
                 bctx,
                 diagnostics,
+                corrections,
             );
         } else if let Some(inner) = target.as_multi_target_node() {
-            check_multi_target_shadow(cop, source, &inner, outer_locals, bctx, diagnostics);
+            check_multi_target_shadow(
+                cop,
+                source,
+                &inner,
+                outer_locals,
+                bctx,
+                diagnostics,
+                corrections,
+            );
         }
     }
     // Rest param (*splat) inside destructuring
@@ -1305,6 +1323,7 @@ fn check_multi_target_shadow(
                         outer_locals,
                         bctx,
                         diagnostics,
+                        corrections,
                     );
                 }
             }
@@ -1323,6 +1342,7 @@ fn check_multi_target_shadow(
                 outer_locals,
                 bctx,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -1335,9 +1355,18 @@ fn check_block_parameters_shadow(
     outer_locals: &HashMap<String, VarInfo>,
     bctx: &BlockContext,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     if let Some(inner_params) = block_params.parameters() {
-        check_block_params_shadow(cop, source, &inner_params, outer_locals, bctx, diagnostics);
+        check_block_params_shadow(
+            cop,
+            source,
+            &inner_params,
+            outer_locals,
+            bctx,
+            diagnostics,
+            corrections,
+        );
 
         for param in inner_params.requireds().iter() {
             if let Some(multi_target) = param.as_multi_target_node() {
@@ -1348,6 +1377,7 @@ fn check_block_parameters_shadow(
                     outer_locals,
                     bctx,
                     diagnostics,
+                    corrections,
                 );
             }
         }
@@ -1361,6 +1391,7 @@ fn check_block_parameters_shadow(
                     outer_locals,
                     bctx,
                     diagnostics,
+                    corrections,
                 );
             }
         }
@@ -1382,6 +1413,7 @@ fn check_block_parameters_shadow(
             outer_locals,
             bctx,
             diagnostics,
+            corrections,
         );
     }
 }
@@ -1393,6 +1425,7 @@ fn check_block_params_shadow(
     outer_locals: &HashMap<String, VarInfo>,
     bctx: &BlockContext,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     for p in params.requireds().iter() {
         if let Some(req) = p.as_required_parameter_node() {
@@ -1407,6 +1440,7 @@ fn check_block_params_shadow(
                 outer_locals,
                 bctx,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -1423,6 +1457,7 @@ fn check_block_params_shadow(
                 outer_locals,
                 bctx,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -1439,6 +1474,7 @@ fn check_block_params_shadow(
                 outer_locals,
                 bctx,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -1456,6 +1492,7 @@ fn check_block_params_shadow(
                 outer_locals,
                 bctx,
                 diagnostics,
+                corrections,
             );
         } else if let Some(keyword) = p.as_optional_keyword_parameter_node() {
             let name = std::str::from_utf8(keyword.name().as_slice())
@@ -1470,6 +1507,7 @@ fn check_block_params_shadow(
                 outer_locals,
                 bctx,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -1487,6 +1525,7 @@ fn check_block_params_shadow(
                     outer_locals,
                     bctx,
                     diagnostics,
+                    corrections,
                 );
             }
         }
@@ -1505,6 +1544,7 @@ fn check_block_params_shadow(
                     outer_locals,
                     bctx,
                     diagnostics,
+                    corrections,
                 );
             }
         }
@@ -1522,6 +1562,7 @@ fn check_block_params_shadow(
                 outer_locals,
                 bctx,
                 diagnostics,
+                corrections,
             );
         }
     }
@@ -1579,6 +1620,7 @@ fn check_shadow(
     outer_locals: &HashMap<String, VarInfo>,
     bctx: &BlockContext,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     if name.is_empty() || name.starts_with('_') {
         return;
@@ -1623,12 +1665,28 @@ fn check_shadow(
             }
         }
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(cop.diagnostic(
+        let mut diagnostic = cop.diagnostic(
             source,
             line,
             column,
             format!("Shadowing outer local variable - `{}`.", name),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let replacement = if name == "_" {
+                "unused".to_string()
+            } else {
+                format!("{name}_shadow")
+            };
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -1781,4 +1839,13 @@ mod tests {
         ShadowingOuterLocalVariable,
         "cops/lint/shadowing_outer_local_variable"
     );
+
+    #[test]
+    fn autocorrect_renames_shadowing_block_parameter() {
+        crate::testutil::assert_cop_autocorrect(
+            &ShadowingOuterLocalVariable,
+            b"def some_method\n  foo = 1\n  1.times do |foo|\n  end\nend\n",
+            b"def some_method\n  foo = 1\n  1.times do |foo_shadow|\n  end\nend\n",
+        );
+    }
 }

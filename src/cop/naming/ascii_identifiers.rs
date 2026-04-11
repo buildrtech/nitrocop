@@ -70,6 +70,10 @@ impl Cop for AsciiIdentifiers {
         "Naming/AsciiIdentifiers"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -77,8 +81,9 @@ impl Cop for AsciiIdentifiers {
         code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let ascii_constants = config.get_bool("AsciiConstants", true);
         let bytes = &source.content;
         let len = bytes.len();
@@ -176,7 +181,18 @@ impl Cop for AsciiIdentifiers {
                 } else {
                     "Use only ascii symbols in identifiers."
                 };
-                diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+                let mut diagnostic = self.diagnostic(source, line, column, message.to_string());
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start,
+                        end: i,
+                        replacement: sanitize_ascii_identifier(ident),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             } else if !b.is_ascii() {
                 // Skip non-ASCII bytes that aren't part of an identifier
                 // (e.g., standalone Unicode operators)
@@ -198,8 +214,9 @@ impl Cop for AsciiIdentifiers {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Handle `def method_with_non_ascii?` — after `def`, the Parser gem
         // tokenizes the method name as tIDENTIFIER (not tFID), even with ?/!
         // suffix. The byte scanner skips ?/! ending identifiers to avoid
@@ -236,7 +253,18 @@ impl Cop for AsciiIdentifiers {
             } else {
                 "Use only ascii symbols in identifiers."
             };
-            diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+            let mut diagnostic = self.diagnostic(source, line, column, message.to_string());
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: sanitize_ascii_identifier(name_bytes),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
             return;
         }
 
@@ -284,7 +312,18 @@ impl Cop for AsciiIdentifiers {
             } else {
                 "Use only ascii symbols in identifiers."
             };
-            diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
+            let mut diagnostic = self.diagnostic(source, line, column, message.to_string());
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: sanitize_ascii_identifier(name_bytes),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -313,6 +352,22 @@ fn utf8_char_len(b: u8) -> usize {
         3
     } else {
         4
+    }
+}
+
+fn sanitize_ascii_identifier(name: &[u8]) -> String {
+    let mut out = String::new();
+    for ch in String::from_utf8_lossy(name).chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '?' || ch == '!' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "identifier".to_string()
+    } else {
+        out
     }
 }
 
@@ -369,5 +424,14 @@ mod tests {
         let source = "# café comment\nx = 1\n".as_bytes();
         let diags = run_cop_full(&AsciiIdentifiers, source);
         assert!(diags.is_empty(), "Should not flag non-ASCII in comments");
+    }
+
+    #[test]
+    fn autocorrect_replaces_non_ascii_identifier_bytes() {
+        crate::testutil::assert_cop_autocorrect(
+            &AsciiIdentifiers,
+            "naïve = 1\n".as_bytes(),
+            b"na_ve = 1\n",
+        );
     }
 }

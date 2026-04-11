@@ -100,6 +100,10 @@ impl Cop for MissingSuper {
         "Lint/MissingSuper"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -111,7 +115,7 @@ impl Cop for MissingSuper {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_parent_classes: Vec<Vec<u8>> = config
             .get_string_array("AllowedParentClasses")
@@ -126,6 +130,7 @@ impl Cop for MissingSuper {
             diagnostics: Vec::new(),
             class_stack: Vec::new(),
             allowed_parent_classes,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -153,15 +158,16 @@ enum ClassContext {
     Block,
 }
 
-struct MissingSuperVisitor<'a, 'src> {
+struct MissingSuperVisitor<'a, 'src, 'corr> {
     cop: &'a MissingSuper,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     class_stack: Vec<ClassContext>,
     allowed_parent_classes: Vec<Vec<u8>>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl MissingSuperVisitor<'_, '_> {
+impl MissingSuperVisitor<'_, '_, '_> {
     /// Strip leading `::` prefix from a constant name.
     /// `::BasicObject` → `BasicObject`, `BasicObject` → `BasicObject`.
     fn strip_root_prefix(name: &[u8]) -> &[u8] {
@@ -276,9 +282,33 @@ impl MissingSuperVisitor<'_, '_> {
     fn is_callback_name(name: &[u8]) -> bool {
         CLASS_LIFECYCLE_CALLBACKS.contains(&name) || METHOD_LIFECYCLE_CALLBACKS.contains(&name)
     }
+
+    fn add_super_autocorrect(&mut self, node: &ruby_prism::DefNode<'_>) -> bool {
+        let Some(corrections) = self.corrections.as_deref_mut() else {
+            return false;
+        };
+
+        let loc = node.location();
+        let bytes = &self.source.as_bytes()[loc.start_offset()..loc.end_offset()];
+        let Some(sig_newline_rel) = bytes.iter().position(|b| *b == b'\n') else {
+            return false;
+        };
+
+        let insert_at = loc.start_offset() + sig_newline_rel + 1;
+        let (_line, column) = self.source.offset_to_line_col(loc.start_offset());
+        let indent = " ".repeat(column + 2);
+        corrections.push(crate::correction::Correction {
+            start: insert_at,
+            end: insert_at,
+            replacement: format!("{indent}super\n"),
+            cop_name: self.cop.name(),
+            cop_index: 0,
+        });
+        true
+    }
 }
 
-impl<'pr> Visit<'pr> for MissingSuperVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for MissingSuperVisitor<'_, '_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         let ctx = if let Some(superclass) = node.superclass() {
             let loc = superclass.location();
@@ -374,12 +404,16 @@ impl<'pr> Visit<'pr> for MissingSuperVisitor<'_, '_> {
             if self.is_inside_class_with_stateful_parent() && !Self::def_contains_super(node) {
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     "Call `super` to initialize state of the parent class.".to_string(),
-                ));
+                );
+                if self.add_super_autocorrect(node) {
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         } else if Self::is_callback_name(method_name) {
             // Both instance and class-method callbacks (def method_added,
@@ -388,12 +422,16 @@ impl<'pr> Visit<'pr> for MissingSuperVisitor<'_, '_> {
             if self.is_inside_class_module_or_sclass() && !Self::def_contains_super(node) {
                 let loc = node.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     "Call `super` to invoke callback defined in the parent class.".to_string(),
-                ));
+                );
+                if self.add_super_autocorrect(node) {
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
 
@@ -426,4 +464,13 @@ impl<'pr> Visit<'pr> for SuperFinder {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MissingSuper, "cops/lint/missing_super");
+
+    #[test]
+    fn autocorrect_inserts_super_in_missing_initialize() {
+        crate::testutil::assert_cop_autocorrect(
+            &MissingSuper,
+            b"class Child < Parent\n  def initialize\n  end\nend\n",
+            b"class Child < Parent\n  def initialize\n    super\n  end\nend\n",
+        );
+    }
 }
