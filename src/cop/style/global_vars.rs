@@ -126,6 +126,10 @@ impl Cop for GlobalVars {
         "Style/GlobalVars"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             GLOBAL_VARIABLE_AND_WRITE_NODE,
@@ -144,8 +148,9 @@ impl Cop for GlobalVars {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let allowed = config.get_string_array("AllowedVariables");
 
         let (name, loc) = if let Some(gw) = node.as_global_variable_write_node() {
@@ -191,12 +196,23 @@ impl Cop for GlobalVars {
         }
 
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Do not introduce global variables.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "$global_var".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -204,4 +220,13 @@ impl Cop for GlobalVars {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(GlobalVars, "cops/style/global_vars");
+
+    #[test]
+    fn autocorrect_replaces_custom_global_var_name() {
+        crate::testutil::assert_cop_autocorrect(
+            &GlobalVars,
+            b"$my_global = 1\n",
+            b"$global_var = 1\n",
+        );
+    }
 }
