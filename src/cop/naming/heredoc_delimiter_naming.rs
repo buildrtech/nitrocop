@@ -114,6 +114,10 @@ impl Cop for HeredocDelimiterNaming {
         "Naming/HeredocDelimiterNaming"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             INTERPOLATED_STRING_NODE,
@@ -130,7 +134,7 @@ impl Cop for HeredocDelimiterNaming {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let forbidden_delimiters = config.get_string_array("ForbiddenDelimiters");
 
@@ -224,12 +228,35 @@ impl Cop for HeredocDelimiterNaming {
                 closing_start.unwrap_or(opening_loc.start_offset() + 2)
             };
             let (line, column) = source.offset_to_line_col(offense_offset);
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Use meaningful heredoc delimiters.".to_string(),
-            ));
+            );
+            if let Some(corrections) = corrections {
+                let replacement = "HEREDOC".to_string();
+                let open_start = opening_loc.end_offset() - delimiter.len();
+                let open_end = opening_loc.end_offset();
+                corrections.push(crate::correction::Correction {
+                    start: open_start,
+                    end: open_end,
+                    replacement: replacement.clone(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                if let Some(close_start) = closing_start {
+                    corrections.push(crate::correction::Correction {
+                        start: close_start,
+                        end: close_start + delimiter.len(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                }
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -242,4 +269,13 @@ mod tests {
         HeredocDelimiterNaming,
         "cops/naming/heredoc_delimiter_naming"
     );
+
+    #[test]
+    fn autocorrect_rewrites_bad_heredoc_delimiter() {
+        crate::testutil::assert_cop_autocorrect(
+            &HeredocDelimiterNaming,
+            b"x = <<~END\n  content\nEND\n",
+            b"x = <<~HEREDOC\n  content\nHEREDOC\n",
+        );
+    }
 }
