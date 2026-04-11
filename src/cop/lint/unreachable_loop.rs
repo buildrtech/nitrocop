@@ -41,6 +41,10 @@ impl Cop for UnreachableLoop {
         "Lint/UnreachableLoop"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -52,7 +56,7 @@ impl Cop for UnreachableLoop {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_patterns = config.get_string_array("AllowedPatterns");
         let compiled_patterns: Vec<regex::Regex> = allowed_patterns
@@ -82,17 +86,19 @@ impl Cop for UnreachableLoop {
             source,
             allowed_patterns: &compiled_patterns,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct UnreachableLoopVisitor<'a, 'src> {
+struct UnreachableLoopVisitor<'a, 'src, 'corr> {
     cop: &'a UnreachableLoop,
     source: &'src SourceFile,
     allowed_patterns: &'a [regex::Regex],
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
 fn is_break_command(node: &ruby_prism::Node<'_>) -> bool {
@@ -483,7 +489,28 @@ fn body_always_breaks(stmts: &ruby_prism::StatementsNode<'_>) -> bool {
     stmts_break(&body)
 }
 
-impl UnreachableLoopVisitor<'_, '_> {
+impl UnreachableLoopVisitor<'_, '_, '_> {
+    fn report_loop_offense(&mut self, start: usize, end: usize) {
+        let (line, column) = self.source.offset_to_line_col(start);
+        let mut diagnostic = self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            "This loop will have at most one iteration.".to_string(),
+        );
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start,
+                end,
+                replacement: "".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
+    }
+
     /// Get the source text of a call node excluding the block portion.
     /// This matches RuboCop's `send_node.source` which is the call without the block.
     fn call_source_without_block(
@@ -505,18 +532,12 @@ impl UnreachableLoopVisitor<'_, '_> {
     }
 }
 
-impl<'pr> Visit<'pr> for UnreachableLoopVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for UnreachableLoopVisitor<'_, '_, '_> {
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
         if let Some(stmts) = node.statements() {
             if body_always_breaks(&stmts) {
                 let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    "This loop will have at most one iteration.".to_string(),
-                ));
+                self.report_loop_offense(loc.start_offset(), loc.end_offset());
             }
         }
         ruby_prism::visit_while_node(self, node);
@@ -526,13 +547,7 @@ impl<'pr> Visit<'pr> for UnreachableLoopVisitor<'_, '_> {
         if let Some(stmts) = node.statements() {
             if body_always_breaks(&stmts) {
                 let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    "This loop will have at most one iteration.".to_string(),
-                ));
+                self.report_loop_offense(loc.start_offset(), loc.end_offset());
             }
         }
         ruby_prism::visit_until_node(self, node);
@@ -542,13 +557,7 @@ impl<'pr> Visit<'pr> for UnreachableLoopVisitor<'_, '_> {
         if let Some(stmts) = node.statements() {
             if body_always_breaks(&stmts) {
                 let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    "This loop will have at most one iteration.".to_string(),
-                ));
+                self.report_loop_offense(loc.start_offset(), loc.end_offset());
             }
         }
         ruby_prism::visit_for_node(self, node);
@@ -590,13 +599,7 @@ impl<'pr> Visit<'pr> for UnreachableLoopVisitor<'_, '_> {
                         };
                         if breaks {
                             let loc = node.location();
-                            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                            self.diagnostics.push(self.cop.diagnostic(
-                                self.source,
-                                line,
-                                column,
-                                "This loop will have at most one iteration.".to_string(),
-                            ));
+                            self.report_loop_offense(loc.start_offset(), loc.end_offset());
                         }
                     }
                 }
@@ -619,4 +622,13 @@ impl<'pr> Visit<'pr> for UnreachableLoopVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UnreachableLoop, "cops/lint/unreachable_loop");
+
+    #[test]
+    fn autocorrect_removes_unreachable_loop() {
+        crate::testutil::assert_cop_autocorrect(
+            &UnreachableLoop,
+            b"while true\n  break\nend\nputs 'after'\n",
+            b"\nputs 'after'\n",
+        );
+    }
 }

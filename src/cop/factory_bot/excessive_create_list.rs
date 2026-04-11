@@ -11,6 +11,10 @@ impl Cop for ExcessiveCreateList {
         "FactoryBot/ExcessiveCreateList"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -30,7 +34,7 @@ impl Cop for ExcessiveCreateList {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -85,7 +89,7 @@ impl Cop for ExcessiveCreateList {
 
         let count_loc = arg_list[1].location();
         let (line, column) = source.offset_to_line_col(count_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
@@ -93,7 +97,18 @@ impl Cop for ExcessiveCreateList {
                 "Avoid using `create_list` with more than {} items.",
                 max_amount
             ),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: count_loc.start_offset(),
+                end: count_loc.end_offset(),
+                replacement: max_amount.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -101,4 +116,13 @@ impl Cop for ExcessiveCreateList {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ExcessiveCreateList, "cops/factorybot/excessive_create_list");
+
+    #[test]
+    fn autocorrect_caps_create_list_count_to_max_amount() {
+        crate::testutil::assert_cop_autocorrect(
+            &ExcessiveCreateList,
+            b"create_list(:merge_requests, 11)\n",
+            b"create_list(:merge_requests, 10)\n",
+        );
+    }
 }

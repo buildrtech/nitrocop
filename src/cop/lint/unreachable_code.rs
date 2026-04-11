@@ -77,6 +77,10 @@ impl Cop for UnreachableCode {
         "Lint/UnreachableCode"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -88,7 +92,7 @@ impl Cop for UnreachableCode {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = UnreachableVisitor {
             cop: self,
@@ -96,18 +100,20 @@ impl Cop for UnreachableCode {
             diagnostics: Vec::new(),
             redefined: Vec::new(),
             instance_eval_count: 0,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct UnreachableVisitor<'a, 'src> {
+struct UnreachableVisitor<'a, 'src, 'corr> {
     cop: &'a UnreachableCode,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     redefined: Vec<Vec<u8>>,
     instance_eval_count: u32,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
 const REDEFINABLE_FLOW_METHODS: &[&[u8]] =
@@ -403,7 +409,7 @@ fn is_instance_eval_block(node: &ruby_prism::CallNode<'_>) -> bool {
     node.name().as_slice() == b"instance_eval" && node.block().is_some()
 }
 
-impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_, '_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         let body: Vec<_> = node.body().iter().collect();
 
@@ -413,12 +419,23 @@ impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_> {
             if flow_expression(&pair[0], &mut self.redefined, self.instance_eval_count) {
                 let loc = pair[1].location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     "Unreachable code detected.".to_string(),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
 
@@ -440,4 +457,13 @@ impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UnreachableCode, "cops/lint/unreachable_code");
+
+    #[test]
+    fn autocorrect_removes_unreachable_statement() {
+        crate::testutil::assert_cop_autocorrect(
+            &UnreachableCode,
+            b"def foo\n  return 1\n  puts 'after return'\nend\n",
+            b"def foo\n  return 1\n  \nend\n",
+        );
+    }
 }

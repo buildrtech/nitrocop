@@ -39,6 +39,10 @@ impl Cop for HashCompareByIdentity {
         "Lint/HashCompareByIdentity"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -59,8 +63,9 @@ impl Cop for HashCompareByIdentity {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         if let Some(call) = node.as_call_node() {
             let method_name = call.name().as_slice();
             if !HASH_KEY_METHODS.contains(&method_name) || call.receiver().is_none() {
@@ -68,7 +73,13 @@ impl Cop for HashCompareByIdentity {
             }
 
             if let Some(first_arg) = first_argument(call.arguments()) {
-                self.add_offense_if_object_id_key(source, &call.as_node(), &first_arg, diagnostics);
+                self.add_offense_if_object_id_key(
+                    source,
+                    &call.as_node(),
+                    &first_arg,
+                    diagnostics,
+                    corrections.as_deref_mut(),
+                );
             }
             return;
         }
@@ -80,6 +91,7 @@ impl Cop for HashCompareByIdentity {
                     &write.as_node(),
                     &first_arg,
                     diagnostics,
+                    corrections.as_deref_mut(),
                 );
             }
             return;
@@ -92,6 +104,7 @@ impl Cop for HashCompareByIdentity {
                     &write.as_node(),
                     &first_arg,
                     diagnostics,
+                    corrections.as_deref_mut(),
                 );
             }
             return;
@@ -104,6 +117,7 @@ impl Cop for HashCompareByIdentity {
                     &write.as_node(),
                     &first_arg,
                     diagnostics,
+                    corrections.as_deref_mut(),
                 );
             }
         }
@@ -117,6 +131,7 @@ impl HashCompareByIdentity {
         node: &ruby_prism::Node<'_>,
         first_arg: &ruby_prism::Node<'_>,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if !is_object_id_call(first_arg) {
             return;
@@ -124,12 +139,34 @@ impl HashCompareByIdentity {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Use `Hash#compare_by_identity` instead of using `object_id` for keys.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            if let Some(object_id_call) = first_arg.as_call_node() {
+                let arg_loc = first_arg.location();
+                let replacement = if let Some(receiver) = object_id_call.receiver() {
+                    let recv_loc = receiver.location();
+                    source
+                        .byte_slice(recv_loc.start_offset(), recv_loc.end_offset(), "")
+                        .to_string()
+                } else {
+                    "self".to_string()
+                };
+                corrections.push(crate::correction::Correction {
+                    start: arg_loc.start_offset(),
+                    end: arg_loc.end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -148,4 +185,13 @@ fn is_object_id_call(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashCompareByIdentity, "cops/lint/hash_compare_by_identity");
+
+    #[test]
+    fn autocorrect_rewrites_object_id_key_to_receiver() {
+        crate::testutil::assert_cop_autocorrect(
+            &HashCompareByIdentity,
+            b"hash[foo.object_id] = :bar\n",
+            b"hash[foo] = :bar\n",
+        );
+    }
 }
