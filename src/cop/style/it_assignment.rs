@@ -14,6 +14,10 @@ impl Cop for ItAssignment {
         "Style/ItAssignment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             LOCAL_VARIABLE_WRITE_NODE,
@@ -29,20 +33,25 @@ impl Cop for ItAssignment {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let name_bytes: &[u8];
         let start_offset: usize;
+        let end_offset: usize;
+        let mut corrections = corrections;
 
         if let Some(w) = node.as_local_variable_write_node() {
             name_bytes = w.name().as_slice();
-            start_offset = w.location().start_offset();
+            start_offset = w.name_loc().start_offset();
+            end_offset = w.name_loc().end_offset();
         } else if let Some(p) = node.as_required_parameter_node() {
             name_bytes = p.name().as_slice();
             start_offset = p.location().start_offset();
+            end_offset = p.location().end_offset();
         } else if let Some(p) = node.as_optional_parameter_node() {
             name_bytes = p.name().as_slice();
-            start_offset = p.location().start_offset();
+            start_offset = p.name_loc().start_offset();
+            end_offset = p.name_loc().end_offset();
         } else {
             return;
         }
@@ -52,7 +61,18 @@ impl Cop for ItAssignment {
         }
 
         let (line, column) = source.offset_to_line_col(start_offset);
-        diagnostics.push(self.diagnostic(source, line, column, MSG.to_string()));
+        let mut diagnostic = self.diagnostic(source, line, column, MSG.to_string());
+        if let Some(corrections) = corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: start_offset,
+                end: end_offset,
+                replacement: "it_var".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -60,4 +80,9 @@ impl Cop for ItAssignment {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ItAssignment, "cops/style/it_assignment");
+
+    #[test]
+    fn autocorrect_renames_it_assignment() {
+        crate::testutil::assert_cop_autocorrect(&ItAssignment, b"it = 1\n", b"it_var = 1\n");
+    }
 }

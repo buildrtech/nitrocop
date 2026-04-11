@@ -85,6 +85,10 @@ impl Cop for VariableName {
         "Naming/VariableName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             LOCAL_VARIABLE_WRITE_NODE,
@@ -119,24 +123,31 @@ impl Cop for VariableName {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Handle DefNode for method parameters
         if let Some(def_node) = node.as_def_node() {
-            self.check_parameters(source, def_node, config, diagnostics);
+            self.check_parameters(source, def_node, config, diagnostics, &mut corrections);
             return;
         }
 
         // Handle BlockNode/LambdaNode for block parameters
         if let Some(block_node) = node.as_block_node() {
-            self.check_block_parameters(source, block_node, config, diagnostics);
+            self.check_block_parameters(source, block_node, config, diagnostics, &mut corrections);
             return;
         }
         if let Some(lambda_node) = node.as_lambda_node() {
             if let Some(params) = lambda_node.parameters() {
                 if let Some(block_params) = params.as_block_parameters_node() {
                     if let Some(params_node) = block_params.parameters() {
-                        self.check_params_node(source, params_node, config, diagnostics);
+                        self.check_params_node(
+                            source,
+                            params_node,
+                            config,
+                            diagnostics,
+                            &mut corrections,
+                        );
                     }
                 }
             }
@@ -148,7 +159,16 @@ impl Cop for VariableName {
             let name = n.name().as_slice();
             let name_str = std::str::from_utf8(name).unwrap_or("");
             let (line, column) = source.offset_to_line_col(n.location().start_offset());
-            self.check_variable_name(source, name_str, line, column, config, diagnostics);
+            self.check_variable_name(
+                source,
+                name_str,
+                line,
+                column,
+                config,
+                diagnostics,
+                None,
+                &mut corrections,
+            );
             return;
         }
 
@@ -158,13 +178,13 @@ impl Cop for VariableName {
         // regex captures, which RuboCop does NOT check (they use match_var and
         // match_with_lvasgn in the Parser gem, not lvasgn).
         if let Some(mw) = node.as_multi_write_node() {
-            self.check_multi_write_targets(source, mw, config, diagnostics);
+            self.check_multi_write_targets(source, mw, config, diagnostics, &mut corrections);
             return;
         }
 
         // Handle ForNode — check the index variable
         if let Some(for_node) = node.as_for_node() {
-            self.check_for_index(source, for_node, config, diagnostics);
+            self.check_for_index(source, for_node, config, diagnostics, &mut corrections);
             return;
         }
 
@@ -238,7 +258,16 @@ impl Cop for VariableName {
             // RuboCop only checks forbidden names on global variables, not style
             self.check_forbidden_only(source, var_name_str, line, column, config, diagnostics);
         } else {
-            self.check_variable_name(source, var_name_str, line, column, config, diagnostics);
+            self.check_variable_name(
+                source,
+                var_name_str,
+                line,
+                column,
+                config,
+                diagnostics,
+                Some((start_offset, start_offset + raw_name.len())),
+                &mut corrections,
+            );
         }
     }
 
@@ -249,7 +278,7 @@ impl Cop for VariableName {
         _code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle rescue => var references. In Prism, RescueNode is visited via
         // visit_rescue_node() which doesn't trigger visit_branch_node_enter(),
@@ -261,6 +290,7 @@ impl Cop for VariableName {
             source,
             config,
             diagnostics,
+            corrections,
         };
         visitor.visit(&parse_result.node());
     }
@@ -269,18 +299,24 @@ impl Cop for VariableName {
 /// Visitor that finds rescue node references (rescue => var) and checks their names.
 /// This is needed because Prism's Visit trait calls visit_rescue_node() directly,
 /// bypassing visit_branch_node_enter(), so check_node never sees RescueNode.
-struct RescueRefVisitor<'a> {
+struct RescueRefVisitor<'a, 'corr> {
     cop: &'a VariableName,
     source: &'a SourceFile,
     config: &'a CopConfig,
     diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> ruby_prism::Visit<'pr> for RescueRefVisitor<'_> {
+impl<'pr> ruby_prism::Visit<'pr> for RescueRefVisitor<'_, '_> {
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         if let Some(ref_node) = node.reference() {
-            self.cop
-                .check_target_node(self.source, &ref_node, self.config, self.diagnostics);
+            self.cop.check_target_node(
+                self.source,
+                &ref_node,
+                self.config,
+                self.diagnostics,
+                &mut self.corrections,
+            );
         }
         // Continue walking into children (exceptions, statements, subsequent)
         ruby_prism::visit_rescue_node(self, node);
@@ -294,15 +330,16 @@ impl VariableName {
         mw: ruby_prism::MultiWriteNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         for target in mw.lefts().iter() {
-            self.check_target_node(source, &target, config, diagnostics);
+            self.check_target_node(source, &target, config, diagnostics, corrections);
         }
         if let Some(rest) = mw.rest() {
-            self.check_target_node(source, &rest, config, diagnostics);
+            self.check_target_node(source, &rest, config, diagnostics, corrections);
         }
         for target in mw.rights().iter() {
-            self.check_target_node(source, &target, config, diagnostics);
+            self.check_target_node(source, &target, config, diagnostics, corrections);
         }
     }
 
@@ -312,9 +349,10 @@ impl VariableName {
         for_node: ruby_prism::ForNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let index = for_node.index();
-        self.check_target_node(source, &index, config, diagnostics);
+        self.check_target_node(source, &index, config, diagnostics, corrections);
     }
 
     fn check_target_node(
@@ -323,6 +361,7 @@ impl VariableName {
         node: &ruby_prism::Node<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let (raw_name, start_offset, is_global) =
             if let Some(n) = node.as_local_variable_target_node() {
@@ -336,19 +375,19 @@ impl VariableName {
             } else if let Some(n) = node.as_splat_node() {
                 // *rest in multi-assignment: check inner expression
                 if let Some(expr) = n.expression() {
-                    self.check_target_node(source, &expr, config, diagnostics);
+                    self.check_target_node(source, &expr, config, diagnostics, corrections);
                 }
                 return;
             } else if let Some(mw) = node.as_multi_target_node() {
                 // Nested destructuring: (a, b), c = ...
                 for target in mw.lefts().iter() {
-                    self.check_target_node(source, &target, config, diagnostics);
+                    self.check_target_node(source, &target, config, diagnostics, corrections);
                 }
                 if let Some(rest) = mw.rest() {
-                    self.check_target_node(source, &rest, config, diagnostics);
+                    self.check_target_node(source, &rest, config, diagnostics, corrections);
                 }
                 for target in mw.rights().iter() {
-                    self.check_target_node(source, &target, config, diagnostics);
+                    self.check_target_node(source, &target, config, diagnostics, corrections);
                 }
                 return;
             } else {
@@ -367,7 +406,16 @@ impl VariableName {
         if is_global {
             self.check_forbidden_only(source, var_name_str, line, column, config, diagnostics);
         } else {
-            self.check_variable_name(source, var_name_str, line, column, config, diagnostics);
+            self.check_variable_name(
+                source,
+                var_name_str,
+                line,
+                column,
+                config,
+                diagnostics,
+                Some((start_offset, start_offset + raw_name.len())),
+                corrections,
+            );
         }
     }
 
@@ -420,6 +468,8 @@ impl VariableName {
         column: usize,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        correction_range: Option<(usize, usize)>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "snake_case");
         let allowed_identifiers = config.get_string_array("AllowedIdentifiers");
@@ -491,12 +541,27 @@ impl VariableName {
             _ => "snake_case",
         };
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Use {style_msg} for variable names."),
-        ));
+        );
+        if enforced_style == "snake_case" {
+            if let (Some((start, end)), Some(corrections)) =
+                (correction_range, corrections.as_deref_mut())
+            {
+                corrections.push(crate::correction::Correction {
+                    start,
+                    end,
+                    replacement: to_snake_case_identifier(var_name_str),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+        }
+        diagnostics.push(diagnostic);
     }
 
     fn check_block_parameters(
@@ -505,6 +570,7 @@ impl VariableName {
         block_node: ruby_prism::BlockNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let params = match block_node.parameters() {
             Some(p) => p,
@@ -521,7 +587,7 @@ impl VariableName {
             None => return,
         };
 
-        self.check_params_node(source, params_node, config, diagnostics);
+        self.check_params_node(source, params_node, config, diagnostics, corrections);
     }
 
     fn check_params_node(
@@ -530,87 +596,131 @@ impl VariableName {
         params: ruby_prism::ParametersNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         for param in params.requireds().iter() {
             if let Some(req) = param.as_required_parameter_node() {
-                let name = req.name().as_slice();
-                let name_str = std::str::from_utf8(name).unwrap_or("");
-                let (line, column) = source.offset_to_line_col(req.location().start_offset());
-                self.check_variable_name(source, name_str, line, column, config, diagnostics);
+                let name_str = std::str::from_utf8(req.name().as_slice()).unwrap_or("");
+                let loc = req.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                self.check_variable_name(
+                    source,
+                    name_str,
+                    line,
+                    column,
+                    config,
+                    diagnostics,
+                    Some((loc.start_offset(), loc.end_offset())),
+                    corrections,
+                );
             }
         }
 
         for param in params.optionals().iter() {
             if let Some(opt) = param.as_optional_parameter_node() {
-                let name = opt.name().as_slice();
-                let name_str = std::str::from_utf8(name).unwrap_or("");
-                let (line, column) = source.offset_to_line_col(opt.name_loc().start_offset());
-                self.check_variable_name(source, name_str, line, column, config, diagnostics);
+                let name_str = std::str::from_utf8(opt.name().as_slice()).unwrap_or("");
+                let loc = opt.name_loc();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                self.check_variable_name(
+                    source,
+                    name_str,
+                    line,
+                    column,
+                    config,
+                    diagnostics,
+                    Some((loc.start_offset(), loc.end_offset())),
+                    corrections,
+                );
             }
         }
 
         for param in params.keywords().iter() {
             if let Some(kw) = param.as_required_keyword_parameter_node() {
-                let name = kw.name().as_slice();
-                let name_str = std::str::from_utf8(name).unwrap_or("");
+                let name_str = std::str::from_utf8(kw.name().as_slice()).unwrap_or("");
                 let clean_name = name_str.strip_suffix(':').unwrap_or(name_str);
-                let (line, column) = source.offset_to_line_col(kw.name_loc().start_offset());
-                self.check_variable_name(source, clean_name, line, column, config, diagnostics);
+                let loc = kw.name_loc();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                self.check_variable_name(
+                    source,
+                    clean_name,
+                    line,
+                    column,
+                    config,
+                    diagnostics,
+                    Some((loc.start_offset(), loc.end_offset())),
+                    corrections,
+                );
             }
             if let Some(kw) = param.as_optional_keyword_parameter_node() {
-                let name = kw.name().as_slice();
-                let name_str = std::str::from_utf8(name).unwrap_or("");
+                let name_str = std::str::from_utf8(kw.name().as_slice()).unwrap_or("");
                 let clean_name = name_str.strip_suffix(':').unwrap_or(name_str);
-                let (line, column) = source.offset_to_line_col(kw.name_loc().start_offset());
-                self.check_variable_name(source, clean_name, line, column, config, diagnostics);
+                let loc = kw.name_loc();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                self.check_variable_name(
+                    source,
+                    clean_name,
+                    line,
+                    column,
+                    config,
+                    diagnostics,
+                    Some((loc.start_offset(), loc.end_offset())),
+                    corrections,
+                );
             }
         }
 
         if let Some(rest) = params.rest() {
             if let Some(rest_param) = rest.as_rest_parameter_node() {
-                if let Some(name) = rest_param.name() {
+                if let (Some(name), Some(loc)) = (rest_param.name(), rest_param.name_loc()) {
                     let name_str = std::str::from_utf8(name.as_slice()).unwrap_or("");
-                    if let Some(name_loc) = rest_param.name_loc() {
-                        let (line, column) = source.offset_to_line_col(name_loc.start_offset());
-                        self.check_variable_name(
-                            source,
-                            name_str,
-                            line,
-                            column,
-                            config,
-                            diagnostics,
-                        );
-                    }
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    self.check_variable_name(
+                        source,
+                        name_str,
+                        line,
+                        column,
+                        config,
+                        diagnostics,
+                        Some((loc.start_offset(), loc.end_offset())),
+                        corrections,
+                    );
                 }
             }
         }
 
         if let Some(kw_rest) = params.keyword_rest() {
             if let Some(kw_rest_param) = kw_rest.as_keyword_rest_parameter_node() {
-                if let Some(name) = kw_rest_param.name() {
+                if let (Some(name), Some(loc)) = (kw_rest_param.name(), kw_rest_param.name_loc()) {
                     let name_str = std::str::from_utf8(name.as_slice()).unwrap_or("");
-                    if let Some(name_loc) = kw_rest_param.name_loc() {
-                        let (line, column) = source.offset_to_line_col(name_loc.start_offset());
-                        self.check_variable_name(
-                            source,
-                            name_str,
-                            line,
-                            column,
-                            config,
-                            diagnostics,
-                        );
-                    }
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    self.check_variable_name(
+                        source,
+                        name_str,
+                        line,
+                        column,
+                        config,
+                        diagnostics,
+                        Some((loc.start_offset(), loc.end_offset())),
+                        corrections,
+                    );
                 }
             }
         }
 
         if let Some(block) = params.block() {
-            if let Some(name) = block.name() {
+            if let (Some(name), Some(loc)) = (block.name(), block.name_loc()) {
                 let name_str = std::str::from_utf8(name.as_slice()).unwrap_or("");
-                if let Some(name_loc) = block.name_loc() {
-                    let (line, column) = source.offset_to_line_col(name_loc.start_offset());
-                    self.check_variable_name(source, name_str, line, column, config, diagnostics);
-                }
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                self.check_variable_name(
+                    source,
+                    name_str,
+                    line,
+                    column,
+                    config,
+                    diagnostics,
+                    Some((loc.start_offset(), loc.end_offset())),
+                    corrections,
+                );
             }
         }
     }
@@ -621,17 +731,33 @@ impl VariableName {
         def_node: ruby_prism::DefNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let params = match def_node.parameters() {
             Some(p) => p,
             None => return,
         };
 
-        self.check_params_node(source, params, config, diagnostics);
+        self.check_params_node(source, params, config, diagnostics, corrections);
     }
 }
 
 /// Returns true if the name is lowerCamelCase (starts lowercase, no underscores).
+fn to_snake_case_identifier(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for (idx, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if idx > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn is_lower_camel_case(name: &[u8]) -> bool {
     if name.is_empty() {
         return true;
@@ -725,6 +851,15 @@ mod tests {
             !diags.is_empty(),
             "rescue => badError should be flagged: got {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn autocorrect_parameter_to_snake_case() {
+        crate::testutil::assert_cop_autocorrect(
+            &VariableName,
+            b"def foo(myVar)\nend\n",
+            b"def foo(my_var)\nend\n",
         );
     }
 
