@@ -17,6 +17,10 @@ impl Cop for AutoResourceCleanup {
         "Style/AutoResourceCleanup"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -28,22 +32,24 @@ impl Cop for AutoResourceCleanup {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = AutoResourceCleanupVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct AutoResourceCleanupVisitor<'a> {
+struct AutoResourceCleanupVisitor<'a, 'corr> {
     cop: &'a AutoResourceCleanup,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
 /// Check if a call node is `File.open(...)` or `Tempfile.open(...)` without a block.
@@ -90,19 +96,30 @@ fn is_resource_open_without_block(call: &ruby_prism::CallNode<'_>) -> Option<Str
     Some(recv_str.to_string())
 }
 
-impl<'pr> Visit<'pr> for AutoResourceCleanupVisitor<'_> {
+impl<'pr> Visit<'pr> for AutoResourceCleanupVisitor<'_, '_> {
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
         // Only flag File.open/Tempfile.open when assigned to a local variable
         if let Some(call) = node.value().as_call_node() {
             if let Some(recv_str) = is_resource_open_without_block(&call) {
                 let loc = call.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     column,
                     format!("Use the block version of `{}.open`.", recv_str),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement: "nil".to_string(),
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
 
@@ -115,4 +132,13 @@ impl<'pr> Visit<'pr> for AutoResourceCleanupVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AutoResourceCleanup, "cops/style/auto_resource_cleanup");
+
+    #[test]
+    fn autocorrect_replaces_file_open_without_block_assignment_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &AutoResourceCleanup,
+            b"file = File.open(path)\n",
+            b"file = nil\n",
+        );
+    }
 }

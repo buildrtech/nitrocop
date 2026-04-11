@@ -25,6 +25,10 @@ impl Cop for SafeNavigationChainLength {
         "Style/SafeNavigationChainLength"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
@@ -36,7 +40,7 @@ impl Cop for SafeNavigationChainLength {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let max = config.get_usize("Max", 2);
 
@@ -63,12 +67,23 @@ impl Cop for SafeNavigationChainLength {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             format!("Avoid safe navigation chains longer than {} calls.", max),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -132,4 +147,13 @@ mod tests {
         SafeNavigationChainLength,
         "cops/style/safe_navigation_chain_length"
     );
+
+    #[test]
+    fn autocorrect_replaces_overlong_safe_navigation_chain_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &SafeNavigationChainLength,
+            b"a&.b&.c&.d\n",
+            b"nil\n",
+        );
+    }
 }

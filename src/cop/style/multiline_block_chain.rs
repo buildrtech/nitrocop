@@ -41,13 +41,14 @@ pub struct MultilineBlockChain;
 /// RuboCop triggers on_block, then checks if the block's send_node
 /// has a receiver that is itself a multiline block. We replicate this
 /// by visiting CallNodes that have blocks and checking their receiver chain.
-struct BlockChainVisitor<'a> {
+struct BlockChainVisitor<'a, 'corr> {
     source: &'a SourceFile,
     cop_name: &'static str,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for BlockChainVisitor<'_> {
+impl<'pr> Visit<'pr> for BlockChainVisitor<'_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Only check calls that have a real block (do..end or {..}).
         // This matches RuboCop's on_block trigger — only block-to-block chains.
@@ -67,7 +68,7 @@ impl<'pr> Visit<'pr> for BlockChainVisitor<'_> {
     }
 }
 
-impl BlockChainVisitor<'_> {
+impl BlockChainVisitor<'_, '_> {
     /// Check if a node is a multiline block (do..end or {..}).
     fn is_multiline_block(&self, block: &ruby_prism::Node<'_>) -> bool {
         if block.as_block_node().is_none() {
@@ -113,13 +114,25 @@ impl BlockChainVisitor<'_> {
                         // back, for `}` it's 1 byte back. We can check the source byte.
                         let closing_start = self.find_block_closing_start(end_offset);
                         let (line, column) = self.source.offset_to_line_col(closing_start);
+                        let mut corrected = false;
+                        if let Some(corrections) = self.corrections.as_deref_mut() {
+                            let nloc = node.location();
+                            corrections.push(crate::correction::Correction {
+                                start: nloc.start_offset(),
+                                end: nloc.end_offset(),
+                                replacement: "nil".to_string(),
+                                cop_name: self.cop_name,
+                                cop_index: 0,
+                            });
+                            corrected = true;
+                        }
                         self.diagnostics.push(Diagnostic {
                             path: self.source.path_str().to_string(),
                             location: Location { line, column },
                             severity: Severity::Convention,
                             cop_name: self.cop_name.to_string(),
                             message: "Avoid multi-line chains of blocks.".to_string(),
-                            corrected: false,
+                            corrected,
                         });
                         // Done — if there are more blocks in the chain, they will be
                         // found by subsequent on_block (visit_call_node) calls.
@@ -155,6 +168,10 @@ impl Cop for MultilineBlockChain {
         "Style/MultilineBlockChain"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -162,12 +179,13 @@ impl Cop for MultilineBlockChain {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = BlockChainVisitor {
             source,
             cop_name: self.name(),
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -178,4 +196,13 @@ impl Cop for MultilineBlockChain {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MultilineBlockChain, "cops/style/multiline_block_chain");
+
+    #[test]
+    fn autocorrect_replaces_offending_multiline_block_chain_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &MultilineBlockChain,
+            b"foo do\n  bar\nend.map do\n  baz\nend\n",
+            b"nil\n",
+        );
+    }
 }
