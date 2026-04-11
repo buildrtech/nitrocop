@@ -408,6 +408,10 @@ impl Cop for DangerousColumnNames {
         "Rails/DangerousColumnNames"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -427,8 +431,9 @@ impl Cop for DangerousColumnNames {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -477,12 +482,28 @@ impl Cop for DangerousColumnNames {
 
         let loc = col_name_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Avoid dangerous column names.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let replacement = if col_name_node.as_symbol_node().is_some() {
+                ":safe_column".to_string()
+            } else {
+                "\"safe_column\"".to_string()
+            };
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement,
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -490,4 +511,13 @@ impl Cop for DangerousColumnNames {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DangerousColumnNames, "cops/rails/dangerous_column_names");
+
+    #[test]
+    fn autocorrect_replaces_dangerous_column_symbol() {
+        crate::testutil::assert_cop_autocorrect(
+            &DangerousColumnNames,
+            b"add_column :users, :attributes, :string\n",
+            b"add_column :users, :safe_column, :string\n",
+        );
+    }
 }
