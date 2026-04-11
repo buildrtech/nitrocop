@@ -12,6 +12,10 @@ impl Cop for IneffectiveAccessModifier {
         "Lint/IneffectiveAccessModifier"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -23,28 +27,32 @@ impl Cop for IneffectiveAccessModifier {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = IneffectiveVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct IneffectiveVisitor<'a, 'src> {
+struct IneffectiveVisitor<'a, 'src, 'corr> {
     cop: &'a IneffectiveAccessModifier,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ModifierInfo {
     kind: ModifierKind,
     line: usize,
+    start_offset: usize,
+    end_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,11 +92,14 @@ fn check_class_body(
     cop: &IneffectiveAccessModifier,
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
     stmts: &ruby_prism::StatementsNode<'_>,
 ) {
     let ignored_methods = collect_class_method_visibility_overrides(stmts);
     let body: Vec<_> = stmts.body().iter().collect();
     let mut current_modifier: Option<ModifierInfo> = None;
+    let mut corrected_modifier_lines = HashSet::new();
+    let mut corrections = corrections;
 
     for stmt in &body {
         // Check for bare access modifiers
@@ -102,8 +113,14 @@ fn check_class_body(
                     _ => None,
                 };
                 if let Some(k) = kind {
-                    let (line, _) = source.offset_to_line_col(call.location().start_offset());
-                    current_modifier = Some(ModifierInfo { kind: k, line });
+                    let loc = call.location();
+                    let (line, _) = source.offset_to_line_col(loc.start_offset());
+                    current_modifier = Some(ModifierInfo {
+                        kind: k,
+                        line,
+                        start_offset: loc.start_offset(),
+                        end_offset: loc.end_offset(),
+                    });
                 }
             }
         }
@@ -124,7 +141,7 @@ fn check_class_body(
                         ModifierKind::Private => {
                             let loc = defs.def_keyword_loc();
                             let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(cop.diagnostic(
+                            let mut diagnostic = cop.diagnostic(
                                 source,
                                 line,
                                 column,
@@ -132,12 +149,25 @@ fn check_class_body(
                                     "`private` (on line {}) does not make singleton methods private. Use `private_class_method` or `private` inside a `class << self` block instead.",
                                     modifier.line
                                 ),
-                            ));
+                            );
+                            if corrected_modifier_lines.insert(modifier.line) {
+                                if let Some(corrections) = corrections.as_deref_mut() {
+                                    corrections.push(crate::correction::Correction {
+                                        start: modifier.start_offset,
+                                        end: modifier.end_offset,
+                                        replacement: "public".to_string(),
+                                        cop_name: cop.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                            }
+                            diagnostics.push(diagnostic);
                         }
                         ModifierKind::Protected => {
                             let loc = defs.def_keyword_loc();
                             let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(cop.diagnostic(
+                            let mut diagnostic = cop.diagnostic(
                                 source,
                                 line,
                                 column,
@@ -145,7 +175,20 @@ fn check_class_body(
                                     "`protected` (on line {}) does not make singleton methods protected. Use `protected` inside a `class << self` block instead.",
                                     modifier.line
                                 ),
-                            ));
+                            );
+                            if corrected_modifier_lines.insert(modifier.line) {
+                                if let Some(corrections) = corrections.as_deref_mut() {
+                                    corrections.push(crate::correction::Correction {
+                                        start: modifier.start_offset,
+                                        end: modifier.end_offset,
+                                        replacement: "public".to_string(),
+                                        cop_name: cop.name(),
+                                        cop_index: 0,
+                                    });
+                                    diagnostic.corrected = true;
+                                }
+                            }
+                            diagnostics.push(diagnostic);
                         }
                     }
                 }
@@ -154,11 +197,17 @@ fn check_class_body(
     }
 }
 
-impl<'pr> Visit<'pr> for IneffectiveVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for IneffectiveVisitor<'_, '_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         if let Some(body) = node.body() {
             if let Some(stmts) = body.as_statements_node() {
-                check_class_body(self.cop, self.source, &mut self.diagnostics, &stmts);
+                check_class_body(
+                    self.cop,
+                    self.source,
+                    &mut self.diagnostics,
+                    self.corrections.as_deref_mut(),
+                    &stmts,
+                );
             }
         }
         ruby_prism::visit_class_node(self, node);
@@ -167,7 +216,13 @@ impl<'pr> Visit<'pr> for IneffectiveVisitor<'_, '_> {
     fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
         if let Some(body) = node.body() {
             if let Some(stmts) = body.as_statements_node() {
-                check_class_body(self.cop, self.source, &mut self.diagnostics, &stmts);
+                check_class_body(
+                    self.cop,
+                    self.source,
+                    &mut self.diagnostics,
+                    self.corrections.as_deref_mut(),
+                    &stmts,
+                );
             }
         }
         ruby_prism::visit_module_node(self, node);
@@ -181,4 +236,13 @@ mod tests {
         IneffectiveAccessModifier,
         "cops/lint/ineffective_access_modifier"
     );
+
+    #[test]
+    fn autocorrect_rewrites_ineffective_private_to_public() {
+        crate::testutil::assert_cop_autocorrect(
+            &IneffectiveAccessModifier,
+            b"class C\n  private\n\n  def self.method1\n    puts 'hi'\n  end\nend\n",
+            b"class C\n  public\n\n  def self.method1\n    puts 'hi'\n  end\nend\n",
+        );
+    }
 }

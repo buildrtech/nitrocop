@@ -44,6 +44,10 @@ impl Cop for BinaryOperatorWithIdenticalOperands {
         "Lint/BinaryOperatorWithIdenticalOperands"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -59,19 +63,35 @@ impl Cop for BinaryOperatorWithIdenticalOperands {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Handle `&&` and `||` (AndNode / OrNode)
         if let Some(and_node) = node.as_and_node() {
             if operands_match(source, &and_node.left(), &and_node.right()) {
                 let loc = and_node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Binary operator `&&` has identical operands.".to_string(),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let left = and_node.left().location();
+                    let replacement = source
+                        .byte_slice(left.start_offset(), left.end_offset(), "")
+                        .to_string();
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
             return;
         }
@@ -80,12 +100,27 @@ impl Cop for BinaryOperatorWithIdenticalOperands {
             if operands_match(source, &or_node.left(), &or_node.right()) {
                 let loc = or_node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     "Binary operator `||` has identical operands.".to_string(),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    let left = or_node.left().location();
+                    let replacement = source
+                        .byte_slice(left.start_offset(), left.end_offset(), "")
+                        .to_string();
+                    corrections.push(crate::correction::Correction {
+                        start: loc.start_offset(),
+                        end: loc.end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
             return;
         }
@@ -250,4 +285,13 @@ mod tests {
         BinaryOperatorWithIdenticalOperands,
         "cops/lint/binary_operator_with_identical_operands"
     );
+
+    #[test]
+    fn autocorrect_reduces_duplicate_or_expression_to_left_operand() {
+        crate::testutil::assert_cop_autocorrect(
+            &BinaryOperatorWithIdenticalOperands,
+            b"b || b\n",
+            b"b\n",
+        );
+    }
 }

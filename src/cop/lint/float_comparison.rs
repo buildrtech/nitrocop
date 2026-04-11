@@ -51,6 +51,10 @@ impl Cop for FloatComparison {
         "Lint/FloatComparison"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -66,20 +70,32 @@ impl Cop for FloatComparison {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Handle float literals in when clauses
         if let Some(when_node) = node.as_when_node() {
             for condition in when_node.conditions().iter() {
                 if is_float(&condition) && !is_literal_safe(&condition) {
                     let loc = condition.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
                         "Avoid float literal comparisons in case statements as they are unreliable.".to_string(),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: "0.0".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
             return;
@@ -126,7 +142,18 @@ impl Cop for FloatComparison {
             } else {
                 "Avoid equality comparisons of floats as they are unreliable."
             };
-            diagnostics.push(self.diagnostic(source, line, column, msg.to_string()));
+            let mut diagnostic = self.diagnostic(source, line, column, msg.to_string());
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "false".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -261,4 +288,9 @@ fn is_literal_safe(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FloatComparison, "cops/lint/float_comparison");
+
+    #[test]
+    fn autocorrect_replaces_float_equality_comparison_with_false() {
+        crate::testutil::assert_cop_autocorrect(&FloatComparison, b"x == 0.1\n", b"false\n");
+    }
 }
