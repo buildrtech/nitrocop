@@ -10,6 +10,10 @@ impl Cop for MissingRespondToMissing {
         "Style/MissingRespondToMissing"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -17,23 +21,25 @@ impl Cop for MissingRespondToMissing {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = MethodMissingVisitor {
             source,
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct MethodMissingVisitor<'src> {
+struct MethodMissingVisitor<'src, 'corr> {
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl MethodMissingVisitor<'_> {
+impl MethodMissingVisitor<'_, '_> {
     /// Check a class or module body for method_missing without respond_to_missing?
     fn check_body(&mut self, body: Option<ruby_prism::Node<'_>>) {
         let body = match body {
@@ -61,12 +67,18 @@ impl MethodMissingVisitor<'_> {
                 if def_node.receiver().is_some() {
                     // self.method_missing or self.respond_to_missing?
                     if name_bytes == b"method_missing" {
-                        has_class_method_missing.push(def_node.location().start_offset());
+                        has_class_method_missing.push((
+                            def_node.location().start_offset(),
+                            def_node.location().end_offset(),
+                        ));
                     } else if name_bytes == b"respond_to_missing?" {
                         has_class_respond_to_missing = true;
                     }
                 } else if name_bytes == b"method_missing" {
-                    has_instance_method_missing.push(def_node.location().start_offset());
+                    has_instance_method_missing.push((
+                        def_node.location().start_offset(),
+                        def_node.location().end_offset(),
+                    ));
                 } else if name_bytes == b"respond_to_missing?" {
                     has_instance_respond_to_missing = true;
                 }
@@ -87,14 +99,18 @@ impl MethodMissingVisitor<'_> {
 
                                 if def_node.receiver().is_some() {
                                     if name_bytes == b"method_missing" {
-                                        has_class_method_missing
-                                            .push(def_node.location().start_offset());
+                                        has_class_method_missing.push((
+                                            def_node.location().start_offset(),
+                                            def_node.location().end_offset(),
+                                        ));
                                     } else if name_bytes == b"respond_to_missing?" {
                                         has_class_respond_to_missing = true;
                                     }
                                 } else if name_bytes == b"method_missing" {
-                                    has_instance_method_missing
-                                        .push(def_node.location().start_offset());
+                                    has_instance_method_missing.push((
+                                        def_node.location().start_offset(),
+                                        def_node.location().end_offset(),
+                                    ));
                                 } else if name_bytes == b"respond_to_missing?" {
                                     has_instance_respond_to_missing = true;
                                 }
@@ -107,33 +123,55 @@ impl MethodMissingVisitor<'_> {
 
         // Flag instance method_missing without instance respond_to_missing?
         if !has_instance_respond_to_missing {
-            for offset in &has_instance_method_missing {
-                let (line, column) = self.source.offset_to_line_col(*offset);
-                self.diagnostics.push(MissingRespondToMissing.diagnostic(
+            for (start, end) in &has_instance_method_missing {
+                let (line, column) = self.source.offset_to_line_col(*start);
+                let mut diagnostic = MissingRespondToMissing.diagnostic(
                     self.source,
                     line,
                     column,
                     "When using `method_missing`, define `respond_to_missing?`.".to_string(),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: *start,
+                        end: *end,
+                        replacement: "nil".to_string(),
+                        cop_name: "Style/MissingRespondToMissing",
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
 
         // Flag class method_missing without class respond_to_missing?
         if !has_class_respond_to_missing {
-            for offset in &has_class_method_missing {
-                let (line, column) = self.source.offset_to_line_col(*offset);
-                self.diagnostics.push(MissingRespondToMissing.diagnostic(
+            for (start, end) in &has_class_method_missing {
+                let (line, column) = self.source.offset_to_line_col(*start);
+                let mut diagnostic = MissingRespondToMissing.diagnostic(
                     self.source,
                     line,
                     column,
                     "When using `method_missing`, define `respond_to_missing?`.".to_string(),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start: *start,
+                        end: *end,
+                        replacement: "nil".to_string(),
+                        cop_name: "Style/MissingRespondToMissing",
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
     }
 }
 
-impl<'pr> Visit<'pr> for MethodMissingVisitor<'_> {
+impl<'pr> Visit<'pr> for MethodMissingVisitor<'_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         self.check_body(node.body());
         // Don't recurse into nested classes/modules here;
@@ -154,4 +192,13 @@ mod tests {
         MissingRespondToMissing,
         "cops/style/missing_respond_to_missing"
     );
+
+    #[test]
+    fn autocorrect_replaces_method_missing_def_without_respond_to_missing() {
+        crate::testutil::assert_cop_autocorrect(
+            &MissingRespondToMissing,
+            b"class User\n  def method_missing(name)\n    super\n  end\nend\n",
+            b"class User\n  nil\nend\n",
+        );
+    }
 }
