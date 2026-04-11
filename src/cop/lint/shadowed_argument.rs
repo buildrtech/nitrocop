@@ -68,6 +68,10 @@ impl Cop for ShadowedArgument {
         "Lint/ShadowedArgument"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -79,7 +83,7 @@ impl Cop for ShadowedArgument {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let ignore_implicit = config.get_bool("IgnoreImplicitReferences", false);
         let mut visitor = ShadowedArgVisitor {
@@ -87,17 +91,19 @@ impl Cop for ShadowedArgument {
             source,
             diagnostics: Vec::new(),
             ignore_implicit,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct ShadowedArgVisitor<'a, 'src> {
+struct ShadowedArgVisitor<'a, 'src, 'corr> {
     cop: &'a ShadowedArgument,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
     ignore_implicit: bool,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
 /// Extract parameter names from a ParametersNode.
@@ -399,31 +405,23 @@ impl<'pr> Visit<'pr> for RefCollector {
     fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
 }
 
-impl ShadowedArgVisitor<'_, '_> {
+impl ShadowedArgVisitor<'_, '_, '_> {
     fn check_one_param(
         &mut self,
         param_name: &[u8],
         param_decl_offset: usize,
         body: &ruby_prism::Node<'_>,
     ) {
-        // Collect all references (reads) to the param in the body
         let ref_offsets = collect_reference_offsets(body, param_name, self.ignore_implicit);
-
-        // RuboCop: `return unless argument.referenced?`
-        // If the argument is never referenced at all, no offense.
         if ref_offsets.is_empty() {
             return;
         }
 
-        // Collect all assignments to the param (deep scan)
         let assignments = collect_assignments(body, param_name);
         if assignments.is_empty() {
             return;
         }
 
-        // References after the first shadowing-style assignment can belong to
-        // the shadowing local variable, not the original argument. Use this as
-        // the cutoff for "used before shadowing" checks.
         let first_shadowing_offset = assignments
             .iter()
             .find(|a| !a.is_shorthand && !a.rhs_uses_param)
@@ -432,33 +430,21 @@ impl ShadowedArgVisitor<'_, '_> {
             return;
         };
 
-        // Walk assignments in order, mirroring RuboCop's
-        // `assignment_without_argument_usage` reduce logic.
         let mut location_known = true;
 
         for asgn in &assignments {
-            // Shorthand assignments always use the argument
             if asgn.is_shorthand {
                 location_known = false;
                 continue;
             }
-
-            // If the RHS uses the param, this is not shadowing (e.g., foo = foo + 1)
             if asgn.rhs_uses_param {
-                // location remains known for subsequent assignments
                 continue;
             }
-
-            // This assignment doesn't use the param on RHS.
             if asgn.is_conditional {
-                // Inside a conditional/block: can't tell if it executes.
-                // Mark location as unknown and continue looking.
                 location_known = false;
                 continue;
             }
 
-            // Unconditional assignment that doesn't use the param.
-            // Before flagging: check if there's a reference before this assignment.
             let assignment_pos = asgn.offset;
             let has_prior_ref = ref_offsets
                 .iter()
@@ -467,34 +453,44 @@ impl ShadowedArgVisitor<'_, '_> {
                 return;
             }
 
-            // This is a shadowing assignment.
             if location_known {
-                // Report at the assignment location
-                let (line, column) = self.source.offset_to_line_col(assignment_pos);
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    format!(
-                        "Argument `{}` was shadowed by a local variable before it was used.",
-                        String::from_utf8_lossy(param_name)
-                    ),
-                ));
+                self.emit_shadowed_diagnostic(param_name, assignment_pos, param_decl_offset);
             } else {
-                // Report at the declaration node (location unknown)
-                let (line, column) = self.source.offset_to_line_col(param_decl_offset);
-                self.diagnostics.push(self.cop.diagnostic(
-                    self.source,
-                    line,
-                    column,
-                    format!(
-                        "Argument `{}` was shadowed by a local variable before it was used.",
-                        String::from_utf8_lossy(param_name)
-                    ),
-                ));
+                self.emit_shadowed_diagnostic(param_name, param_decl_offset, param_decl_offset);
             }
             return;
         }
+    }
+
+    fn emit_shadowed_diagnostic(
+        &mut self,
+        param_name: &[u8],
+        offense_offset: usize,
+        decl_offset: usize,
+    ) {
+        let (line, column) = self.source.offset_to_line_col(offense_offset);
+        let mut diagnostic = self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            format!(
+                "Argument `{}` was shadowed by a local variable before it was used.",
+                String::from_utf8_lossy(param_name)
+            ),
+        );
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            let old_name = String::from_utf8_lossy(param_name);
+            let replacement = format!("{}_arg", old_name);
+            corrections.push(crate::correction::Correction {
+                start: decl_offset,
+                end: decl_offset + param_name.len(),
+                replacement,
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -594,7 +590,7 @@ fn find_param_offset(params: &ruby_prism::ParametersNode<'_>, name: &[u8]) -> Op
     None
 }
 
-impl<'pr> Visit<'pr> for ShadowedArgVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for ShadowedArgVisitor<'_, '_, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         if let Some(params) = node.parameters() {
             let names = collect_param_names(&params);
@@ -659,4 +655,13 @@ impl<'pr> Visit<'pr> for ShadowedArgVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ShadowedArgument, "cops/lint/shadowed_argument");
+
+    #[test]
+    fn autocorrect_renames_shadowed_parameter_declaration() {
+        crate::testutil::assert_cop_autocorrect(
+            &ShadowedArgument,
+            b"def foo(bar)\n  bar = 'something'\n  bar\nend\n",
+            b"def foo(bar_arg)\n  bar = 'something'\n  bar\nend\n",
+        );
+    }
 }

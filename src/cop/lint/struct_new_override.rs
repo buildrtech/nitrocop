@@ -128,6 +128,10 @@ impl Cop for StructNewOverride {
         "Lint/StructNewOverride"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -149,8 +153,9 @@ impl Cop for StructNewOverride {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -209,7 +214,7 @@ impl Cop for StructNewOverride {
                 if STRUCT_METHOD_NAMES.contains(&name.as_str()) {
                     let loc = arg.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
@@ -217,7 +222,24 @@ impl Cop for StructNewOverride {
                             "`:{}` member overrides `Struct#{}` and it may be unexpected.",
                             name, name
                         ),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        let replacement_name = format!("{}_field", name);
+                        let replacement = if arg.as_symbol_node().is_some() {
+                            format!(":{replacement_name}")
+                        } else {
+                            format!("\"{replacement_name}\"")
+                        };
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement,
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -228,4 +250,13 @@ impl Cop for StructNewOverride {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(StructNewOverride, "cops/lint/struct_new_override");
+
+    #[test]
+    fn autocorrect_renames_overriding_struct_member() {
+        crate::testutil::assert_cop_autocorrect(
+            &StructNewOverride,
+            b"Bad = Struct.new(:members)\n",
+            b"Bad = Struct.new(:members_field)\n",
+        );
+    }
 }
