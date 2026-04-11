@@ -44,6 +44,10 @@ impl Cop for NumberedParametersLimit {
         "Style/NumberedParametersLimit"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[BLOCK_NODE, CALL_NODE, NUMBERED_PARAMETERS_NODE]
     }
@@ -55,8 +59,9 @@ impl Cop for NumberedParametersLimit {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let max = config.get_usize("Max", 1);
 
         let call = match node.as_call_node() {
@@ -99,14 +104,25 @@ impl Cop for NumberedParametersLimit {
         if unique_count > max {
             let loc = node.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!(
                     "Avoid using more than {max} numbered parameters; {unique_count} detected."
                 ),
-            ));
+            );
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
         }
     }
 }
@@ -118,4 +134,13 @@ mod tests {
         NumberedParametersLimit,
         "cops/style/numbered_parameters_limit"
     );
+
+    #[test]
+    fn autocorrect_replaces_excessive_numbered_param_block_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &NumberedParametersLimit,
+            b"items.map { _1 + _2 }\n",
+            b"nil\n",
+        );
+    }
 }
