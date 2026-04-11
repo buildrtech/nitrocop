@@ -80,6 +80,10 @@ impl Cop for UnderscorePrefixedVariableName {
         "Lint/UnderscorePrefixedVariableName"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -91,7 +95,7 @@ impl Cop for UnderscorePrefixedVariableName {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allow_keyword_block_args = config.get_bool("AllowKeywordBlockArguments", false);
         let mut visitor = ScopeFinder {
@@ -100,6 +104,7 @@ impl Cop for UnderscorePrefixedVariableName {
             allow_keyword_block_args,
             diagnostics: Vec::new(),
             outer_var_names: HashSet::new(),
+            corrections,
         };
         // Check top-level scope first
         visitor.check_scope_body(&parse_result.node());
@@ -109,17 +114,18 @@ impl Cop for UnderscorePrefixedVariableName {
     }
 }
 
-struct ScopeFinder<'a, 'src> {
+struct ScopeFinder<'a, 'src, 'corr> {
     cop: &'a UnderscorePrefixedVariableName,
     source: &'src SourceFile,
     allow_keyword_block_args: bool,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
     /// Variable names declared in enclosing scopes. Used by check_block to
     /// skip reassignments of outer-scope variables (avoids double-reporting).
     outer_var_names: HashSet<String>,
 }
 
-impl<'pr> Visit<'pr> for ScopeFinder<'_, '_> {
+impl<'pr> Visit<'pr> for ScopeFinder<'_, '_, '_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         self.check_def(node);
         // Don't recurse into nested defs — each is its own scope
@@ -166,7 +172,7 @@ impl<'pr> Visit<'pr> for ScopeFinder<'_, '_> {
     }
 }
 
-impl ScopeFinder<'_, '_> {
+impl ScopeFinder<'_, '_, '_> {
     fn check_def(&mut self, def_node: &ruby_prism::DefNode<'_>) {
         let mut underscore_vars: Vec<UnderscoreVar> = Vec::new();
 
@@ -373,12 +379,28 @@ impl ScopeFinder<'_, '_> {
 
             if reads.contains(var.name.as_str()) {
                 let (line, col) = self.source.offset_to_line_col(var.offset);
-                self.diagnostics.push(self.cop.diagnostic(
+                let mut diagnostic = self.cop.diagnostic(
                     self.source,
                     line,
                     col,
                     "Do not use prefix `_` for a variable that is used.".to_string(),
-                ));
+                );
+                if let Some(corrections) = self.corrections.as_deref_mut() {
+                    let replacement = if var.name == "_" {
+                        "unused".to_string()
+                    } else {
+                        var.name.trim_start_matches('_').to_string()
+                    };
+                    corrections.push(crate::correction::Correction {
+                        start: var.offset,
+                        end: var.offset + var.name.len(),
+                        replacement,
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                self.diagnostics.push(diagnostic);
             }
         }
     }
@@ -939,6 +961,15 @@ mod tests {
         UnderscorePrefixedVariableName,
         "cops/lint/underscore_prefixed_variable_name"
     );
+
+    #[test]
+    fn autocorrect_rewrites_underscore_prefixed_param_name_at_declaration() {
+        crate::testutil::assert_cop_autocorrect(
+            &UnderscorePrefixedVariableName,
+            b"def some_method(_bar)\n  puts _bar\nend\n",
+            b"def some_method(bar)\n  puts _bar\nend\n",
+        );
+    }
 
     #[test]
     fn test_block_param_used_in_method_call() {
