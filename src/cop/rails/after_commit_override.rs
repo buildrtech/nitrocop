@@ -19,6 +19,10 @@ impl Cop for AfterCommitOverride {
         "Rails/AfterCommitOverride"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -34,8 +38,9 @@ impl Cop for AfterCommitOverride {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let class_node = match node.as_class_node() {
             Some(c) => c,
             None => return,
@@ -74,7 +79,7 @@ impl Cop for AfterCommitOverride {
                     let loc = call.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
                     let name_str = String::from_utf8_lossy(e.key());
-                    diagnostics.push(self.diagnostic(
+                    let mut diagnostic = self.diagnostic(
                         source,
                         line,
                         column,
@@ -82,7 +87,18 @@ impl Cop for AfterCommitOverride {
                             "There can only be one `after_*_commit :{}` hook defined for a model.",
                             name_str
                         ),
-                    ));
+                    );
+                    if let Some(corrections) = corrections.as_deref_mut() {
+                        corrections.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
+                    }
+                    diagnostics.push(diagnostic);
                 }
                 std::collections::hash_map::Entry::Vacant(e) => {
                     e.insert(true);
@@ -96,4 +112,13 @@ impl Cop for AfterCommitOverride {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AfterCommitOverride, "cops/rails/after_commit_override");
+
+    #[test]
+    fn autocorrect_removes_duplicate_after_commit_hook() {
+        crate::testutil::assert_cop_autocorrect(
+            &AfterCommitOverride,
+            b"class User < ApplicationRecord\n  after_commit :do_it\n  after_commit :do_it\nend\n",
+            b"class User < ApplicationRecord\n  after_commit :do_it\n  \nend\n",
+        );
+    }
 }

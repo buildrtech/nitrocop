@@ -16,6 +16,10 @@ impl Cop for RenderInline {
         "Rails/RenderInline"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -31,8 +35,9 @@ impl Cop for RenderInline {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -49,12 +54,23 @@ impl Cop for RenderInline {
         }
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Avoid `render inline:`. Use templates instead.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -62,4 +78,13 @@ impl Cop for RenderInline {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(RenderInline, "cops/rails/render_inline");
+
+    #[test]
+    fn autocorrect_replaces_render_inline_call_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &RenderInline,
+            b"render inline: '<p>x</p>'\n",
+            b"nil\n",
+        );
+    }
 }
