@@ -81,6 +81,10 @@ impl Cop for CreateTableWithTimestamps {
         "Rails/CreateTableWithTimestamps"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -108,8 +112,9 @@ impl Cop for CreateTableWithTimestamps {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Start from CallNode `create_table`, then access its block
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -161,12 +166,26 @@ impl Cop for CreateTableWithTimestamps {
 
         let loc = node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Add `t.timestamps` to `create_table` block.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections.as_deref_mut() {
+            let insert_offset = body.location().end_offset();
+            let (_, body_column) = source.offset_to_line_col(body.location().start_offset());
+            let indent = " ".repeat(body_column);
+            corrections.push(crate::correction::Correction {
+                start: insert_offset,
+                end: insert_offset,
+                replacement: format!("\n{indent}t.timestamps"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -177,4 +196,13 @@ mod tests {
         CreateTableWithTimestamps,
         "cops/rails/create_table_with_timestamps"
     );
+
+    #[test]
+    fn autocorrect_inserts_timestamps_before_end() {
+        crate::testutil::assert_cop_autocorrect(
+            &CreateTableWithTimestamps,
+            b"create_table :users do |t|\n  t.string :name\nend\n",
+            b"create_table :users do |t|\n  t.string :name\n  t.timestamps\nend\n",
+        );
+    }
 }
