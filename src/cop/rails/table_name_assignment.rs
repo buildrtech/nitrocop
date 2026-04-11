@@ -11,6 +11,10 @@ impl Cop for TableNameAssignment {
         "Rails/TableNameAssignment"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -26,7 +30,7 @@ impl Cop for TableNameAssignment {
         _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = TableNameAssignmentVisitor {
             cop: self,
@@ -34,21 +38,23 @@ impl Cop for TableNameAssignment {
             diagnostics: Vec::new(),
             in_class: false,
             in_base_class: false,
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct TableNameAssignmentVisitor<'a> {
+struct TableNameAssignmentVisitor<'a, 'corr> {
     cop: &'a TableNameAssignment,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
     in_class: bool,
     in_base_class: bool,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl<'pr> Visit<'pr> for TableNameAssignmentVisitor<'_> {
+impl<'pr> Visit<'pr> for TableNameAssignmentVisitor<'_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         let was_in_class = self.in_class;
         let was_in_base = self.in_base_class;
@@ -87,13 +93,24 @@ impl<'pr> Visit<'pr> for TableNameAssignmentVisitor<'_> {
                     if is_literal_arg {
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        self.diagnostics.push(self.cop.diagnostic(
+                        let mut diagnostic = self.cop.diagnostic(
                             self.source,
                             line,
                             column,
                             "Do not set `self.table_name`. Use conventions or rename the table."
                                 .to_string(),
-                        ));
+                        );
+                        if let Some(corrections) = self.corrections.as_deref_mut() {
+                            corrections.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: "nil".to_string(),
+                                cop_name: self.cop.name(),
+                                cop_index: 0,
+                            });
+                            diagnostic.corrected = true;
+                        }
+                        self.diagnostics.push(diagnostic);
                     }
                 }
             }
@@ -116,4 +133,13 @@ impl<'pr> Visit<'pr> for TableNameAssignmentVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(TableNameAssignment, "cops/rails/table_name_assignment");
+
+    #[test]
+    fn autocorrect_replaces_table_name_assignment_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &TableNameAssignment,
+            b"class User < ApplicationRecord\n  self.table_name = 'users'\nend\n",
+            b"class User < ApplicationRecord\n  nil\nend\n",
+        );
+    }
 }
