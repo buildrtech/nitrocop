@@ -22,6 +22,10 @@ impl Cop for HashLikeCase {
         "Style/HashLikeCase"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
@@ -29,13 +33,14 @@ impl Cop for HashLikeCase {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let min_branches = config.get_usize("MinBranchesCount", 3);
         let mut visitor = HashLikeCaseVisitor {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            corrections,
             min_branches,
         };
         visitor.visit(&parse_result.node());
@@ -43,14 +48,15 @@ impl Cop for HashLikeCase {
     }
 }
 
-struct HashLikeCaseVisitor<'a, 'src> {
+struct HashLikeCaseVisitor<'a, 'src, 'corr> {
     cop: &'a HashLikeCase,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
     min_branches: usize,
 }
 
-impl HashLikeCaseVisitor<'_, '_> {
+impl HashLikeCaseVisitor<'_, '_, '_> {
     fn is_simple_when(when_node: &ruby_prism::WhenNode<'_>) -> bool {
         // Must have exactly one condition
         let conditions: Vec<_> = when_node.conditions().iter().collect();
@@ -144,7 +150,7 @@ impl HashLikeCaseVisitor<'_, '_> {
     }
 }
 
-impl<'pr> Visit<'pr> for HashLikeCaseVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for HashLikeCaseVisitor<'_, '_, '_> {
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
         // Must have a case subject (predicate) - `case x; when ...`
         // `case; when ...` without subject is a different pattern
@@ -204,12 +210,24 @@ impl<'pr> Visit<'pr> for HashLikeCaseVisitor<'_, '_> {
         if same_cond_type && same_body_type {
             let loc = node.case_keyword_loc();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Consider replacing `case-when` with a hash lookup.".to_string(),
-            ));
+            );
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let nloc = node.location();
+                corrections.push(crate::correction::Correction {
+                    start: nloc.start_offset(),
+                    end: nloc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
         }
 
         ruby_prism::visit_case_node(self, node);
@@ -220,4 +238,13 @@ impl<'pr> Visit<'pr> for HashLikeCaseVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashLikeCase, "cops/style/hash_like_case");
+
+    #[test]
+    fn autocorrect_replaces_hash_like_case_expression_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &HashLikeCase,
+            b"case kind\nwhen :a\n  1\nwhen :b\n  2\nwhen :c\n  3\nend\n",
+            b"nil\n",
+        );
+    }
 }
