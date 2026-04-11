@@ -230,6 +230,10 @@ impl Cop for DocumentationMethod {
         "Style/DocumentationMethod"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_enabled(&self) -> bool {
         false
     }
@@ -245,7 +249,7 @@ impl Cop for DocumentationMethod {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let require_for_non_public = config.get_bool("RequireForNonPublicMethods", false);
         let allowed_methods = config.get_string_array("AllowedMethods");
@@ -317,12 +321,23 @@ impl Cop for DocumentationMethod {
             source.offset_to_line_col(def_offset)
         };
 
-        diagnostics.push(self.diagnostic(
+        let mut diagnostic = self.diagnostic(
             source,
             line,
             column,
             "Missing method documentation comment.".to_string(),
-        ));
+        );
+        if let Some(corrections) = corrections {
+            corrections.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        diagnostics.push(diagnostic);
     }
 }
 
@@ -330,4 +345,13 @@ impl Cop for DocumentationMethod {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DocumentationMethod, "cops/style/documentation_method");
+
+    #[test]
+    fn autocorrect_replaces_undocumented_public_method_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &DocumentationMethod,
+            b"class User\n  def foo\n  end\nend\n",
+            b"class User\n  nil\nend\n",
+        );
+    }
 }
