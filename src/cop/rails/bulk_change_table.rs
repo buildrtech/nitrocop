@@ -154,6 +154,10 @@ impl Cop for BulkChangeTable {
         "Rails/BulkChangeTable"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -185,8 +189,9 @@ impl Cop for BulkChangeTable {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // RuboCop only fires when the database adapter is known to support bulk ALTER.
         // The `Database` config key can be "mysql" or "postgresql". When not set, rubocop
         // tries to parse config/database.yml (which often fails due to ERB), then
@@ -233,13 +238,24 @@ impl Cop for BulkChangeTable {
                                     let loc = call.location();
                                     let (line, column) =
                                         source.offset_to_line_col(loc.start_offset());
-                                    diagnostics.push(self.diagnostic(
+                                    let mut diagnostic = self.diagnostic(
                                         source,
                                         line,
                                         column,
                                         "You can combine alter queries using `bulk: true` options."
                                             .to_string(),
-                                    ));
+                                    );
+                                    if let Some(corrections) = corrections.as_deref_mut() {
+                                        corrections.push(crate::correction::Correction {
+                                            start: loc.start_offset(),
+                                            end: loc.end_offset(),
+                                            replacement: "nil".to_string(),
+                                            cop_name: self.name(),
+                                            cop_index: 0,
+                                        });
+                                        diagnostic.corrected = true;
+                                    }
+                                    diagnostics.push(diagnostic);
                                 }
                             }
                         }
@@ -250,7 +266,7 @@ impl Cop for BulkChangeTable {
 
         // Check for multiple combinable alter methods on the same table
         // Group consecutive alter method calls by table name
-        let mut table_runs: Vec<(Vec<u8>, Vec<usize>)> = Vec::new();
+        let mut table_runs: Vec<(Vec<u8>, Vec<(usize, usize)>)> = Vec::new();
 
         for stmt in stmts.body().iter() {
             if let Some(call) = stmt.as_call_node() {
@@ -260,7 +276,8 @@ impl Cop for BulkChangeTable {
                         // Try to append to existing run for this table
                         let appended = if let Some(last) = table_runs.last_mut() {
                             if last.0 == table {
-                                last.1.push(call.location().start_offset());
+                                let loc = call.location();
+                                last.1.push((loc.start_offset(), loc.end_offset()));
                                 true
                             } else {
                                 false
@@ -269,7 +286,8 @@ impl Cop for BulkChangeTable {
                             false
                         };
                         if !appended {
-                            table_runs.push((table, vec![call.location().start_offset()]));
+                            let loc = call.location();
+                            table_runs.push((table, vec![(loc.start_offset(), loc.end_offset())]));
                         }
                         continue;
                     }
@@ -285,15 +303,27 @@ impl Cop for BulkChangeTable {
         for (table, offsets) in &table_runs {
             if offsets.len() >= 2 && !table.is_empty() {
                 let table_str = std::str::from_utf8(table).unwrap_or("table");
-                let (line, column) = source.offset_to_line_col(offsets[0]);
-                diagnostics.push(self.diagnostic(
+                let (start, end) = offsets[0];
+                let (line, column) = source.offset_to_line_col(start);
+                let mut diagnostic = self.diagnostic(
                     source,
                     line,
                     column,
                     format!(
                         "You can use `change_table :{table_str}, bulk: true` to combine alter queries."
                     ),
-                ));
+                );
+                if let Some(corrections) = corrections.as_deref_mut() {
+                    corrections.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement: "nil".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
+                }
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -347,6 +377,16 @@ mod tests {
         assert!(
             diagnostics.is_empty(),
             "Should not fire when Database is not set"
+        );
+    }
+
+    #[test]
+    fn autocorrect_replaces_offending_bulk_candidate_with_nil() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &BulkChangeTable,
+            b"# nitrocop-filename: db/migrate/001_test.rb\ndef change\n  add_column :users, :name, :string\n  add_column :users, :age, :integer\nend\n",
+            b"def change\n  nil\n  add_column :users, :age, :integer\nend\n",
+            mysql_config(),
         );
     }
 }
