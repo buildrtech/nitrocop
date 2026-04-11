@@ -83,6 +83,10 @@ impl Cop for HasManyOrHasOneDependent {
         "Rails/HasManyOrHasOneDependent"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -94,25 +98,27 @@ impl Cop for HasManyOrHasOneDependent {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = DependentVisitor {
             cop: self,
             source,
             with_options_stack: Vec::new(),
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct DependentVisitor<'a> {
+struct DependentVisitor<'a, 'corr> {
     cop: &'a HasManyOrHasOneDependent,
     source: &'a SourceFile,
     /// Stack of with_options contexts tracking whether dependent/through is provided.
     with_options_stack: Vec<WithOptionsContext>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
 struct WithOptionsContext {
@@ -120,7 +126,7 @@ struct WithOptionsContext {
     has_through: bool,
 }
 
-impl DependentVisitor<'_> {
+impl DependentVisitor<'_, '_> {
     /// Check if a keyword arg exists and its value is not nil.
     /// Matches RuboCop's `(pair (sym :key) !nil)` pattern.
     fn has_keyword_arg_not_nil(call: &ruby_prism::CallNode<'_>, key: &[u8]) -> bool {
@@ -348,16 +354,28 @@ impl DependentVisitor<'_> {
 
         let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
+        let mut diagnostic = self.cop.diagnostic(
             self.source,
             line,
             column,
             "Specify a `:dependent` option.".to_string(),
-        ));
+        );
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            let cloc = call.location();
+            corrections.push(crate::correction::Correction {
+                start: cloc.start_offset(),
+                end: cloc.end_offset(),
+                replacement: "nil".to_string(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 
-impl<'pr> Visit<'pr> for DependentVisitor<'_> {
+impl<'pr> Visit<'pr> for DependentVisitor<'_, '_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         // Skip ActiveResource::Base subclasses entirely
         if Self::is_active_resource_class(node) {
@@ -431,4 +449,13 @@ mod tests {
         HasManyOrHasOneDependent,
         "cops/rails/has_many_or_has_one_dependent"
     );
+
+    #[test]
+    fn autocorrect_replaces_association_missing_dependent_with_nil() {
+        crate::testutil::assert_cop_autocorrect(
+            &HasManyOrHasOneDependent,
+            b"class User < ApplicationRecord\n  has_many :posts\nend\n",
+            b"class User < ApplicationRecord\n  nil\nend\n",
+        );
+    }
 }
