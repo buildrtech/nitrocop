@@ -66,6 +66,10 @@ impl Cop for UnmodifiedReduceAccumulator {
         "Lint/UnmodifiedReduceAccumulator"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -103,7 +107,7 @@ impl Cop for UnmodifiedReduceAccumulator {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -158,6 +162,7 @@ impl Cop for UnmodifiedReduceAccumulator {
             &el_name,
             method_str,
             diagnostics,
+            corrections,
         );
     }
 }
@@ -217,6 +222,8 @@ fn extract_reduce_params(params_node: &ruby_prism::Node<'_>) -> Option<(String, 
 struct ReturnInfo {
     /// Byte offset start for diagnostic reporting
     start_offset: usize,
+    /// Byte offset end for deterministic autocorrection
+    end_offset: usize,
     /// Whether this return value uses the accumulator (lvar_used? match)
     uses_acc: bool,
     /// Whether this return value is an accumulator index access (acc[foo])
@@ -233,7 +240,9 @@ fn check_return_values(
     el_name: &str,
     method_name: &str,
     diagnostics: &mut Vec<Diagnostic>,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) {
+    let diagnostics_start = diagnostics.len();
     // Collect ALL return values with their analysis: last expression + next/break arguments.
     // This matches RuboCop's return_values method which collects all return points first,
     // then checks if ANY return value references the accumulator before flagging.
@@ -269,6 +278,15 @@ fn check_return_values(
                     method_name
                 ),
             ));
+            apply_autocorrect_for_new_diagnostics(
+                cop,
+                diagnostics,
+                diagnostics_start,
+                &mut corrections,
+                ri.start_offset,
+                ri.end_offset,
+                acc_name,
+            );
             return; // RuboCop only reports the first accumulator index offense
         }
     }
@@ -296,6 +314,16 @@ fn check_return_values(
                     acc_name, method_name
                 ),
             ));
+            apply_autocorrect_for_new_diagnostics(
+                cop,
+                diagnostics,
+                diagnostics_start,
+                &mut corrections,
+                ri.start_offset,
+                ri.end_offset,
+                acc_name,
+            );
+            return;
         }
     }
 }
@@ -304,6 +332,7 @@ fn check_return_values(
 fn analyze_return_value(node: &ruby_prism::Node<'_>, acc_name: &str, el_name: &str) -> ReturnInfo {
     ReturnInfo {
         start_offset: node.location().start_offset(),
+        end_offset: node.location().end_offset(),
         // Use shallow check matching RuboCop's `lvar_used?` node_matcher:
         // only top-level patterns like bare lvar, lvasgn, send(lvar, :<<), dstr, etc.
         // Deep references (e.g. `el.foo && acc`) don't count for
@@ -312,6 +341,29 @@ fn analyze_return_value(node: &ruby_prism::Node<'_>, acc_name: &str, el_name: &s
         is_acc_index: is_accumulator_index(node, acc_name, el_name),
         is_element_only: !references_var(node, acc_name)
             && is_only_element_expr(node, acc_name, el_name),
+    }
+}
+
+fn apply_autocorrect_for_new_diagnostics(
+    cop: &UnmodifiedReduceAccumulator,
+    diagnostics: &mut [Diagnostic],
+    diagnostics_start: usize,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    start: usize,
+    end: usize,
+    replacement: &str,
+) {
+    if let Some(corrections) = corrections.as_deref_mut() {
+        corrections.push(crate::correction::Correction {
+            start,
+            end,
+            replacement: replacement.to_string(),
+            cop_name: cop.name(),
+            cop_index: 0,
+        });
+        for diagnostic in diagnostics.iter_mut().skip(diagnostics_start) {
+            diagnostic.corrected = true;
+        }
     }
 }
 
@@ -817,4 +869,13 @@ mod tests {
         UnmodifiedReduceAccumulator,
         "cops/lint/unmodified_reduce_accumulator"
     );
+
+    #[test]
+    fn autocorrect_rewrites_element_only_return_to_accumulator() {
+        crate::testutil::assert_cop_autocorrect(
+            &UnmodifiedReduceAccumulator,
+            b"(1..4).reduce(0) do |acc, el|\n  el\nend\n",
+            b"(1..4).reduce(0) do |acc, el|\n  acc\nend\n",
+        );
+    }
 }
