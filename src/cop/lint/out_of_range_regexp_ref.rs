@@ -102,6 +102,10 @@ impl Cop for OutOfRangeRegexpRef {
         "Lint/OutOfRangeRegexpRef"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -113,7 +117,7 @@ impl Cop for OutOfRangeRegexpRef {
         _code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let mut visitor = RegexpRefVisitor {
             cop: self,
@@ -122,16 +126,18 @@ impl Cop for OutOfRangeRegexpRef {
             // Start at Some(0) to match RuboCop's @valid_ref = 0 in on_new_investigation.
             // Any $N > 0 before the first regexp match is an offense.
             current_capture_count: Some(0),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct RegexpRefVisitor<'a, 'src> {
+struct RegexpRefVisitor<'a, 'src, 'corr> {
     cop: &'a OutOfRangeRegexpRef,
     source: &'src SourceFile,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
     /// Number of capture groups in the most recent regexp match.
     /// Some(n) means n capture groups were detected (0 = no groups).
     /// None means a non-literal regexp was used and captures are unknown — do not flag $N.
@@ -139,7 +145,7 @@ struct RegexpRefVisitor<'a, 'src> {
     current_capture_count: Option<usize>,
 }
 
-impl<'pr> Visit<'pr> for RegexpRefVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for RegexpRefVisitor<'_, '_, '_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method = node.name().as_slice();
 
@@ -407,8 +413,23 @@ impl<'pr> Visit<'pr> for RegexpRefVisitor<'_, '_> {
                     ref_num, max_captures
                 )
             };
-            self.diagnostics
-                .push(self.cop.diagnostic(self.source, line, column, message));
+            let mut diagnostic = self.cop.diagnostic(self.source, line, column, message);
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let replacement = if max_captures == 0 {
+                    "nil".to_string()
+                } else {
+                    "$1".to_string()
+                };
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement,
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
         }
     }
 }
@@ -570,4 +591,13 @@ fn has_regexp_in_pattern(node: &ruby_prism::Node<'_>) -> (bool, usize) {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(OutOfRangeRegexpRef, "cops/lint/out_of_range_regexp_ref");
+
+    #[test]
+    fn autocorrect_rewrites_out_of_range_backref_to_first_capture() {
+        crate::testutil::assert_cop_autocorrect(
+            &OutOfRangeRegexpRef,
+            b"/(foo)(bar)/ =~ \"foobar\"\nputs $3\n",
+            b"/(foo)(bar)/ =~ \"foobar\"\nputs $1\n",
+        );
+    }
 }

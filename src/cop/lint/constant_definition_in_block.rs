@@ -32,6 +32,10 @@ impl Cop for ConstantDefinitionInBlock {
         "Lint/ConstantDefinitionInBlock"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }
@@ -43,7 +47,7 @@ impl Cop for ConstantDefinitionInBlock {
         _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let allowed_methods = config
             .get_string_array("AllowedMethods")
@@ -54,21 +58,23 @@ impl Cop for ConstantDefinitionInBlock {
             allowed_methods,
             current_block_method: Vec::new(),
             diagnostics: Vec::new(),
+            corrections,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
 }
 
-struct BlockConstVisitor<'a, 'src> {
+struct BlockConstVisitor<'a, 'src, 'corr> {
     cop: &'a ConstantDefinitionInBlock,
     source: &'src SourceFile,
     allowed_methods: Vec<String>,
     current_block_method: Vec<String>,
     diagnostics: Vec<Diagnostic>,
+    corrections: Option<&'corr mut Vec<crate::correction::Correction>>,
 }
 
-impl BlockConstVisitor<'_, '_> {
+impl BlockConstVisitor<'_, '_, '_> {
     fn current_method_allowed(&self) -> bool {
         if let Some(method_name) = self.current_block_method.last() {
             self.allowed_methods.iter().any(|a| a == method_name)
@@ -102,15 +108,32 @@ impl BlockConstVisitor<'_, '_> {
         // Check for constant assignment (FOO = 1)
         // RuboCop's pattern uses `nil?` for the namespace, which means only bare
         // constant writes are flagged, not namespaced ones (Mod::FOO = 1, ::FOO = 1).
-        if node.as_constant_write_node().is_some() {
+        if let Some(const_write) = node.as_constant_write_node() {
             let loc = node.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diagnostic = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 "Do not define constants this way within a block.".to_string(),
-            ));
+            );
+            if let Some(corrections) = self.corrections.as_deref_mut() {
+                let name_loc = const_write.name_loc();
+                let const_name = self
+                    .source
+                    .byte_slice(name_loc.start_offset(), name_loc.end_offset(), "temp")
+                    .to_string();
+                let replacement = const_name.to_ascii_lowercase();
+                corrections.push(crate::correction::Correction {
+                    start: name_loc.start_offset(),
+                    end: name_loc.end_offset(),
+                    replacement,
+                    cop_name: self.cop.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            self.diagnostics.push(diagnostic);
         }
 
         // Check for class definition (class Foo; end)
@@ -139,7 +162,7 @@ impl BlockConstVisitor<'_, '_> {
     }
 }
 
-impl<'pr> Visit<'pr> for BlockConstVisitor<'_, '_> {
+impl<'pr> Visit<'pr> for BlockConstVisitor<'_, '_, '_> {
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         if let Some(body) = node.body() {
             self.visit_block_body(&body);
@@ -180,4 +203,13 @@ mod tests {
         ConstantDefinitionInBlock,
         "cops/lint/constant_definition_in_block"
     );
+
+    #[test]
+    fn autocorrect_rewrites_block_constant_to_local_variable() {
+        crate::testutil::assert_cop_autocorrect(
+            &ConstantDefinitionInBlock,
+            b"task :lint do\n  FILES_TO_LINT = Dir['lib/*.rb']\nend\n",
+            b"task :lint do\n  files_to_lint = Dir['lib/*.rb']\nend\n",
+        );
+    }
 }
