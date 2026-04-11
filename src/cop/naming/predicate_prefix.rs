@@ -55,8 +55,11 @@ impl PredicatePrefix {
         source: &SourceFile,
         name_str: &str,
         name_offset: usize,
+        name_end: usize,
         config: &CopConfig,
-    ) -> Vec<Diagnostic> {
+        diagnostics: &mut Vec<Diagnostic>,
+        corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    ) {
         // NamePrefix identifies which prefixes mark a method as a predicate.
         // ForbiddenPrefixes is the subset that should be removed.
         let name_prefixes = config
@@ -76,17 +79,17 @@ impl PredicatePrefix {
         // (conservative: no false positives).
         let use_sorbet_sigs = config.get_bool("UseSorbetSigs", false);
         if use_sorbet_sigs {
-            return Vec::new();
+            return;
         }
 
         // Setter methods (ending in =) are not predicates
         if name_str.ends_with('=') {
-            return Vec::new();
+            return;
         }
 
         // Check AllowedMethods
         if allowed_methods.iter().any(|m| m == name_str) {
-            return Vec::new();
+            return;
         }
 
         // Iterate over NamePrefix (not ForbiddenPrefixes) to identify predicates,
@@ -125,21 +128,35 @@ impl PredicatePrefix {
 
             let (line, column) = source.offset_to_line_col(name_offset);
 
-            return vec![self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 format!("Rename `{name_str}` to `{expected}`."),
-            )];
+            );
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: name_offset,
+                    end: name_end,
+                    replacement: expected,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
+            return;
         }
-
-        Vec::new()
     }
 }
 
 impl Cop for PredicatePrefix {
     fn name(&self) -> &'static str {
         "Naming/PredicatePrefix"
+    }
+
+    fn supports_autocorrect(&self) -> bool {
+        true
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -153,8 +170,9 @@ impl Cop for PredicatePrefix {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         // Handle regular def nodes
         if let Some(def_node) = node.as_def_node() {
             let method_name = def_node.name().as_slice();
@@ -162,12 +180,16 @@ impl Cop for PredicatePrefix {
                 Ok(s) => s,
                 Err(_) => return,
             };
-            diagnostics.extend(self.check_method_name(
+            let name_loc = def_node.name_loc();
+            self.check_method_name(
                 source,
                 name_str,
-                def_node.name_loc().start_offset(),
+                name_loc.start_offset(),
+                name_loc.end_offset(),
                 config,
-            ));
+                diagnostics,
+                &mut corrections,
+            );
         }
 
         // Handle MethodDefinitionMacros (e.g. define_method(:is_even))
@@ -206,12 +228,16 @@ impl Cop for PredicatePrefix {
                     Ok(s) => s,
                     Err(_) => return,
                 };
-                diagnostics.extend(self.check_method_name(
+                let sym_loc = sym.location();
+                self.check_method_name(
                     source,
                     sym_str,
-                    sym.location().start_offset(),
+                    sym_loc.start_offset(),
+                    sym_loc.end_offset(),
                     config,
-                ));
+                    diagnostics,
+                    &mut corrections,
+                );
             }
         }
     }
@@ -221,4 +247,13 @@ impl Cop for PredicatePrefix {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(PredicatePrefix, "cops/naming/predicate_prefix");
+
+    #[test]
+    fn autocorrect_rewrites_forbidden_predicate_prefix() {
+        crate::testutil::assert_cop_autocorrect(
+            &PredicatePrefix,
+            b"def is_valid\n  @valid\nend\n",
+            b"def valid?\n  @valid\nend\n",
+        );
+    }
 }
