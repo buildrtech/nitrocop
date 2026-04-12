@@ -109,8 +109,8 @@ impl Cop for SpaceInsideBlockBraces {
                             cop_name: self.name(),
                             cop_index: 0,
                         });
-                        diag.corrected = true;
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 }
                 return;
@@ -136,8 +136,8 @@ impl Cop for SpaceInsideBlockBraces {
                             cop_name: self.name(),
                             cop_index: 0,
                         });
-                        diag.corrected = true;
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 }
                 return;
@@ -176,8 +176,8 @@ impl Cop for SpaceInsideBlockBraces {
                             cop_name: self.name(),
                             cop_index: 0,
                         });
-                        diag.corrected = true;
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 }
                 // If space_before_params is true, space between { and | is correct — no offense
@@ -200,8 +200,8 @@ impl Cop for SpaceInsideBlockBraces {
                             cop_name: self.name(),
                             cop_index: 0,
                         });
-                        diag.corrected = true;
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 }
                 // If space_before_params is false, {| is correct — no offense on left brace
@@ -230,8 +230,8 @@ impl Cop for SpaceInsideBlockBraces {
                                     cop_name: self.name(),
                                     cop_index: 0,
                                 });
-                                diag.corrected = true;
                             }
+                            diag.corrected = true;
                             diagnostics.push(diag);
                         }
                     }
@@ -252,8 +252,8 @@ impl Cop for SpaceInsideBlockBraces {
                                     cop_name: self.name(),
                                     cop_index: 0,
                                 });
-                                diag.corrected = true;
                             }
+                            diag.corrected = true;
                             diagnostics.push(diag);
                         }
                     }
@@ -285,8 +285,8 @@ impl Cop for SpaceInsideBlockBraces {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
@@ -307,8 +307,8 @@ impl Cop for SpaceInsideBlockBraces {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
