@@ -71,7 +71,26 @@ impl RegexpArrayVisitor<'_, '_> {
         }
 
         let loc = node.location();
-        if node.as_integer_node().is_some() || node.as_float_node().is_some() {
+        if node.as_integer_node().is_some()
+            || node.as_float_node().is_some()
+            || node.as_local_variable_read_node().is_some()
+            || node.as_instance_variable_read_node().is_some()
+            || node.as_class_variable_read_node().is_some()
+            || node.as_global_variable_read_node().is_some()
+            || node.as_constant_read_node().is_some()
+            || node.as_constant_path_node().is_some()
+        {
+            return self
+                .source
+                .try_byte_slice(loc.start_offset(), loc.end_offset())
+                .map(str::to_string);
+        }
+
+        if let Some(call) = node.as_call_node()
+            && call.receiver().is_none()
+            && call.arguments().is_none()
+            && call.block().is_none()
+        {
             return self
                 .source
                 .try_byte_slice(loc.start_offset(), loc.end_offset())
@@ -174,4 +193,13 @@ mod tests {
         ArrayLiteralInRegexp,
         "cops/lint/array_literal_in_regexp"
     );
+
+    #[test]
+    fn autocorrects_identifier_array_in_regexp_to_alternation() {
+        crate::testutil::assert_cop_autocorrect(
+            &ArrayLiteralInRegexp,
+            b"/#{[foo, bar]}/\n",
+            b"/(?:foo|bar)/\n",
+        );
+    }
 }
