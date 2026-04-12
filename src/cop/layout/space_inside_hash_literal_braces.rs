@@ -59,8 +59,8 @@ impl SpaceInsideHashLiteralBraces {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                     return;
@@ -82,8 +82,8 @@ impl SpaceInsideHashLiteralBraces {
                             cop_name: self.name(),
                             cop_index: 0,
                         });
-                        diag.corrected = true;
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 }
                 return;
@@ -139,8 +139,8 @@ impl SpaceInsideHashLiteralBraces {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
@@ -166,8 +166,8 @@ impl SpaceInsideHashLiteralBraces {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
@@ -194,8 +194,8 @@ impl SpaceInsideHashLiteralBraces {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
@@ -221,8 +221,8 @@ impl SpaceInsideHashLiteralBraces {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
