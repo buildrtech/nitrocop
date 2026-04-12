@@ -185,8 +185,8 @@ impl Cop for Sample {
                     format!("Use `{}` instead of `{}`.", correct, incorrect),
                 );
 
-                if let Some(corr) = corrections.as_mut() {
-                    if let Some(shuffle_selector) = shuffle_call.message_loc() {
+                if let Some(shuffle_selector) = shuffle_call.message_loc() {
+                    if let Some(corr) = corrections.as_mut() {
                         corr.push(crate::correction::Correction {
                             start: shuffle_selector.start_offset(),
                             end: loc.end_offset(),
@@ -194,8 +194,8 @@ impl Cop for Sample {
                             cop_name: self.name(),
                             cop_index: 0,
                         });
-                        diag.corrected = true;
                     }
+                    diag.corrected = true;
                 }
 
                 diagnostics.push(diag);
