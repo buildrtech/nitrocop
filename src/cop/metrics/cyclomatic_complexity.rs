@@ -403,6 +403,10 @@ impl Cop for CyclomaticComplexity {
         "Metrics/CyclomaticComplexity"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
@@ -648,5 +652,10 @@ mod tests {
             "Block-pass should count: got {}",
             diags[0].message
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(CyclomaticComplexity.supports_autocorrect());
     }
 }
