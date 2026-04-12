@@ -155,17 +155,17 @@ impl<'a> HashConversionVisitor<'a> {
         }
 
         let mut diag = self.cop.diagnostic(self.source, line, column, message);
-        if self.emit_corrections {
-            if let Some(replacement) = replacement {
+        if let Some(replacement) = replacement {
+            if self.emit_corrections {
                 self.corrections.push(crate::correction::Correction {
                     start: loc.start_offset(),
                     end: loc.end_offset(),
-                    replacement,
+                    replacement: replacement.clone(),
                     cop_name: self.cop.name(),
                     cop_index: 0,
                 });
-                diag.corrected = true;
             }
+            diag.corrected = true;
         }
 
         self.diagnostics.push(diag);

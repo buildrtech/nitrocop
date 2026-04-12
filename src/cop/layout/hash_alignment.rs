@@ -746,12 +746,13 @@ impl Cop for HashAlignment {
                 offense.message.to_string(),
             );
 
-            if let Some(corrections_vec) = corrections.as_mut() {
-                if apply_correction_for_offense(source, offense, &pairs, first.col, corrections_vec)
-                {
-                    diagnostic.corrected = true;
-                }
-            }
+            let corrected = if let Some(corrections_vec) = corrections.as_mut() {
+                apply_correction_for_offense(source, offense, &pairs, first.col, corrections_vec)
+            } else {
+                let mut probe = Vec::new();
+                apply_correction_for_offense(source, offense, &pairs, first.col, &mut probe)
+            };
+            diagnostic.corrected = corrected;
 
             diagnostics.push(diagnostic);
         }

@@ -136,12 +136,12 @@ impl RedundantInterpVisitor<'_, '_> {
             "Prefer `to_s` over string interpolation.".to_string(),
         );
 
+        let inner_loc = inner.location();
+        let inner_src = self
+            .source
+            .byte_slice(inner_loc.start_offset(), inner_loc.end_offset(), "")
+            .to_string();
         if let Some(corrections) = self.corrections.as_mut() {
-            let inner_loc = inner.location();
-            let inner_src = self
-                .source
-                .byte_slice(inner_loc.start_offset(), inner_loc.end_offset(), "")
-                .to_string();
             corrections.push(crate::correction::Correction {
                 start: loc.start_offset(),
                 end: loc.end_offset(),
@@ -149,8 +149,8 @@ impl RedundantInterpVisitor<'_, '_> {
                 cop_name: self.cop.name(),
                 cop_index: 0,
             });
-            diag.corrected = true;
         }
+        diag.corrected = true;
 
         self.diagnostics.push(diag);
     }
