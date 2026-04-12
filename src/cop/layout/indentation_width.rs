@@ -229,12 +229,14 @@ impl IndentationWidth {
             expected,
             corrections,
         );
-        Some(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             member_line,
             member_col,
             self.indentation_message(width, actual_indent, style_name),
-        ))
+        );
+        diag.corrected = true;
+        Some(diag)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -496,7 +498,7 @@ impl IndentationWidth {
                 expected,
                 corrections,
             );
-            return vec![self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 child_line,
                 child_col,
@@ -504,7 +506,9 @@ impl IndentationWidth {
                     "Use {} (not {}) spaces for indentation.",
                     width, actual_indent
                 ),
-            )];
+            );
+            diag.corrected = true;
+            return vec![diag];
         }
 
         Vec::new()
@@ -574,7 +578,7 @@ impl IndentationWidth {
                 expected,
                 corrections,
             );
-            return vec![self.diagnostic(
+            let mut diag = self.diagnostic(
                 source,
                 child_line,
                 child_col,
@@ -582,7 +586,9 @@ impl IndentationWidth {
                     "Use {} (not {}) spaces for indentation.",
                     width, actual_indent
                 ),
-            )];
+            );
+            diag.corrected = true;
+            return vec![diag];
         }
 
         Vec::new()

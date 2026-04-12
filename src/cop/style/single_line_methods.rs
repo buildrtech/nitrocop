@@ -63,25 +63,29 @@ impl Cop for SingleLineMethods {
 
         if def_line == end_line {
             let (line, column) = source.offset_to_line_col(def_loc.start_offset());
-            diagnostics.push(self.diagnostic(
+            let mut diagnostic = self.diagnostic(
                 source,
                 line,
                 column,
                 "Avoid single-line method definitions.".to_string(),
-            ));
+            );
 
-            if let (Some(corrections), Some(replacement)) = (
-                corrections,
-                multiline_replacement(source, &def_node, end_kw_loc.start_offset()),
-            ) {
-                corrections.push(Correction {
-                    start: def_node.location().start_offset(),
-                    end: def_node.location().end_offset(),
-                    replacement,
-                    cop_name: self.name(),
-                    cop_index: 0,
-                });
+            if let Some(replacement) =
+                multiline_replacement(source, &def_node, end_kw_loc.start_offset())
+            {
+                if let Some(corrections) = corrections {
+                    corrections.push(Correction {
+                        start: def_node.location().start_offset(),
+                        end: def_node.location().end_offset(),
+                        replacement,
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                }
+                diagnostic.corrected = true;
             }
+
+            diagnostics.push(diagnostic);
         }
     }
 }
