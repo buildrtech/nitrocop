@@ -55,7 +55,6 @@ impl Cop for HttpPositionalArguments {
             source,
             diagnostics: Vec::new(),
             corrections: Vec::new(),
-            autocorrect_enabled: corrections.is_some(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -118,7 +117,6 @@ struct HttpPosArgsVisitor<'a> {
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
     corrections: Vec<crate::correction::Correction>,
-    autocorrect_enabled: bool,
 }
 
 impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
@@ -144,58 +142,56 @@ impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
                     // Conservative RuboCop-aligned baseline: second positional arg -> params,
                     // optional third positional arg -> session. Keep any remaining
                     // positional args unchanged.
-                    if self.autocorrect_enabled {
-                        let params_raw = self
+                    let params_raw = self
+                        .source
+                        .byte_slice(
+                            arg_list[1].location().start_offset(),
+                            arg_list[1].location().end_offset(),
+                            "",
+                        )
+                        .to_string();
+                    let params = compact_hash_literal_braces(&params_raw);
+
+                    let mut replacement = format!("params: {params}");
+                    let mut correction_end = arg_list[1].location().end_offset();
+
+                    if arg_list.len() >= 3 {
+                        let session_raw = self
                             .source
                             .byte_slice(
-                                arg_list[1].location().start_offset(),
-                                arg_list[1].location().end_offset(),
+                                arg_list[2].location().start_offset(),
+                                arg_list[2].location().end_offset(),
                                 "",
                             )
                             .to_string();
-                        let params = compact_hash_literal_braces(&params_raw);
+                        let session = compact_hash_literal_braces(&session_raw);
+                        replacement.push_str(&format!(", session: {session}"));
+                        correction_end = arg_list[2].location().end_offset();
+                    }
 
-                        let mut replacement = format!("params: {params}");
-                        let mut correction_end = arg_list[1].location().end_offset();
-
-                        if arg_list.len() >= 3 {
-                            let session_raw = self
+                    if arg_list.len() > 3 {
+                        for extra in arg_list.iter().skip(3) {
+                            let extra_src = self
                                 .source
                                 .byte_slice(
-                                    arg_list[2].location().start_offset(),
-                                    arg_list[2].location().end_offset(),
+                                    extra.location().start_offset(),
+                                    extra.location().end_offset(),
                                     "",
                                 )
                                 .to_string();
-                            let session = compact_hash_literal_braces(&session_raw);
-                            replacement.push_str(&format!(", session: {session}"));
-                            correction_end = arg_list[2].location().end_offset();
+                            replacement.push_str(&format!(", {extra_src}"));
+                            correction_end = extra.location().end_offset();
                         }
-
-                        if arg_list.len() > 3 {
-                            for extra in arg_list.iter().skip(3) {
-                                let extra_src = self
-                                    .source
-                                    .byte_slice(
-                                        extra.location().start_offset(),
-                                        extra.location().end_offset(),
-                                        "",
-                                    )
-                                    .to_string();
-                                replacement.push_str(&format!(", {extra_src}"));
-                                correction_end = extra.location().end_offset();
-                            }
-                        }
-
-                        self.corrections.push(crate::correction::Correction {
-                            start: arg_list[1].location().start_offset(),
-                            end: correction_end,
-                            replacement,
-                            cop_name: self.cop.name(),
-                            cop_index: 0,
-                        });
-                        diagnostic.corrected = true;
                     }
+
+                    self.corrections.push(crate::correction::Correction {
+                        start: arg_list[1].location().start_offset(),
+                        end: correction_end,
+                        replacement,
+                        cop_name: self.cop.name(),
+                        cop_index: 0,
+                    });
+                    diagnostic.corrected = true;
 
                     self.diagnostics.push(diagnostic);
                 }
