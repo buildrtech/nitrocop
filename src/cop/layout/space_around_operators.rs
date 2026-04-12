@@ -231,8 +231,8 @@ impl Cop for SpaceAroundOperators {
                                     cop_index: 0,
                                 });
                             }
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     } else if allow_for_alignment && space_before && (space_after || newline_after)
                     {
@@ -342,8 +342,8 @@ impl Cop for SpaceAroundOperators {
                                 cop_index: 0,
                             });
                         }
-                        diag.corrected = true;
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 } else if allow_for_alignment && space_before && (space_after || newline_after) {
                     // Check for extra spaces around `=` (alignment check)
