@@ -8,6 +8,14 @@ pub struct HttpPositionalArguments;
 
 const HTTP_METHODS: &[&[u8]] = &[b"get", b"post", b"put", b"patch", b"delete", b"head"];
 
+fn compact_hash_literal_braces(arg_source: &str) -> String {
+    let trimmed = arg_source.trim();
+    if let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        return format!("{{{}}}", inner.trim());
+    }
+    arg_source.to_string()
+}
+
 impl Cop for HttpPositionalArguments {
     fn name(&self) -> &'static str {
         "Rails/HttpPositionalArguments"
@@ -134,9 +142,10 @@ impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
                     );
 
                     // Conservative RuboCop-aligned baseline: second positional arg -> params,
-                    // optional third positional arg -> session.
-                    if self.autocorrect_enabled && arg_list.len() <= 3 {
-                        let params = self
+                    // optional third positional arg -> session. Keep any remaining
+                    // positional args unchanged.
+                    if self.autocorrect_enabled {
+                        let params_raw = self
                             .source
                             .byte_slice(
                                 arg_list[1].location().start_offset(),
@@ -144,12 +153,13 @@ impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
                                 "",
                             )
                             .to_string();
+                        let params = compact_hash_literal_braces(&params_raw);
 
                         let mut replacement = format!("params: {params}");
                         let mut correction_end = arg_list[1].location().end_offset();
 
-                        if arg_list.len() == 3 {
-                            let session = self
+                        if arg_list.len() >= 3 {
+                            let session_raw = self
                                 .source
                                 .byte_slice(
                                     arg_list[2].location().start_offset(),
@@ -157,8 +167,24 @@ impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
                                     "",
                                 )
                                 .to_string();
+                            let session = compact_hash_literal_braces(&session_raw);
                             replacement.push_str(&format!(", session: {session}"));
                             correction_end = arg_list[2].location().end_offset();
+                        }
+
+                        if arg_list.len() > 3 {
+                            for extra in arg_list.iter().skip(3) {
+                                let extra_src = self
+                                    .source
+                                    .byte_slice(
+                                        extra.location().start_offset(),
+                                        extra.location().end_offset(),
+                                        "",
+                                    )
+                                    .to_string();
+                                replacement.push_str(&format!(", {extra_src}"));
+                                correction_end = extra.location().end_offset();
+                            }
                         }
 
                         self.corrections.push(crate::correction::Correction {
@@ -240,6 +266,16 @@ mod tests {
     #[test]
     fn supports_autocorrect() {
         assert!(HttpPositionalArguments.supports_autocorrect());
+    }
+
+    #[test]
+    fn autocorrect_keeps_trailing_positional_args_after_session() {
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &HttpPositionalArguments,
+            b"get :new, { user_id: 1 }, { token: 'x' }, :json\n",
+            b"get :new, params: {user_id: 1}, session: {token: 'x'}, :json\n",
+            config_with_rails(5.0),
+        );
     }
 
     #[test]
