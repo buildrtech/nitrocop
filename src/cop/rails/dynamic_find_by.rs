@@ -180,44 +180,45 @@ impl Cop for DynamicFindBy {
         );
         let mut diagnostic = self.diagnostic(source, line, column, msg);
 
-        if let Some(ref mut corr) = corrections {
-            let attr_with_bang = std::str::from_utf8(attr).unwrap_or("");
-            let (attrs_only, bang) = if let Some(stripped) = attr_with_bang.strip_suffix('!') {
-                (stripped, true)
-            } else {
-                (attr_with_bang, false)
-            };
-            let keywords: Vec<&str> = attrs_only.split("_and_").collect();
+        let attr_with_bang = std::str::from_utf8(attr).unwrap_or("");
+        let (attrs_only, bang) = if let Some(stripped) = attr_with_bang.strip_suffix('!') {
+            (stripped, true)
+        } else {
+            (attr_with_bang, false)
+        };
+        let keywords: Vec<&str> = attrs_only.split("_and_").collect();
 
-            if let Some(args) = call.arguments() {
-                let arg_nodes: Vec<_> = args.arguments().iter().collect();
-                if arg_nodes.len() == keywords.len() {
-                    let mut rebuilt_args = Vec::with_capacity(arg_nodes.len());
-                    for (i, arg_node) in arg_nodes.iter().enumerate() {
-                        let l = arg_node.location();
-                        let arg_src = std::str::from_utf8(
-                            &source.as_bytes()[l.start_offset()..l.end_offset()],
-                        )
-                        .unwrap_or("...");
-                        rebuilt_args.push(format!("{}: {arg_src}", keywords[i]));
-                    }
-
-                    let replacement = if bang {
-                        format!("find_by!({})", rebuilt_args.join(", "))
-                    } else {
-                        format!("find_by({})", rebuilt_args.join(", "))
-                    };
-
-                    let selector_loc = call.message_loc().unwrap_or(call.location());
-                    corr.push(crate::correction::Correction {
-                        start: selector_loc.start_offset(),
-                        end: call.location().end_offset(),
-                        replacement,
-                        cop_name: self.name(),
-                        cop_index: 0,
-                    });
-                    diagnostic.corrected = true;
+        if let Some(args) = call.arguments() {
+            let arg_nodes: Vec<_> = args.arguments().iter().collect();
+            if arg_nodes.len() == keywords.len() {
+                let mut rebuilt_args = Vec::with_capacity(arg_nodes.len());
+                for (i, arg_node) in arg_nodes.iter().enumerate() {
+                    let l = arg_node.location();
+                    let arg_src =
+                        std::str::from_utf8(&source.as_bytes()[l.start_offset()..l.end_offset()])
+                            .unwrap_or("...");
+                    rebuilt_args.push(format!("{}: {arg_src}", keywords[i]));
                 }
+
+                let replacement = if bang {
+                    format!("find_by!({})", rebuilt_args.join(", "))
+                } else {
+                    format!("find_by({})", rebuilt_args.join(", "))
+                };
+
+                let selector_loc = call.message_loc().unwrap_or(call.location());
+                let correction = crate::correction::Correction {
+                    start: selector_loc.start_offset(),
+                    end: call.location().end_offset(),
+                    replacement,
+                    cop_name: self.name(),
+                    cop_index: 0,
+                };
+
+                if let Some(ref mut corr) = corrections {
+                    corr.push(correction.clone());
+                }
+                diagnostic.corrected = true;
             }
         }
 
