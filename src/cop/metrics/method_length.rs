@@ -222,6 +222,10 @@ impl Cop for MethodLength {
         "Metrics/MethodLength"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[DEF_NODE, CALL_NODE]
     }
@@ -1332,5 +1336,10 @@ mod tests {
             "Expected [10/9] but got: {}",
             diags[0].message
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(MethodLength.supports_autocorrect());
     }
 }

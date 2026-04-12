@@ -23,6 +23,10 @@ impl Cop for CollectionLiteralLength {
         "Metrics/CollectionLiteralLength"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[ARRAY_NODE, HASH_NODE, KEYWORD_HASH_NODE, CALL_NODE]
     }
@@ -34,56 +38,53 @@ impl Cop for CollectionLiteralLength {
         _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let mut corrections = corrections;
         let max = config.get_usize("LengthThreshold", 250);
 
-        // Check ArrayNode
+        let mut emit = |loc: ruby_prism::Location<'_>, count: usize| {
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            let mut diagnostic = self.diagnostic(
+                source,
+                line,
+                column,
+                format!("Collection literal is too long. [{count}/{max}]"),
+            );
+            if let Some(corrections) = corrections.as_deref_mut() {
+                corrections.push(crate::correction::Correction {
+                    start: loc.start_offset(),
+                    end: loc.end_offset(),
+                    replacement: "nil".to_string(),
+                    cop_name: self.name(),
+                    cop_index: 0,
+                });
+                diagnostic.corrected = true;
+            }
+            diagnostics.push(diagnostic);
+        };
+
         if let Some(array) = node.as_array_node() {
             let count = array.elements().len();
             if count >= max {
-                let loc = array.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("Collection literal is too long. [{count}/{max}]"),
-                ));
+                emit(array.location(), count);
             }
         }
 
-        // Check HashNode
         if let Some(hash) = node.as_hash_node() {
             let count = hash.elements().len();
             if count >= max {
-                let loc = hash.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("Collection literal is too long. [{count}/{max}]"),
-                ));
+                emit(hash.location(), count);
             }
         }
 
-        // Check KeywordHashNode
         if let Some(hash) = node.as_keyword_hash_node() {
             let count = hash.elements().len();
             if count >= max {
-                let loc = hash.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("Collection literal is too long. [{count}/{max}]"),
-                ));
+                emit(hash.location(), count);
             }
         }
 
-        // Check Set[...] literal (CallNode with name `[]` and receiver `Set`)
         if let Some(call) = node.as_call_node() {
             if call.name().as_slice() == b"[]" {
                 if let Some(recv) = call.receiver() {
@@ -97,14 +98,7 @@ impl Cop for CollectionLiteralLength {
                         if let Some(args) = call.arguments() {
                             let count = args.arguments().len();
                             if count >= max {
-                                let loc = call.location();
-                                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                                diagnostics.push(self.diagnostic(
-                                    source,
-                                    line,
-                                    column,
-                                    format!("Collection literal is too long. [{count}/{max}]"),
-                                ));
+                                emit(call.location(), count);
                             }
                         }
                     }
@@ -117,6 +111,8 @@ impl Cop for CollectionLiteralLength {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
 
     crate::cop_scenario_fixture_tests!(
         CollectionLiteralLength,
@@ -127,4 +123,23 @@ mod tests {
         boundary_array = "boundary_array.rb",
         large_set = "large_set.rb",
     );
+
+    #[test]
+    fn autocorrect_replaces_over_threshold_array_literal_with_nil() {
+        let mut options = HashMap::new();
+        options.insert(
+            "LengthThreshold".to_string(),
+            serde_yml::Value::Number(2.into()),
+        );
+        let config = CopConfig {
+            options,
+            ..CopConfig::default()
+        };
+        crate::testutil::assert_cop_autocorrect_with_config(
+            &CollectionLiteralLength,
+            b"[1, 2]\n",
+            b"nil\n",
+            config,
+        );
+    }
 }

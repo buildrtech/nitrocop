@@ -473,6 +473,10 @@ impl Cop for PerceivedComplexity {
         "Metrics/PerceivedComplexity"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             BLOCK_NODE,
@@ -776,5 +780,10 @@ mod tests {
             "Expected [4/1] for if/elsif/else, got: {}",
             diags[0].message
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(PerceivedComplexity.supports_autocorrect());
     }
 }
