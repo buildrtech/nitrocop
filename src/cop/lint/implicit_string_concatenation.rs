@@ -96,8 +96,8 @@ impl Cop for ImplicitStringConcatenation {
                                     cop_name: self.name(),
                                     cop_index: 0,
                                 });
-                                diagnostic.corrected = true;
                             }
+                            diagnostic.corrected = true;
 
                             diagnostics.push(diagnostic);
                             // Do NOT break — report all consecutive same-line pairs,
