@@ -146,12 +146,14 @@ impl<'a, 'pr> Visit<'pr> for FileNullVisitor<'a> {
         if let Some(matched_str) = matched {
             let loc = node.location();
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
+            let mut diag = self.cop.diagnostic(
                 self.source,
                 line,
                 column,
                 format!("Use `File::NULL` instead of `{}`.", matched_str),
-            ));
+            );
+            diag.corrected = true;
+            self.diagnostics.push(diag);
             self.offense_ranges
                 .push((loc.start_offset(), loc.end_offset()));
         }
