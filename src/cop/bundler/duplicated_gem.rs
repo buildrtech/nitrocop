@@ -128,8 +128,8 @@ impl Cop for DuplicatedGem {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diagnostic.corrected = true;
                         }
+                        diagnostic.corrected = true;
                         diagnostics.push(diagnostic);
                     }
                     continue;
@@ -177,8 +177,8 @@ impl Cop for DuplicatedGem {
                         cop_name: self.name(),
                         cop_index: 0,
                     });
-                    diagnostic.corrected = true;
                 }
+                diagnostic.corrected = true;
                 diagnostics.push(diagnostic);
             }
         }
