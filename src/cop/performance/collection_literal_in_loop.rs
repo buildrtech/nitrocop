@@ -292,6 +292,10 @@ impl Cop for CollectionLiteralInLoop {
         "Performance/CollectionLiteralInLoop"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Convention
     }
@@ -1175,5 +1179,10 @@ mod tests {
             &CollectionLiteralInLoop,
             b"[1,2].zip([0].cycle){|a| arr << a}\n          ^^^ Performance/CollectionLiteralInLoop: Avoid immutable Array literals in loops. It is better to extract it into a local variable or a constant.\n",
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(CollectionLiteralInLoop.supports_autocorrect());
     }
 }
