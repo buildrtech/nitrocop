@@ -124,11 +124,14 @@ impl Cop for Output {
             cop: self,
             source,
             diagnostics: Vec::new(),
-            corrections,
+            corrections: Vec::new(),
             parent_is_call: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
+        if let Some(corr) = corrections {
+            corr.extend(visitor.corrections);
+        }
     }
 }
 
@@ -136,7 +139,7 @@ struct OutputVisitor<'a> {
     cop: &'a Output,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
-    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
+    corrections: Vec<crate::correction::Correction>,
     /// True when the current node is a direct child (receiver/argument) of a CallNode.
     /// Matches RuboCop's `return if node.parent&.call_type?`.
     parent_is_call: bool,
@@ -159,16 +162,14 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
                             self.cop
                                 .diagnostic(self.source, line, column, MSG.to_string());
 
-                        if let Some(ref mut corr) = self.corrections {
-                            corr.push(crate::correction::Correction {
-                                start: msg_loc.start_offset(),
-                                end: msg_loc.end_offset(),
-                                replacement: "Rails.logger.debug".to_string(),
-                                cop_name: self.cop.name(),
-                                cop_index: 0,
-                            });
-                            diagnostic.corrected = true;
-                        }
+                        self.corrections.push(crate::correction::Correction {
+                            start: msg_loc.start_offset(),
+                            end: msg_loc.end_offset(),
+                            replacement: "Rails.logger.debug".to_string(),
+                            cop_name: self.cop.name(),
+                            cop_index: 0,
+                        });
+                        diagnostic.corrected = true;
 
                         self.diagnostics.push(diagnostic);
                     }
@@ -199,10 +200,8 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
                             self.cop
                                 .diagnostic(self.source, line, column, MSG.to_string());
 
-                        if let Some(ref mut corr) = self.corrections
-                            && let Some(selector) = node.message_loc()
-                        {
-                            corr.push(crate::correction::Correction {
+                        if let Some(selector) = node.message_loc() {
+                            self.corrections.push(crate::correction::Correction {
                                 start: recv_loc.start_offset(),
                                 end: selector.end_offset(),
                                 replacement: "Rails.logger.debug".to_string(),
