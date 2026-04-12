@@ -216,8 +216,8 @@ impl Cop for TrailingEmptyLines {
                 cop_name: self.name(),
                 cop_index: 0,
             });
-            diag.corrected = true;
         }
+        diag.corrected = true;
         diagnostics.push(diag);
     }
 }
