@@ -578,8 +578,8 @@ fn push_remove_offense(
             cop_name: cop.name(),
             cop_index: 0,
         });
-        diag.corrected = true;
     }
+    diag.corrected = true;
     diagnostics.push(diag);
 }
 
@@ -601,8 +601,8 @@ fn push_insert_offense(
             cop_name: cop.name(),
             cop_index: 0,
         });
-        diag.corrected = true;
     }
+    diag.corrected = true;
     diagnostics.push(diag);
 }
 

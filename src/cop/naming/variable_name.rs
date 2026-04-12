@@ -547,10 +547,10 @@ impl VariableName {
             column,
             format!("Use {style_msg} for variable names."),
         );
-        if enforced_style == "snake_case" {
-            if let (Some((start, end)), Some(corrections)) =
-                (correction_range, corrections.as_deref_mut())
-            {
+        if enforced_style == "snake_case"
+            && let Some((start, end)) = correction_range
+        {
+            if let Some(corrections) = corrections.as_deref_mut() {
                 corrections.push(crate::correction::Correction {
                     start,
                     end,
@@ -558,8 +558,8 @@ impl VariableName {
                     cop_name: self.name(),
                     cop_index: 0,
                 });
-                diagnostic.corrected = true;
             }
+            diagnostic.corrected = true;
         }
         diagnostics.push(diagnostic);
     }
