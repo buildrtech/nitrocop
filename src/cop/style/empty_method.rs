@@ -96,14 +96,14 @@ impl Cop for EmptyMethod {
                     "Put empty method definitions on a single line.".to_string(),
                 );
 
-                if let Some(corrections) = corrections.as_mut() {
-                    let def_start = def_loc.start_offset();
-                    let header_src = &source.as_bytes()[def_start..end_kw_loc.start_offset()];
-                    let normalized_header = String::from_utf8_lossy(header_src)
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                let def_start = def_loc.start_offset();
+                let header_src = &source.as_bytes()[def_start..end_kw_loc.start_offset()];
+                let normalized_header = String::from_utf8_lossy(header_src)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
 
+                if let Some(corrections) = corrections.as_mut() {
                     corrections.push(crate::correction::Correction {
                         start: def_start,
                         end: end_kw_loc.end_offset(),
@@ -111,8 +111,8 @@ impl Cop for EmptyMethod {
                         cop_name: self.name(),
                         cop_index: 0,
                     });
-                    diagnostic.corrected = true;
                 }
+                diagnostic.corrected = true;
 
                 diagnostics.push(diagnostic);
             }
@@ -125,15 +125,15 @@ impl Cop for EmptyMethod {
                     "Put the `end` on the next line.".to_string(),
                 );
 
-                if let Some(corrections) = corrections.as_mut() {
-                    let def_start = def_loc.start_offset();
-                    let header_src = &source.as_bytes()[def_start..end_kw_loc.start_offset()];
-                    let normalized_header = String::from_utf8_lossy(header_src)
-                        .trim()
-                        .trim_end_matches(';')
-                        .trim_end()
-                        .to_string();
+                let def_start = def_loc.start_offset();
+                let header_src = &source.as_bytes()[def_start..end_kw_loc.start_offset()];
+                let normalized_header = String::from_utf8_lossy(header_src)
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim_end()
+                    .to_string();
 
+                if let Some(corrections) = corrections.as_mut() {
                     corrections.push(crate::correction::Correction {
                         start: def_start,
                         end: end_kw_loc.end_offset(),
@@ -141,8 +141,8 @@ impl Cop for EmptyMethod {
                         cop_name: self.name(),
                         cop_index: 0,
                     });
-                    diagnostic.corrected = true;
                 }
+                diagnostic.corrected = true;
 
                 diagnostics.push(diagnostic);
             }
