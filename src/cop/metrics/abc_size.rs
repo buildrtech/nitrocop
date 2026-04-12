@@ -1178,6 +1178,10 @@ impl Cop for AbcSize {
         "Metrics/AbcSize"
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             BLOCK_NODE,
@@ -2067,5 +2071,10 @@ end
             rounded > 17.0,
             "Score should be > 17 for assertion_types_regex. Got A={a}, B={b}, C={c}, score={rounded}"
         );
+    }
+
+    #[test]
+    fn supports_autocorrect_flag_enabled() {
+        assert!(AbcSize.supports_autocorrect());
     }
 }
