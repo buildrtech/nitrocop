@@ -180,8 +180,8 @@ impl Cop for PluralizationGrammar {
                 cop_name: self.name(),
                 cop_index: 0,
             });
-            diagnostic.corrected = true;
         }
+        diagnostic.corrected = true;
 
         diagnostics.push(diagnostic);
     }

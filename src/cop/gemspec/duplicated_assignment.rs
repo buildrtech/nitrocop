@@ -60,18 +60,18 @@ impl Cop for DuplicatedAssignment {
                             ),
                         );
                         if corrected_lines.insert(line_num) {
-                            if let Some(corrections) = corrections.as_deref_mut() {
-                                if let Some(start) = source.line_col_to_offset(line_num, 0) {
-                                    let end = start + line.len();
-                                    corrections.push(crate::correction::Correction {
-                                        start,
-                                        end,
-                                        replacement: "".to_string(),
-                                        cop_name: self.name(),
-                                        cop_index: 0,
-                                    });
-                                    diagnostic.corrected = true;
-                                }
+                            diagnostic.corrected = true;
+                            if let Some(corrections) = corrections.as_deref_mut()
+                                && let Some(start) = source.line_col_to_offset(line_num, 0)
+                            {
+                                let end = start + line.len();
+                                corrections.push(crate::correction::Correction {
+                                    start,
+                                    end,
+                                    replacement: "".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
                             }
                         }
                         diagnostics.push(diagnostic);

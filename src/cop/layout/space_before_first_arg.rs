@@ -232,8 +232,8 @@ fn push_space_before_first_arg_offense(
             cop_name: cop.name(),
             cop_index: 0,
         });
-        diagnostic.corrected = true;
     }
+    diagnostic.corrected = true;
     diagnostics.push(diagnostic);
 }
 
