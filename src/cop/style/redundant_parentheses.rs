@@ -474,8 +474,8 @@ impl RedundantParensVisitor<'_> {
             format!("Don't use parentheses around {}.", msg),
         );
 
+        let inner_loc = inner.location();
         if let Some(corrections) = self.corrections.as_mut() {
-            let inner_loc = inner.location();
             corrections.push(crate::correction::Correction {
                 start: loc.start_offset(),
                 end: loc.end_offset(),
@@ -486,8 +486,8 @@ impl RedundantParensVisitor<'_> {
                 cop_name: self.cop.name(),
                 cop_index: 0,
             });
-            diagnostic.corrected = true;
         }
+        diagnostic.corrected = true;
 
         self.diagnostics.push(diagnostic);
     }
