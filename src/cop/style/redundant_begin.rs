@@ -210,10 +210,10 @@ impl RedundantBeginVisitor<'_> {
             "Redundant `begin` block detected.".to_string(),
         );
 
+        let replacement = std::str::from_utf8(body_nodes[0].location().as_slice())
+            .unwrap_or("")
+            .to_string();
         if self.autocorrect_enabled {
-            let replacement = std::str::from_utf8(body_nodes[0].location().as_slice())
-                .unwrap_or("")
-                .to_string();
             self.pending_corrections
                 .push(crate::correction::Correction {
                     start: begin_node.location().start_offset(),
@@ -222,8 +222,8 @@ impl RedundantBeginVisitor<'_> {
                     cop_name: self.cop.name(),
                     cop_index: 0,
                 });
-            diagnostic.corrected = true;
         }
+        diagnostic.corrected = true;
 
         self.diagnostics.push(diagnostic);
 
