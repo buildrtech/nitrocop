@@ -633,8 +633,8 @@ impl SymbolConversion {
                         cop_name: self.name(),
                         cop_index: 0,
                     });
-                    diag.corrected = true;
                 }
+                diag.corrected = true;
                 diagnostics.push(diag);
             }
             return;
@@ -702,12 +702,12 @@ impl SymbolConversion {
             corr.push(crate::correction::Correction {
                 start: loc.start_offset(),
                 end: loc.end_offset(),
-                replacement: correction,
+                replacement: correction.clone(),
                 cop_name: self.name(),
                 cop_index: 0,
             });
-            diag.corrected = true;
         }
+        diag.corrected = true;
         diagnostics.push(diag);
     }
 
@@ -750,12 +750,12 @@ impl SymbolConversion {
                 corr.push(crate::correction::Correction {
                     start: loc.start_offset(),
                     end: loc.end_offset(),
-                    replacement: correction,
+                    replacement: correction.clone(),
                     cop_name: self.name(),
                     cop_index: 0,
                 });
-                diag.corrected = true;
             }
+            diag.corrected = true;
             diagnostics.push(diag);
             return;
         }
@@ -779,12 +779,12 @@ impl SymbolConversion {
                 corr.push(crate::correction::Correction {
                     start: loc.start_offset(),
                     end: loc.end_offset(),
-                    replacement: correction,
+                    replacement: correction.clone(),
                     cop_name: self.name(),
                     cop_index: 0,
                 });
-                diag.corrected = true;
             }
+            diag.corrected = true;
             diagnostics.push(diag);
             return;
         }
@@ -819,12 +819,12 @@ impl SymbolConversion {
                 corr.push(crate::correction::Correction {
                     start: loc.start_offset(),
                     end: loc.end_offset(),
-                    replacement: correction,
+                    replacement: correction.clone(),
                     cop_name: self.name(),
                     cop_index: 0,
                 });
-                diag.corrected = true;
             }
+            diag.corrected = true;
             diagnostics.push(diag);
         }
     }
