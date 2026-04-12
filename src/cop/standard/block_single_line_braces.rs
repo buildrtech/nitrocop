@@ -80,8 +80,8 @@ impl<'a> Visitor<'a> {
 
         if allow_autocorrect {
             let would_break = self.correction_would_break_code(block_node);
-            if let Some(ref mut corrections) = self.corrections {
-                if !would_break {
+            if !would_break {
+                if let Some(ref mut corrections) = self.corrections {
                     corrections.push(crate::correction::Correction {
                         start: opening_loc.start_offset(),
                         end: opening_loc.end_offset(),
@@ -96,8 +96,8 @@ impl<'a> Visitor<'a> {
                         cop_name: self.cop.name(),
                         cop_index: 0,
                     });
-                    diagnostic.corrected = true;
                 }
+                diagnostic.corrected = true;
             }
         }
 
