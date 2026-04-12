@@ -227,8 +227,8 @@ impl Cop for TrailingCommaInArguments {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
@@ -299,8 +299,8 @@ impl Cop for TrailingCommaInArguments {
                             cop_name: self.name(),
                             cop_index: 0,
                         });
-                        diag.corrected = true;
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 } else if !is_multiline && has_comma && last_end < closing_start {
                     // Single-line call with unwanted trailing comma
@@ -322,8 +322,8 @@ impl Cop for TrailingCommaInArguments {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
@@ -348,8 +348,8 @@ impl Cop for TrailingCommaInArguments {
                                 cop_name: self.name(),
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
+                        diag.corrected = true;
                         diagnostics.push(diag);
                     }
                 }
