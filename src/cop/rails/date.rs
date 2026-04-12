@@ -88,8 +88,8 @@ impl Cop for Date {
                     cop_name: self.name(),
                     cop_index: 0,
                 });
-                diagnostic.corrected = true;
             }
+            diagnostic.corrected = true;
 
             diagnostics.push(diagnostic);
             return;
@@ -146,8 +146,8 @@ impl Cop for Date {
                 cop_name: self.name(),
                 cop_index: 0,
             });
-            diagnostic.corrected = true;
         }
+        diagnostic.corrected = true;
 
         diagnostics.push(diagnostic);
     }
