@@ -175,8 +175,8 @@ impl Cop for Semicolon {
                         cop_name: self.name(),
                         cop_index: 0,
                     });
-                    diag.corrected = true;
                 }
+                diag.corrected = true;
                 diagnostics.push(diag);
                 continue;
             }
@@ -197,8 +197,8 @@ impl Cop for Semicolon {
                         cop_name: self.name(),
                         cop_index: 0,
                     });
-                    diag.corrected = true;
                 }
+                diag.corrected = true;
                 diagnostics.push(diag);
                 continue;
             }
@@ -223,8 +223,8 @@ impl Cop for Semicolon {
                         cop_name: self.name(),
                         cop_index: 0,
                     });
-                    diag.corrected = true;
                 }
+                diag.corrected = true;
                 diagnostics.push(diag);
                 continue;
             }
@@ -246,8 +246,8 @@ impl Cop for Semicolon {
                         cop_name: self.name(),
                         cop_index: 0,
                     });
-                    diag.corrected = true;
                 }
+                diag.corrected = true;
                 diagnostics.push(diag);
                 continue;
             }

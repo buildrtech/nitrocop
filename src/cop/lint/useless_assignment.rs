@@ -1662,9 +1662,6 @@ impl UselessAssignVisitor<'_, '_, '_> {
         analyzer: &ScopeAnalyzer,
         offset: usize,
     ) -> bool {
-        let Some(corrections) = self.corrections.as_deref_mut() else {
-            return false;
-        };
         let Some((start, end)) = analyzer.write_spans.get(&offset).copied() else {
             return false;
         };
@@ -1683,13 +1680,15 @@ impl UselessAssignVisitor<'_, '_, '_> {
             return false;
         }
 
-        corrections.push(crate::correction::Correction {
-            start: delete_start,
-            end: delete_end,
-            replacement: String::new(),
-            cop_name: self.cop.name(),
-            cop_index: 0,
-        });
+        if let Some(corrections) = self.corrections.as_deref_mut() {
+            corrections.push(crate::correction::Correction {
+                start: delete_start,
+                end: delete_end,
+                replacement: String::new(),
+                cop_name: self.cop.name(),
+                cop_index: 0,
+            });
+        }
         self.correction_ranges.push((delete_start, delete_end));
         true
     }
