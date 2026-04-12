@@ -145,16 +145,16 @@ impl Cop for ErbNewArguments {
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             let mut diag = self.diagnostic(source, line, column, msg);
 
-            if let (Some(corr), Some((start, end, replacement))) =
-                (corrections.as_mut(), correction.as_ref())
-            {
-                corr.push(crate::correction::Correction {
-                    start: *start,
-                    end: *end,
-                    replacement: replacement.clone(),
-                    cop_name: self.name(),
-                    cop_index: 0,
-                });
+            if let Some((start, end, replacement)) = correction.as_ref() {
+                if let Some(corr) = corrections.as_mut() {
+                    corr.push(crate::correction::Correction {
+                        start: *start,
+                        end: *end,
+                        replacement: replacement.clone(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                }
                 diag.corrected = true;
             }
 
