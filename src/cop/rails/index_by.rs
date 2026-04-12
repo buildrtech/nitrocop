@@ -454,18 +454,19 @@ impl Cop for IndexBy {
                                     && let Some((param, key_src)) =
                                         index_by_parts(&block_node, source)
                                     && let Some(base) = chain.inner_call.receiver()
-                                    && let Some(ref mut corr) = corrections
                                 {
                                     let base_src = node_source(source, &base);
                                     let replacement =
                                         format!("{base_src}.index_by {{ |{param}| {key_src} }}");
-                                    corr.push(crate::correction::Correction {
-                                        start: loc.start_offset(),
-                                        end: loc.end_offset(),
-                                        replacement,
-                                        cop_name: self.name(),
-                                        cop_index: 0,
-                                    });
+                                    if let Some(ref mut corr) = corrections {
+                                        corr.push(crate::correction::Correction {
+                                            start: loc.start_offset(),
+                                            end: loc.end_offset(),
+                                            replacement: replacement.clone(),
+                                            cop_name: self.name(),
+                                            cop_index: 0,
+                                        });
+                                    }
                                     diagnostic.corrected = true;
                                 }
 
@@ -501,7 +502,6 @@ impl Cop for IndexBy {
 
                         if is_index_by_block(&block_node)
                             && let Some((param, key_src)) = index_by_parts(&block_node, source)
-                            && let Some(ref mut corr) = corrections
                         {
                             let replacement = if let Some(base) = call.receiver() {
                                 let base_src = node_source(source, &base);
@@ -509,13 +509,15 @@ impl Cop for IndexBy {
                             } else {
                                 format!("index_by {{ |{param}| {key_src} }}")
                             };
-                            corr.push(crate::correction::Correction {
-                                start: loc.start_offset(),
-                                end: loc.end_offset(),
-                                replacement,
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start: loc.start_offset(),
+                                    end: loc.end_offset(),
+                                    replacement: replacement.clone(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                            }
                             diagnostic.corrected = true;
                         }
 
@@ -542,18 +544,19 @@ impl Cop for IndexBy {
                         if let Some((param, key_src)) =
                             each_with_object_index_parts(&block_node, source)
                             && let Some(base) = call.receiver()
-                            && let Some(ref mut corr) = corrections
                         {
                             let base_src = node_source(source, &base);
                             let replacement =
                                 format!("{base_src}.index_by {{ |{param}| {key_src} }}");
-                            corr.push(crate::correction::Correction {
-                                start: loc.start_offset(),
-                                end: loc.end_offset(),
-                                replacement,
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start: loc.start_offset(),
+                                    end: loc.end_offset(),
+                                    replacement: replacement.clone(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                            }
                             diagnostic.corrected = true;
                         }
 

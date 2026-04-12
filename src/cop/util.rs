@@ -668,9 +668,9 @@ pub fn check_empty_lines_around_body_with_corrections(
                         cop_name,
                         cop_index: 0,
                     });
-                    diag.corrected = true;
                 }
             }
+            diag.corrected = true;
             diagnostics.push(diag);
         }
     }
@@ -704,9 +704,9 @@ pub fn check_empty_lines_around_body_with_corrections(
                                 cop_name,
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 }
             }
@@ -778,9 +778,9 @@ pub fn check_missing_empty_lines_around_body_with_corrections(
                         cop_name,
                         cop_index: 0,
                     });
-                    diag.corrected = true;
                 }
             }
+            diag.corrected = true;
             diagnostics.push(diag);
         }
     }
@@ -812,9 +812,9 @@ pub fn check_missing_empty_lines_around_body_with_corrections(
                                 cop_name,
                                 cop_index: 0,
                             });
-                            diag.corrected = true;
                         }
                     }
+                    diag.corrected = true;
                     diagnostics.push(diag);
                 }
             }
