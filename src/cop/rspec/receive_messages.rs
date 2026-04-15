@@ -355,12 +355,14 @@ fn extract_allow_receive_info(
     let return_arg = &and_return_arg_list[0];
     let return_loc = return_arg.location();
     let raw_return = source.byte_slice(return_loc.start_offset(), return_loc.end_offset(), "");
-    let return_src =
-        if return_arg.as_hash_node().is_some() && !raw_return.trim_start().starts_with('{') {
-            format!("{{ {} }}", raw_return)
-        } else {
-            raw_return.to_string()
-        };
+    let return_src = if (return_arg.as_hash_node().is_some()
+        || return_arg.as_keyword_hash_node().is_some())
+        && !raw_return.trim_start().starts_with('{')
+    {
+        format!("{{ {} }}", raw_return)
+    } else {
+        raw_return.to_string()
+    };
 
     let (line, _) = source.offset_to_line_col(stmt_loc.start_offset());
 
@@ -428,6 +430,15 @@ mod tests {
             &ReceiveMessages,
             b"before do\n  allow(Service).to receive(:foo).and_return(1)\n  allow(Service).to receive(:bar).and_return(2)\nend\n",
             b"before do\n  allow(Service).to receive_messages(foo: 1, bar: 2)\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrect_wraps_keyword_hash_return_values() {
+        crate::testutil::assert_cop_autocorrect(
+            &ReceiveMessages,
+            b"before do\n  allow(Service).to receive(:foo).and_return(a: 1)\n  allow(Service).to receive(:bar).and_return(b: 2)\nend\n",
+            b"before do\n  allow(Service).to receive_messages(foo: { a: 1 }, bar: { b: 2 })\nend\n",
         );
     }
 }
