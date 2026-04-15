@@ -86,13 +86,55 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           ls -lah
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists; uploading assets with --clobber"
-            gh release upload "$TAG" nitrocop-darwin-arm64 nitrocop-darwin-x86_64 nitrocop-linux-arm64 nitrocop-linux-x86_64 --clobber
+          API="https://api.github.com/repos/${REPO}"
+          AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
+
+          status=$(curl -sS -o /tmp/release.json -w "%{http_code}" "${AUTH[@]}" "$API/releases/tags/$TAG")
+          if [ "$status" = "200" ]; then
+            release_id=$(python3 -c 'import json;print(json.load(open("/tmp/release.json"))["id"])')
+            echo "Using existing release id=$release_id for $TAG"
+          elif [ "$status" = "404" ]; then
+            echo "Creating release for $TAG"
+            create_status=$(curl -sS -o /tmp/release-create.json -w "%{http_code}" "${AUTH[@]}" \
+              -X POST "$API/releases" \
+              -d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\",\"generate_release_notes\":true}")
+            cat /tmp/release-create.json
+            if [ "$create_status" != "201" ]; then
+              echo "Failed to create release (status=$create_status)" >&2
+              exit 1
+            fi
+            release_id=$(python3 -c 'import json;print(json.load(open("/tmp/release-create.json"))["id"])')
           else
-            echo "Release $TAG does not exist; creating it with assets"
-            gh release create "$TAG" nitrocop-darwin-arm64 nitrocop-darwin-x86_64 nitrocop-linux-arm64 nitrocop-linux-x86_64 --title "$TAG" --generate-notes
+            echo "Unexpected status fetching release: $status" >&2
+            cat /tmp/release.json >&2
+            exit 1
           fi
+
+          assets_json=$(curl -sS "${AUTH[@]}" "$API/releases/$release_id/assets")
+          export ASSETS_JSON="$assets_json"
+
+          for asset in nitrocop-darwin-arm64 nitrocop-darwin-x86_64 nitrocop-linux-arm64 nitrocop-linux-x86_64; do
+            existing_id=$(python3 -c 'import json,os,sys; name=sys.argv[1]; assets=json.loads(os.environ.get("ASSETS_JSON", "[]")); print(next((str(a["id"]) for a in assets if a.get("name")==name), ""))' "$asset")
+
+            if [ -n "${existing_id:-}" ]; then
+              echo "Deleting existing asset $asset (id=$existing_id)"
+              curl -sS "${AUTH[@]}" -X DELETE "$API/releases/assets/$existing_id" >/dev/null
+            fi
+
+            echo "Uploading $asset"
+            upload_status=$(curl -sS -o /tmp/upload.json -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$asset" \
+              "https://uploads.github.com/repos/${REPO}/releases/${release_id}/assets?name=${asset}")
+            if [ "$upload_status" != "201" ]; then
+              echo "Failed uploading $asset (status=$upload_status)" >&2
+              cat /tmp/upload.json >&2
+              exit 1
+            fi
+          done
