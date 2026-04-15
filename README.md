@@ -147,7 +147,7 @@ Options:
       --ignore-disable-comments  Ignore all # rubocop:disable inline comments
       --cache <true|false>  Enable/disable file-level result caching [default: true]
       --cache-clear         Clear the result cache and exit
-      --init                Resolve gem paths and write lockfile to cache directory, then exit
+      --init                Pre-resolve gem paths and write lockfile to cache directory, then exit
       --fail-level <SEV>    Minimum severity for non-zero exit (convention/warning/error/fatal)
   -F, --fail-fast           Stop after first file with offenses
       --force-exclusion     Apply AllCops.Exclude to explicitly-passed files
@@ -155,6 +155,8 @@ Options:
       --force-default-config  Ignore all config files, use built-in defaults
   -h, --help                Print help
 ```
+
+`nitrocop` now auto-refreshes its gem lockfile when it is missing or stale (for example after `bundle update`). `--init` remains available as an optional prewarm command.
 
 ## Local Development
 

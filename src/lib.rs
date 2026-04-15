@@ -339,18 +339,49 @@ pub fn run(args: Args) -> Result<i32> {
     } else if use_cache {
         // Try to find config dir for lockfile lookup
         let lock_dir = target_dir.unwrap_or(std::path::Path::new("."));
-        match config::lockfile::read_lock(lock_dir) {
-            Ok(lock) => {
-                config::lockfile::check_freshness(&lock, lock_dir)?;
-                if args.debug {
-                    eprintln!("debug: using lockfile ({} cached gems)", lock.gems.len());
+
+        let mut lock_issue: Option<String> = None;
+        let fresh_lock = match config::lockfile::read_lock(lock_dir) {
+            Ok(lock) => match config::lockfile::check_freshness(&lock, lock_dir) {
+                Ok(()) => Some(lock),
+                Err(e) => {
+                    lock_issue = Some(e.to_string());
+                    None
                 }
-                load_config_with_mode(Some(&lock.gems))?
-            }
+            },
             Err(e) => {
-                // If lockfile is missing, fail with helpful message
-                anyhow::bail!("{e}");
+                lock_issue = Some(e.to_string());
+                None
             }
+        };
+
+        if let Some(lock) = fresh_lock {
+            if args.debug {
+                eprintln!("debug: using lockfile ({} cached gems)", lock.gems.len());
+            }
+            load_config_with_mode(Some(&lock.gems))?
+        } else {
+            eprintln!("nitrocop: lockfile missing or stale, refreshing lockfile automatically...");
+            if args.debug {
+                if let Some(issue) = lock_issue.as_deref() {
+                    eprintln!("debug: lockfile refresh reason: {issue}");
+                }
+            }
+
+            let refreshed_config = load_config_with_mode(None)?;
+            let gem_paths = config::gem_path::drain_resolved_paths();
+            config::lockfile::write_lock(&gem_paths, lock_dir)?;
+
+            if args.debug {
+                let lockfile_location = config::lockfile::lockfile_path(lock_dir);
+                eprintln!(
+                    "debug: refreshed lockfile ({} cached gems) at {}",
+                    gem_paths.len(),
+                    lockfile_location.display()
+                );
+            }
+
+            refreshed_config
         }
     } else {
         load_config_with_mode(None)?

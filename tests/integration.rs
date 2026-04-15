@@ -4131,6 +4131,131 @@ fn no_cache_flag_disables_result_cache_writes() {
 }
 
 #[test]
+fn auto_refreshes_lockfile_when_missing() {
+    let dir = temp_dir("auto_refresh_lockfile_missing");
+    write_file(
+        &dir,
+        "clean.rb",
+        b"# frozen_string_literal: true\n\nx = 1\n",
+    );
+
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .env("NITROCOP_CACHE_DIR", &cache_dir)
+        .args([
+            "--only",
+            "Layout/TrailingWhitespace",
+            "--format",
+            "json",
+            dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute nitrocop");
+
+    assert!(
+        output.status.success(),
+        "nitrocop should auto-refresh a missing lockfile and continue:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lockfiles: Vec<_> = fs::read_dir(cache_dir.join("lockfiles"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        lockfiles.len(),
+        1,
+        "Expected exactly one lockfile to be created, found: {:?}",
+        lockfiles
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refreshing lockfile") || stderr.contains("Created lockfile"),
+        "Expected stderr to mention lockfile refresh/create, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn auto_refreshes_lockfile_when_stale_gemfile_lock_changes() {
+    let dir = temp_dir("auto_refresh_lockfile_stale");
+    write_file(
+        &dir,
+        "clean.rb",
+        b"# frozen_string_literal: true\n\nx = 1\n",
+    );
+    write_file(&dir, "Gemfile.lock", b"GEM\n  specs:\n");
+
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let init_output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .env("NITROCOP_CACHE_DIR", &cache_dir)
+        .args(["--init", dir.to_str().unwrap()])
+        .output()
+        .expect("Failed to execute nitrocop --init");
+    assert!(
+        init_output.status.success(),
+        "--init should succeed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&init_output.stdout),
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+
+    let lockfile_path = fs::read_dir(cache_dir.join("lockfiles"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .next()
+        .expect("Expected lockfile after --init");
+    let before: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lockfile_path).unwrap()).unwrap();
+    let before_hash = before["gemfile_lock_sha256"].as_str().unwrap().to_string();
+
+    write_file(&dir, "Gemfile.lock", b"GEM\n  specs:\n    rake (13.2.0)\n");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .env("NITROCOP_CACHE_DIR", &cache_dir)
+        .args([
+            "--only",
+            "Layout/TrailingWhitespace",
+            "--format",
+            "json",
+            dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute nitrocop");
+
+    assert!(
+        output.status.success(),
+        "nitrocop should auto-refresh a stale lockfile and continue:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let after: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lockfile_path).unwrap()).unwrap();
+    let after_hash = after["gemfile_lock_sha256"].as_str().unwrap();
+    assert_ne!(
+        before_hash, after_hash,
+        "Expected lockfile Gemfile.lock hash to change after auto-refresh"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refreshing lockfile"),
+        "Expected stderr to mention lockfile refresh, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cache_invalidated_by_file_change() {
     let dir = temp_dir("cache_file_change");
     let file = write_file(&dir, "test.rb", b"x = 1 \n");
