@@ -1,0 +1,97 @@
+name: Release Tag Assets
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish assets for (e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-assets:
+    name: build-${{ matrix.asset_name }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset_name: nitrocop-darwin-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_name: nitrocop-darwin-x86_64
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset_name: nitrocop-linux-x86_64
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            asset_name: nitrocop-linux-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: assets-${{ matrix.target }}
+
+      - name: Install aarch64 cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Build nitrocop
+        run: cargo build --release --target ${{ matrix.target }} --bin nitrocop
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--sysroot=/usr/aarch64-linux-gnu' || '' }}
+
+      - name: Prepare asset file
+        run: |
+          cp target/${{ matrix.target }}/release/nitrocop ./${{ matrix.asset_name }}
+          chmod +x ./${{ matrix.asset_name }}
+
+      - name: Upload built asset artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  publish-release:
+    needs: build-assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: nitrocop-*
+          merge-multiple: true
+
+      - name: Publish/Update GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          ls -lah
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; uploading assets with --clobber"
+            gh release upload "$TAG" nitrocop-darwin-arm64 nitrocop-darwin-x86_64 nitrocop-linux-arm64 nitrocop-linux-x86_64 --clobber
+          else
+            echo "Release $TAG does not exist; creating it with assets"
+            gh release create "$TAG" nitrocop-darwin-arm64 nitrocop-darwin-x86_64 nitrocop-linux-arm64 nitrocop-linux-x86_64 --title "$TAG" --generate-notes
+          fi
