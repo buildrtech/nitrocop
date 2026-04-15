@@ -1401,6 +1401,10 @@ fn lint_source_once(
 
     if !args.ignore_disable_comments && !disabled.is_empty() {
         diagnostics.retain(|d| !disabled.check_and_mark_used(&d.cop_name, d.location.line));
+        corrections.retain(|c| {
+            let (line, _) = source.offset_to_line_col(c.start);
+            !disabled.is_disabled(c.cop_name, line)
+        });
     }
 
     let has_only = !args.only.is_empty();

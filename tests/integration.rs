@@ -3469,6 +3469,50 @@ fn no_redundant_disable_when_offense_suppressed() {
 }
 
 #[test]
+fn autocorrect_does_not_modify_code_suppressed_by_disable_comments() {
+    let dir = temp_dir("autocorrect_respects_disable_comments");
+    let file = write_file(
+        &dir,
+        "test.rb",
+        b"# frozen_string_literal: true\n\n# rubocop:disable Layout/TrailingWhitespace\nx = 1   \n# rubocop:enable Layout/TrailingWhitespace\n",
+    );
+    let config = load_config(None, None, None).unwrap();
+    let registry = CopRegistry::default_registry();
+    let args = Args {
+        autocorrect_all: true,
+        only: vec!["Layout/TrailingWhitespace".to_string()],
+        ..default_args()
+    };
+
+    let result = run_linter(
+        &discovered(&[file.clone()]),
+        &config,
+        &registry,
+        &args,
+        &TierMap::load(),
+        &AutocorrectAllowlist::load(),
+    );
+
+    let tw: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.cop_name == "Layout/TrailingWhitespace")
+        .collect();
+    assert!(
+        tw.is_empty(),
+        "TrailingWhitespace should stay suppressed by disable comment"
+    );
+
+    let corrected = fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        corrected,
+        "# frozen_string_literal: true\n\n# rubocop:disable Layout/TrailingWhitespace\nx = 1   \n# rubocop:enable Layout/TrailingWhitespace\n"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn no_redundant_disable_with_only_flag() {
     // When --only is set, don't report redundant disables (cops are filtered).
     // Style/Copyright is disabled by default and WOULD be flagged as redundant
