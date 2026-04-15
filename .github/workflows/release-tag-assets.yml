@@ -21,12 +21,13 @@ jobs:
   build-assets:
     name: build-${{ matrix.asset_name }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
             asset_name: nitrocop-darwin-arm64
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             asset_name: nitrocop-darwin-x86_64
           - os: ubuntu-24.04
