@@ -77,7 +77,7 @@ impl Cop for MixedRegexpCaptureTypes {
             );
             if let Some(corrections) = corrections {
                 let raw = source.byte_slice(loc.start_offset(), loc.end_offset(), "");
-                if let Some(replacement) = rewrite_first_numbered_capture_to_non_capturing(&raw) {
+                if let Some(replacement) = rewrite_first_numbered_capture_to_non_capturing(raw) {
                     corrections.push(crate::correction::Correction {
                         start: loc.start_offset(),
                         end: loc.end_offset(),

@@ -785,6 +785,7 @@ struct BranchInfo<'pr> {
     autocorrect_range: Option<(usize, usize)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_if_branches(
     cop: &DuplicateBranch,
     source: &SourceFile,

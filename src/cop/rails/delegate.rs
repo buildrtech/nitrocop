@@ -554,13 +554,10 @@ impl Cop for Delegate {
                     ":{}",
                     String::from_utf8_lossy(gv.name().as_slice())
                 ))
-            } else if let Some(cr) = receiver.as_constant_read_node() {
-                Some(format!(
-                    ":{}",
-                    String::from_utf8_lossy(cr.name().as_slice())
-                ))
             } else {
-                None
+                receiver
+                    .as_constant_read_node()
+                    .map(|cr| format!(":{}", String::from_utf8_lossy(cr.name().as_slice())))
             };
 
             if let Some(target) = to_target

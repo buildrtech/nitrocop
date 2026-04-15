@@ -1612,6 +1612,7 @@ fn build_block_body_scope(
     scope
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_shadow(
     cop: &ShadowingOuterLocalVariable,
     source: &SourceFile,

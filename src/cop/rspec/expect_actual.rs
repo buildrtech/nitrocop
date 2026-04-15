@@ -156,15 +156,14 @@ impl Cop for ExpectActual {
             && !is_literal_value(source, &expected_node)
         {
             let expected_loc = expected_node.location();
-            let expected_src = std::str::from_utf8(
-                &source.as_bytes()[expected_loc.start_offset()..expected_loc.end_offset()],
-            )
-            .unwrap_or("")
-            .to_string();
-            let actual_src =
-                std::str::from_utf8(&source.as_bytes()[loc.start_offset()..loc.end_offset()])
-                    .unwrap_or("")
-                    .to_string();
+            let expected_src = source
+                .try_byte_slice(expected_loc.start_offset(), expected_loc.end_offset())
+                .unwrap_or("")
+                .to_string();
+            let actual_src = source
+                .try_byte_slice(loc.start_offset(), loc.end_offset())
+                .unwrap_or("")
+                .to_string();
 
             corr.push(crate::correction::Correction {
                 start: loc.start_offset(),

@@ -27,13 +27,34 @@ pub struct StringInclude;
 /// Check if a single byte is in RuboCop's literal character allowlist.
 /// Matches: `[\w\s\-,"'!#%&<>=;:`~/]` from RuboCop's `Util::LITERAL_REGEX`.
 fn is_literal_char(b: u8) -> bool {
-    match b {
-        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => true,
-        b' ' | b'\t' | b'\n' | b'\r' | 0x0C => true,
-        b'-' | b',' | b'"' | b'\'' | b'!' | b'#' | b'%' | b'&' | b'<' | b'>' | b'=' | b';'
-        | b':' | b'`' | b'~' | b'/' => true,
-        _ => false,
-    }
+    matches!(
+        b,
+        b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b' '
+            | b'\t'
+            | b'\n'
+            | b'\r'
+            | 0x0C
+            | b'-'
+            | b','
+            | b'"'
+            | b'\''
+            | b'!'
+            | b'#'
+            | b'%'
+            | b'&'
+            | b'<'
+            | b'>'
+            | b'='
+            | b';'
+            | b':'
+            | b'`'
+            | b'~'
+            | b'/'
+    )
 }
 
 /// Characters that, when preceded by a backslash, form a regex metachar class.

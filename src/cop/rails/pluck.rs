@@ -179,11 +179,11 @@ impl PluckVisitor<'_, '_> {
         );
 
         let key_loc = key.location();
-        let key_src = std::str::from_utf8(
-            &self.source.as_bytes()[key_loc.start_offset()..key_loc.end_offset()],
-        )
-        .unwrap_or(":key")
-        .to_string();
+        let key_src = self
+            .source
+            .try_byte_slice(key_loc.start_offset(), key_loc.end_offset())
+            .unwrap_or(":key")
+            .to_string();
 
         let selector = call.message_loc().unwrap_or(call.location());
         let block_end = block_node.location().end_offset();

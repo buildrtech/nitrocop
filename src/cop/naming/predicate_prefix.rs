@@ -50,6 +50,7 @@ use crate::parse::source::SourceFile;
 pub struct PredicatePrefix;
 
 impl PredicatePrefix {
+    #[allow(clippy::too_many_arguments)]
     fn check_method_name(
         &self,
         source: &SourceFile,

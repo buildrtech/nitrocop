@@ -232,6 +232,7 @@ struct ReturnInfo {
     is_element_only: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_return_values(
     cop: &UnmodifiedReduceAccumulator,
     source: &SourceFile,

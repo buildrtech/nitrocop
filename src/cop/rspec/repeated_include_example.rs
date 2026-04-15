@@ -10,6 +10,8 @@ use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 use std::collections::HashMap;
 
+type IncludeLoc = (usize, usize, usize, usize);
+
 /// RSpec/RepeatedIncludeExample: Flag duplicate include_examples/it_behaves_like calls.
 pub struct RepeatedIncludeExample;
 
@@ -88,7 +90,7 @@ impl Cop for RepeatedIncludeExample {
         };
 
         // signature -> list of include call locations
-        let mut include_map: HashMap<Vec<u8>, Vec<(usize, usize, usize, usize)>> = HashMap::new();
+        let mut include_map: HashMap<Vec<u8>, Vec<IncludeLoc>> = HashMap::new();
 
         for stmt in stmts.body().iter() {
             if let Some(c) = stmt.as_call_node() {

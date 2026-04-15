@@ -8,6 +8,8 @@ use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 use std::collections::HashMap;
 
+type DuplicateLoc = (usize, usize, usize, usize);
+
 /// RSpec/RepeatedExample: Don't repeat examples (same body) within an example group.
 ///
 /// **Investigation (2026-03-04):** 88 FPs caused by `its()` calls with different string
@@ -312,7 +314,7 @@ impl Cop for RepeatedExample {
         collect_examples_in_scope(&block_node, source, &mut examples);
 
         // Group by signature
-        let mut body_map: HashMap<Vec<u8>, Vec<(usize, usize, usize, usize)>> = HashMap::new();
+        let mut body_map: HashMap<Vec<u8>, Vec<DuplicateLoc>> = HashMap::new();
         for (sig, line, col, start, end) in examples {
             body_map
                 .entry(sig)

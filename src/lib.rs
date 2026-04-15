@@ -1,3 +1,5 @@
+#![allow(clippy::needless_option_as_deref)]
+
 pub mod cache;
 pub mod cli;
 pub mod config;

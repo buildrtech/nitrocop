@@ -19,35 +19,6 @@ use crate::parse::source::SourceFile;
 /// have a receiver (the `where(...)` call), so it already correctly handled both cases.
 pub struct FindById;
 
-/// Check if a call has exactly one keyword argument with key `:id`.
-fn has_sole_id_keyword_arg(call: &ruby_prism::CallNode<'_>) -> bool {
-    let args = match call.arguments() {
-        Some(a) => a,
-        None => return false,
-    };
-    let all_args: Vec<_> = args.arguments().iter().collect();
-    if all_args.len() != 1 {
-        return false;
-    }
-    let kw = match all_args[0].as_keyword_hash_node() {
-        Some(k) => k,
-        None => return false,
-    };
-    let elements: Vec<_> = kw.elements().iter().collect();
-    if elements.len() != 1 {
-        return false;
-    }
-    let assoc = match elements[0].as_assoc_node() {
-        Some(a) => a,
-        None => return false,
-    };
-    let sym = match assoc.key().as_symbol_node() {
-        Some(s) => s,
-        None => return false,
-    };
-    sym.unescaped() == b"id"
-}
-
 fn sole_id_keyword_value<'a>(call: &ruby_prism::CallNode<'a>) -> Option<ruby_prism::Node<'a>> {
     let args = call.arguments()?;
     let all_args: Vec<_> = args.arguments().iter().collect();
@@ -117,10 +88,9 @@ impl Cop for FindById {
 
                     if let Some(ref mut corr) = corrections {
                         let id_loc = id_value.location();
-                        let id_src = std::str::from_utf8(
-                            &source.as_bytes()[id_loc.start_offset()..id_loc.end_offset()],
-                        )
-                        .unwrap_or("id");
+                        let id_src = source
+                            .try_byte_slice(id_loc.start_offset(), id_loc.end_offset())
+                            .unwrap_or("id");
                         corr.push(crate::correction::Correction {
                             start: loc.start_offset(),
                             end: call.location().end_offset(),
@@ -152,10 +122,9 @@ impl Cop for FindById {
 
                 if let Some(ref mut corr) = corrections {
                     let id_loc = id_value.location();
-                    let id_src = std::str::from_utf8(
-                        &source.as_bytes()[id_loc.start_offset()..id_loc.end_offset()],
-                    )
-                    .unwrap_or("id");
+                    let id_src = source
+                        .try_byte_slice(id_loc.start_offset(), id_loc.end_offset())
+                        .unwrap_or("id");
                     corr.push(crate::correction::Correction {
                         start: loc.start_offset(),
                         end: call.location().end_offset(),
@@ -196,10 +165,9 @@ impl Cop for FindById {
 
                 if let Some(ref mut corr) = corrections {
                     let id_loc = id_value.location();
-                    let id_src = std::str::from_utf8(
-                        &source.as_bytes()[id_loc.start_offset()..id_loc.end_offset()],
-                    )
-                    .unwrap_or("id");
+                    let id_src = source
+                        .try_byte_slice(id_loc.start_offset(), id_loc.end_offset())
+                        .unwrap_or("id");
                     corr.push(crate::correction::Correction {
                         start: loc.start_offset(),
                         end: call.location().end_offset(),

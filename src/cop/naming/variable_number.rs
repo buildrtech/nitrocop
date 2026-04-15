@@ -494,6 +494,7 @@ impl VariableNumber {
     /// Check a target variable node from MultiWriteNode or ForNode.
     /// Handles LocalVariableTargetNode, InstanceVariableTargetNode,
     /// ClassVariableTargetNode, and GlobalVariableTargetNode.
+    #[allow(clippy::too_many_arguments)]
     fn check_target_variable(
         &self,
         source: &SourceFile,
@@ -553,6 +554,7 @@ fn is_allowed(name: &str, allowed_ids: &[String], allowed_pats: &[String]) -> bo
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_number_style(
     cop: &VariableNumber,
     source: &SourceFile,

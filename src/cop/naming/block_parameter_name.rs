@@ -150,6 +150,7 @@ impl Cop for BlockParameterName {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_param_name(
     cop: &BlockParameterName,
     source: &SourceFile,

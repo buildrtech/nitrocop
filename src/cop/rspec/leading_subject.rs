@@ -256,13 +256,7 @@ impl LeadingSubject {
 
                         diagnostics.push(diagnostic);
                     }
-                } else if is_rspec_example_group(name) {
-                    self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
-                    if first_relevant_name.is_none() {
-                        first_relevant_name = Some(name);
-                        first_relevant_insert_at = first_statement_insert_at(source, &stmt);
-                    }
-                } else if is_example_include(name) {
+                } else if is_rspec_example_group(name) || is_example_include(name) {
                     self.check_block_body(source, &stmt, diagnostics, corrections.as_deref_mut());
                     if first_relevant_name.is_none() {
                         first_relevant_name = Some(name);

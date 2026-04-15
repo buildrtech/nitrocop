@@ -8,6 +8,8 @@ use crate::parse::source::SourceFile;
 
 pub struct BulkChangeTable;
 
+type TableRun = (Vec<u8>, Vec<(usize, usize)>);
+
 /// Combinable alter methods (can be done in a single ALTER TABLE).
 const COMBINABLE_ALTER_METHODS: &[&[u8]] = &[
     b"add_column",
@@ -266,7 +268,7 @@ impl Cop for BulkChangeTable {
 
         // Check for multiple combinable alter methods on the same table
         // Group consecutive alter method calls by table name
-        let mut table_runs: Vec<(Vec<u8>, Vec<(usize, usize)>)> = Vec::new();
+        let mut table_runs: Vec<TableRun> = Vec::new();
 
         for stmt in stmts.body().iter() {
             if let Some(call) = stmt.as_call_node() {

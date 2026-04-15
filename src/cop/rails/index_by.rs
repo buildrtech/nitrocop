@@ -244,7 +244,7 @@ fn index_by_parts(
     if second.name().as_slice() != param.name().as_slice() {
         return None;
     }
-    Some((param_name, node_source(source, &value)))
+    Some((param_name, node_source(source, value)))
 }
 
 fn each_with_object_index_parts(

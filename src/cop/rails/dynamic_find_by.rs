@@ -194,9 +194,9 @@ impl Cop for DynamicFindBy {
                 let mut rebuilt_args = Vec::with_capacity(arg_nodes.len());
                 for (i, arg_node) in arg_nodes.iter().enumerate() {
                     let l = arg_node.location();
-                    let arg_src =
-                        std::str::from_utf8(&source.as_bytes()[l.start_offset()..l.end_offset()])
-                            .unwrap_or("...");
+                    let arg_src = source
+                        .try_byte_slice(l.start_offset(), l.end_offset())
+                        .unwrap_or("...");
                     rebuilt_args.push(format!("{}: {arg_src}", keywords[i]));
                 }
 

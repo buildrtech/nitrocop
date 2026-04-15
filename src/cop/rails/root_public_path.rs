@@ -96,7 +96,7 @@ impl Cop for RootPublicPath {
                 )
                 .to_string();
 
-            let first_path = String::from_utf8_lossy(&content).to_string();
+            let first_path = String::from_utf8_lossy(content).to_string();
             let first_path_remainder = if first_path == "public" {
                 "".to_string()
             } else {

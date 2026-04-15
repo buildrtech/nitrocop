@@ -92,7 +92,8 @@ impl Cop for MatchArray {
                 .iter()
                 .map(|n| {
                     let l = n.location();
-                    std::str::from_utf8(&source.as_bytes()[l.start_offset()..l.end_offset()])
+                    source
+                        .try_byte_slice(l.start_offset(), l.end_offset())
                         .unwrap_or("")
                         .to_string()
                 })

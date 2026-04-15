@@ -188,32 +188,32 @@ impl Cop for PredicateMatcher {
 
         // Conservative inflected-style autocorrect baseline:
         // only for no-arg/no-block predicate calls.
-        if predicate_call.arguments().is_none() && predicate_call.block().is_none() {
-            if let Some(expected_truthy) = matcher_truthiness(matcher)
-                && let Some(ref mut corr) = corrections
-            {
-                let recv = predicate_call.receiver().unwrap();
-                let recv_text = source.byte_slice(
-                    recv.location().start_offset(),
-                    recv.location().end_offset(),
-                    "",
-                );
-                let runner = if method_name == b"to" {
-                    if expected_truthy { "to" } else { "not_to" }
-                } else if expected_truthy {
-                    "not_to"
-                } else {
-                    "to"
-                };
-                corr.push(crate::correction::Correction {
-                    start: loc.start_offset(),
-                    end: loc.end_offset(),
-                    replacement: format!("expect({recv_text}).{runner} {suggested}"),
-                    cop_name: self.name(),
-                    cop_index: 0,
-                });
-                diagnostic.corrected = true;
-            }
+        if predicate_call.arguments().is_none()
+            && predicate_call.block().is_none()
+            && let Some(expected_truthy) = matcher_truthiness(matcher)
+            && let Some(ref mut corr) = corrections
+        {
+            let recv = predicate_call.receiver().unwrap();
+            let recv_text = source.byte_slice(
+                recv.location().start_offset(),
+                recv.location().end_offset(),
+                "",
+            );
+            let runner = if method_name == b"to" {
+                if expected_truthy { "to" } else { "not_to" }
+            } else if expected_truthy {
+                "not_to"
+            } else {
+                "to"
+            };
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: format!("expect({recv_text}).{runner} {suggested}"),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diagnostic.corrected = true;
         }
 
         diagnostics.push(diagnostic);

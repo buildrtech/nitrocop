@@ -164,38 +164,33 @@ impl<'pr> Visit<'pr> for StrategyFinder<'_, '_> {
                                                 if let Some(args) = inner_call.arguments() {
                                                     let arg_list: Vec<_> =
                                                         args.arguments().iter().collect();
-                                                    if arg_list.len() == 1 {
-                                                        if arg_list[0].as_symbol_node().is_some()
+                                                    if arg_list.len() == 1
+                                                        && (arg_list[0].as_symbol_node().is_some()
                                                             || arg_list[0]
                                                                 .as_string_node()
-                                                                .is_some()
-                                                        {
-                                                            let arg_src = self.source.byte_slice(
-                                                                arg_list[0]
-                                                                    .location()
-                                                                    .start_offset(),
-                                                                arg_list[0].location().end_offset(),
-                                                                "",
-                                                            );
-                                                            let replacement = if inner_call
-                                                                .opening_loc()
-                                                                .is_some()
-                                                            {
+                                                                .is_some())
+                                                    {
+                                                        let arg_src = self.source.byte_slice(
+                                                            arg_list[0].location().start_offset(),
+                                                            arg_list[0].location().end_offset(),
+                                                            "",
+                                                        );
+                                                        let replacement =
+                                                            if inner_call.opening_loc().is_some() {
                                                                 format!("association({arg_src})")
                                                             } else {
                                                                 format!("association {arg_src}")
                                                             };
-                                                            corrections.push(
-                                                                crate::correction::Correction {
-                                                                    start: loc.start_offset(),
-                                                                    end: loc.end_offset(),
-                                                                    replacement,
-                                                                    cop_name: self.cop_name,
-                                                                    cop_index: 0,
-                                                                },
-                                                            );
-                                                            diagnostic.corrected = true;
-                                                        }
+                                                        corrections.push(
+                                                            crate::correction::Correction {
+                                                                start: loc.start_offset(),
+                                                                end: loc.end_offset(),
+                                                                replacement,
+                                                                cop_name: self.cop_name,
+                                                                cop_index: 0,
+                                                            },
+                                                        );
+                                                        diagnostic.corrected = true;
                                                     }
                                                 }
                                             }

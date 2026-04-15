@@ -460,6 +460,7 @@ impl VariableName {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_variable_name(
         &self,
         source: &SourceFile,
